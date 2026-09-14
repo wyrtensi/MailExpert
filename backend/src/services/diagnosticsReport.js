@@ -16,6 +16,7 @@ import { loadAiConfig } from './aiProvider.js';
 import { getActivatedPlugins } from '../plugins/activation.js';
 import { getWarningsRaw, getConnectionStats, getSyncSignalsRaw } from './diagnosticsRing.js';
 import { getPerformanceSnapshot } from './performanceMetrics.js';
+import { getImapSnapshot } from './imapMetrics.js';
 
 const packageMeta = JSON.parse(readFileSync(new URL('../../package.json', import.meta.url), 'utf-8'));
 const BACKEND_VERSION = (process.env.APP_VERSION || packageMeta.version || '0.0.0').replace(/^v[.]?/, '');
@@ -215,6 +216,14 @@ export async function buildServerReport(userId, salt) {
       lastSeenAgeSeconds: Math.round((Date.now() - s.lastT) / 1000),
     }));
 
+  // Server-wide IMAP login and background-work counters, aggregated by provider. They describe
+  // every account on the server, not only this user's, so only an admin's report includes them.
+  let imap;
+  try {
+    const { rows: [viewer] } = await query('SELECT is_admin FROM users WHERE id = $1', [userId]);
+    if (viewer?.is_admin === true) imap = getImapSnapshot(host => deriveProvider(host, null));
+  } catch { /* leave the section out */ }
+
   return {
     versions: { backend: BACKEND_VERSION, gitSha: process.env.BUILD_SHA || 'dev' },
     server: { uptimeSeconds: Math.round(process.uptime()), dbOk, redisOk },
@@ -225,6 +234,7 @@ export async function buildServerReport(userId, salt) {
     syncSignals,
     connection: getConnectionStats(),
     performance: getPerformanceSnapshot(),
+    ...(imap ? { imap } : {}),
     config: { aiEnabled, aiProvider, plugins },
   };
 }

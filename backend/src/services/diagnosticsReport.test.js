@@ -19,6 +19,7 @@ vi.mock('./diagnosticsRing.js', () => ({
 
 import { hashRef, folderLabel, categorizeSyncError, deriveProvider, scrubReport, buildServerReport } from './diagnosticsReport.js';
 import { query } from './db.js';
+import { recordImapLogin, _resetImapMetrics } from './imapMetrics.js';
 
 describe('deriveProvider', () => {
   it('prefers the OAuth provider, else maps known hosts, else generic imap (never the raw host)', () => {
@@ -172,6 +173,29 @@ describe('buildServerReport', () => {
     // connection stats present
     expect(report.connection.broadcastCounts.new_messages).toBe(6);
     expect(report.connection.wsConnects).toBe(4);
+  });
+});
+
+describe('buildServerReport — server-wide IMAP metrics', () => {
+  beforeEach(() => { query.mockReset(); _resetImapMetrics(); });
+  const asUser = isAdmin => query.mockImplementation(sql =>
+    Promise.resolve({ rows: /SELECT is_admin FROM users/.test(sql) ? [{ is_admin: isAdmin }] : [] }));
+
+  it('gives an admin login counts by provider, never by host', async () => {
+    recordImapLogin('imap.gmail.com', 'IMAP pool connect');
+    recordImapLogin('mail.my-company.example', 'Backfill connect');
+    asUser(true);
+    const report = await buildServerReport('admin-1', 'deadbeefdeadbeef');
+    expect(report.imap.loginsByProvider.map(r => r.provider).sort()).toEqual(['gmail', 'imap']);
+    expect(report.imap.logins).toContainEqual(expect.objectContaining({ provider: 'gmail', purpose: 'IMAP pool connect', total: 1 }));
+    expect(JSON.stringify(report)).not.toContain('my-company');
+  });
+
+  it('leaves the server-wide section out of a regular user report', async () => {
+    recordImapLogin('imap.gmail.com', 'IMAP pool connect');
+    asUser(false);
+    const report = await buildServerReport('user-9', 'deadbeefdeadbeef');
+    expect(report).not.toHaveProperty('imap');
   });
 });
 

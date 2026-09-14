@@ -1,4 +1,5 @@
 import { query } from './db.js';
+import { recordStatusCycle } from './imapMetrics.js';
 
 export const STATUS_INTERVAL_MS = 60000;
 // INBOX plus (BATCH - 1) rotating folders per cycle. The monitor query's LIMIT is bound from
@@ -181,6 +182,9 @@ export class FolderStatusMonitor {
   async _refresh(account) {
     this.nextCheck.set(account.id, Date.now() + STATUS_INTERVAL_MS);
     let any = false, failed = false;
+    // Cycle metrics: the folder query (cache counts of every observed folder) and the whole cycle.
+    const startedAt = Date.now();
+    let queryMs = null, mode = null, cycleFailed = false;
     try {
       const { rows } = await query(`SELECT f.*,
         (SELECT count(*) FROM messages m WHERE m.account_id=f.account_id AND m.folder=f.path AND NOT m.is_deleted) AS cached_total,
@@ -190,11 +194,13 @@ export class FolderStatusMonitor {
       // LIMIT NULL reads every folder: one LIST-STATUS observes them all.
       [account.id, this.listStatus.get(account.id) ? null : STATUS_FOLDER_BATCH]);
       if (!rows.length) return;
+      queryMs = Date.now() - startedAt;
       const changed = [];
       // Never the IDLE connection: a fresh login, or a pooled session for providers that allow it.
       await this.withClient(account, async client => {
         const listing = supportsListStatus(client);
         this.listStatus.set(account.id, listing);
+        mode = listing ? 'list-status' : 'rotation';
         let listed = null;
         if (listing) {
           try {
@@ -247,12 +253,16 @@ export class FolderStatusMonitor {
       if (failed) throw new Error('One or more folder status checks failed');
       this.failures.delete(account.id);
     } catch (err) {
+      cycleFailed = true;
       const failures = (this.failures.get(account.id) || 0) + 1;
       this.failures.set(account.id, failures);
       this.nextCheck.set(account.id, Date.now() + Math.min(600000, STATUS_INTERVAL_MS * 2 ** Math.min(failures - 1, 4)));
       console.warn(`Folder status cycle failed for account ${account.id}: ${err.message}`);
     } finally {
       if (any || failed) this.broadcast({ type: 'folder_counts', accountId: account.id }, account.user_id);
+      if (queryMs != null) {
+        recordStatusCycle(account.imap_host, mode || 'not-connected', { ms: Date.now() - startedAt, queryMs, failed: cycleFailed });
+      }
     }
   }
 }

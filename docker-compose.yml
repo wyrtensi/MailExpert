@@ -80,6 +80,10 @@ services:
     # Set them (e.g. 99:100 on Unraid) only when bind-mounting POSTGRES_DATA to a host
     # share, and chown that share to the same uid:gid first.
     user: "${PUID:-0}:${PGID:-0}"
+    # Parallel queries, parallel VACUUM and parallel CREATE INDEX share memory through /dev/shm.
+    # Docker's 64 MB default fails them with "could not resize shared memory segment ... No space
+    # left on device" once `messages` reaches a few million rows (measured at 3.5M rows, 8 GB).
+    shm_size: 256m
     environment:
       POSTGRES_DB: ${DB_NAME:-mailexpert}
       POSTGRES_USER: ${DB_USER:-mailexpert}

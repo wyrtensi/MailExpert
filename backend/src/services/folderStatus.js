@@ -42,40 +42,111 @@ export function folderNeedsSync(row, s, now = Date.now()) {
   // With CONDSTORE every flag change already moves HIGHESTMODSEQ and an expunge moves the
   // message count, so the periodic pass only has to catch old holes. It re-fetches the flags
   // of the whole folder, which is what 100 accounts on one IP cannot afford every 15 minutes.
-  const verifyMs = s.highestModseq != null ? FOLDER_VERIFY_CONDSTORE_MS : FOLDER_VERIFY_MS;
+  const verifyMs = folderVerifyMs(row, s.highestModseq != null ? FOLDER_VERIFY_CONDSTORE_MS : FOLDER_VERIFY_MS);
   return now - new Date(row.status_synced_at).getTime() >= verifyMs;
 }
 
-export async function observeFolder(client, accountId, path) {
-  // Allocate before network I/O. A slower old request must never replace a newer sample.
+// The verification interval of one folder: base ± 25%, from an FNV-1a hash of the folder.
+// Folders checkpointed together (after a deploy, a restart or a first backfill) would otherwise
+// come due together at every interval. The spread must be deterministic: folderNeedsSync runs
+// every minute, so a random threshold drawn per check would fire at the earliest draw and
+// collapse to the lower bound.
+export function folderVerifyMs(row, baseMs) {
+  let hash = 0x811c9dc5;
+  for (const ch of `${row.account_id}:${row.path}`) {
+    hash ^= ch.codePointAt(0);
+    hash = Math.imul(hash, 0x01000193);
+  }
+  return baseMs * (0.75 + 0.5 * ((hash >>> 0) / 2 ** 32));
+}
+
+// Allocate before network I/O. A slower old request must never replace a newer sample.
+async function allocateStatusSample() {
   const { rows: [sample] } = await query("SELECT nextval('folder_status_revision')::text AS revision, clock_timestamp() AS started_at");
+  return sample;
+}
+
+async function saveFolderStatus(accountId, path, sample, status) {
+  if (!validFolderStatus(status)) throw new Error('Incomplete folder STATUS response');
+  const { rows } = await query(`
+    UPDATE folders SET server_total_count=$3, server_unread_count=$4,
+      server_uid_next=$5, server_uid_validity=$6, server_highest_modseq=$7,
+      server_counts_at=$8, server_count_revision=$9, status_attempt_revision=$9,
+      status_attempted_at=NOW(), status_error=NULL
+    WHERE account_id=$1 AND path=$2
+      AND (status_attempt_revision IS NULL OR status_attempt_revision < $9)
+    RETURNING id`, [accountId, path, status.messages, status.unseen, status.uidNext,
+    String(status.uidValidity), status.highestModseq == null ? null : String(status.highestModseq), sample.started_at, sample.revision]);
+  return rows.length ? status : null;
+}
+
+async function saveFolderStatusError(accountId, path, sample, err) {
+  // Never turn an unavailable mailbox into an empty one or erase the last good sample.
+  await query(`UPDATE folders SET status_attempt_revision=$3, status_attempted_at=NOW(), status_error=$4
+    WHERE account_id=$1 AND path=$2 AND (status_attempt_revision IS NULL OR status_attempt_revision < $3)`,
+  [accountId, path, sample.revision, String(err?.message ?? err).slice(0, 300)]);
+}
+
+// Races a status command against a timeout that destroys the transport, so a hung server
+// cannot pin the connection (or a pool slot) forever.
+function withStatusTimeout(client, promise, ms, message) {
   let timer;
+  return Promise.race([
+    promise,
+    new Promise((_, reject) => { timer = setTimeout(() => {
+      try { client.close(); } catch { /* already closed */ }
+      reject(new Error(message));
+    }, ms); }),
+  ]).finally(() => clearTimeout(timer));
+}
+
+export async function observeFolder(client, accountId, path) {
+  const sample = await allocateStatusSample();
   try {
-    const status = await Promise.race([
-      client.status(path, STATUS_QUERY),
-      new Promise((_, reject) => { timer = setTimeout(() => {
-        try { client.close(); } catch { /* already closed */ }
-        reject(new Error('Folder STATUS timed out'));
-      }, 10000); }),
-    ]);
-    if (!validFolderStatus(status)) throw new Error('Incomplete folder STATUS response');
-    const { rows } = await query(`
-      UPDATE folders SET server_total_count=$3, server_unread_count=$4,
-        server_uid_next=$5, server_uid_validity=$6, server_highest_modseq=$7,
-        server_counts_at=$8, server_count_revision=$9, status_attempt_revision=$9,
-        status_attempted_at=NOW(), status_error=NULL
-      WHERE account_id=$1 AND path=$2
-        AND (status_attempt_revision IS NULL OR status_attempt_revision < $9)
-      RETURNING id`, [accountId, path, status.messages, status.unseen, status.uidNext,
-      String(status.uidValidity), status.highestModseq == null ? null : String(status.highestModseq), sample.started_at, sample.revision]);
-    return rows.length ? status : null;
+    const status = await withStatusTimeout(client, client.status(path, STATUS_QUERY), 10000, 'Folder STATUS timed out');
+    return await saveFolderStatus(accountId, path, sample, status);
   } catch (err) {
-    // Never turn an unavailable mailbox into an empty one or erase the last good sample.
-    await query(`UPDATE folders SET status_attempt_revision=$3, status_attempted_at=NOW(), status_error=$4
-      WHERE account_id=$1 AND path=$2 AND (status_attempt_revision IS NULL OR status_attempt_revision < $3)`,
-    [accountId, path, sample.revision, String(err.message).slice(0, 300)]);
+    await saveFolderStatusError(accountId, path, sample, err);
     throw err;
-  } finally { clearTimeout(timer); }
+  }
+}
+
+// LIST-STATUS (RFC 5819) returns the STATUS of every mailbox in one command. Checked on the
+// advertisement alone: without it ImapFlow silently sends one STATUS per listed mailbox, which
+// is worse than the bounded rotation. skipListStatusArgs is set when the server rejected the
+// STATUS return option on this connection.
+export function supportsListStatus(client) {
+  return !!client.capabilities?.has?.('LIST-STATUS') && !client.skipListStatusArgs;
+}
+
+// Observes the given folders with one LIST-STATUS. Returns path -> { status } (null status when
+// a newer sample already won) or { error }. A folder the listing did not report is left out, so
+// the caller can ask STATUS for it.
+export async function observeListedFolders(client, accountId, paths) {
+  // One revision for the whole listing, allocated before network I/O as in observeFolder.
+  const sample = await allocateStatusSample();
+  let entries;
+  try {
+    // listOnly would return the entries before ImapFlow attaches the inline STATUS.
+    entries = await withStatusTimeout(client, client.list({ statusQuery: STATUS_QUERY }), 30000, 'Folder LIST-STATUS timed out');
+  } catch (err) {
+    for (const path of paths) await saveFolderStatusError(accountId, path, sample, err);
+    throw err;
+  }
+  const reported = new Map((entries || []).map(entry => [entry.path, entry.status]));
+  const results = new Map();
+  for (const path of paths) {
+    const status = reported.get(path);
+    if (status === undefined) continue;
+    try {
+      if (status?.error) throw status.error;
+      results.set(path, { status: await saveFolderStatus(accountId, path, sample, status) });
+    } catch (err) {
+      await saveFolderStatusError(accountId, path, sample, err);
+      results.set(path, { error: err });
+    }
+  }
+  return results;
 }
 
 export async function checkpointFolderStatus(accountId, path, status) {
@@ -94,6 +165,9 @@ export class FolderStatusMonitor {
     this.running = new Map();
     this.nextCheck = new Map();
     this.failures = new Map();
+    // accountId -> whether the last status connection offered LIST-STATUS. Until the first
+    // connection says so, the monitor reads only one rotation of folder rows.
+    this.listStatus = new Map();
   }
   refresh(account, { force = false } = {}) {
     if (this.running.has(account.id)) return this.running.get(account.id);
@@ -112,14 +186,38 @@ export class FolderStatusMonitor {
         (SELECT count(*) FROM messages m WHERE m.account_id=f.account_id AND m.folder=f.path AND NOT m.is_deleted) AS cached_total,
         (SELECT count(*) FROM messages m WHERE m.account_id=f.account_id AND m.folder=f.path AND NOT m.is_deleted AND NOT m.is_read) AS cached_unread
         FROM folders f WHERE f.account_id=$1 AND NOT f.no_select
-        ORDER BY (f.path='INBOX') DESC, f.status_attempted_at ASC NULLS FIRST, f.path LIMIT $2`, [account.id, STATUS_FOLDER_BATCH]);
+        ORDER BY (f.path='INBOX') DESC, f.status_attempted_at ASC NULLS FIRST, f.path LIMIT $2`,
+      // LIMIT NULL reads every folder: one LIST-STATUS observes them all.
+      [account.id, this.listStatus.get(account.id) ? null : STATUS_FOLDER_BATCH]);
       if (!rows.length) return;
       const changed = [];
-      // This connection stays AUTHENTICATED: no selected mailbox, no interference with IDLE.
+      // Never the IDLE connection: a fresh login, or a pooled session for providers that allow it.
       await this.withClient(account, async client => {
-        for (const row of rows) {
+        const listing = supportsListStatus(client);
+        this.listStatus.set(account.id, listing);
+        let listed = null;
+        if (listing) {
           try {
-            const status = await observeFolder(client, account.id, row.path);
+            listed = await observeListedFolders(client, account.id, rows.map(row => row.path));
+          } catch (err) {
+            failed = true;
+            console.warn(`Folder status listing failed for account ${account.id}: ${err.message}`);
+            return;
+          }
+        }
+        let asked = 0;
+        for (const row of listing ? rows : rows.slice(0, STATUS_FOLDER_BATCH)) {
+          try {
+            const result = listed?.get(row.path);
+            if (result?.error) throw result.error;
+            let status = result?.status;
+            if (!result) {
+              // Folders the listing left out get a STATUS each, bounded to the rotation width;
+              // the rest keep their older attempt time and come first next cycle.
+              if (listing && asked >= STATUS_FOLDER_BATCH) continue;
+              asked++;
+              status = await observeFolder(client, account.id, row.path);
+            }
             if (!status) continue;
             any = true;
             if (folderNeedsSync(row, status)) changed.push({ row, status });

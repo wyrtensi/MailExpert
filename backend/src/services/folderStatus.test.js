@@ -1,7 +1,7 @@
 import { beforeEach, afterEach, describe, it, expect, vi } from 'vitest';
 vi.mock('./db.js', () => ({ query: vi.fn() }));
 import { query } from './db.js';
-import { validFolderStatus, observeFolder, folderNeedsSync, publicFolderCounts, FolderStatusMonitor, folderStaleMs, STATUS_FOLDER_BATCH, STATUS_STALE_MS } from './folderStatus.js';
+import { validFolderStatus, observeFolder, folderNeedsSync, folderVerifyMs, publicFolderCounts, FolderStatusMonitor, folderStaleMs, STATUS_FOLDER_BATCH, STATUS_STALE_MS, FOLDER_VERIFY_MS, FOLDER_VERIFY_CONDSTORE_MS } from './folderStatus.js';
 const good = { messages: 10, unseen: 3, uidNext: 42, uidValidity: 8n, highestModseq: 9007199254740993n };
 beforeEach(() => { query.mockReset(); });
 afterEach(() => { vi.useRealTimers(); vi.restoreAllMocks(); });
@@ -43,26 +43,36 @@ describe('independent server observations', () => {
   });
 });
 describe('completed sync checkpoints', () => {
-  const row = { status_synced_at: new Date(0), status_synced_uid_validity: '8', status_synced_uid_next: '42', status_synced_modseq: '9007199254740993', cached_total: '10', cached_unread: '3' };
+  const row = { account_id: 'a', path: 'INBOX', status_synced_at: new Date(0), status_synced_uid_validity: '8', status_synced_uid_next: '42', status_synced_modseq: '9007199254740993', cached_total: '10', cached_unread: '3' };
   it('skips a recently verified unchanged folder', () => expect(folderNeedsSync(row, good, 1)).toBe(false));
   it.each([
     { ...good, uidNext: 43 }, { ...good, uidValidity: 9n }, { ...good, unseen: 2 },
     { ...good, messages: 9 }, { ...good, highestModseq: 9007199254740994n },
   ])('notices arrivals, rebuilds, flags, expunges, and exact modseq changes', status => expect(folderNeedsSync(row, status, 1)).toBe(true));
   it('periodically verifies equal-count membership and retries uncompleted ingestion', () => {
-    expect(folderNeedsSync(row, good, 6*3600000)).toBe(true);
+    expect(folderNeedsSync(row, good, 8*3600000)).toBe(true);
     expect(folderNeedsSync({ ...row, status_synced_at: null }, good, 1)).toBe(true);
   });
-  it('verifies an unchanged CONDSTORE folder every six hours instead of every 15 minutes', () => {
+  it('verifies an unchanged CONDSTORE folder about every six hours instead of every 15 minutes', () => {
     expect(folderNeedsSync(row, good, 15*60000)).toBe(false);
-    expect(folderNeedsSync(row, good, 5*3600000)).toBe(false);
-    expect(folderNeedsSync(row, good, 7*3600000)).toBe(true);
+    expect(folderNeedsSync(row, good, 4*3600000)).toBe(false);
+    expect(folderNeedsSync(row, good, 8*3600000)).toBe(true);
   });
   it('keeps the 15-minute verification on servers without CONDSTORE', () => {
     const plain = { ...good, highestModseq: undefined };
     const plainRow = { ...row, status_synced_modseq: null };
-    expect(folderNeedsSync(plainRow, plain, 14*60000)).toBe(false);
-    expect(folderNeedsSync(plainRow, plain, 16*60000)).toBe(true);
+    expect(folderNeedsSync(plainRow, plain, 10*60000)).toBe(false);
+    expect(folderNeedsSync(plainRow, plain, 20*60000)).toBe(true);
+  });
+  it('spreads folders checkpointed together across the verification interval', () => {
+    // Same folder, same interval every cycle; otherwise the earliest draw would always win.
+    expect(folderVerifyMs(row, FOLDER_VERIFY_CONDSTORE_MS)).toBe(folderVerifyMs({ ...row }, FOLDER_VERIFY_CONDSTORE_MS));
+    expect(folderVerifyMs(row, FOLDER_VERIFY_CONDSTORE_MS)).not.toBe(folderVerifyMs({ ...row, path: 'Sent' }, FOLDER_VERIFY_CONDSTORE_MS));
+    const spread = Array.from({ length: 200 }, (_, i) => folderVerifyMs({ account_id: `acc-${i % 20}`, path: `Folder ${i}` }, FOLDER_VERIFY_MS));
+    expect(Math.min(...spread)).toBeGreaterThanOrEqual(0.75 * FOLDER_VERIFY_MS);
+    expect(Math.max(...spread)).toBeLessThanOrEqual(1.25 * FOLDER_VERIFY_MS);
+    expect(Math.min(...spread)).toBeLessThan(0.8 * FOLDER_VERIFY_MS);
+    expect(Math.max(...spread)).toBeGreaterThan(1.2 * FOLDER_VERIFY_MS);
   });
   it('does not present cache counts as verified server counts', () => {
     expect(publicFolderCounts({ total_count: 10, unread_count: 4 }, 0)).toMatchObject({ total_count: null, unread_count: null, cached_total_count: 10, counts_known: false, counts_stale: true });
@@ -106,6 +116,79 @@ describe('bounded background monitor', () => {
     const monitor = new FolderStatusMonitor({ withClient: async (_a, fn) => fn({ status: async () => good }), enqueueSync, broadcast: vi.fn() });
     await monitor.refresh({ id: 'a' });
     expect(enqueueSync.mock.calls[0][1]).toBe('INBOX');
+  });
+
+  describe('one LIST-STATUS instead of a STATUS per folder', () => {
+    const sqlFor = rows => async sql => sql.includes('SELECT f.*') ? { rows }
+      : sql.includes('nextval') ? { rows: [{ revision: '1', started_at: new Date(0) }] } : { rows: [{ id: 'f' }] };
+    const monitorWith = (client, enqueueSync = vi.fn().mockReturnValue(true)) =>
+      new FolderStatusMonitor({ withClient: async (_a, fn) => fn(client), enqueueSync, broadcast: vi.fn() });
+    const listing = (entries, extra = {}) => ({ capabilities: new Set(['LIST-STATUS']), usable: true,
+      list: vi.fn(async () => entries), status: vi.fn(async () => good), ...extra });
+    const updatesFor = path => query.mock.calls.filter(([sql, params]) => sql.includes('server_total_count=$3') && params[1] === path);
+    const errorsFor = path => query.mock.calls.filter(([sql, params]) => sql.includes('status_error=$4') && params[1] === path);
+
+    it('observes every folder in one command and asks STATUS only for folders the listing omitted', async () => {
+      vi.spyOn(console, 'warn').mockImplementation(() => {});
+      query.mockImplementation(sqlFor(['INBOX', 'INBOX.Sent', 'INBOX.Archive', 'INBOX.Junk', 'INBOX.Gone'].map(path => ({ path }))));
+      const client = listing([
+        { path: 'INBOX', status: good },
+        // The personal-namespace path must match the folders row exactly, or the folder silently loses its counts.
+        { path: 'INBOX.Sent', status: { ...good, messages: 4, unseen: 0 } },
+        // A server may leave out the mailbox this pooled session has selected.
+        { path: 'INBOX.Archive' },
+        { path: 'INBOX.Junk', status: { error: new Error('NO [SERVERBUG] status failed') } },
+      ]);
+      const monitor = monitorWith(client);
+      await monitor._refresh({ id: 'a' });
+
+      expect(client.list).toHaveBeenCalledOnce();
+      expect(client.list.mock.calls[0][0]).toEqual({ statusQuery: expect.objectContaining({ messages: true, unseen: true, uidNext: true }) });
+      expect(client.status.mock.calls.map(([path]) => path)).toEqual(['INBOX.Archive', 'INBOX.Gone']);
+      expect(updatesFor('INBOX.Sent')[0][1].slice(2, 4)).toEqual([4, 0]);
+      expect(updatesFor('INBOX')).toHaveLength(1);
+      expect(errorsFor('INBOX.Junk')[0][1][3]).toContain('SERVERBUG');
+      expect(updatesFor('INBOX.Junk')).toHaveLength(0);
+
+      // Once the server is known to support it, the monitor reads every folder, not a rotation.
+      await monitor._refresh({ id: 'a' });
+      const selects = query.mock.calls.filter(([sql]) => sql.includes('SELECT f.*'));
+      expect(selects.map(([, params]) => params)).toEqual([['a', STATUS_FOLDER_BATCH], ['a', null]]);
+    });
+
+    it('bounds per-folder STATUS fallbacks to the rotation width', async () => {
+      const rows = Array.from({ length: STATUS_FOLDER_BATCH + 3 }, (_, i) => ({ path: `F${i}` }));
+      query.mockImplementation(sqlFor(rows));
+      const client = listing([]);
+      await monitorWith(client)._refresh({ id: 'a' });
+      expect(client.status).toHaveBeenCalledTimes(STATUS_FOLDER_BATCH);
+    });
+
+    it('records a failed listing on every folder without asking STATUS', async () => {
+      vi.spyOn(console, 'warn').mockImplementation(() => {});
+      query.mockImplementation(sqlFor([{ path: 'INBOX' }, { path: 'Sent' }]));
+      const client = listing([], { list: vi.fn().mockRejectedValue(new Error('BAD listing')) });
+      const enqueueSync = vi.fn();
+      const monitor = monitorWith(client, enqueueSync);
+      await monitor._refresh({ id: 'a' });
+      expect(client.status).not.toHaveBeenCalled();
+      expect(errorsFor('INBOX')).toHaveLength(1);
+      expect(errorsFor('Sent')).toHaveLength(1);
+      expect(enqueueSync).not.toHaveBeenCalled();
+      expect(monitor.failures.get('a')).toBe(1);
+    });
+
+    it('keeps the six-folder STATUS rotation when the server has no LIST-STATUS', async () => {
+      query.mockImplementation(sqlFor(Array.from({ length: STATUS_FOLDER_BATCH + 2 }, (_, i) => ({ path: `F${i}` }))));
+      const client = { usable: true, capabilities: new Set(['IMAP4rev1']), list: vi.fn(), status: vi.fn(async () => good) };
+      const monitor = monitorWith(client);
+      await monitor._refresh({ id: 'a' });
+      await monitor._refresh({ id: 'a' });
+      expect(client.list).not.toHaveBeenCalled();
+      expect(client.status).toHaveBeenCalledTimes(STATUS_FOLDER_BATCH * 2);
+      const selects = query.mock.calls.filter(([sql]) => sql.includes('SELECT f.*'));
+      expect(selects.map(([, params]) => params[1])).toEqual([STATUS_FOLDER_BATCH, STATUS_FOLDER_BATCH]);
+    });
   });
 
   it('backs off login failures and does not enqueue work', async () => {

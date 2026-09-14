@@ -3407,4 +3407,97 @@ describe('Gmail profile for many accounts on one server', () => {
     expect(ImapFlow).not.toHaveBeenCalled();
     expect(query.mock.calls.some(([sql]) => sql.includes('MAX(uid)'))).toBe(false);
   });
+
+  describe('folder status and integrity sync on a pooled session', () => {
+    let clients;
+    beforeEach(() => {
+      clients = [];
+      ImapFlow.mockImplementation(function () {
+        const client = Object.assign(new EventEmitter(), {
+          usable: true,
+          connect: vi.fn().mockResolvedValue(),
+          logout: vi.fn().mockResolvedValue(),
+        });
+        client.close = vi.fn(() => { client.usable = false; client.emit('close'); });
+        clients.push(client);
+        return client;
+      });
+    });
+    const managerFor = acct => {
+      const mgr = new ImapManager(null);
+      stopTimers(mgr);
+      vi.spyOn(mgr._bgConnSem, 'acquire');
+      query.mockImplementation(async sql => ({ rows: sql.includes('FROM email_accounts') ? [acct] : [] }));
+      return mgr;
+    };
+
+    it('uses the pool for Gmail and a larger pool to leave room for user actions', () => {
+      expect(providerProfile(gmail).statusOnPool).toBe(true);
+      expect(poolSizeFor(gmail)).toBe(3);
+      expect(providerProfile({ imap_host: 'imap.mail.yahoo.com' }).statusOnPool).toBeUndefined();
+    });
+
+    it('opens one Gmail login for many status cycles and takes no background slot', async () => {
+      const acct = { ...gmail, id: 'gmail-status-pool' };
+      const mgr = managerFor(acct);
+      const seen = [];
+      for (let i = 0; i < 3; i++) await mgr._withCountClient(acct, async client => { seen.push(client); });
+      expect(ImapFlow).toHaveBeenCalledTimes(1);
+      expect(new Set(seen).size).toBe(1);
+      expect(mgr._bgConnSem.acquire).not.toHaveBeenCalled();
+      expect(clients[0].close).not.toHaveBeenCalled();
+    });
+
+    it('closes a pooled session whose job failed, so a timed-out FETCH is never handed on', async () => {
+      const acct = { ...gmail, id: 'gmail-status-pool-failure' };
+      const mgr = managerFor(acct);
+      await expect(mgr._withCountClient(acct, async () => { throw new Error('Folder integrity sync timed out'); }))
+        .rejects.toThrow('timed out');
+      expect(clients[0].close).toHaveBeenCalledOnce();
+      await mgr._withCountClient(acct, async () => {});
+      expect(ImapFlow).toHaveBeenCalledTimes(2);
+    });
+
+    it('skips the cycle instead of opening a temporary login when the pool stays busy', async () => {
+      vi.useFakeTimers();
+      try {
+        const acct = { ...gmail, id: 'gmail-status-pool-busy' };
+        const mgr = managerFor(acct);
+        let finish;
+        const hold = new Promise(resolve => { finish = resolve; });
+        const holders = Array.from({ length: poolSizeFor(acct) }, () => mgr._withCountClient(acct, () => hold));
+        await vi.advanceTimersByTimeAsync(0);
+        expect(ImapFlow).toHaveBeenCalledTimes(poolSizeFor(acct));
+        const busy = expect(mgr._withCountClient(acct, async () => {})).rejects.toThrow('IMAP pool busy');
+        await vi.advanceTimersByTimeAsync(10000);
+        await busy;
+        expect(ImapFlow).toHaveBeenCalledTimes(poolSizeFor(acct));
+        finish();
+        await Promise.all(holders);
+      } finally { vi.useRealTimers(); }
+    });
+
+    it('bounds concurrent Gmail integrity syncs across accounts to the host budget', async () => {
+      const mgr = managerFor(gmail);
+      let finish;
+      const running = new Promise(resolve => { finish = resolve; });
+      mgr._refreshObservedFolder = vi.fn(() => running);
+      const status = { messages: 1, unseen: 0, uidNext: 2, uidValidity: 1n };
+      const accounts = Array.from({ length: 7 }, (_, i) => ({ ...gmail, id: `gmail-integrity-${i}` }));
+      const queued = accounts.map(acct => mgr._queueObservedFolder(acct, 'INBOX', status));
+      expect(queued).toEqual([true, true, true, true, true, true, false]);
+      finish(true);
+      await vi.waitFor(() => expect(mgr._statusSyncRunning.size).toBe(0));
+      expect(mgr._queueObservedFolder(accounts[6], 'INBOX', status)).toBe(true);
+    });
+
+    it('keeps a fresh login and a background slot per cycle for other providers', async () => {
+      const acct = { id: 'generic-status-fresh', user_id: 'u1', enabled: true, imap_host: 'imap.example.com', imap_tls: true };
+      const mgr = managerFor(acct);
+      for (let i = 0; i < 2; i++) await mgr._withCountClient(acct, async () => {});
+      expect(ImapFlow).toHaveBeenCalledTimes(2);
+      expect(mgr._bgConnSem.acquire).toHaveBeenCalledTimes(2);
+      expect(clients.every(c => c.close.mock.calls.length === 1)).toBe(true);
+    });
+  });
 });

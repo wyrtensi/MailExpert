@@ -1817,6 +1817,7 @@ export class ImapManager {
                 // Warn once on crossing the threshold, not every cycle: the condition persists
                 // until reconnect, and a per-cycle warning would drown the log it belongs in.
                 if (misses === IDLE_MISS_WARN_STREAK) {
+                  recordImapEvent(row.imap_host, 'idle_not_running');
                   console.warn(`Health check: ${logAccount(row)} has IDLE enabled but has not been idling for ${misses} consecutive checks — push is inactive, this account is polling only`);
                 }
               }
@@ -2198,7 +2199,8 @@ export class ImapManager {
       if (existing) clearTimeout(existing);
       this._expungeDebounceTimers.set(account.id, setTimeout(() => {
         this._expungeDebounceTimers.delete(account.id);
-        console.log(`IMAP IDLE: expunge for ${logAccount(account)}, reconciling`);
+        // As above: an untagged EXPUNGE is not proof of IDLE either.
+        console.log(`IMAP EXPUNGE: expunge for ${logAccount(account)}, reconciling`);
         this.reconcileDeletes(account).catch(err =>
           console.warn(`Expunge-triggered reconcile error for ${logAccount(account)}:`, err.message)
         );

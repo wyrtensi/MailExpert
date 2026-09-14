@@ -3548,3 +3548,42 @@ describe('Gmail profile for many accounts on one server', () => {
     });
   });
 });
+describe('health check asserts that IDLE is running', () => {
+  const row = { id: 'idle-invariant', email_address: 'a@example.com', imap_host: 'imap.example.com', oauth_provider: null };
+  beforeEach(() => {
+    vi.clearAllMocks();
+    query.mockReset();
+    query.mockResolvedValue({ rows: [row] });
+    _resetImapMetrics();
+  });
+  afterEach(() => { vi.restoreAllMocks(); });
+  const healthCycleOf = () => {
+    const interval = vi.spyOn(globalThis, 'setInterval');
+    const mgr = new ImapManager(null);
+    const cycle = interval.mock.calls.find(([, ms]) => ms === 90000)[0];
+    for (const key of ['_healthCheckTimer', '_snippetSchedulerTimer', '_stalenessCheckTimer', '_flagPushReconcilerTimer', '_folderStatusTimer']) clearInterval(mgr[key]);
+    return { mgr, cycle };
+  };
+
+  it('warns once, and records it for the diagnostics report, after three checks without IDLE', async () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    const { mgr, cycle } = healthCycleOf();
+    mgr.connections.set(row.id, { idling: false });
+    for (let i = 0; i < 4; i++) await cycle();
+    expect(warn.mock.calls.filter(([msg]) => String(msg).includes('has not been idling'))).toHaveLength(1);
+    expect(getImapSnapshot(host => host).events).toEqual([expect.objectContaining({ event: 'idle_not_running', total: 1 })]);
+  });
+
+  it('resets the streak when the connection is seen idling', async () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    const { mgr, cycle } = healthCycleOf();
+    const client = { idling: false };
+    mgr.connections.set(row.id, client);
+    await cycle(); await cycle();
+    client.idling = true;
+    await cycle();
+    client.idling = false;
+    await cycle(); await cycle();
+    expect(warn.mock.calls.some(([msg]) => String(msg).includes('has not been idling'))).toBe(false);
+  });
+});

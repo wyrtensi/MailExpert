@@ -883,6 +883,9 @@ function safeDate(d) {
 //                       BACKGROUND_CONN_MAX_PER_HOST, and the staleness probe stays ungated.
 // stalenessProbe:       false turns off the periodic fresh-login staleness probe.
 // autoBackfillExistingOnConnect: false backfills on connect only an account with no cached mail.
+// statusOnPool:         true runs folder status and integrity sync on a pooled session instead
+//                       of a fresh login with a background slot. Needs a pool with room to spare;
+//                       never for preferFreshBodyFetch providers, whose pooled sessions go stale.
 const PROVIDERS = {
   google: {
     // Gmail folders are label memberships; matching Message-IDs are not proof of a move.
@@ -896,9 +899,16 @@ const PROVIDERS = {
     //     sync repair gaps. An empty account still backfills on connect.
     //   maxBackgroundConnections:6 — shared by every Gmail account on this server; the
     //     database, not Gmail, bounds concurrent backfills. Tune it in the scale test.
+    //   statusOnPool:true — the folder status monitor (every minute) and integrity sync run on
+    //     a pooled session instead of a fresh login each; only a real UID gap still opens a
+    //     backfill login.
+    //   poolSize:3 — integrity sync can hold one pooled session for up to a minute, so user
+    //     actions keep two. Sessions open lazily, well under Gmail's 15 per account.
     stalenessProbe: false,
     autoBackfillExistingOnConnect: false,
     maxBackgroundConnections: 6,
+    statusOnPool: true,
+    poolSize: 3,
     // Large batches, short delay: Gmail only throttles BODY[] not envelope/flags/uid.
     // Backfills 30k+ messages in ~2 min instead of 12+ hours.
     batchSize: 500, batchDelay: 2000, errorDelay: 30000, batchesPerConn: 10,
@@ -1396,7 +1406,9 @@ function drainWaiters(pool) {
   }
 }
 
-async function acquirePooledClient(account) {
+// noTemp: when the pool stays full, reject instead of opening a temporary login. For background
+// work that would rather skip a cycle than add a login.
+async function acquirePooledClient(account, { noTemp = false } = {}) {
   const id = account.id;
   if (!connectionPools.has(id)) {
     connectionPools.set(id, { clients: [], inUse: new Set(), waiters: [] });
@@ -1443,6 +1455,7 @@ async function acquirePooledClient(account) {
     const entry = { resolve, reject, timer: null };
     entry.timer = setTimeout(async () => {
       pool.waiters = pool.waiters.filter(w => w !== entry);
+      if (noTemp) { reject(new Error('IMAP pool busy')); return; }
       try {
         const freshAccount = await ensureFreshToken(account);
         const { resolved, policy } = await resolveAccountHost(freshAccount);
@@ -1479,8 +1492,8 @@ function evictPool(accountId) {
   connectionPools.delete(accountId);
 }
 
-async function withFreshClient(account, fn) {
-  const client = await acquirePooledClient(account);
+async function withFreshClient(account, fn, poolOpts) {
+  const client = await acquirePooledClient(account, poolOpts);
   try {
     return await fn(client);
   } catch (err) {
@@ -3041,7 +3054,8 @@ export class ImapManager {
 
   async _withCountClient(account, fn) {
     const host = (account.imap_host || '').toLowerCase();
-    await this._bgConnSem.acquire(host, { timeoutMs: 30000 });
+    const pooled = !!providerProfile(account).statusOnPool;
+    if (!pooled) await this._bgConnSem.acquire(host, { timeoutMs: 30000 });
     let client;
     try {
       const cooldown = this._connectCooldown.get(account.id);
@@ -3049,6 +3063,18 @@ export class ImapManager {
       const { rows: [current] } = await query('SELECT * FROM email_accounts WHERE id=$1 AND enabled', [account.id]);
       // A flagged OAuth account stays offline until reconsent (also after a restart).
       if (!current || current.oauth_reconnect_required) return;
+      if (pooled) {
+        // A busy pool skips this cycle (the monitor backs off) rather than opening a login.
+        return await withFreshClient(current, async pooledClient => {
+          try {
+            return await fn(pooledClient);
+          } catch (err) {
+            // A timed-out command may still be running on this session; never hand it on.
+            try { pooledClient.close(); } catch { /* already closed */ }
+            throw err;
+          }
+        }, { noTemp: true });
+      }
       const fresh = await ensureFreshToken(current);
       const { resolved, policy } = await raceTimeout(resolveAccountHost(fresh), 15000, 'Count host resolve');
       client = await connectImapClient(fresh, resolved, { policy }, 25000, 'Folder status connect');
@@ -3059,7 +3085,7 @@ export class ImapManager {
       throw err;
     } finally {
       if (client) { try { client.close(); } catch { /* already closed */ } }
-      this._bgConnSem.release(host);
+      if (!pooled) this._bgConnSem.release(host);
     }
   }
 
@@ -3099,7 +3125,8 @@ export class ImapManager {
     let missing = false;
     let expired = false;
     await this._withCountClient(account, async client => {
-      // Entire operation is bounded and the finally in _withCountClient destroys a hung transport.
+      // Entire operation is bounded, and _withCountClient destroys a hung transport: the fresh
+      // login in its finally, a pooled session when this callback fails.
       try { await raceTimeout((async () => {
         await this.syncMessages(account, client, path, 100, false, true);
         const lock = await client.getMailboxLock(path);

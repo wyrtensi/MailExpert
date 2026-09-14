@@ -108,6 +108,79 @@ describe('bounded background monitor', () => {
     expect(enqueueSync.mock.calls[0][1]).toBe('INBOX');
   });
 
+  describe('one LIST-STATUS instead of a STATUS per folder', () => {
+    const sqlFor = rows => async sql => sql.includes('SELECT f.*') ? { rows }
+      : sql.includes('nextval') ? { rows: [{ revision: '1', started_at: new Date(0) }] } : { rows: [{ id: 'f' }] };
+    const monitorWith = (client, enqueueSync = vi.fn().mockReturnValue(true)) =>
+      new FolderStatusMonitor({ withClient: async (_a, fn) => fn(client), enqueueSync, broadcast: vi.fn() });
+    const listing = (entries, extra = {}) => ({ capabilities: new Set(['LIST-STATUS']), usable: true,
+      list: vi.fn(async () => entries), status: vi.fn(async () => good), ...extra });
+    const updatesFor = path => query.mock.calls.filter(([sql, params]) => sql.includes('server_total_count=$3') && params[1] === path);
+    const errorsFor = path => query.mock.calls.filter(([sql, params]) => sql.includes('status_error=$4') && params[1] === path);
+
+    it('observes every folder in one command and asks STATUS only for folders the listing omitted', async () => {
+      vi.spyOn(console, 'warn').mockImplementation(() => {});
+      query.mockImplementation(sqlFor(['INBOX', 'INBOX.Sent', 'INBOX.Archive', 'INBOX.Junk', 'INBOX.Gone'].map(path => ({ path }))));
+      const client = listing([
+        { path: 'INBOX', status: good },
+        // The personal-namespace path must match the folders row exactly, or the folder silently loses its counts.
+        { path: 'INBOX.Sent', status: { ...good, messages: 4, unseen: 0 } },
+        // A server may leave out the mailbox this pooled session has selected.
+        { path: 'INBOX.Archive' },
+        { path: 'INBOX.Junk', status: { error: new Error('NO [SERVERBUG] status failed') } },
+      ]);
+      const monitor = monitorWith(client);
+      await monitor._refresh({ id: 'a' });
+
+      expect(client.list).toHaveBeenCalledOnce();
+      expect(client.list.mock.calls[0][0]).toEqual({ statusQuery: expect.objectContaining({ messages: true, unseen: true, uidNext: true }) });
+      expect(client.status.mock.calls.map(([path]) => path)).toEqual(['INBOX.Archive', 'INBOX.Gone']);
+      expect(updatesFor('INBOX.Sent')[0][1].slice(2, 4)).toEqual([4, 0]);
+      expect(updatesFor('INBOX')).toHaveLength(1);
+      expect(errorsFor('INBOX.Junk')[0][1][3]).toContain('SERVERBUG');
+      expect(updatesFor('INBOX.Junk')).toHaveLength(0);
+
+      // Once the server is known to support it, the monitor reads every folder, not a rotation.
+      await monitor._refresh({ id: 'a' });
+      const selects = query.mock.calls.filter(([sql]) => sql.includes('SELECT f.*'));
+      expect(selects.map(([, params]) => params)).toEqual([['a', STATUS_FOLDER_BATCH], ['a', null]]);
+    });
+
+    it('bounds per-folder STATUS fallbacks to the rotation width', async () => {
+      const rows = Array.from({ length: STATUS_FOLDER_BATCH + 3 }, (_, i) => ({ path: `F${i}` }));
+      query.mockImplementation(sqlFor(rows));
+      const client = listing([]);
+      await monitorWith(client)._refresh({ id: 'a' });
+      expect(client.status).toHaveBeenCalledTimes(STATUS_FOLDER_BATCH);
+    });
+
+    it('records a failed listing on every folder without asking STATUS', async () => {
+      vi.spyOn(console, 'warn').mockImplementation(() => {});
+      query.mockImplementation(sqlFor([{ path: 'INBOX' }, { path: 'Sent' }]));
+      const client = listing([], { list: vi.fn().mockRejectedValue(new Error('BAD listing')) });
+      const enqueueSync = vi.fn();
+      const monitor = monitorWith(client, enqueueSync);
+      await monitor._refresh({ id: 'a' });
+      expect(client.status).not.toHaveBeenCalled();
+      expect(errorsFor('INBOX')).toHaveLength(1);
+      expect(errorsFor('Sent')).toHaveLength(1);
+      expect(enqueueSync).not.toHaveBeenCalled();
+      expect(monitor.failures.get('a')).toBe(1);
+    });
+
+    it('keeps the six-folder STATUS rotation when the server has no LIST-STATUS', async () => {
+      query.mockImplementation(sqlFor(Array.from({ length: STATUS_FOLDER_BATCH + 2 }, (_, i) => ({ path: `F${i}` }))));
+      const client = { usable: true, capabilities: new Set(['IMAP4rev1']), list: vi.fn(), status: vi.fn(async () => good) };
+      const monitor = monitorWith(client);
+      await monitor._refresh({ id: 'a' });
+      await monitor._refresh({ id: 'a' });
+      expect(client.list).not.toHaveBeenCalled();
+      expect(client.status).toHaveBeenCalledTimes(STATUS_FOLDER_BATCH * 2);
+      const selects = query.mock.calls.filter(([sql]) => sql.includes('SELECT f.*'));
+      expect(selects.map(([, params]) => params[1])).toEqual([STATUS_FOLDER_BATCH, STATUS_FOLDER_BATCH]);
+    });
+  });
+
   it('backs off login failures and does not enqueue work', async () => {
     vi.useFakeTimers();
     vi.spyOn(console, 'warn').mockImplementation(() => {});

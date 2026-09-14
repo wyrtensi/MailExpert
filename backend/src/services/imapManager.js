@@ -11,6 +11,7 @@ import { sanitizeEmail } from './emailSanitizer.js';
 import { renderInviteHtml } from './icsInvite.js';
 import { logger } from './logger.js';
 import { recordBroadcast, recordWarning, recordSyncSignal } from './diagnosticsRing.js';
+import { recordImapLogin, recordImapEvent } from './imapMetrics.js';
 import { decrypt } from './encryption.js';
 import { sendPushToUser } from './pushNotifications.js';
 import { redactEmail } from '../utils/redact.js';
@@ -114,7 +115,9 @@ async function connectImapClientOnce(account, resolved, cfgOpts, timeoutMs, labe
     await hostConnectSem.acquire(host);
     try {
       await raceTimeout(client.connect(), timeoutMs, tag);
+      recordImapLogin(host, tag);
     } catch (err) {
+      recordImapLogin(host, tag, { failed: true });
       // close() (not logout()): forcefully destroys the socket and aborts the still-pending
       // connect left running by the race timeout — a graceful logout could itself hang on a
       // wedged/half-open connection (the exact failure we're recovering from).
@@ -1455,7 +1458,11 @@ async function acquirePooledClient(account, { noTemp = false } = {}) {
     const entry = { resolve, reject, timer: null };
     entry.timer = setTimeout(async () => {
       pool.waiters = pool.waiters.filter(w => w !== entry);
-      if (noTemp) { reject(new Error('IMAP pool busy')); return; }
+      if (noTemp) {
+        recordImapEvent(account.imap_host, 'pool_busy');
+        reject(new Error('IMAP pool busy'));
+        return;
+      }
       try {
         const freshAccount = await ensureFreshToken(account);
         const { resolved, policy } = await resolveAccountHost(freshAccount);
@@ -2455,6 +2462,7 @@ export class ImapManager {
     const failures = (this._connectCooldown.get(account.id)?.failures || 0) + 1;
     const ms = connectCooldownMs(failures);
     this._connectCooldown.set(account.id, { until: Date.now() + ms, failures });
+    recordImapEvent(account.imap_host, 'refusal_cooldown');
     console.warn(`${reason} for ${logAccount(account)} — backing off ${Math.round(ms / 1000)}s (refusal #${failures})`);
     return ms;
   }
@@ -3104,7 +3112,10 @@ export class ImapManager {
     // A folder that finds the host bound full is not queued; the next status cycle re-evaluates it.
     const host = (account.imap_host || '').toLowerCase();
     const hostBounded = !!profile.statusOnPool;
-    if (hostBounded && !this._integritySem.tryAcquire(host)) return false;
+    if (hostBounded && !this._integritySem.tryAcquire(host)) {
+      recordImapEvent(host, 'integrity_slot_full');
+      return false;
+    }
     this._statusSyncRunning.add(key);
     query('UPDATE folders SET status_sync_attempted_at=NOW() WHERE account_id=$1 AND path=$2', [account.id, path])
       .then(() => this._refreshObservedFolder(account, path, status))

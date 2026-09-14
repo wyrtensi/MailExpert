@@ -126,6 +126,8 @@ export async function generateReport({ locale, theme, uiScale }) {
     syncSignals: server?.syncSignals ?? [],
     connection: server?.connection ?? {},
     performance: server?.performance ?? {},
+    // Server-wide IMAP login counters; the backend sends them only to admins.
+    ...(server?.imap ? { imap: server.imap } : {}),
     config: server?.config ?? {},
   };
 

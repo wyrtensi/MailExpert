@@ -27,6 +27,7 @@ import { resolveForConnection } from './hostValidation.js';
 import { getConnectionPolicy } from './connectionPolicy.js';
 import { invalidateGtdConfigCache } from '../plugins/gtd/gtdConfig.js';
 import { parseMessage } from './messageParser.js';
+import { getImapSnapshot, _resetImapMetrics } from './imapMetrics.js';
 
 const account = (imap_host, oauth_provider = null) => ({ imap_host, oauth_provider });
 
@@ -3440,9 +3441,14 @@ describe('Gmail profile for many accounts on one server', () => {
     it('opens one Gmail login for many status cycles and takes no background slot', async () => {
       const acct = { ...gmail, id: 'gmail-status-pool' };
       const mgr = managerFor(acct);
+      _resetImapMetrics();
       const seen = [];
       for (let i = 0; i < 3; i++) await mgr._withCountClient(acct, async client => { seen.push(client); });
       expect(ImapFlow).toHaveBeenCalledTimes(1);
+      // The diagnostics counters see the same single login.
+      expect(getImapSnapshot(host => host).logins).toEqual([
+        expect.objectContaining({ provider: 'imap.gmail.com', purpose: 'IMAP pool connect', total: 1, failures: 0 }),
+      ]);
       expect(new Set(seen).size).toBe(1);
       expect(mgr._bgConnSem.acquire).not.toHaveBeenCalled();
       expect(clients[0].close).not.toHaveBeenCalled();
@@ -3468,10 +3474,12 @@ describe('Gmail profile for many accounts on one server', () => {
         const holders = Array.from({ length: poolSizeFor(acct) }, () => mgr._withCountClient(acct, () => hold));
         await vi.advanceTimersByTimeAsync(0);
         expect(ImapFlow).toHaveBeenCalledTimes(poolSizeFor(acct));
+        _resetImapMetrics();
         const busy = expect(mgr._withCountClient(acct, async () => {})).rejects.toThrow('IMAP pool busy');
         await vi.advanceTimersByTimeAsync(10000);
         await busy;
         expect(ImapFlow).toHaveBeenCalledTimes(poolSizeFor(acct));
+        expect(getImapSnapshot(host => host).events).toEqual([expect.objectContaining({ event: 'pool_busy', total: 1 })]);
         finish();
         await Promise.all(holders);
       } finally { vi.useRealTimers(); }

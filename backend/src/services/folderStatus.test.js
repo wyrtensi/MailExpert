@@ -1,6 +1,7 @@
 import { beforeEach, afterEach, describe, it, expect, vi } from 'vitest';
 vi.mock('./db.js', () => ({ query: vi.fn() }));
 import { query } from './db.js';
+import { getImapSnapshot, _resetImapMetrics } from './imapMetrics.js';
 import { validFolderStatus, observeFolder, folderNeedsSync, folderVerifyMs, publicFolderCounts, FolderStatusMonitor, folderStaleMs, STATUS_FOLDER_BATCH, STATUS_STALE_MS, FOLDER_VERIFY_MS, FOLDER_VERIFY_CONDSTORE_MS } from './folderStatus.js';
 const good = { messages: 10, unseen: 3, uidNext: 42, uidValidity: 8n, highestModseq: 9007199254740993n };
 beforeEach(() => { query.mockReset(); });
@@ -154,6 +155,18 @@ describe('bounded background monitor', () => {
       await monitor._refresh({ id: 'a' });
       const selects = query.mock.calls.filter(([sql]) => sql.includes('SELECT f.*'));
       expect(selects.map(([, params]) => params)).toEqual([['a', STATUS_FOLDER_BATCH], ['a', null]]);
+    });
+
+    it('records each cycle with its mode and the time of the folder query', async () => {
+      _resetImapMetrics();
+      query.mockImplementation(sqlFor([{ path: 'INBOX' }]));
+      await monitorWith(listing([{ path: 'INBOX', status: good }]))._refresh({ id: 'a', imap_host: 'imap.gmail.com' });
+      await monitorWith({ usable: true, status: vi.fn(async () => good) })._refresh({ id: 'b', imap_host: 'imap.gmail.com' });
+      const cycles = getImapSnapshot(host => host).statusCycles;
+      expect(cycles.map(c => [c.provider, c.mode, c.count, c.failures])).toEqual([
+        ['imap.gmail.com', 'list-status', 1, 0], ['imap.gmail.com', 'rotation', 1, 0],
+      ]);
+      expect(cycles.every(c => Number.isInteger(c.meanQueryMs))).toBe(true);
     });
 
     it('bounds per-folder STATUS fallbacks to the rotation width', async () => {

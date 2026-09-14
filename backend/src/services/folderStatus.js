@@ -42,8 +42,22 @@ export function folderNeedsSync(row, s, now = Date.now()) {
   // With CONDSTORE every flag change already moves HIGHESTMODSEQ and an expunge moves the
   // message count, so the periodic pass only has to catch old holes. It re-fetches the flags
   // of the whole folder, which is what 100 accounts on one IP cannot afford every 15 minutes.
-  const verifyMs = s.highestModseq != null ? FOLDER_VERIFY_CONDSTORE_MS : FOLDER_VERIFY_MS;
+  const verifyMs = folderVerifyMs(row, s.highestModseq != null ? FOLDER_VERIFY_CONDSTORE_MS : FOLDER_VERIFY_MS);
   return now - new Date(row.status_synced_at).getTime() >= verifyMs;
+}
+
+// The verification interval of one folder: base ± 25%, from an FNV-1a hash of the folder.
+// Folders checkpointed together (after a deploy, a restart or a first backfill) would otherwise
+// come due together at every interval. The spread must be deterministic: folderNeedsSync runs
+// every minute, so a random threshold drawn per check would fire at the earliest draw and
+// collapse to the lower bound.
+export function folderVerifyMs(row, baseMs) {
+  let hash = 0x811c9dc5;
+  for (const ch of `${row.account_id}:${row.path}`) {
+    hash ^= ch.codePointAt(0);
+    hash = Math.imul(hash, 0x01000193);
+  }
+  return baseMs * (0.75 + 0.5 * ((hash >>> 0) / 2 ** 32));
 }
 
 // Allocate before network I/O. A slower old request must never replace a newer sample.

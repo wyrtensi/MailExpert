@@ -1,7 +1,7 @@
 import { beforeEach, afterEach, describe, it, expect, vi } from 'vitest';
 vi.mock('./db.js', () => ({ query: vi.fn() }));
 import { query } from './db.js';
-import { validFolderStatus, observeFolder, folderNeedsSync, publicFolderCounts, FolderStatusMonitor, folderStaleMs, STATUS_FOLDER_BATCH, STATUS_STALE_MS } from './folderStatus.js';
+import { validFolderStatus, observeFolder, folderNeedsSync, folderVerifyMs, publicFolderCounts, FolderStatusMonitor, folderStaleMs, STATUS_FOLDER_BATCH, STATUS_STALE_MS, FOLDER_VERIFY_MS, FOLDER_VERIFY_CONDSTORE_MS } from './folderStatus.js';
 const good = { messages: 10, unseen: 3, uidNext: 42, uidValidity: 8n, highestModseq: 9007199254740993n };
 beforeEach(() => { query.mockReset(); });
 afterEach(() => { vi.useRealTimers(); vi.restoreAllMocks(); });
@@ -43,26 +43,36 @@ describe('independent server observations', () => {
   });
 });
 describe('completed sync checkpoints', () => {
-  const row = { status_synced_at: new Date(0), status_synced_uid_validity: '8', status_synced_uid_next: '42', status_synced_modseq: '9007199254740993', cached_total: '10', cached_unread: '3' };
+  const row = { account_id: 'a', path: 'INBOX', status_synced_at: new Date(0), status_synced_uid_validity: '8', status_synced_uid_next: '42', status_synced_modseq: '9007199254740993', cached_total: '10', cached_unread: '3' };
   it('skips a recently verified unchanged folder', () => expect(folderNeedsSync(row, good, 1)).toBe(false));
   it.each([
     { ...good, uidNext: 43 }, { ...good, uidValidity: 9n }, { ...good, unseen: 2 },
     { ...good, messages: 9 }, { ...good, highestModseq: 9007199254740994n },
   ])('notices arrivals, rebuilds, flags, expunges, and exact modseq changes', status => expect(folderNeedsSync(row, status, 1)).toBe(true));
   it('periodically verifies equal-count membership and retries uncompleted ingestion', () => {
-    expect(folderNeedsSync(row, good, 6*3600000)).toBe(true);
+    expect(folderNeedsSync(row, good, 8*3600000)).toBe(true);
     expect(folderNeedsSync({ ...row, status_synced_at: null }, good, 1)).toBe(true);
   });
-  it('verifies an unchanged CONDSTORE folder every six hours instead of every 15 minutes', () => {
+  it('verifies an unchanged CONDSTORE folder about every six hours instead of every 15 minutes', () => {
     expect(folderNeedsSync(row, good, 15*60000)).toBe(false);
-    expect(folderNeedsSync(row, good, 5*3600000)).toBe(false);
-    expect(folderNeedsSync(row, good, 7*3600000)).toBe(true);
+    expect(folderNeedsSync(row, good, 4*3600000)).toBe(false);
+    expect(folderNeedsSync(row, good, 8*3600000)).toBe(true);
   });
   it('keeps the 15-minute verification on servers without CONDSTORE', () => {
     const plain = { ...good, highestModseq: undefined };
     const plainRow = { ...row, status_synced_modseq: null };
-    expect(folderNeedsSync(plainRow, plain, 14*60000)).toBe(false);
-    expect(folderNeedsSync(plainRow, plain, 16*60000)).toBe(true);
+    expect(folderNeedsSync(plainRow, plain, 10*60000)).toBe(false);
+    expect(folderNeedsSync(plainRow, plain, 20*60000)).toBe(true);
+  });
+  it('spreads folders checkpointed together across the verification interval', () => {
+    // Same folder, same interval every cycle; otherwise the earliest draw would always win.
+    expect(folderVerifyMs(row, FOLDER_VERIFY_CONDSTORE_MS)).toBe(folderVerifyMs({ ...row }, FOLDER_VERIFY_CONDSTORE_MS));
+    expect(folderVerifyMs(row, FOLDER_VERIFY_CONDSTORE_MS)).not.toBe(folderVerifyMs({ ...row, path: 'Sent' }, FOLDER_VERIFY_CONDSTORE_MS));
+    const spread = Array.from({ length: 200 }, (_, i) => folderVerifyMs({ account_id: `acc-${i % 20}`, path: `Folder ${i}` }, FOLDER_VERIFY_MS));
+    expect(Math.min(...spread)).toBeGreaterThanOrEqual(0.75 * FOLDER_VERIFY_MS);
+    expect(Math.max(...spread)).toBeLessThanOrEqual(1.25 * FOLDER_VERIFY_MS);
+    expect(Math.min(...spread)).toBeLessThan(0.8 * FOLDER_VERIFY_MS);
+    expect(Math.max(...spread)).toBeGreaterThan(1.2 * FOLDER_VERIFY_MS);
   });
   it('does not present cache counts as verified server counts', () => {
     expect(publicFolderCounts({ total_count: 10, unread_count: 4 }, 0)).toMatchObject({ total_count: null, unread_count: null, cached_total_count: 10, counts_known: false, counts_stale: true });

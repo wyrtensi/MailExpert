@@ -3477,6 +3477,20 @@ describe('Gmail profile for many accounts on one server', () => {
       } finally { vi.useRealTimers(); }
     });
 
+    it('bounds concurrent Gmail integrity syncs across accounts to the host budget', async () => {
+      const mgr = managerFor(gmail);
+      let finish;
+      const running = new Promise(resolve => { finish = resolve; });
+      mgr._refreshObservedFolder = vi.fn(() => running);
+      const status = { messages: 1, unseen: 0, uidNext: 2, uidValidity: 1n };
+      const accounts = Array.from({ length: 7 }, (_, i) => ({ ...gmail, id: `gmail-integrity-${i}` }));
+      const queued = accounts.map(acct => mgr._queueObservedFolder(acct, 'INBOX', status));
+      expect(queued).toEqual([true, true, true, true, true, true, false]);
+      finish(true);
+      await vi.waitFor(() => expect(mgr._statusSyncRunning.size).toBe(0));
+      expect(mgr._queueObservedFolder(accounts[6], 'INBOX', status)).toBe(true);
+    });
+
     it('keeps a fresh login and a background slot per cycle for other providers', async () => {
       const acct = { id: 'generic-status-fresh', user_id: 'u1', enabled: true, imap_host: 'imap.example.com', imap_tls: true };
       const mgr = managerFor(acct);

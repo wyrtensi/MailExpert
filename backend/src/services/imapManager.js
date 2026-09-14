@@ -1676,6 +1676,9 @@ export class ImapManager {
     // Cap concurrent background IMAP connections (backfill, snippet indexer, folder status, bulk
     // flags) per provider host; a provider profile may set a tighter host limit.
     this._bgConnSem = createKeyedSemaphore(host => backgroundConnectionLimit(host));
+    // Integrity syncs on pooled sessions (statusOnPool) take no background connection, but each
+    // one re-reads the flags of a whole folder, so they get the same per-host bound of their own.
+    this._integritySem = createKeyedSemaphore(host => backgroundConnectionLimit(host));
     this._connectCooldown = new Map(); // accountId -> { until: ms, failures: number } after connection refusals
     // accountId -> the value last persisted to email_accounts.sync_error: a string (error is
     // showing), null (known clear), or absent (unknown — e.g. just after a restart, where the
@@ -3098,6 +3101,10 @@ export class ImapManager {
     if (this._statusSyncRunning.has(key) || this.backfillRunning.has(key) || this.onDemandSyncing.has(key)) return false;
     // At most one integrity worker per account, including time queued for host admission.
     if ([...this._statusSyncRunning].some(k => k.startsWith(`${account.id}:`))) return false;
+    // A folder that finds the host bound full is not queued; the next status cycle re-evaluates it.
+    const host = (account.imap_host || '').toLowerCase();
+    const hostBounded = !!profile.statusOnPool;
+    if (hostBounded && !this._integritySem.tryAcquire(host)) return false;
     this._statusSyncRunning.add(key);
     query('UPDATE folders SET status_sync_attempted_at=NOW() WHERE account_id=$1 AND path=$2', [account.id, path])
       .then(() => this._refreshObservedFolder(account, path, status))
@@ -3109,7 +3116,10 @@ export class ImapManager {
         this._noteIntegrityRetry(key);
         console.warn(`Folder integrity sync failed for account ${account.id}: ${err.message}`);
       })
-      .finally(() => this._statusSyncRunning.delete(key));
+      .finally(() => {
+        this._statusSyncRunning.delete(key);
+        if (hostBounded) this._integritySem.release(host);
+      });
     return true;
   }
 

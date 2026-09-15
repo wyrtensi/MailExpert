@@ -2153,6 +2153,7 @@ git commit -m "feat(sync): sync and reconnect one mailbox at a time and skip rep
 - Modify: `frontend/src/components/MessageList.jsx` (импорты; `handleSync` ~680-702)
 - Modify: `frontend/src/components/ElectronNotificationBridge.jsx` (импорты; действие `sync` ~284)
 - Modify: `frontend/src/store/index.js` (~435-451, ~1096-1107)
+- Modify: `frontend/src/components/Sidebar.jsx:500`
 - Create: `frontend/src/components/MailboxSyncSettings.jsx`
 - Modify: `frontend/src/components/AdminPanel.jsx` (импорт; `LayoutsTab` ~1533 и ~1912-1983; `SecurityTab` перед «Status card»; поисковые пункты ~8189-8190 и ~8210)
 - Modify: `frontend/src/locales/{cs,de,en,es,fr,it,pl,ru,zhCN}.json` (ключи в `admin.security`)
@@ -2411,6 +2412,8 @@ import { manualSyncAccountIds } from '../utils/mailboxSync.js';
       if (prefs.syncInterval) set({ syncInterval: parseInt(prefs.syncInterval) || 60 });
 ```
 
+В `frontend/src/components/Sidebar.jsx` в списке ключей, которые выход очищает, заменить `'mailexpert_page_size', 'mailexpert_scroll_mode', 'mailexpert_sync_interval',` на `'mailexpert_page_size', 'mailexpert_scroll_mode',`: этот ключ больше никто не пишет.
+
 - [ ] **Step 7: Admin section for the intervals**
 
 `frontend/src/components/MailboxSyncSettings.jsx`:
@@ -2578,7 +2581,7 @@ Expected: `admin.security mailbox sync keys added`.
 Run: `cd frontend && node --test src/utils/mailboxSync.test.js src/locales/i18n.test.js && npx eslint src/components/MailboxSyncSettings.jsx src/components/AdminPanel.jsx src/components/MessageList.jsx src/components/ElectronNotificationBridge.jsx src/store/index.js src/utils/api.js src/utils/mailboxSync.js --max-warnings 0`
 Expected: PASS, lint без ошибок.
 
-Проверка остатков: `grep -rn "setSyncInterval\|setFolderSyncInterval\|folderSyncInterval\|api.syncNow()" frontend/src` ничего не выводит.
+Проверка остатков: `grep -rn "setSyncInterval\|setFolderSyncInterval\|folderSyncInterval\|mailexpert_sync_interval\|api.syncNow()" frontend/src` ничего не выводит.
 
 Run: `cd frontend && npm test && npm run lint && npm run build`
 Expected: PASS.
@@ -2586,7 +2589,7 @@ Expected: PASS.
 - [ ] **Step 10: Commit**
 
 ```bash
-git add frontend/src/utils/mailboxSync.js frontend/src/utils/mailboxSync.test.js frontend/src/utils/api.js frontend/src/components/MessageList.jsx frontend/src/components/ElectronNotificationBridge.jsx frontend/src/store/index.js frontend/src/components/MailboxSyncSettings.jsx frontend/src/components/AdminPanel.jsx frontend/src/locales
+git add frontend/src/utils/mailboxSync.js frontend/src/utils/mailboxSync.test.js frontend/src/utils/api.js frontend/src/components/MessageList.jsx frontend/src/components/ElectronNotificationBridge.jsx frontend/src/components/Sidebar.jsx frontend/src/store/index.js frontend/src/components/MailboxSyncSettings.jsx frontend/src/components/AdminPanel.jsx frontend/src/locales
 git commit -m "feat(ui): sync one mailbox at a time and move sync intervals to admin settings"
 ```
 
@@ -2618,6 +2621,12 @@ CI сервер не запускает, поэтому запуск прове�
 
 ```sh
 cd /work/backend
+# Stop a server left over from an earlier run; the slim image has no pkill.
+node -e "
+const fs=require('fs');
+for (const d of fs.readdirSync('/proc')) { if (!/^\d+$/.test(d)) continue;
+  try { if (fs.readFileSync('/proc/'+d+'/cmdline','utf8').replace(/\0/g,' ').trim()==='node src/index.js') process.kill(+d); } catch {} }"
+sleep 2
 env SESSION_SECRET=0123456789abcdef0123456789abcdef0123 DB_HOST=mailexpert-check-db DB_USER=mailexpert DB_NAME=mailexpert DB_PASSWORD=check \
   REDIS_URL=redis://mailexpert-check-redis:6379 ENCRYPTION_KEY=0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef \
   NODE_ENV=development PORT=3000 IMAP_CONNECT_CONCURRENCY=1 node src/index.js > /tmp/boot.log 2>&1 &
@@ -2735,7 +2744,7 @@ Expected: все проверки зелёные до merge; после pull `ma
 
 - [ ] **Step 7: Handoff and cleanup**
 
-Дописать в локальный `agent-changes/2026-09-14-deps-oauth-handoff.md` (не коммитить) строку с номером PR, merge-коммитом и напоминанием: не включать `AUTH_MODE=google` до PR 3. Удалить тестовый контейнер: `docker rm -f mailexpert-backend-test`.
+Дописать в локальный `agent-changes/2026-09-14-deps-oauth-handoff.md` (не коммитить) строку с номером PR, merge-коммитом и напоминаниями: не включать `AUTH_MODE=google` до PR 3; в PR 7 добавить в таблицы переменных README `IMAP_CONNECT_CONCURRENCY` вместе с `AUTH_MODE` и `APP_ALT_URLS`. Удалить тестовый контейнер: `docker rm -f mailexpert-backend-test`.
 
 ---
 

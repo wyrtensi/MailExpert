@@ -43,7 +43,7 @@ describe('OAuth state + PKCE store', () => {
     expect(key).not.toContain(a.state);
     expect(opts).toEqual({ NX: true, EX: 600 });
     const saved = JSON.parse(raw);
-    expect(saved).toEqual({ userId: 'u1', codeVerifier: expect.any(String), loginHint: 'x@gmail.com' });
+    expect(saved).toEqual({ userId: 'u1', codeVerifier: expect.any(String), loginHint: 'x@gmail.com', appId: null });
     expect(saved.codeVerifier.length).toBeGreaterThanOrEqual(43);
     expect(a.codeChallenge).toBe(base64url(createHash('sha256').update(saved.codeVerifier).digest()));
     expect(a.codeChallenge).not.toBe(saved.codeVerifier);
@@ -52,9 +52,14 @@ describe('OAuth state + PKCE store', () => {
   it('consumes a state exactly once', async () => {
     const { state } = await createOAuthState({ provider: 'google', userId: 'u1' });
     const first = await consumeOAuthState({ provider: 'google', state });
-    expect(first).toEqual({ userId: 'u1', codeVerifier: expect.any(String), loginHint: null });
+    expect(first).toEqual({ userId: 'u1', codeVerifier: expect.any(String), loginHint: null, appId: null });
     expect(await consumeOAuthState({ provider: 'google', state })).toBeNull();
     expect(redisClient.getDel).toHaveBeenCalledTimes(2);
+  });
+
+  it('carries the chosen Google app through the flow', async () => {
+    const { state } = await createOAuthState({ provider: 'google', userId: 'u1', appId: 'app-1' });
+    expect(await consumeOAuthState({ provider: 'google', state })).toMatchObject({ appId: 'app-1' });
   });
 
   it('does not accept a state issued for another provider', async () => {

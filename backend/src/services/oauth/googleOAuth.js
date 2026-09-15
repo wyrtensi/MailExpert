@@ -2,6 +2,7 @@ import { createRemoteJWKSet, jwtVerify } from 'jose';
 import { query } from '../db.js';
 import { encrypt, decrypt } from '../encryption.js';
 import { PROVIDER_FETCH_TIMEOUT_MS } from './constants.js';
+import { getGoogleAppById } from './googleApps.js';
 
 export const GOOGLE_AUTH_URL = 'https://accounts.google.com/o/oauth2/v2/auth';
 export const GOOGLE_TOKEN_URL = 'https://oauth2.googleapis.com/token';
@@ -22,19 +23,6 @@ export class GoogleOAuthError extends Error {
   }
 }
 
-export function getGoogleConfig() {
-  return {
-    clientId: process.env.GOOGLE_CLIENT_ID,
-    clientSecret: process.env.GOOGLE_CLIENT_SECRET,
-    redirectUri: process.env.GOOGLE_REDIRECT_URI,
-  };
-}
-
-export function isGoogleConfigured() {
-  const { clientId, clientSecret, redirectUri } = getGoogleConfig();
-  return !!(clientId && clientSecret && redirectUri);
-}
-
 // createRemoteJWKSet caches and rotates keys internally; build it once per process.
 let googleJwks = null;
 function getGoogleJwks() {
@@ -47,8 +35,7 @@ export function hasGoogleMailScope(scope) {
   return scope.split(/\s+/).includes(GOOGLE_MAIL_SCOPE);
 }
 
-export function buildGoogleAuthorizationUrl({ state, codeChallenge, redirectUri, loginHint }) {
-  const { clientId } = getGoogleConfig();
+export function buildGoogleAuthorizationUrl({ clientId, state, codeChallenge, redirectUri, loginHint }) {
   const params = new URLSearchParams({
     client_id: clientId,
     redirect_uri: redirectUri,
@@ -92,8 +79,7 @@ async function postToken(params) {
   return body || {};
 }
 
-export async function exchangeGoogleCode({ code, codeVerifier, redirectUri }) {
-  const { clientId, clientSecret } = getGoogleConfig();
+export async function exchangeGoogleCode({ clientId, clientSecret, code, codeVerifier, redirectUri }) {
   if (!clientId || !clientSecret) throw new GoogleOAuthError('not_configured');
 
   const tokens = await postToken(new URLSearchParams({
@@ -143,12 +129,18 @@ export async function verifyGoogleIdToken({ idToken, clientId }) {
   };
 }
 
-// Refresh a Google access token and persist the result. The stored refresh token is
-// kept when Google does not return a new one. Returns the account with the plaintext
-// access token, matching refreshMicrosoftToken.
+// Refresh a Google access token through the app that issued it and persist the result. The
+// stored refresh token is kept when Google does not return a new one. Returns the account
+// with the plaintext access token, matching refreshMicrosoftToken.
 export async function refreshGoogleToken(account) {
-  const { clientId, clientSecret } = getGoogleConfig();
-  if (!clientId || !clientSecret) throw new GoogleOAuthError('not_configured');
+  const app = await getGoogleAppById(account.oauth_app_id);
+  // A refresh token only works with its issuing client: without that app the mailbox has
+  // to consent again, through another app.
+  if (!app || app.status === 'disabled') {
+    throw new GoogleOAuthError('authentication_failed', { oauthError: 'app_unavailable' });
+  }
+  const clientSecret = decrypt(app.client_secret);
+  if (!clientSecret) throw new GoogleOAuthError('not_configured');
 
   const storedRefreshToken = decrypt(account.oauth_refresh_token);
   if (!storedRefreshToken) {
@@ -158,7 +150,7 @@ export async function refreshGoogleToken(account) {
   const tokens = await postToken(new URLSearchParams({
     grant_type: 'refresh_token',
     refresh_token: storedRefreshToken,
-    client_id: clientId,
+    client_id: app.client_id,
     client_secret: clientSecret,
   }));
   if (typeof tokens.access_token !== 'string' || !tokens.access_token) {

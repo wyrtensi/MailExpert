@@ -6,11 +6,10 @@ import { redactEmail } from '../utils/redact.js';
 import {
   buildGoogleAuthorizationUrl,
   exchangeGoogleCode,
-  getGoogleConfig,
   hasGoogleMailScope,
-  isGoogleConfigured,
   verifyGoogleIdToken,
 } from '../services/oauth/googleOAuth.js';
+import { recordGoogleGrant, resolveGoogleConfig } from '../services/oauth/googleApps.js';
 import { createOAuthState, consumeOAuthState } from '../services/oauth/oauthState.js';
 
 // Mounted at /oauth/google. Redirect targets carry only stable codes — never provider
@@ -38,19 +37,26 @@ const errorRedirect = (code) => `/?oauth_error=${code}&oauth_provider=${PROVIDER
 // Step 1: create state + PKCE and send the user to Google's consent screen.
 router.get('/', async (req, res) => {
   if (!req.session?.userId) return res.status(401).json({ error: 'Not authenticated' });
-  if (!isGoogleConfigured()) return res.redirect(errorRedirect('not_configured'));
 
   const rawHint = typeof req.query.login_hint === 'string' ? req.query.login_hint.trim() : '';
   const loginHint = LOGIN_HINT_PATTERN.test(rawHint) ? rawHint : null;
 
   try {
+    const config = await resolveGoogleConfig();
+    if (!config) return res.redirect(errorRedirect('not_configured'));
     const { state, codeChallenge } = await createOAuthState({
       provider: PROVIDER,
       userId: req.session.userId,
       loginHint,
+      appId: config.appId,
     });
-    const { redirectUri } = getGoogleConfig();
-    res.redirect(buildGoogleAuthorizationUrl({ state, codeChallenge, redirectUri, loginHint }));
+    res.redirect(buildGoogleAuthorizationUrl({
+      clientId: config.clientId,
+      state,
+      codeChallenge,
+      redirectUri: config.redirectUri,
+      loginHint,
+    }));
   } catch (err) {
     console.error(`Google OAuth start failed: ${err?.name || 'Error'}`);
     res.redirect(errorRedirect('authentication_failed'));
@@ -68,19 +74,29 @@ router.get('/callback', async (req, res) => {
     if (error !== undefined) {
       throw new CallbackError(error === 'access_denied' ? 'access_denied' : 'authentication_failed');
     }
-    if (!isGoogleConfigured()) throw new CallbackError('not_configured');
     // The flow must finish in the same MailExpert session that started it.
     if (!pending || !req.session?.userId || req.session.userId !== pending.userId) {
       throw new CallbackError('invalid_state');
     }
+    // Finish with the app chosen at start: its client is the one Google issued the code to.
+    const config = await resolveGoogleConfig({ appId: pending.appId });
+    if (!config) throw new CallbackError('not_configured');
     if (typeof code !== 'string' || !code) throw new CallbackError('authentication_failed');
 
-    const { clientId, redirectUri } = getGoogleConfig();
-    const tokens = await exchangeGoogleCode({ code, codeVerifier: pending.codeVerifier, redirectUri });
+    const tokens = await exchangeGoogleCode({
+      clientId: config.clientId,
+      clientSecret: config.clientSecret,
+      code,
+      codeVerifier: pending.codeVerifier,
+      redirectUri: config.redirectUri,
+    });
+    const identity = await verifyGoogleIdToken({ idToken: tokens.idToken, clientId: config.clientId });
+    // Google counts this account against the app's user cap once it issued tokens, even if
+    // the consent is refused below.
+    await recordGoogleGrant({ appId: config.appId, email: identity.email, sub: identity.sub });
     if (!hasGoogleMailScope(tokens.scope)) throw new CallbackError('scope_missing');
 
-    const identity = await verifyGoogleIdToken({ idToken: tokens.idToken, clientId });
-    const { account, result } = await upsertGoogleAccount(pending.userId, identity, tokens);
+    const { account, result } = await upsertGoogleAccount(pending.userId, identity, tokens, config.appId);
 
     reconnectAccount(account, result);
     res.redirect(`/?oauth_success=${PROVIDER}&oauth_result=${result}`);
@@ -95,8 +111,9 @@ router.get('/callback', async (req, res) => {
 });
 
 // Create or update the Gmail account for (userId, email) under a transaction-scoped
-// advisory lock so racing callbacks for one mailbox cannot insert duplicates.
-async function upsertGoogleAccount(userId, identity, tokens) {
+// advisory lock so racing callbacks for one mailbox cannot insert duplicates. The account
+// is bound to the app whose client issued the tokens.
+async function upsertGoogleAccount(userId, identity, tokens, appId) {
   const email = identity.email.toLowerCase();
   const encryptedAccess = encrypt(tokens.accessToken);
   const encryptedRefresh = tokens.refreshToken ? encrypt(tokens.refreshToken) : null;
@@ -105,7 +122,7 @@ async function upsertGoogleAccount(userId, identity, tokens) {
     await client.query('SELECT pg_advisory_xact_lock(hashtext($1))', [`oauth-account:${userId}:${email}`]);
 
     const existing = await client.query(
-      `SELECT id, oauth_refresh_token FROM email_accounts
+      `SELECT id, oauth_refresh_token, oauth_app_id FROM email_accounts
        WHERE user_id = $1 AND lower(email_address) = lower($2)
        ORDER BY created_at LIMIT 1`,
       [userId, email],
@@ -115,8 +132,10 @@ async function upsertGoogleAccount(userId, identity, tokens) {
     let result;
     if (existing.rows.length) {
       const row = existing.rows[0];
-      // Without a new or stored refresh token the account could not stay connected.
-      if (!encryptedRefresh && !row.oauth_refresh_token) throw new CallbackError('missing_refresh_token');
+      // A stored refresh token only works with the app that issued it, so it can be kept
+      // only when the account stays on the same app.
+      const canKeepStoredRefresh = !!row.oauth_refresh_token && row.oauth_app_id === appId;
+      if (!encryptedRefresh && !canKeepStoredRefresh) throw new CallbackError('missing_refresh_token');
       accountId = row.id;
       result = 'updated';
       await client.query(`
@@ -127,9 +146,10 @@ async function upsertGoogleAccount(userId, identity, tokens) {
           oauth_provider = 'google', oauth_public_client = false, auth_user = email_address,
           imap_host = 'imap.gmail.com', imap_port = 993, imap_tls = true,
           smtp_host = 'smtp.gmail.com', smtp_port = 465, smtp_tls = 'SSL',
+          oauth_app_id = $4, oauth_subject = $5,
           oauth_reconnect_required = false, sync_error = NULL
-        WHERE id = $4
-      `, [encryptedAccess, encryptedRefresh, tokens.expiresAt, accountId]);
+        WHERE id = $6
+      `, [encryptedAccess, encryptedRefresh, tokens.expiresAt, appId, identity.sub, accountId]);
     } else {
       if (!encryptedRefresh) throw new CallbackError('missing_refresh_token');
       const color = ACCOUNT_COLORS[Math.floor(Math.random() * ACCOUNT_COLORS.length)];
@@ -140,15 +160,17 @@ async function upsertGoogleAccount(userId, identity, tokens) {
           smtp_host, smtp_port, smtp_tls,
           auth_user,
           oauth_provider, oauth_access_token, oauth_refresh_token, oauth_token_expiry,
-          oauth_public_client, oauth_reconnect_required, include_in_unified_inbox
+          oauth_public_client, oauth_reconnect_required, include_in_unified_inbox,
+          oauth_app_id, oauth_subject
         ) VALUES ($1, $2, $3, $4, 'imap',
           'imap.gmail.com', 993, true,
           'smtp.gmail.com', 465, 'SSL',
           $3,
           'google', $5, $6, $7,
-          false, false, false)
+          false, false, false,
+          $8, $9)
         RETURNING id
-      `, [userId, identity.name || email, email, color, encryptedAccess, encryptedRefresh, tokens.expiresAt]);
+      `, [userId, identity.name || email, email, color, encryptedAccess, encryptedRefresh, tokens.expiresAt, appId, identity.sub]);
       accountId = inserted.rows[0].id;
       result = 'created';
     }

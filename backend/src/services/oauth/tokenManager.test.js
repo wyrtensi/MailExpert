@@ -131,6 +131,13 @@ describe('refreshOAuthToken', () => {
     expect(err.code).toBe('oauth_reconnect_required');
   });
 
+  it('treats an unavailable Google app as requiring reconnect', async () => {
+    refreshGoogleToken.mockRejectedValue(providerError('app_unavailable'));
+    query.mockResolvedValue({ rows: [], rowCount: 1 });
+    const err = await refreshOAuthToken(googleAccount()).catch(e => e);
+    expect(err.code).toBe('oauth_reconnect_required');
+  });
+
   it('keeps other failures retryable and does not flag the account', async () => {
     refreshGoogleToken.mockRejectedValue(providerError(undefined, 'socket hang up secret-refresh-token'));
     const err = await refreshOAuthToken(googleAccount()).catch(e => e);

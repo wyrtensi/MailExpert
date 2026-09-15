@@ -14,6 +14,12 @@ vi.mock('../services/encryption.js', () => ({
   encrypt: (v) => (v ? `enc(${v})` : v),
   decrypt: (v) => v,
 }));
+// The registry is covered by googleApps.test.js; routes see only the resolved credentials.
+const googleApps = vi.hoisted(() => ({ config: null, byId: {} }));
+vi.mock('../services/oauth/googleApps.js', () => ({
+  resolveGoogleConfig: vi.fn(async ({ appId = null } = {}) => (appId ? googleApps.byId[appId] ?? null : googleApps.config)),
+  recordGoogleGrant: vi.fn(async () => {}),
+}));
 
 // In-memory Redis so the real single-use state store runs end to end.
 const redisStore = vi.hoisted(() => new Map());
@@ -39,8 +45,10 @@ import oauthRoutes from './oauth.js';
 import { imapManager } from '../index.js';
 import { withTransaction } from '../services/db.js';
 import { exchangeGoogleCode, verifyGoogleIdToken, GoogleOAuthError } from '../services/oauth/googleOAuth.js';
+import { recordGoogleGrant } from '../services/oauth/googleApps.js';
 
-const CLIENT_ID = 'cid.apps.googleusercontent.com';
+const CLIENT_ID = '123456789012-abc123def456.apps.googleusercontent.com';
+const APP_ID = 'aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa';
 const CLIENT_SECRET = 'client-secret-value';
 const REDIRECT_URI = 'https://mail.example.com/oauth/google/callback';
 const USER_ID = '11111111-1111-1111-1111-111111111111';
@@ -76,7 +84,7 @@ function installDb({ existing = null } = {}) {
     query: vi.fn(async (sql, params) => {
       dbState.calls.push([sql, params]);
       if (/pg_advisory_xact_lock/.test(sql)) return { rows: [] };
-      if (/^\s*SELECT id, oauth_refresh_token FROM email_accounts/.test(sql)) {
+      if (/^\s*SELECT id, oauth_refresh_token, oauth_app_id FROM email_accounts/.test(sql)) {
         return { rows: dbState.existing ? [dbState.existing] : [] };
       }
       if (/^\s*INSERT INTO email_accounts/.test(sql)) return { rows: [{ id: 'new-acc' }] };
@@ -102,9 +110,9 @@ async function startFlow(query = '') {
 
 let logSpies;
 beforeEach(() => {
-  process.env.GOOGLE_CLIENT_ID = CLIENT_ID;
-  process.env.GOOGLE_CLIENT_SECRET = CLIENT_SECRET;
-  process.env.GOOGLE_REDIRECT_URI = REDIRECT_URI;
+  googleApps.config = { appId: APP_ID, clientId: CLIENT_ID, clientSecret: CLIENT_SECRET, redirectUri: REDIRECT_URI };
+  googleApps.byId = { [APP_ID]: googleApps.config };
+  recordGoogleGrant.mockClear();
   redisStore.clear();
   exchangeGoogleCode.mockReset();
   verifyGoogleIdToken.mockReset();
@@ -116,9 +124,6 @@ beforeEach(() => {
   logSpies = ['log', 'warn', 'error', 'info'].map((m) => vi.spyOn(console, m).mockImplementation(() => {}));
 });
 afterEach(() => {
-  delete process.env.GOOGLE_CLIENT_ID;
-  delete process.env.GOOGLE_CLIENT_SECRET;
-  delete process.env.GOOGLE_REDIRECT_URI;
   logSpies.forEach((s) => s.mockRestore());
 });
 const loggedText = () => JSON.stringify(logSpies.flatMap((s) => s.mock.calls));
@@ -142,7 +147,7 @@ describe('GET /oauth/google', () => {
   });
 
   it('redirects with not_configured when the integration is incomplete', async () => {
-    delete process.env.GOOGLE_CLIENT_SECRET;
+    googleApps.config = null;
     const res = await get('/oauth/google');
     expect(res.status).toBe(302);
     expect(res.headers.get('location')).toBe('/?oauth_error=not_configured&oauth_provider=google');
@@ -166,7 +171,7 @@ describe('GET /oauth/google', () => {
 
     expect(redisStore.size).toBe(1);
     const saved = JSON.parse([...redisStore.values()][0]);
-    expect(saved).toMatchObject({ userId: USER_ID, loginHint: 'user@gmail.com' });
+    expect(saved).toMatchObject({ userId: USER_ID, loginHint: 'user@gmail.com', appId: APP_ID });
     expect(p.get('code_challenge')).toBe(createHash('sha256').update(saved.codeVerifier).digest('base64url'));
     expect(location.toString()).not.toContain(saved.codeVerifier);
     expect(location.toString()).not.toContain(CLIENT_SECRET);
@@ -198,7 +203,9 @@ describe('GET /oauth/google/callback', () => {
 
     expect(res.status).toBe(302);
     expect(res.headers.get('location')).toBe('/?oauth_success=google&oauth_result=created');
-    expect(exchangeGoogleCode).toHaveBeenCalledWith({ code: 'auth-code-xyz', codeVerifier: saved.codeVerifier, redirectUri: REDIRECT_URI });
+    expect(exchangeGoogleCode).toHaveBeenCalledWith({
+      clientId: CLIENT_ID, clientSecret: CLIENT_SECRET, code: 'auth-code-xyz', codeVerifier: saved.codeVerifier, redirectUri: REDIRECT_URI,
+    });
     expect(verifyGoogleIdToken).toHaveBeenCalledWith({ idToken: 'id-tok', clientId: CLIENT_ID });
 
     const lock = sqlCall(/pg_advisory_xact_lock/);
@@ -209,19 +216,21 @@ describe('GET /oauth/google/callback', () => {
     expect(insertSql).toMatch(/'imap\.gmail\.com', 993, true/);
     expect(insertSql).toMatch(/'smtp\.gmail\.com', 465, 'SSL'/);
     expect(insertSql).toMatch(/'google'/);
-    expect(insertSql).toMatch(/include_in_unified_inbox/);
-    expect(insertSql).toMatch(/false\)\s*RETURNING id/);
+    expect(insertSql).toMatch(/include_in_unified_inbox,\s*oauth_app_id, oauth_subject/);
+    expect(insertSql).toMatch(/false, false, false,\s*\$8, \$9\)\s*RETURNING id/);
     expect(insertParams).toContain('enc(access-tok)');
     expect(insertParams).toContain('enc(refresh-tok)');
     expect(insertParams).not.toContain('access-tok');
     expect(insertParams).not.toContain('refresh-tok');
+    expect(insertParams.slice(7)).toEqual([APP_ID, 'sub-1']);
+    expect(recordGoogleGrant).toHaveBeenCalledWith({ appId: APP_ID, email: 'user@gmail.com', sub: 'sub-1' });
 
     expect(imapManager.connectAccount).toHaveBeenCalledWith(expect.objectContaining({ id: 'new-acc' }));
     expectCooldownClearedBeforeConnect('new-acc');
   });
 
   it('updates an existing account, keeps the stored refresh token and clears the reconnect flag', async () => {
-    installDb({ existing: { id: 'acc-1', oauth_refresh_token: 'enc(old-refresh)' } });
+    installDb({ existing: { id: 'acc-1', oauth_refresh_token: 'enc(old-refresh)', oauth_app_id: APP_ID } });
     mockSuccessfulGoogle({ refreshToken: null, email: 'User@Gmail.com' });
     const { state } = await startFlow();
 
@@ -230,7 +239,7 @@ describe('GET /oauth/google/callback', () => {
     expect(res.headers.get('location')).toBe('/?oauth_success=google&oauth_result=updated');
     const lock = sqlCall(/pg_advisory_xact_lock/);
     expect(lock[1]).toEqual([`oauth-account:${USER_ID}:user@gmail.com`]);
-    expect(sqlCall(/^\s*SELECT id, oauth_refresh_token FROM email_accounts/)[0]).toMatch(/lower\(email_address\) = lower\(\$2\)/);
+    expect(sqlCall(/^\s*SELECT id, oauth_refresh_token, oauth_app_id FROM email_accounts/)[0]).toMatch(/lower\(email_address\) = lower\(\$2\)/);
     const [updateSql, updateParams] = sqlCall(/^\s*UPDATE email_accounts/);
     expect(updateSql).toMatch(/oauth_refresh_token = COALESCE\(\$2, oauth_refresh_token\)/);
     expect(updateSql).toMatch(/oauth_reconnect_required = false/);
@@ -238,6 +247,8 @@ describe('GET /oauth/google/callback', () => {
     expect(updateSql).toMatch(/oauth_provider = 'google'/);
     expect(updateParams[0]).toBe('enc(access-tok)');
     expect(updateParams[1]).toBeNull();
+    expect(updateSql).toMatch(/oauth_app_id = \$4, oauth_subject = \$5/);
+    expect(updateParams.slice(3)).toEqual([APP_ID, 'sub-1', 'acc-1']);
     expect(sqlCall(/^\s*INSERT INTO email_accounts/)).toBeUndefined();
     await vi.waitFor(() => expect(imapManager.connectAccount).toHaveBeenCalled());
     expectCooldownClearedBeforeConnect('acc-1');
@@ -253,7 +264,7 @@ describe('GET /oauth/google/callback', () => {
   });
 
   it('rejects an existing account without any refresh token to keep', async () => {
-    installDb({ existing: { id: 'acc-1', oauth_refresh_token: null } });
+    installDb({ existing: { id: 'acc-1', oauth_refresh_token: null, oauth_app_id: APP_ID } });
     mockSuccessfulGoogle({ refreshToken: null });
     const { state } = await startFlow();
     const res = await callback({ code: 'c', state });
@@ -305,9 +316,10 @@ describe('GET /oauth/google/callback', () => {
 
   it('redirects with not_configured when the integration was removed mid-flow', async () => {
     const { state } = await startFlow();
-    delete process.env.GOOGLE_CLIENT_ID;
+    googleApps.byId = {};
     const res = await callback({ code: 'c', state });
     expect(res.headers.get('location')).toBe(errorLocation('not_configured'));
+    expect(exchangeGoogleCode).not.toHaveBeenCalled();
   });
 
   it('maps a failed code exchange to authentication_failed without leaking the code', async () => {
@@ -326,11 +338,12 @@ describe('GET /oauth/google/callback', () => {
     expect(loggedText()).not.toMatch(/access-tok|refresh-tok/);
   });
 
-  it('requires the full Gmail scope', async () => {
+  it('journals the grant but refuses a consent without the full Gmail scope', async () => {
     mockSuccessfulGoogle({ scope: 'openid email https://www.googleapis.com/auth/gmail.readonly' });
     const { state } = await startFlow();
     const res = await callback({ code: 'c', state });
     expect(res.headers.get('location')).toBe(errorLocation('scope_missing'));
+    expect(recordGoogleGrant).toHaveBeenCalledWith({ appId: APP_ID, email: 'user@gmail.com', sub: 'sub-1' });
     expect(withTransaction).not.toHaveBeenCalled();
   });
 
@@ -340,6 +353,7 @@ describe('GET /oauth/google/callback', () => {
     const { state } = await startFlow();
     const res = await callback({ code: 'c', state });
     expect(res.headers.get('location')).toBe(errorLocation('email_not_verified'));
+    expect(recordGoogleGrant).not.toHaveBeenCalled();
     expect(withTransaction).not.toHaveBeenCalled();
   });
 
@@ -352,5 +366,25 @@ describe('GET /oauth/google/callback', () => {
     for (const secret of ['auth-code-xyz', 'access-tok', 'refresh-tok', 'id-tok', CLIENT_SECRET, saved.codeVerifier, state]) {
       expect(logged).not.toContain(secret);
     }
+  });
+
+  it('finishes through the app chosen at start even when the default app changed', async () => {
+    mockSuccessfulGoogle();
+    const { state } = await startFlow();
+    googleApps.config = { appId: 'bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb', clientId: '999-other.apps.googleusercontent.com', clientSecret: 'other', redirectUri: REDIRECT_URI };
+
+    await callback({ code: 'c', state });
+
+    expect(exchangeGoogleCode).toHaveBeenCalledWith(expect.objectContaining({ clientId: CLIENT_ID, clientSecret: CLIENT_SECRET }));
+    expect(verifyGoogleIdToken).toHaveBeenCalledWith({ idToken: 'id-tok', clientId: CLIENT_ID });
+  });
+
+  it('refuses to move a mailbox to another app without a new refresh token', async () => {
+    installDb({ existing: { id: 'acc-1', oauth_refresh_token: 'enc(old-refresh)', oauth_app_id: 'cccccccc-cccc-cccc-cccc-cccccccccccc' } });
+    mockSuccessfulGoogle({ refreshToken: null });
+    const { state } = await startFlow();
+    const res = await callback({ code: 'c', state });
+    expect(res.headers.get('location')).toBe(errorLocation('missing_refresh_token'));
+    expect(sqlCall(/^\s*UPDATE email_accounts/)).toBeUndefined();
   });
 });

@@ -19,59 +19,40 @@ vi.mock('../encryption.js', () => ({
   encrypt: (v) => (v ? `enc(${v})` : v),
   decrypt: (v) => (typeof v === 'string' && v.startsWith('enc(') ? v.slice(4, -1) : v),
 }));
+vi.mock('./googleApps.js', () => ({ getGoogleAppById: vi.fn() }));
 
 const { SignJWT, generateKeyPair, exportJWK, createLocalJWKSet } = await import('jose');
 const { query } = await import('../db.js');
+const { getGoogleAppById } = await import('./googleApps.js');
 const {
   buildGoogleAuthorizationUrl,
   exchangeGoogleCode,
   verifyGoogleIdToken,
   refreshGoogleToken,
   hasGoogleMailScope,
-  isGoogleConfigured,
   GOOGLE_MAIL_SCOPE,
 } = await import('./googleOAuth.js');
 
-const CLIENT_ID = 'client-id.apps.googleusercontent.com';
+const CLIENT_ID = '123456789012-abc123def456.apps.googleusercontent.com';
 const CLIENT_SECRET = 'very-secret-client-secret';
 const REDIRECT_URI = 'https://mail.example.com/oauth/google/callback';
+const APP = { id: 'app-1', client_id: CLIENT_ID, client_secret: `enc(${CLIENT_SECRET})`, status: 'active' };
 const jsonRes = (ok, body, status = ok ? 200 : 400) => ({ ok, status, json: async () => body });
 
-function setConfig() {
-  process.env.GOOGLE_CLIENT_ID = CLIENT_ID;
-  process.env.GOOGLE_CLIENT_SECRET = CLIENT_SECRET;
-  process.env.GOOGLE_REDIRECT_URI = REDIRECT_URI;
-}
-function clearConfig() {
-  delete process.env.GOOGLE_CLIENT_ID;
-  delete process.env.GOOGLE_CLIENT_SECRET;
-  delete process.env.GOOGLE_REDIRECT_URI;
-}
-
 beforeEach(() => {
-  setConfig();
   query.mockReset();
   query.mockResolvedValue({ rows: [] });
+  getGoogleAppById.mockReset();
+  getGoogleAppById.mockResolvedValue(APP);
 });
 afterEach(() => {
   vi.unstubAllGlobals();
-  clearConfig();
-});
-
-describe('isGoogleConfigured', () => {
-  it('requires client id, secret and redirect uri', () => {
-    expect(isGoogleConfigured()).toBe(true);
-    delete process.env.GOOGLE_CLIENT_SECRET;
-    expect(isGoogleConfigured()).toBe(false);
-    setConfig();
-    delete process.env.GOOGLE_REDIRECT_URI;
-    expect(isGoogleConfigured()).toBe(false);
-  });
 });
 
 describe('buildGoogleAuthorizationUrl', () => {
   it('includes every mandatory authorization parameter and only the PKCE challenge', () => {
     const url = new URL(buildGoogleAuthorizationUrl({
+      clientId: CLIENT_ID,
       state: 'state-123', codeChallenge: 'challenge-abc', redirectUri: REDIRECT_URI,
     }));
     expect(url.origin + url.pathname).toBe('https://accounts.google.com/o/oauth2/v2/auth');
@@ -94,6 +75,7 @@ describe('buildGoogleAuthorizationUrl', () => {
 
   it('adds login_hint when provided', () => {
     const url = new URL(buildGoogleAuthorizationUrl({
+      clientId: CLIENT_ID,
       state: 's', codeChallenge: 'c', redirectUri: REDIRECT_URI, loginHint: 'user@gmail.com',
     }));
     expect(url.searchParams.get('login_hint')).toBe('user@gmail.com');
@@ -118,7 +100,9 @@ describe('exchangeGoogleCode', () => {
     vi.stubGlobal('fetch', fetchMock);
 
     const before = Date.now();
-    const tokens = await exchangeGoogleCode({ code: 'auth-code', codeVerifier: 'verifier', redirectUri: REDIRECT_URI });
+    const tokens = await exchangeGoogleCode({
+      clientId: CLIENT_ID, clientSecret: CLIENT_SECRET, code: 'auth-code', codeVerifier: 'verifier', redirectUri: REDIRECT_URI,
+    });
 
     const [url, init] = fetchMock.mock.calls[0];
     expect(url).toBe('https://oauth2.googleapis.com/token');
@@ -143,7 +127,9 @@ describe('exchangeGoogleCode', () => {
     vi.stubGlobal('fetch', vi.fn().mockResolvedValue(jsonRes(false, {
       error: 'invalid_grant', error_description: 'Bad Request code=auth-code secret leaked',
     })));
-    const err = await exchangeGoogleCode({ code: 'auth-code', codeVerifier: 'v', redirectUri: REDIRECT_URI }).catch(e => e);
+    const err = await exchangeGoogleCode({
+      clientId: CLIENT_ID, clientSecret: CLIENT_SECRET, code: 'auth-code', codeVerifier: 'v', redirectUri: REDIRECT_URI,
+    }).catch(e => e);
     expect(err.code).toBe('authentication_failed');
     expect(err.oauthError).toBe('invalid_grant');
     expect(err.message).not.toMatch(/auth-code|secret|Bad Request/);
@@ -151,8 +137,18 @@ describe('exchangeGoogleCode', () => {
 
   it('throws authentication_failed when no access token is returned', async () => {
     vi.stubGlobal('fetch', vi.fn().mockResolvedValue(jsonRes(true, { id_token: 'x' })));
-    const err = await exchangeGoogleCode({ code: 'c', codeVerifier: 'v', redirectUri: REDIRECT_URI }).catch(e => e);
+    const err = await exchangeGoogleCode({
+      clientId: CLIENT_ID, clientSecret: CLIENT_SECRET, code: 'c', codeVerifier: 'v', redirectUri: REDIRECT_URI,
+    }).catch(e => e);
     expect(err.code).toBe('authentication_failed');
+  });
+
+  it('fails with not_configured without client credentials and never calls Google', async () => {
+    const fetchMock = vi.fn();
+    vi.stubGlobal('fetch', fetchMock);
+    const err = await exchangeGoogleCode({ clientId: CLIENT_ID, clientSecret: '', code: 'c', codeVerifier: 'v', redirectUri: REDIRECT_URI }).catch(e => e);
+    expect(err.code).toBe('not_configured');
+    expect(fetchMock).not.toHaveBeenCalled();
   });
 });
 
@@ -225,7 +221,7 @@ describe('verifyGoogleIdToken', () => {
 });
 
 describe('refreshGoogleToken', () => {
-  const account = { id: 'acc-1', oauth_provider: 'google', oauth_refresh_token: 'enc(stored-rt)' };
+  const account = { id: 'acc-1', oauth_provider: 'google', oauth_app_id: 'app-1', oauth_refresh_token: 'enc(stored-rt)' };
 
   it('refreshes with the decrypted refresh token and persists encrypted tokens atomically', async () => {
     const fetchMock = vi.fn().mockResolvedValue(jsonRes(true, {
@@ -239,6 +235,8 @@ describe('refreshGoogleToken', () => {
     expect(body.get('grant_type')).toBe('refresh_token');
     expect(body.get('refresh_token')).toBe('stored-rt');
     expect(body.get('client_secret')).toBe(CLIENT_SECRET);
+    expect(body.get('client_id')).toBe(CLIENT_ID);
+    expect(getGoogleAppById).toHaveBeenCalledWith('app-1');
 
     expect(query).toHaveBeenCalledTimes(1);
     const [sql, params] = query.mock.calls[0];
@@ -279,8 +277,28 @@ describe('refreshGoogleToken', () => {
     expect(fetchMock).not.toHaveBeenCalled();
   });
 
-  it('fails with not_configured when the integration is missing', async () => {
-    clearConfig();
+  it.each([
+    ['no app is bound', { oauth_app_id: null }, null],
+    ['the app was removed', {}, null],
+    ['the app is disabled', {}, { ...APP, status: 'disabled' }],
+  ])('needs reconnect when %s, without calling Google', async (_label, overrides, app) => {
+    getGoogleAppById.mockResolvedValue(app);
+    const fetchMock = vi.fn();
+    vi.stubGlobal('fetch', fetchMock);
+    const err = await refreshGoogleToken({ ...account, ...overrides }).catch(e => e);
+    expect(err.code).toBe('authentication_failed');
+    expect(err.oauthError).toBe('app_unavailable');
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  it('keeps refreshing through a closed app', async () => {
+    getGoogleAppById.mockResolvedValue({ ...APP, status: 'closed' });
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue(jsonRes(true, { access_token: 'new-at', expires_in: 3600 })));
+    await expect(refreshGoogleToken(account)).resolves.toMatchObject({ oauth_access_token: 'new-at' });
+  });
+
+  it('fails with not_configured when the app secret cannot be decrypted', async () => {
+    getGoogleAppById.mockResolvedValue({ ...APP, client_secret: null });
     const fetchMock = vi.fn();
     vi.stubGlobal('fetch', fetchMock);
     const err = await refreshGoogleToken(account).catch(e => e);

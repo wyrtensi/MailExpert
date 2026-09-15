@@ -2,29 +2,36 @@ import { Router } from 'express';
 import { query } from '../services/db.js';
 import { requireAuth, requireAdmin } from '../middleware/auth.js';
 import { encrypt, decrypt, isEncrypted } from '../services/encryption.js';
-import { isGoogleConfigured } from '../services/oauth/googleOAuth.js';
+import {
+  GoogleAppError,
+  getDefaultGoogleApp,
+  importLegacyGoogleConfig,
+  resolveGoogleConfig,
+  saveDefaultGoogleAppCompat,
+  setGoogleAppStatus,
+} from '../services/oauth/googleApps.js';
 
 const router = Router();
 
 // Placeholder sent instead of a stored client secret; posting it back keeps the stored value.
 const REDACTED_SECRET = '••••••••';
 
-// Google config fields and the env vars the OAuth routes read them from.
-const GOOGLE_ENV = {
-  clientId: 'GOOGLE_CLIENT_ID',
-  clientSecret: 'GOOGLE_CLIENT_SECRET',
-  redirectUri: 'GOOGLE_REDIRECT_URI',
+// HTTP status and message for registry errors the single-app Google card can trigger.
+const GOOGLE_APP_ERRORS = {
+  client_id_invalid: [400, 'Client ID is not a Google OAuth client ID'],
+  client_secret_required: [400, 'Client secret is required'],
+  app_same_project: [409, 'An app from this Google Cloud project is already added'],
+  app_in_use: [409, 'The current Google app still has connected mailboxes'],
 };
 
-// Mirror a stored Google config into process.env. Unset fields clear their env var so
-// /status never reports a half-removed config as ready.
+// Mirror the stored Google callback URL into process.env. Client credentials live in
+// google_oauth_apps, so only the redirect URI is kept in integration_config.
 function applyGoogleEnv(config) {
-  for (const [field, envName] of Object.entries(GOOGLE_ENV)) {
-    const value = field === 'clientSecret' ? decrypt(config?.[field]) : config?.[field];
-    if (value) process.env[envName] = value;
-    else delete process.env[envName];
-  }
+  if (config?.redirectUri) process.env.GOOGLE_REDIRECT_URI = config.redirectUri;
+  else delete process.env.GOOGLE_REDIRECT_URI;
 }
+
+const stringField = (value) => (typeof value === 'string' ? value.trim() : '');
 
 router.use(requireAuth);
 
@@ -41,6 +48,17 @@ router.get('/', requireAdmin, async (req, res) => {
     if (cfg.clientSecret) cfg.clientSecret = REDACTED_SECRET;
     configs[row.provider] = { ...cfg, updated_at: row.updated_at };
   }
+  // The Google card shows the default app's client; any client fields left in the legacy
+  // row are ignored.
+  const googleApp = await getDefaultGoogleApp();
+  if (configs.google || googleApp) {
+    const stored = configs.google || {};
+    configs.google = {
+      ...(googleApp ? { clientId: googleApp.client_id, clientSecret: REDACTED_SECRET } : {}),
+      ...(stored.redirectUri ? { redirectUri: stored.redirectUri } : {}),
+      ...(stored.updated_at ? { updated_at: stored.updated_at } : {}),
+    };
+  }
   res.json(configs);
 });
 
@@ -51,12 +69,13 @@ router.get('/', requireAdmin, async (req, res) => {
 // The OAuth connect routes already require only an authenticated session and bind the
 // resulting mailbox to that user, so no privilege is granted here. (#315)
 router.get('/status', async (req, res) => {
+  const google = await resolveGoogleConfig();
   res.json({
     microsoft: {
       configured: !!process.env.MS_CLIENT_ID,
     },
     google: {
-      configured: isGoogleConfigured(),
+      configured: !!google,
     },
   });
 });
@@ -67,21 +86,48 @@ router.post('/:provider', requireAdmin, async (req, res) => {
   const allowed = ['microsoft', 'google'];
   if (!allowed.includes(provider)) return res.status(400).json({ error: 'Unknown provider' });
 
-  let config = req.body;
+  const isRedactionMix = (secret) => typeof secret === 'string'
+    && secret !== REDACTED_SECRET
+    && secret.includes('•');
+
   if (provider === 'google') {
-    // Store only the documented fields; string values only.
     const body = req.body || {};
-    config = {};
-    for (const field of Object.keys(GOOGLE_ENV)) {
-      if (typeof body[field] === 'string' && body[field].trim()) config[field] = body[field].trim();
+    const clientSecret = stringField(body.clientSecret);
+    // A secret that contains the redaction bullet but is not exactly the placeholder was typed
+    // into (or around) the redacted field; storing it would replace the real secret with junk.
+    if (isRedactionMix(clientSecret)) {
+      return res.status(400).json({
+        error: 'Client secret contains the redaction placeholder; enter the full secret',
+        code: 'client_secret_redacted',
+      });
     }
+    try {
+      await saveDefaultGoogleAppCompat({
+        clientId: stringField(body.clientId),
+        clientSecret: clientSecret && clientSecret !== REDACTED_SECRET ? clientSecret : null,
+      });
+    } catch (err) {
+      const mapped = err instanceof GoogleAppError ? GOOGLE_APP_ERRORS[err.code] : null;
+      if (!mapped) throw err;
+      return res.status(mapped[0]).json({ error: mapped[1], code: err.code });
+    }
+    const redirectUri = stringField(body.redirectUri);
+    const googleConfig = redirectUri ? { redirectUri } : {};
+    await query(`
+      INSERT INTO integration_config (provider, config)
+      VALUES ($1, $2)
+      ON CONFLICT (provider) DO UPDATE
+      SET config = EXCLUDED.config, updated_at = NOW()
+    `, [provider, googleConfig]);
+    applyGoogleEnv(googleConfig);
+    return res.json({ ok: true });
   }
+
+  const config = req.body;
 
   // A secret that contains the redaction bullet but is not exactly the placeholder was typed into
   // (or around) the redacted field; storing it would silently replace the real secret with junk.
-  if (typeof config.clientSecret === 'string'
-    && config.clientSecret !== REDACTED_SECRET
-    && config.clientSecret.includes('•')) {
+  if (isRedactionMix(config.clientSecret)) {
     return res.status(400).json({
       error: 'Client secret contains the redaction placeholder; enter the full secret',
       code: 'client_secret_redacted',
@@ -119,8 +165,6 @@ router.post('/:provider', requireAdmin, async (req, res) => {
     if (config.clientSecret) process.env.MS_CLIENT_SECRET = decrypt(config.clientSecret);
     if (config.tenantId) process.env.MS_TENANT_ID = config.tenantId;
     if (config.redirectUri) process.env.MS_REDIRECT_URI = config.redirectUri;
-  } else if (provider === 'google') {
-    applyGoogleEnv(config);
   }
 
   res.json({ ok: true });
@@ -138,6 +182,16 @@ router.delete('/:provider', requireAdmin, async (req, res) => {
     delete process.env.MS_TENANT_ID;
     delete process.env.MS_REDIRECT_URI;
   } else if (req.params.provider === 'google') {
+    // The single-app card removes "the" Google app: disable it so its mailboxes ask for a
+    // reconnect, and drop their connections built from its tokens.
+    const app = await getDefaultGoogleApp();
+    if (app) {
+      const accountIds = await setGoogleAppStatus(app.id, 'disabled');
+      const manager = req.app.get('imapManager');
+      for (const accountId of accountIds) {
+        Promise.resolve(manager?.disconnectAccount(accountId)).catch(() => {});
+      }
+    }
     applyGoogleEnv(null);
   }
   res.json({ ok: true });
@@ -162,6 +216,13 @@ export async function loadIntegrationConfigs() {
     console.log('Integration configs loaded');
   } catch (err) {
     console.error('Failed to load integration configs:', err.message);
+  }
+  // Runs after the stored callback URL is applied; logs only a code so a failure never
+  // prints SQL, secrets or provider text.
+  try {
+    await importLegacyGoogleConfig();
+  } catch (err) {
+    console.error(`Google OAuth app import failed: ${err?.code || err?.name || 'Error'}`);
   }
 }
 

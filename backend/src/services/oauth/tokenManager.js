@@ -21,8 +21,9 @@ const DEFAULT_LOCK_WAIT_MS = 10000;
 const DEFAULT_LOCK_POLL_MS = 200;
 const RELEASE_LOCK_SCRIPT = `if redis.call('get', KEYS[1]) == ARGV[1] then return redis.call('del', KEYS[1]) else return 0 end`;
 
-// Provider error codes that no retry can fix: only a new user consent helps.
-const RECONNECT_OAUTH_ERRORS = new Set(['invalid_grant', 'missing_refresh_token']);
+// Provider error codes that no retry can fix: only a new user consent helps. app_unavailable
+// means the Google app that issued the tokens was disabled or removed.
+const RECONNECT_OAUTH_ERRORS = new Set(['invalid_grant', 'missing_refresh_token', 'app_unavailable']);
 
 // Stable, secret-free error. `code` is one of: oauth_reconnect_required,
 // oauth_refresh_failed, oauth_unsupported_provider, oauth_account_not_found.

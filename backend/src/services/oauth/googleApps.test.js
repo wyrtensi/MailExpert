@@ -1,0 +1,359 @@
+import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
+
+vi.mock('../db.js', () => ({ query: vi.fn(), withTransaction: vi.fn() }));
+vi.mock('../encryption.js', () => ({
+  encrypt: (v) => (v ? `enc(${v})` : v),
+  // 'broken' stands for a value encrypted with another key: decrypt() returns null for it.
+  decrypt: (v) => (typeof v === 'string' && v.startsWith('enc(') ? v.slice(4, -1) : v === 'broken' ? null : v),
+}));
+
+const { query, withTransaction } = await import('../db.js');
+const {
+  GoogleAppError,
+  parseGoogleClientId,
+  getGoogleAppById,
+  getDefaultGoogleApp,
+  resolveGoogleConfig,
+  recordGoogleGrant,
+  setGoogleAppStatus,
+  importLegacyGoogleConfig,
+  saveDefaultGoogleAppCompat,
+} = await import('./googleApps.js');
+
+const CLIENT_ID = '123456789012-abc123def456.apps.googleusercontent.com';
+const REDIRECT_URI = 'https://mail.example.com/oauth/google/callback';
+const APP = {
+  id: 'app-1',
+  label: 'Google 1',
+  client_id: CLIENT_ID,
+  client_secret: 'enc(app-secret)',
+  project_number: '123456789012',
+  user_limit: 100,
+  status: 'active',
+  created_at: new Date('2026-09-15T00:00:00Z'),
+};
+
+// Transaction client that routes SQL by pattern and records every call.
+function scriptedClient(handlers) {
+  const calls = [];
+  const client = {
+    query: vi.fn(async (sql, params) => {
+      calls.push([sql, params]);
+      for (const [re, result] of handlers) {
+        if (re.test(sql)) return typeof result === 'function' ? result(params) : result;
+      }
+      throw new Error(`unexpected SQL: ${sql}`);
+    }),
+  };
+  return { client, calls };
+}
+
+beforeEach(() => {
+  query.mockReset();
+  withTransaction.mockReset();
+  delete process.env.GOOGLE_REDIRECT_URI;
+});
+afterEach(() => {
+  delete process.env.GOOGLE_REDIRECT_URI;
+});
+
+describe('parseGoogleClientId', () => {
+  it('returns the Google Cloud project number of a web client ID', () => {
+    expect(parseGoogleClientId(CLIENT_ID)).toBe('123456789012');
+    expect(parseGoogleClientId(`  ${CLIENT_ID}  `)).toBe('123456789012');
+  });
+
+  it.each([
+    ['no project number', 'abc123.apps.googleusercontent.com'],
+    ['another domain', '123-abc.apps.example.com'],
+    ['an upper-case suffix', '123-ABC.apps.googleusercontent.com'],
+    ['a number', 42],
+    ['an empty string', ''],
+  ])('rejects %s', (_label, value) => {
+    expect(parseGoogleClientId(value)).toBeNull();
+  });
+});
+
+describe('app lookups', () => {
+  it('picks the oldest app that is not disabled as the default', async () => {
+    query.mockResolvedValue({ rows: [APP] });
+    expect(await getDefaultGoogleApp()).toEqual(APP);
+    const [sql] = query.mock.calls[0];
+    expect(sql).toMatch(/FROM google_oauth_apps/);
+    expect(sql).toMatch(/status <> 'disabled'/);
+    expect(sql).toMatch(/ORDER BY created_at, id LIMIT 1/);
+  });
+
+  it('returns null when there is no default app', async () => {
+    query.mockResolvedValue({ rows: [] });
+    expect(await getDefaultGoogleApp()).toBeNull();
+  });
+
+  it('loads an app by id in any status and skips the query without an id', async () => {
+    query.mockResolvedValue({ rows: [{ ...APP, status: 'disabled' }] });
+    expect(await getGoogleAppById('app-1')).toMatchObject({ id: 'app-1', status: 'disabled' });
+    expect(query.mock.calls[0][1]).toEqual(['app-1']);
+
+    query.mockClear();
+    expect(await getGoogleAppById(null)).toBeNull();
+    expect(query).not.toHaveBeenCalled();
+  });
+});
+
+describe('resolveGoogleConfig', () => {
+  it('combines the default app with the callback URL and decrypts the secret', async () => {
+    process.env.GOOGLE_REDIRECT_URI = REDIRECT_URI;
+    query.mockResolvedValue({ rows: [APP] });
+    expect(await resolveGoogleConfig()).toEqual({
+      appId: 'app-1', clientId: CLIENT_ID, clientSecret: 'app-secret', redirectUri: REDIRECT_URI,
+    });
+    expect(query.mock.calls[0][0]).toMatch(/status <> 'disabled'/);
+  });
+
+  it('uses the requested app instead of the default one', async () => {
+    process.env.GOOGLE_REDIRECT_URI = REDIRECT_URI;
+    query.mockResolvedValue({ rows: [{ ...APP, id: 'app-2', status: 'closed' }] });
+    expect(await resolveGoogleConfig({ appId: 'app-2' })).toMatchObject({ appId: 'app-2' });
+    expect(query.mock.calls[0][0]).toMatch(/WHERE id = \$1/);
+    expect(query.mock.calls[0][1]).toEqual(['app-2']);
+  });
+
+  it('is null without a callback URL, without an app, for a disabled app or an undecryptable secret', async () => {
+    query.mockResolvedValue({ rows: [APP] });
+    expect(await resolveGoogleConfig()).toBeNull();
+
+    process.env.GOOGLE_REDIRECT_URI = REDIRECT_URI;
+    query.mockResolvedValue({ rows: [] });
+    expect(await resolveGoogleConfig()).toBeNull();
+
+    query.mockResolvedValue({ rows: [{ ...APP, status: 'disabled' }] });
+    expect(await resolveGoogleConfig({ appId: 'app-1' })).toBeNull();
+
+    query.mockResolvedValue({ rows: [{ ...APP, client_secret: 'broken' }] });
+    expect(await resolveGoogleConfig()).toBeNull();
+  });
+});
+
+describe('recordGoogleGrant', () => {
+  it('upserts one journal row per app and lower-cased email, keeping a known subject', async () => {
+    query.mockResolvedValue({ rows: [] });
+    await recordGoogleGrant({ appId: 'app-1', email: 'User@Gmail.com', sub: 'sub-1' });
+    const [sql, params] = query.mock.calls[0];
+    expect(sql).toMatch(/INSERT INTO google_oauth_grants \(app_id, email, google_sub\) VALUES \(\$1, lower\(\$2\), \$3\)/);
+    expect(sql).toMatch(/ON CONFLICT \(app_id, email\) DO UPDATE SET google_sub = COALESCE\(google_oauth_grants\.google_sub, EXCLUDED\.google_sub\)/);
+    expect(params).toEqual(['app-1', 'User@Gmail.com', 'sub-1']);
+  });
+
+  it('runs on a transaction client when one is passed', async () => {
+    const { client } = scriptedClient([[/INSERT INTO google_oauth_grants/, { rows: [] }]]);
+    await recordGoogleGrant({ appId: 'app-1', email: 'u@gmail.com' }, client);
+    expect(client.query.mock.calls[0][1]).toEqual(['app-1', 'u@gmail.com', null]);
+    expect(query).not.toHaveBeenCalled();
+  });
+});
+
+describe('setGoogleAppStatus', () => {
+  it('flags every mailbox of a disabled app for reconnect and returns their ids', async () => {
+    const { client, calls } = scriptedClient([
+      [/^\s*UPDATE google_oauth_apps/, { rows: [{ id: 'app-1' }] }],
+      [/^\s*UPDATE email_accounts/, { rows: [{ id: 'acc-1' }, { id: 'acc-2' }] }],
+    ]);
+    withTransaction.mockImplementation(async (fn) => fn(client));
+
+    expect(await setGoogleAppStatus('app-1', 'disabled')).toEqual(['acc-1', 'acc-2']);
+    expect(calls[0][1]).toEqual(['app-1', 'disabled']);
+    const [accountSql, accountParams] = calls[1];
+    expect(accountSql).toMatch(/oauth_reconnect_required = true/);
+    expect(accountSql).toMatch(/sync_error = 'oauth_reconnect_required'/);
+    expect(accountSql).toMatch(/WHERE oauth_app_id = \$1/);
+    expect(accountParams).toEqual(['app-1']);
+  });
+
+  it.each(['active', 'closed'])('leaves mailboxes alone when the status becomes %s', async (status) => {
+    const { client, calls } = scriptedClient([[/^\s*UPDATE google_oauth_apps/, { rows: [{ id: 'app-1' }] }]]);
+    withTransaction.mockImplementation(async (fn) => fn(client));
+    expect(await setGoogleAppStatus('app-1', status)).toEqual([]);
+    expect(calls).toHaveLength(1);
+  });
+
+  it('rejects an unknown status without a transaction', async () => {
+    const err = await setGoogleAppStatus('app-1', 'paused').catch((e) => e);
+    expect(err).toBeInstanceOf(GoogleAppError);
+    expect(err.code).toBe('app_status_invalid');
+    expect(withTransaction).not.toHaveBeenCalled();
+  });
+
+  it('reports a missing app', async () => {
+    const { client } = scriptedClient([[/^\s*UPDATE google_oauth_apps/, { rows: [] }]]);
+    withTransaction.mockImplementation(async (fn) => fn(client));
+    const err = await setGoogleAppStatus('app-9', 'closed').catch((e) => e);
+    expect(err.code).toBe('app_not_found');
+  });
+});
+
+describe('importLegacyGoogleConfig', () => {
+  let errorSpy;
+  let logSpy;
+  beforeEach(() => {
+    errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+    logSpy = vi.spyOn(console, 'log').mockImplementation(() => {});
+    delete process.env.GOOGLE_CLIENT_ID;
+    delete process.env.GOOGLE_CLIENT_SECRET;
+  });
+  afterEach(() => {
+    errorSpy.mockRestore();
+    logSpy.mockRestore();
+    delete process.env.GOOGLE_CLIENT_ID;
+    delete process.env.GOOGLE_CLIENT_SECRET;
+  });
+
+  function importDb({ appExists = false, config = null } = {}) {
+    const { client, calls } = scriptedClient([
+      [/pg_advisory_xact_lock/, { rows: [] }],
+      [/^\s*SELECT 1 FROM google_oauth_apps/, { rows: appExists ? [{ '?column?': 1 }] : [] }],
+      [/^\s*SELECT config FROM integration_config/, { rows: config ? [{ config }] : [] }],
+      [/^\s*INSERT INTO google_oauth_apps/, { rows: [{ id: 'app-new' }] }],
+      [/^\s*UPDATE email_accounts SET oauth_app_id/, { rows: [], rowCount: 2 }],
+      [/^\s*INSERT INTO google_oauth_grants/, { rows: [] }],
+      [/^\s*UPDATE integration_config/, { rows: [] }],
+    ]);
+    withTransaction.mockImplementation(async (fn) => fn(client));
+    return calls;
+  }
+  const findCall = (calls, re) => calls.find(([sql]) => re.test(sql));
+
+  it('does nothing once an app exists', async () => {
+    const calls = importDb({ appExists: true, config: { clientId: CLIENT_ID, clientSecret: 'enc(s)' } });
+    expect(await importLegacyGoogleConfig()).toBeNull();
+    expect(findCall(calls, /INSERT INTO google_oauth_apps/)).toBeUndefined();
+  });
+
+  it('imports the stored client, binds Gmail accounts, fills the journal and keeps only the callback URL', async () => {
+    const calls = importDb({ config: { clientId: CLIENT_ID, clientSecret: 'enc(stored-secret)', redirectUri: REDIRECT_URI } });
+
+    expect(await importLegacyGoogleConfig()).toBe('app-new');
+
+    expect(findCall(calls, /pg_advisory_xact_lock/)[0]).toMatch(/hashtext\('google-oauth-app-import'\)/);
+    const [insertSql, insertParams] = findCall(calls, /INSERT INTO google_oauth_apps/);
+    expect(insertSql).toMatch(/'Google 1'/);
+    expect(insertParams).toEqual([CLIENT_ID, 'enc(stored-secret)', '123456789012']);
+    const [bindSql, bindParams] = findCall(calls, /UPDATE email_accounts SET oauth_app_id/);
+    expect(bindSql).toMatch(/oauth_provider = 'google' AND oauth_app_id IS NULL/);
+    expect(bindParams).toEqual(['app-new']);
+    const [grantSql, grantParams] = findCall(calls, /INSERT INTO google_oauth_grants/);
+    expect(grantSql).toMatch(/SELECT DISTINCT \$1::uuid, lower\(email_address\)/);
+    expect(grantSql).toMatch(/ON CONFLICT \(app_id, email\) DO NOTHING/);
+    expect(grantParams).toEqual(['app-new']);
+    expect(findCall(calls, /UPDATE integration_config/)[0]).toMatch(/jsonb_build_object\('redirectUri', config->'redirectUri'\)/);
+  });
+
+  it('encrypts a legacy plaintext secret', async () => {
+    const calls = importDb({ config: { clientId: CLIENT_ID, clientSecret: 'plain-secret' } });
+    await importLegacyGoogleConfig();
+    expect(findCall(calls, /INSERT INTO google_oauth_apps/)[1][1]).toBe('enc(plain-secret)');
+  });
+
+  it('falls back to the environment when nothing is stored', async () => {
+    process.env.GOOGLE_CLIENT_ID = CLIENT_ID;
+    process.env.GOOGLE_CLIENT_SECRET = 'env-secret';
+    const calls = importDb();
+    expect(await importLegacyGoogleConfig()).toBe('app-new');
+    expect(findCall(calls, /INSERT INTO google_oauth_apps/)[1]).toEqual([CLIENT_ID, 'enc(env-secret)', '123456789012']);
+    expect(findCall(calls, /UPDATE integration_config/)).toBeUndefined();
+  });
+
+  it('does nothing without any stored or environment client', async () => {
+    const calls = importDb();
+    expect(await importLegacyGoogleConfig()).toBeNull();
+    expect(findCall(calls, /INSERT INTO google_oauth_apps/)).toBeUndefined();
+    expect(errorSpy).not.toHaveBeenCalled();
+  });
+
+  it('reports a client ID that is not a Google OAuth client ID instead of importing it', async () => {
+    const calls = importDb({ config: { clientId: 'gid', clientSecret: 'enc(top-secret)' } });
+    expect(await importLegacyGoogleConfig()).toBeNull();
+    expect(findCall(calls, /INSERT INTO google_oauth_apps/)).toBeUndefined();
+    const logged = JSON.stringify(errorSpy.mock.calls);
+    expect(logged).toMatch(/not a Google OAuth client ID/);
+    expect(logged).not.toMatch(/top-secret|gid/);
+  });
+
+  it('reports a stored secret that cannot be decrypted', async () => {
+    const calls = importDb({ config: { clientId: CLIENT_ID, clientSecret: 'broken' } });
+    expect(await importLegacyGoogleConfig()).toBeNull();
+    expect(findCall(calls, /INSERT INTO google_oauth_apps/)).toBeUndefined();
+    expect(JSON.stringify(errorSpy.mock.calls)).toMatch(/cannot be decrypted/);
+  });
+});
+
+describe('saveDefaultGoogleAppCompat', () => {
+  const OTHER_CLIENT_ID = '999999999999-zzz999.apps.googleusercontent.com';
+
+  function compatDb({ sameClient = null, current = null, projectTaken = false } = {}) {
+    const { client, calls } = scriptedClient([
+      [/pg_advisory_xact_lock/, { rows: [] }],
+      [/^\s*SELECT id FROM google_oauth_apps WHERE client_id = \$1/, { rows: sameClient ? [sameClient] : [] }],
+      [/^\s*UPDATE google_oauth_apps SET status = 'active'/, { rows: [] }],
+      [/^\s*SELECT a\.id, \(SELECT count\(\*\)/, { rows: current ? [current] : [] }],
+      [/^\s*DELETE FROM google_oauth_apps/, { rows: [] }],
+      [/^\s*SELECT 1 FROM google_oauth_apps WHERE project_number = \$1/, { rows: projectTaken ? [{}] : [] }],
+      [/^\s*INSERT INTO google_oauth_apps/, { rows: [{ id: 'app-new' }] }],
+    ]);
+    withTransaction.mockImplementation(async (fn) => fn(client));
+    return calls;
+  }
+  const findCall = (calls, re) => calls.find(([sql]) => re.test(sql));
+
+  it('rejects a client ID that is not a Google OAuth client ID before touching the database', async () => {
+    const err = await saveDefaultGoogleAppCompat({ clientId: 'gid', clientSecret: 's' }).catch((e) => e);
+    expect(err.code).toBe('client_id_invalid');
+    expect(withTransaction).not.toHaveBeenCalled();
+  });
+
+  it('updates the secret of the same client and re-activates it', async () => {
+    const calls = compatDb({ sameClient: { id: 'app-1' } });
+    expect(await saveDefaultGoogleAppCompat({ clientId: CLIENT_ID, clientSecret: 'new-secret' })).toBe('app-1');
+    expect(findCall(calls, /UPDATE google_oauth_apps SET status = 'active'/)[1]).toEqual(['app-1', 'enc(new-secret)']);
+    expect(findCall(calls, /INSERT INTO google_oauth_apps/)).toBeUndefined();
+  });
+
+  it('keeps the stored secret of the same client when none is given', async () => {
+    const calls = compatDb({ sameClient: { id: 'app-1' } });
+    await saveDefaultGoogleAppCompat({ clientId: CLIENT_ID, clientSecret: null });
+    expect(findCall(calls, /UPDATE google_oauth_apps SET status = 'active'/)[1]).toEqual(['app-1', null]);
+  });
+
+  it('requires a secret for a new client', async () => {
+    compatDb();
+    const err = await saveDefaultGoogleAppCompat({ clientId: CLIENT_ID, clientSecret: null }).catch((e) => e);
+    expect(err.code).toBe('client_secret_required');
+  });
+
+  it('creates the first app', async () => {
+    const calls = compatDb();
+    expect(await saveDefaultGoogleAppCompat({ clientId: CLIENT_ID, clientSecret: 's' })).toBe('app-new');
+    expect(findCall(calls, /INSERT INTO google_oauth_apps/)[1]).toEqual(['Google 1', CLIENT_ID, 'enc(s)', '123456789012']);
+  });
+
+  it('replaces a default app that has no mailboxes', async () => {
+    const calls = compatDb({ current: { id: 'app-old', accounts: 0 } });
+    expect(await saveDefaultGoogleAppCompat({ clientId: OTHER_CLIENT_ID, clientSecret: 's' })).toBe('app-new');
+    expect(findCall(calls, /DELETE FROM google_oauth_apps/)[1]).toEqual(['app-old']);
+    expect(findCall(calls, /INSERT INTO google_oauth_apps/)[1]).toEqual(['Google 1', OTHER_CLIENT_ID, 'enc(s)', '999999999999']);
+  });
+
+  it('refuses to replace a default app that still has mailboxes', async () => {
+    const calls = compatDb({ current: { id: 'app-old', accounts: 3 } });
+    const err = await saveDefaultGoogleAppCompat({ clientId: OTHER_CLIENT_ID, clientSecret: 's' }).catch((e) => e);
+    expect(err.code).toBe('app_in_use');
+    expect(findCall(calls, /DELETE FROM google_oauth_apps/)).toBeUndefined();
+    expect(findCall(calls, /INSERT INTO google_oauth_apps/)).toBeUndefined();
+  });
+
+  it('refuses a second client from the same Google Cloud project', async () => {
+    const calls = compatDb({ projectTaken: true });
+    const err = await saveDefaultGoogleAppCompat({ clientId: CLIENT_ID, clientSecret: 's' }).catch((e) => e);
+    expect(err.code).toBe('app_same_project');
+    expect(findCall(calls, /INSERT INTO google_oauth_apps/)).toBeUndefined();
+  });
+});

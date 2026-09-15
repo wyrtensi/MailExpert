@@ -1,5 +1,5 @@
 import { query, withTransaction } from '../db.js';
-import { decrypt } from '../encryption.js';
+import { encrypt, decrypt } from '../encryption.js';
 
 // Google OAuth apps: one row per Google Cloud project. OAuth clients of one project share
 // its unverified-app user cap, so the project number in the client ID identifies an app.
@@ -82,5 +82,62 @@ export async function setGoogleAppStatus(appId, status) {
       [appId],
     );
     return flagged.rows.map((row) => row.id);
+  });
+}
+
+// One-time import of the single-app settings (Settings → Integrations, or the
+// GOOGLE_CLIENT_ID and GOOGLE_CLIENT_SECRET environment) as the first app. Runs at every
+// startup and does nothing once any app exists.
+export async function importLegacyGoogleConfig() {
+  return withTransaction(async (client) => {
+    await client.query("SELECT pg_advisory_xact_lock(hashtext('google-oauth-app-import'))");
+    const existing = await client.query('SELECT 1 FROM google_oauth_apps LIMIT 1');
+    if (existing.rows.length) return null;
+
+    const stored = await client.query("SELECT config FROM integration_config WHERE provider = 'google'");
+    const config = stored.rows[0]?.config || {};
+    let source = null;
+    if (config.clientId && config.clientSecret) {
+      source = { from: 'the stored integration settings', clientId: config.clientId, clientSecret: decrypt(config.clientSecret) };
+    } else if (process.env.GOOGLE_CLIENT_ID && process.env.GOOGLE_CLIENT_SECRET) {
+      source = { from: 'the environment', clientId: process.env.GOOGLE_CLIENT_ID, clientSecret: process.env.GOOGLE_CLIENT_SECRET };
+    }
+    if (!source) return null;
+
+    const projectNumber = parseGoogleClientId(source.clientId);
+    if (!projectNumber) {
+      console.error(`Google OAuth: the client ID from ${source.from} is not a Google OAuth client ID; add the app again in Settings → Integrations`);
+      return null;
+    }
+    if (!source.clientSecret) {
+      console.error(`Google OAuth: the client secret from ${source.from} cannot be decrypted; add the app again in Settings → Integrations`);
+      return null;
+    }
+
+    const inserted = await client.query(
+      `INSERT INTO google_oauth_apps (label, client_id, client_secret, project_number)
+       VALUES ('Google 1', $1, $2, $3) RETURNING id`,
+      [source.clientId.trim(), encrypt(source.clientSecret), projectNumber],
+    );
+    const appId = inserted.rows[0].id;
+    await client.query(
+      `UPDATE email_accounts SET oauth_app_id = $1 WHERE oauth_provider = 'google' AND oauth_app_id IS NULL`,
+      [appId],
+    );
+    await client.query(
+      `INSERT INTO google_oauth_grants (app_id, email)
+       SELECT DISTINCT $1::uuid, lower(email_address) FROM email_accounts WHERE oauth_app_id = $1
+       ON CONFLICT (app_id, email) DO NOTHING`,
+      [appId],
+    );
+    if (stored.rows.length) {
+      await client.query(
+        `UPDATE integration_config
+         SET config = jsonb_strip_nulls(jsonb_build_object('redirectUri', config->'redirectUri')), updated_at = NOW()
+         WHERE provider = 'google'`,
+      );
+    }
+    console.log(`Google OAuth: imported the client from ${source.from} as app "Google 1"`);
+    return appId;
   });
 }

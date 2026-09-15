@@ -16,6 +16,7 @@ const {
   resolveGoogleConfig,
   recordGoogleGrant,
   setGoogleAppStatus,
+  importLegacyGoogleConfig,
 } = await import('./googleApps.js');
 
 const CLIENT_ID = '123456789012-abc123def456.apps.googleusercontent.com';
@@ -186,5 +187,100 @@ describe('setGoogleAppStatus', () => {
     withTransaction.mockImplementation(async (fn) => fn(client));
     const err = await setGoogleAppStatus('app-9', 'closed').catch((e) => e);
     expect(err.code).toBe('app_not_found');
+  });
+});
+
+describe('importLegacyGoogleConfig', () => {
+  let errorSpy;
+  let logSpy;
+  beforeEach(() => {
+    errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+    logSpy = vi.spyOn(console, 'log').mockImplementation(() => {});
+    delete process.env.GOOGLE_CLIENT_ID;
+    delete process.env.GOOGLE_CLIENT_SECRET;
+  });
+  afterEach(() => {
+    errorSpy.mockRestore();
+    logSpy.mockRestore();
+    delete process.env.GOOGLE_CLIENT_ID;
+    delete process.env.GOOGLE_CLIENT_SECRET;
+  });
+
+  function importDb({ appExists = false, config = null } = {}) {
+    const { client, calls } = scriptedClient([
+      [/pg_advisory_xact_lock/, { rows: [] }],
+      [/^\s*SELECT 1 FROM google_oauth_apps/, { rows: appExists ? [{ '?column?': 1 }] : [] }],
+      [/^\s*SELECT config FROM integration_config/, { rows: config ? [{ config }] : [] }],
+      [/^\s*INSERT INTO google_oauth_apps/, { rows: [{ id: 'app-new' }] }],
+      [/^\s*UPDATE email_accounts SET oauth_app_id/, { rows: [], rowCount: 2 }],
+      [/^\s*INSERT INTO google_oauth_grants/, { rows: [] }],
+      [/^\s*UPDATE integration_config/, { rows: [] }],
+    ]);
+    withTransaction.mockImplementation(async (fn) => fn(client));
+    return calls;
+  }
+  const findCall = (calls, re) => calls.find(([sql]) => re.test(sql));
+
+  it('does nothing once an app exists', async () => {
+    const calls = importDb({ appExists: true, config: { clientId: CLIENT_ID, clientSecret: 'enc(s)' } });
+    expect(await importLegacyGoogleConfig()).toBeNull();
+    expect(findCall(calls, /INSERT INTO google_oauth_apps/)).toBeUndefined();
+  });
+
+  it('imports the stored client, binds Gmail accounts, fills the journal and keeps only the callback URL', async () => {
+    const calls = importDb({ config: { clientId: CLIENT_ID, clientSecret: 'enc(stored-secret)', redirectUri: REDIRECT_URI } });
+
+    expect(await importLegacyGoogleConfig()).toBe('app-new');
+
+    expect(findCall(calls, /pg_advisory_xact_lock/)[0]).toMatch(/hashtext\('google-oauth-app-import'\)/);
+    const [insertSql, insertParams] = findCall(calls, /INSERT INTO google_oauth_apps/);
+    expect(insertSql).toMatch(/'Google 1'/);
+    expect(insertParams).toEqual([CLIENT_ID, 'enc(stored-secret)', '123456789012']);
+    const [bindSql, bindParams] = findCall(calls, /UPDATE email_accounts SET oauth_app_id/);
+    expect(bindSql).toMatch(/oauth_provider = 'google' AND oauth_app_id IS NULL/);
+    expect(bindParams).toEqual(['app-new']);
+    const [grantSql, grantParams] = findCall(calls, /INSERT INTO google_oauth_grants/);
+    expect(grantSql).toMatch(/SELECT DISTINCT \$1::uuid, lower\(email_address\)/);
+    expect(grantSql).toMatch(/ON CONFLICT \(app_id, email\) DO NOTHING/);
+    expect(grantParams).toEqual(['app-new']);
+    expect(findCall(calls, /UPDATE integration_config/)[0]).toMatch(/jsonb_build_object\('redirectUri', config->'redirectUri'\)/);
+  });
+
+  it('encrypts a legacy plaintext secret', async () => {
+    const calls = importDb({ config: { clientId: CLIENT_ID, clientSecret: 'plain-secret' } });
+    await importLegacyGoogleConfig();
+    expect(findCall(calls, /INSERT INTO google_oauth_apps/)[1][1]).toBe('enc(plain-secret)');
+  });
+
+  it('falls back to the environment when nothing is stored', async () => {
+    process.env.GOOGLE_CLIENT_ID = CLIENT_ID;
+    process.env.GOOGLE_CLIENT_SECRET = 'env-secret';
+    const calls = importDb();
+    expect(await importLegacyGoogleConfig()).toBe('app-new');
+    expect(findCall(calls, /INSERT INTO google_oauth_apps/)[1]).toEqual([CLIENT_ID, 'enc(env-secret)', '123456789012']);
+    expect(findCall(calls, /UPDATE integration_config/)).toBeUndefined();
+  });
+
+  it('does nothing without any stored or environment client', async () => {
+    const calls = importDb();
+    expect(await importLegacyGoogleConfig()).toBeNull();
+    expect(findCall(calls, /INSERT INTO google_oauth_apps/)).toBeUndefined();
+    expect(errorSpy).not.toHaveBeenCalled();
+  });
+
+  it('reports a client ID that is not a Google OAuth client ID instead of importing it', async () => {
+    const calls = importDb({ config: { clientId: 'gid', clientSecret: 'enc(top-secret)' } });
+    expect(await importLegacyGoogleConfig()).toBeNull();
+    expect(findCall(calls, /INSERT INTO google_oauth_apps/)).toBeUndefined();
+    const logged = JSON.stringify(errorSpy.mock.calls);
+    expect(logged).toMatch(/not a Google OAuth client ID/);
+    expect(logged).not.toMatch(/top-secret|gid/);
+  });
+
+  it('reports a stored secret that cannot be decrypted', async () => {
+    const calls = importDb({ config: { clientId: CLIENT_ID, clientSecret: 'broken' } });
+    expect(await importLegacyGoogleConfig()).toBeNull();
+    expect(findCall(calls, /INSERT INTO google_oauth_apps/)).toBeUndefined();
+    expect(JSON.stringify(errorSpy.mock.calls)).toMatch(/cannot be decrypted/);
   });
 });

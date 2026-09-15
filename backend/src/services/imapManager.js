@@ -404,6 +404,14 @@ export function folderSyncDue(intervalMs, lastAt, now = Date.now()) {
   return intervalMs > 0 && now - (lastAt || 0) >= intervalMs;
 }
 
+// A manual "sync now" within this long of the mailbox's last sync starts nothing: the mail is
+// already that fresh, and several people pressing the button must not stack syncs.
+export const MANUAL_SYNC_MIN_GAP_MS = 15 * 1000;
+
+export function manualSyncDue(lastAt, now = Date.now()) {
+  return !Number.isFinite(lastAt) || now - lastAt >= MANUAL_SYNC_MIN_GAP_MS;
+}
+
 // Circuit-breaker backoff for the snippet indexer. When a run indexes nothing because
 // the provider keeps refusing the extra connection (e.g. iCloud's cap on simultaneous
 // IMAP connections per account), skip that account for an exponentially growing window
@@ -1739,6 +1747,8 @@ export class ImapManager {
     this._syncErrorState = new Map();
     this._accountErrorStreak = new Map(); // accountId -> consecutive recoverable failures not yet surfaced
     this.onDemandSyncing = new Set(); // `${accountId}:${folder}` — prevent duplicate on-demand syncs
+    this._manualSyncs = new Set();       // accountId — manual INBOX sync requested and still running
+    this._manualFolderSyncs = new Set(); // accountId — manual folder-structure sync requested and still running
     // Bounded engine facade handed to plugin hooks instead of `this` — plugins get only the reviewed
     // sync/label primitives (see mailEngineFacade), never the raw engine, its connections, or locks.
     this.pluginFacade = createPluginMailFacade(this);
@@ -5856,17 +5866,49 @@ export class ImapManager {
     }
   }
 
-  async syncNow(userId, accountId = null) {
-    const result = await query(
-      'SELECT * FROM email_accounts WHERE user_id = $1 AND enabled = true AND protocol = $2',
-      [userId, 'imap']
-    );
-    const accounts = accountId
-      ? result.rows.filter(a => a.id === accountId)
-      : result.rows;
+  isConnecting(accountId) {
+    return this.connectingAccounts.has(accountId);
+  }
 
-    await Promise.all(accounts.map(async (account) => {
-      // Guard against overlapping syncs — interval sync may already be running
+  // Manual "sync now" of one mailbox. Decides synchronously, so the route can report a repeat:
+  // nothing starts while a sync or connect of the mailbox runs, or within MANUAL_SYNC_MIN_GAP_MS
+  // of its last successful INBOX sync. The sync itself runs in the background.
+  requestSync(accountId, now = Date.now()) {
+    if (this._manualSyncs.has(accountId) || this.syncingAccounts.has(accountId)
+      || this.connectingAccounts.has(accountId) || !manualSyncDue(this.lastSyncOkAt.get(accountId), now)) {
+      return { started: false };
+    }
+    this._manualSyncs.add(accountId);
+    this.syncNow(accountId)
+      .catch(err => console.error(`syncNow error for account ${accountId}:`, err.message))
+      .finally(() => this._manualSyncs.delete(accountId));
+    return { started: true };
+  }
+
+  // Manual folder-structure resync of one mailbox, gated like requestSync against the last
+  // folder-structure sync.
+  requestFolderSync(accountId, now = Date.now()) {
+    if (this._manualFolderSyncs.has(accountId) || this.connectingAccounts.has(accountId)
+      || !manualSyncDue(this.lastFolderSyncAt.get(accountId), now)) {
+      return { started: false };
+    }
+    this._manualFolderSyncs.add(accountId);
+    this.syncFoldersNow(accountId)
+      .catch(err => console.error(`syncFoldersNow error for account ${accountId}:`, err.message))
+      .finally(() => this._manualFolderSyncs.delete(accountId));
+    return { started: true };
+  }
+
+  // INBOX sync of one mailbox for requestSync. The syncingAccounts check still covers an interval
+  // tick that started after the request was accepted. Ends with sync_complete so the client stops
+  // its spinner.
+  async syncNow(accountId) {
+    const { rows: [account] } = await query(
+      "SELECT * FROM email_accounts WHERE id = $1 AND enabled = true AND protocol = 'imap'",
+      [accountId]
+    );
+    if (!account) return;
+    try {
       if (this.syncingAccounts.has(account.id)) {
         console.log(`syncNow: ${logAccount(account)} already syncing, skipping`);
         return;
@@ -5892,6 +5934,7 @@ export class ImapManager {
         } else {
           await this.syncMessages(account, client, 'INBOX', 20, false, true);
         }
+        this.lastSyncOkAt.set(account.id, Date.now());
         console.log(`syncNow complete: ${logAccount(account)}`);
       } catch (err) {
         console.error(`syncNow error for ${logAccount(account)}:`, err.message);
@@ -5910,41 +5953,36 @@ export class ImapManager {
         this.syncingAccounts.delete(account.id);
         this.syncStartedAt.delete(account.id);
       }
-    }));
-
-    this.broadcast({ type: 'sync_complete', accountId: accountId || null }, userId);
+    } finally {
+      this.broadcast({ type: 'sync_complete', accountId: account.id }, account.user_id);
+    }
   }
 
-  // Manual folder-structure resync (sidebar "Sync folders now" / accounts page).
-  // Metadata-only LIST + upsert, so it skips the syncingAccounts lock — safe to
-  // run alongside a message sync. Disconnected accounts reconnect instead, which
-  // runs syncFolders as part of connectAccount's startup sequence.
-  async syncFoldersNow(userId, accountId = null) {
-    const result = await query(
-      'SELECT * FROM email_accounts WHERE user_id = $1 AND enabled = true AND protocol = $2',
-      [userId, 'imap']
+  // Folder-structure resync of one mailbox for requestFolderSync (sidebar "Sync folders now" /
+  // accounts page). Metadata-only LIST + upsert, so it skips the syncingAccounts lock — safe to run
+  // alongside a message sync. A disconnected mailbox reconnects instead, which runs syncFolders as
+  // part of connectAccount's startup sequence.
+  async syncFoldersNow(accountId) {
+    const { rows: [account] } = await query(
+      "SELECT * FROM email_accounts WHERE id = $1 AND enabled = true AND protocol = 'imap'",
+      [accountId]
     );
-    const accounts = accountId
-      ? result.rows.filter(a => a.id === accountId)
-      : result.rows;
-
-    await Promise.all(accounts.map(async (account) => {
-      try {
-        const client = this.connections.get(account.id);
-        if (!client) {
-          console.log(`syncFoldersNow: ${logAccount(account)} not connected, reconnecting`);
-          await this.connectAccount(account);
-        } else {
-          // Timeboxed like the initial connect sync (see connectAccount) so a
-          // hung LIST can't wedge the manual-resync request.
-          await raceTimeout(this.syncFolders(account, client), 20000, 'Manual folder sync');
-        }
-        this.lastFolderSyncAt.set(account.id, Date.now());
-        this.broadcast({ type: 'folders_synced', accountId: account.id }, account.user_id);
-      } catch (err) {
-        console.error(`syncFoldersNow error for ${logAccount(account)}:`, err.message);
+    if (!account) return;
+    try {
+      const client = this.connections.get(account.id);
+      if (!client) {
+        console.log(`syncFoldersNow: ${logAccount(account)} not connected, reconnecting`);
+        await this.connectAccount(account);
+      } else {
+        // Timeboxed like the initial connect sync (see connectAccount) so a
+        // hung LIST can't wedge the manual resync.
+        await raceTimeout(this.syncFolders(account, client), 20000, 'Manual folder sync');
       }
-    }));
+      this.lastFolderSyncAt.set(account.id, Date.now());
+      this.broadcast({ type: 'folders_synced', accountId: account.id }, account.user_id);
+    } catch (err) {
+      console.error(`syncFoldersNow error for ${logAccount(account)}:`, err.message);
+    }
   }
 
   startSnoozeWatcher() {

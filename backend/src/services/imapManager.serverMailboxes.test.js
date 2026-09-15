@@ -17,7 +17,9 @@ vi.mock('./hostValidation.js', () => ({ resolveForConnection: vi.fn(), createPin
 vi.mock('./connectionPolicy.js', () => ({ getConnectionPolicy: vi.fn() }));
 
 import { query } from './db.js';
-import { ImapManager, MIN_SYNC_INTERVAL_MS, parseConnectConcurrency } from './imapManager.js';
+import {
+  ImapManager, MANUAL_SYNC_MIN_GAP_MS, MIN_SYNC_INTERVAL_MS, manualSyncDue, parseConnectConcurrency,
+} from './imapManager.js';
 import { SYNC_INTERVAL_CHOICES_SEC } from './syncSettings.js';
 
 // Mailboxes are serviced by the server: they connect at startup and stay connected no matter
@@ -239,5 +241,113 @@ describe('install-wide sync intervals', () => {
     expect(startSync).not.toHaveBeenCalled();
     expect(query).not.toHaveBeenCalled();
     clearTimeout(mgr.syncIntervals.get('mailbox-1'));
+  });
+});
+
+describe('manual sync of one mailbox', () => {
+  const flushPromises = () => new Promise((resolve) => setImmediate(resolve));
+
+  it('waits MANUAL_SYNC_MIN_GAP_MS after the last sync', () => {
+    expect(MANUAL_SYNC_MIN_GAP_MS).toBe(15_000);
+    expect(manualSyncDue(undefined, 1_000_000)).toBe(true);
+    expect(manualSyncDue(1_000_000 - 14_999, 1_000_000)).toBe(false);
+    expect(manualSyncDue(1_000_000 - 15_000, 1_000_000)).toBe(true);
+  });
+
+  it('starts one sync and turns away a repeat while it runs', async () => {
+    const mgr = newManager();
+    let finish;
+    const syncNow = vi.spyOn(mgr, 'syncNow').mockImplementation(() => new Promise((resolve) => { finish = resolve; }));
+
+    expect(mgr.requestSync('mailbox-1')).toEqual({ started: true });
+    expect(mgr.requestSync('mailbox-1')).toEqual({ started: false });
+    expect(syncNow).toHaveBeenCalledTimes(1);
+    expect(syncNow).toHaveBeenCalledWith('mailbox-1');
+
+    finish();
+    await flushPromises();
+    expect(mgr.requestSync('mailbox-1')).toEqual({ started: true });
+  });
+
+  it('turns away a mailbox that is syncing, connecting or synced less than 15 seconds ago', () => {
+    const mgr = newManager();
+    const syncNow = vi.spyOn(mgr, 'syncNow').mockResolvedValue();
+    const now = 5_000_000;
+    mgr.syncingAccounts.add('a');
+    mgr.connectingAccounts.add('b');
+    mgr.lastSyncOkAt.set('c', now - 10_000);
+    mgr.lastSyncOkAt.set('d', now - 20_000);
+
+    expect(mgr.requestSync('a', now)).toEqual({ started: false });
+    expect(mgr.requestSync('b', now)).toEqual({ started: false });
+    expect(mgr.requestSync('c', now)).toEqual({ started: false });
+    expect(mgr.requestSync('d', now)).toEqual({ started: true });
+    expect(syncNow.mock.calls.map(([id]) => id)).toEqual(['d']);
+  });
+
+  it('syncs the INBOX, records the success and tells clients', async () => {
+    const mgr = newManager();
+    rows.set('mailbox-1', mailbox(1));
+    const client = {};
+    mgr.connections.set('mailbox-1', client);
+    const syncMessages = vi.spyOn(mgr, 'syncMessages').mockResolvedValue({ insertedCount: 0 });
+
+    await mgr.syncNow('mailbox-1');
+
+    expect(syncMessages).toHaveBeenCalledWith(expect.objectContaining({ id: 'mailbox-1' }), client, 'INBOX', 20, false, true);
+    expect(mgr.lastSyncOkAt.has('mailbox-1')).toBe(true);
+    expect(mgr.syncingAccounts.has('mailbox-1')).toBe(false);
+    expect(mgr.broadcast).toHaveBeenCalledWith({ type: 'sync_complete', accountId: 'mailbox-1' }, 'u1');
+  });
+
+  it('does nothing for a mailbox disabled after the request', async () => {
+    const mgr = newManager();
+    rows.set('mailbox-1', mailbox(1, { enabled: false }));
+    const connect = vi.spyOn(mgr, 'connectAccount').mockResolvedValue(true);
+
+    await mgr.syncNow('mailbox-1');
+
+    expect(connect).not.toHaveBeenCalled();
+    expect(mgr.broadcast).not.toHaveBeenCalled();
+  });
+
+  it('folder sync: one at a time, not while connecting and not within 15 seconds of the last one', async () => {
+    const mgr = newManager();
+    let finish;
+    const syncFoldersNow = vi.spyOn(mgr, 'syncFoldersNow').mockImplementation(() => new Promise((resolve) => { finish = resolve; }));
+    const now = 5_000_000;
+
+    expect(mgr.requestFolderSync('a', now)).toEqual({ started: true });
+    expect(mgr.requestFolderSync('a', now)).toEqual({ started: false });
+    mgr.lastFolderSyncAt.set('b', now - 5_000);
+    expect(mgr.requestFolderSync('b', now)).toEqual({ started: false });
+    mgr.connectingAccounts.add('c');
+    expect(mgr.requestFolderSync('c', now)).toEqual({ started: false });
+    expect(syncFoldersNow).toHaveBeenCalledTimes(1);
+
+    finish();
+    await flushPromises();
+    expect(mgr.requestFolderSync('a', now)).toEqual({ started: true });
+  });
+
+  it('refreshes the folder list of a connected mailbox', async () => {
+    const mgr = newManager();
+    rows.set('mailbox-1', mailbox(1));
+    const client = {};
+    mgr.connections.set('mailbox-1', client);
+    const syncFolders = vi.spyOn(mgr, 'syncFolders').mockResolvedValue();
+
+    await mgr.syncFoldersNow('mailbox-1');
+
+    expect(syncFolders).toHaveBeenCalledWith(expect.objectContaining({ id: 'mailbox-1' }), client);
+    expect(mgr.lastFolderSyncAt.has('mailbox-1')).toBe(true);
+    expect(mgr.broadcast).toHaveBeenCalledWith({ type: 'folders_synced', accountId: 'mailbox-1' }, 'u1');
+  });
+
+  it('reports a connect in progress', () => {
+    const mgr = newManager();
+    expect(mgr.isConnecting('a')).toBe(false);
+    mgr.connectingAccounts.add('a');
+    expect(mgr.isConnecting('a')).toBe(true);
   });
 });

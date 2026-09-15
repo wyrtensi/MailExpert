@@ -805,41 +805,49 @@ router.patch('/messages/:id/star', async (req, res) => {
   res.json({ ok: true, is_starred: starred });
 });
 
-// Manual sync (INBOX)
-router.post('/sync', async (req, res) => {
-  const { accountId } = req.body; // optional — omit for all accounts
-  if (accountId) {
-    if (!UUID_RE.test(accountId)) return res.status(400).json({ error: 'Invalid account id' });
-    const check = await query(
-      'SELECT id FROM email_accounts WHERE id = $1 AND user_id = $2',
-      [accountId, req.session.userId]
-    );
-    if (!check.rows.length) return res.status(404).json({ error: 'Account not found' });
+// The mailbox a manual sync targets: one the user can reach. Answers 400/404 itself and returns
+// null then.
+async function findManualSyncTarget(req, res) {
+  const accountId = req.body?.accountId;
+  if (!accountId) {
+    res.status(400).json({ error: 'accountId is required', code: 'account_required' });
+    return null;
   }
-  // Run sync in background so response returns immediately
-  imapManager.syncNow(req.session.userId, accountId || null)
-    .catch(err => console.error('syncNow error:', err.message));
-  res.json({ ok: true });
+  if (!UUID_RE.test(accountId)) {
+    res.status(400).json({ error: 'Invalid account id' });
+    return null;
+  }
+  const { rows } = await query(
+    'SELECT id, enabled, protocol FROM email_accounts WHERE id = $1 AND user_id = $2',
+    [accountId, req.session.userId]
+  );
+  if (!rows.length) {
+    res.status(404).json({ error: 'Account not found' });
+    return null;
+  }
+  return rows[0];
+}
+
+const manualSyncable = (account) => account.enabled && account.protocol === 'imap';
+
+// Manual sync (INBOX) of one mailbox. The server services every mailbox, so a request while its
+// sync runs or right after one finished starts nothing and says so.
+router.post('/sync', async (req, res) => {
+  const account = await findManualSyncTarget(req, res);
+  if (!account) return;
+  const { started } = manualSyncable(account) ? imapManager.requestSync(account.id) : { started: false };
+  res.json(started ? { ok: true } : { ok: true, skipped: true });
 });
 
-// Manual folder-structure resync ("Sync folders now" in the sidebar account menu
-// and on the accounts settings page). Refreshes the folder LIST so folders
-// created or renamed in other clients appear without waiting for a reconnect.
+// Manual folder-structure resync of one mailbox ("Sync folders now" in the sidebar account menu
+// and on the accounts settings page). Refreshes the folder LIST so folders created or renamed in
+// other clients appear without waiting for a reconnect; the folders_synced broadcast tells clients
+// when to refetch the folder list.
 router.post('/sync-folders', async (req, res) => {
-  const { accountId } = req.body; // optional — omit for all accounts
-  if (accountId) {
-    if (!UUID_RE.test(accountId)) return res.status(400).json({ error: 'Invalid account id' });
-    const check = await query(
-      'SELECT id FROM email_accounts WHERE id = $1 AND user_id = $2',
-      [accountId, req.session.userId]
-    );
-    if (!check.rows.length) return res.status(404).json({ error: 'Account not found' });
-  }
-  // Run in background so the response returns immediately; the folders_synced
-  // broadcast tells clients when to refetch the folder list.
-  imapManager.syncFoldersNow(req.session.userId, accountId || null)
-    .catch(err => console.error('syncFoldersNow error:', err.message));
-  res.json({ ok: true });
+  const account = await findManualSyncTarget(req, res);
+  if (!account) return;
+  const { started } = manualSyncable(account) ? imapManager.requestFolderSync(account.id) : { started: false };
+  res.json(started ? { ok: true } : { ok: true, skipped: true });
 });
 
 // On-demand folder sync — called when the user navigates to a folder with no local messages

@@ -23,6 +23,15 @@
     "loadMore": "Загрузить ещё"
   },
   "login": {
+    "google": {
+      "title": "Вход в MailExpert",
+      "desc": "Войдите Google-аккаунтом, который одобрил администратор.",
+      "button": "Войти через Google",
+      "cloudflareOnly": "Откройте MailExpert по ссылке Cloudflare Access вашей организации.",
+      "errorNotAllowed": "Этот Google-аккаунт не одобрен для MailExpert. Попросите администратора добавить его.",
+      "errorDisabled": "Ваш доступ к MailExpert отключён.",
+      "errorGeneric": "Не удалось войти через Google. Попробуйте ещё раз."
+    },
     "tagline": "Ваш единый почтовый ящик",
     "signIn": "Войти",
     "createAccount": "Создать аккаунт",

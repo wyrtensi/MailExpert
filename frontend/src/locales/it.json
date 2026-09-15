@@ -23,6 +23,15 @@
     "loadMore": "Carica altro"
   },
   "login": {
+    "google": {
+      "title": "Accedi a MailExpert",
+      "desc": "Usa l'account Google approvato dal tuo amministratore.",
+      "button": "Accedi con Google",
+      "cloudflareOnly": "Apri MailExpert tramite il link Cloudflare Access della tua organizzazione.",
+      "errorNotAllowed": "Questo account Google non è approvato per MailExpert. Chiedi a un amministratore di aggiungerlo.",
+      "errorDisabled": "Il tuo accesso a MailExpert è stato disattivato.",
+      "errorGeneric": "Accesso con Google non riuscito. Riprova."
+    },
     "tagline": "La tua casella di posta unificata",
     "signIn": "Accedi",
     "createAccount": "Crea account",

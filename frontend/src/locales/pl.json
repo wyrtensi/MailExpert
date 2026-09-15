@@ -23,6 +23,15 @@
     "loadMore": "Wczytaj więcej"
   },
   "login": {
+    "google": {
+      "title": "Logowanie do MailExpert",
+      "desc": "Użyj konta Google zatwierdzonego przez administratora.",
+      "button": "Zaloguj się przez Google",
+      "cloudflareOnly": "Otwórz MailExpert przez link Cloudflare Access swojej organizacji.",
+      "errorNotAllowed": "To konto Google nie jest zatwierdzone w MailExpert. Poproś administratora o dodanie go.",
+      "errorDisabled": "Twój dostęp do MailExpert został wyłączony.",
+      "errorGeneric": "Logowanie przez Google nie powiodło się. Spróbuj ponownie."
+    },
     "tagline": "Twoja ujednolicona skrzynka odbiorcza",
     "signIn": "Zaloguj się",
     "createAccount": "Utwórz konto",

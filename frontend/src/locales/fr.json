@@ -23,6 +23,15 @@
     "loadMore": "Charger plus"
   },
   "login": {
+    "google": {
+      "title": "Connexion à MailExpert",
+      "desc": "Utilisez le compte Google approuvé par votre administrateur.",
+      "button": "Se connecter avec Google",
+      "cloudflareOnly": "Ouvrez MailExpert via le lien Cloudflare Access de votre organisation.",
+      "errorNotAllowed": "Ce compte Google n'est pas approuvé pour MailExpert. Demandez à un administrateur de l'ajouter.",
+      "errorDisabled": "Votre accès à MailExpert a été désactivé.",
+      "errorGeneric": "La connexion avec Google a échoué. Réessayez."
+    },
     "tagline": "Votre boîte de réception unifiée",
     "signIn": "Se connecter",
     "createAccount": "Créer un compte",

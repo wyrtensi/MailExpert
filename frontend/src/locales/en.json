@@ -23,6 +23,15 @@
     "loadMore": "Load more"
   },
   "login": {
+    "google": {
+      "title": "Sign in to MailExpert",
+      "desc": "Use the Google account your administrator approved.",
+      "button": "Sign in with Google",
+      "cloudflareOnly": "Open MailExpert through your organization's Cloudflare Access link.",
+      "errorNotAllowed": "This Google account is not approved for MailExpert. Ask an administrator to add it.",
+      "errorDisabled": "Your access to MailExpert has been turned off.",
+      "errorGeneric": "Google sign-in failed. Try again."
+    },
     "tagline": "Your unified inbox",
     "signIn": "Sign in",
     "createAccount": "Create account",

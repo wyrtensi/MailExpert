@@ -23,6 +23,15 @@
     "loadMore": "Cargar más"
   },
   "login": {
+    "google": {
+      "title": "Iniciar sesión en MailExpert",
+      "desc": "Usa la cuenta de Google que aprobó tu administrador.",
+      "button": "Iniciar sesión con Google",
+      "cloudflareOnly": "Abre MailExpert mediante el enlace de Cloudflare Access de tu organización.",
+      "errorNotAllowed": "Esta cuenta de Google no está aprobada para MailExpert. Pide a un administrador que la añada.",
+      "errorDisabled": "Tu acceso a MailExpert se ha desactivado.",
+      "errorGeneric": "No se pudo iniciar sesión con Google. Inténtalo de nuevo."
+    },
     "tagline": "Tu bandeja de entrada unificada",
     "signIn": "Iniciar sesión",
     "createAccount": "Crear cuenta",

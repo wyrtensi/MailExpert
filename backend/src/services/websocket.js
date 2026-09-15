@@ -1,11 +1,10 @@
 import { recordWsConnect, recordWsDisconnect } from './diagnosticsRing.js';
+import { getPublicOrigins } from '../utils/publicOrigins.js';
 
-// Derive the expected origin from APP_URL once at startup.
-// If APP_URL is not set, origin validation is skipped — log a warning so operators know.
-const ALLOWED_ORIGIN = (() => {
-  try { return process.env.APP_URL ? new URL(process.env.APP_URL).origin : null; } catch { return null; }
-})();
-if (!ALLOWED_ORIGIN) {
+// Accepted browser origins (APP_URL plus APP_ALT_URLS), read once at startup.
+// Without any, origin validation is skipped — log a warning so operators know.
+const ALLOWED_ORIGINS = getPublicOrigins();
+if (!ALLOWED_ORIGINS.length) {
   if (process.env.NODE_ENV === 'production') {
     console.error('FATAL: APP_URL is not set in production — WebSocket connections with an Origin header will be rejected.');
   } else {
@@ -20,15 +19,15 @@ export function setupWebSocket(wss, sessionMiddleware, imapManager) {
       console.warn('WebSocket transport error:', err.message);
       ws.terminate();
     });
-    // Reject cross-origin WebSocket connections when APP_URL is configured.
+    // Reject cross-origin WebSocket connections when public origins are configured.
     // Browsers always send Origin on WS upgrades; absence means a non-browser client.
     const origin = req.headers.origin;
-    if (ALLOWED_ORIGIN && origin && origin !== ALLOWED_ORIGIN) {
+    if (ALLOWED_ORIGINS.length && origin && !ALLOWED_ORIGINS.includes(origin)) {
       ws.close(1008, 'Forbidden');
       return;
     }
     // In production without APP_URL, reject browser connections (non-browser clients omit Origin)
-    if (!ALLOWED_ORIGIN && process.env.NODE_ENV === 'production' && origin) {
+    if (!ALLOWED_ORIGINS.length && process.env.NODE_ENV === 'production' && origin) {
       ws.close(1008, 'Forbidden');
       return;
     }

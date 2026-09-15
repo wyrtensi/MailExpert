@@ -43,3 +43,30 @@ describe('WebSocket failure recovery', () => {
     expect(ws.send).toHaveBeenCalledWith(JSON.stringify({ type: 'connected' }));
   });
 });
+
+describe('WebSocket origins', () => {
+  afterEach(() => {
+    vi.unstubAllEnvs();
+    vi.resetModules();
+  });
+
+  it('accepts APP_URL and APP_ALT_URLS origins and closes others', async () => {
+    vi.resetModules();
+    vi.stubEnv('APP_URL', 'https://mail.example.com');
+    vi.stubEnv('APP_ALT_URLS', 'https://direct.example.com');
+    const { setupWebSocket: setupWithOrigins } = await import('./websocket.js');
+    const connect = (origin) => {
+      const wss = new EventEmitter();
+      const ws = Object.assign(new EventEmitter(), {
+        readyState: 1, close: vi.fn(), terminate: vi.fn(), send: vi.fn(),
+      });
+      // Session lookup never finishes: only the origin check runs.
+      setupWithOrigins(wss, () => {}, { connectAllForUser: vi.fn() });
+      wss.emit('connection', ws, { headers: { origin } });
+      return ws;
+    };
+    expect(connect('https://mail.example.com').close).not.toHaveBeenCalled();
+    expect(connect('https://direct.example.com').close).not.toHaveBeenCalled();
+    expect(connect('https://evil.example.com').close).toHaveBeenCalledWith(1008, 'Forbidden');
+  });
+});

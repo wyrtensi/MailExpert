@@ -11,6 +11,7 @@ import {
 } from '../services/oauth/googleOAuth.js';
 import { recordGoogleGrant, resolveGoogleConfig } from '../services/oauth/googleApps.js';
 import { createOAuthState, consumeOAuthState } from '../services/oauth/oauthState.js';
+import { allowedRequestOrigin } from '../utils/publicOrigins.js';
 
 // Mounted at /oauth/google. Redirect targets carry only stable codes — never provider
 // error text, authorization codes or tokens.
@@ -42,7 +43,7 @@ router.get('/', async (req, res) => {
   const loginHint = LOGIN_HINT_PATTERN.test(rawHint) ? rawHint : null;
 
   try {
-    const config = await resolveGoogleConfig();
+    const config = await resolveGoogleConfig({ origin: allowedRequestOrigin(req) });
     if (!config) return res.redirect(errorRedirect('not_configured'));
     const { state, codeChallenge } = await createOAuthState({
       provider: PROVIDER,
@@ -79,7 +80,7 @@ router.get('/callback', async (req, res) => {
       throw new CallbackError('invalid_state');
     }
     // Finish with the app chosen at start: its client is the one Google issued the code to.
-    const config = await resolveGoogleConfig({ appId: pending.appId });
+    const config = await resolveGoogleConfig({ appId: pending.appId, origin: allowedRequestOrigin(req) });
     if (!config) throw new CallbackError('not_configured');
     if (typeof code !== 'string' || !code) throw new CallbackError('authentication_failed');
 

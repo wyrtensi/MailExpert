@@ -39,14 +39,22 @@ export async function getDefaultGoogleApp() {
   return rows[0] || null;
 }
 
-export function getGoogleRedirectUri() {
-  return process.env.GOOGLE_REDIRECT_URI || null;
+// The callback URL registered for every app. A browser that came through another public
+// origin (APP_ALT_URLS) is sent back to that origin, on the same path.
+export function getGoogleRedirectUri(origin = null) {
+  const configured = process.env.GOOGLE_REDIRECT_URI || null;
+  if (!configured || !origin) return configured;
+  try {
+    return `${origin}${new URL(configured).pathname}`;
+  } catch {
+    return configured;
+  }
 }
 
 // Credentials for one consent flow: the given app, or the default app. Null when the
 // callback URL is missing, the app is missing or disabled, or its secret cannot be decrypted.
-export async function resolveGoogleConfig({ appId = null } = {}) {
-  const redirectUri = getGoogleRedirectUri();
+export async function resolveGoogleConfig({ appId = null, origin = null } = {}) {
+  const redirectUri = getGoogleRedirectUri(origin);
   if (!redirectUri) return null;
   const app = appId ? await getGoogleAppById(appId) : await getDefaultGoogleApp();
   if (!app || app.status === 'disabled') return null;

@@ -52,7 +52,7 @@ const activatedByAnyoneCache = new Map(); // pluginId -> { value: boolean, expir
 export async function isPluginActivatedForAccount(pluginId) {
   const cached = activatedByAnyoneCache.get(pluginId);
   if (cached && cached.expiry > Date.now()) return cached.value;
-  let value = false;
+  let value;
   try {
     const { rows } = await query(
       `SELECT EXISTS (

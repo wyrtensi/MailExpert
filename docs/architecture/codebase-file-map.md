@@ -77,8 +77,6 @@ Frontend не ходит к Gmail напрямую. Он обращается к
 | `routes/blockList.js` | Пользовательский blacklist |
 | `routes/categories.js` | Категории сообщений |
 | `routes/contacts.js` | Внутренние контакты |
-| `routes/carddav.js` | CardDAV server, который MailExpert предоставляет клиентам |
-| `routes/carddavAccount.js` | Подключение внешнего CardDAV source |
 | `routes/diagnostics.js` | Безопасный диагностический отчёт |
 | `routes/ai.js` | AI provider/actions |
 | `routes/plugins.js` | Управление plugin runtime/config |
@@ -158,7 +156,7 @@ Google OAuth — не plugin уровня UI: он является credential p
 | `Sidebar.jsx` | 2055 | Аккаунты и папки; сюда добавляется фильтр 100 ящиков |
 | `MailApp.jsx` | 1019 | Application shell и callback integration |
 | `LoginPage.jsx` | 1000 | Password/OIDC/MFA flows |
-| `ContactsPage.jsx` | 861 | Контакты и CardDAV-derived data |
+| `ContactsPage.jsx` | 861 | Контакты |
 | `ContextMenu.jsx` | 809 | Message/folder actions |
 
 Остальные компоненты отвечают за command palette, diagnostics, window layers, notifications, profile, signature editor, GTD views и native notification bridge.

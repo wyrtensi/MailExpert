@@ -15,6 +15,7 @@ import { recordBroadcast, recordWarning, recordSyncSignal } from './diagnosticsR
 import { recordImapLogin, recordImapEvent } from './imapMetrics.js';
 import { decrypt } from './encryption.js';
 import { sendPushToActiveUsers } from './pushNotifications.js';
+import { defaultAddressBookId } from './addressBooks.js';
 import { redactEmail } from '../utils/redact.js';
 import { adjustFolderCounts, resolveSpamFolder } from '../utils/mailUtils.js';
 import { resolveForConnection, createPinnedLookup } from './hostValidation.js';
@@ -3862,7 +3863,7 @@ export class ImapManager {
             );
             if (inboundSenders.length) {
               setImmediate(() => {
-                this.upsertAutoContacts(account.user_id, inboundSenders)
+                this.upsertAutoContacts(inboundSenders)
                   .catch(err => console.warn(`Auto-contact error for ${logAccount(account)}:`, err.message));
               });
             }
@@ -4356,20 +4357,14 @@ export class ImapManager {
     }
   }
 
-  // Insert auto-discovered contacts for inbound senders that don't already have a contact record.
-  // Existing contacts (manual or sent-to) are never modified; is_auto=true entries are never
-  // downgraded by this path.
-  async upsertAutoContacts(userId, messages) {
+  // Insert auto-discovered contacts for inbound senders that don't already have a contact record
+  // in the shared address book. Existing contacts (manual or sent-to) are never modified;
+  // is_auto=true entries are never downgraded by this path.
+  async upsertAutoContacts(messages) {
     try {
-      const abResult = await query(
-        `INSERT INTO address_books (user_id, name) VALUES ($1, 'Personal')
-         ON CONFLICT (user_id, name) DO UPDATE SET updated_at = NOW()
-         RETURNING id`,
-        [userId]
-      );
-      const addressBookId = abResult.rows[0].id;
+      const addressBookId = await defaultAddressBookId();
 
-      const upsertResults = await Promise.allSettled(
+      await Promise.allSettled(
         messages
           .filter(msg => msg.fromEmail)
           .map(msg => {
@@ -4380,26 +4375,16 @@ export class ImapManager {
             const vcard        = generateVCard({ uid, displayName, emails: [{ value: primaryEmail, type: 'other', primary: true }] });
             return query(`
               INSERT INTO contacts (
-                address_book_id, user_id, uid, vcard, etag,
+                address_book_id, uid, vcard, etag,
                 display_name, primary_email, emails, is_auto
               )
-              VALUES ($1, $2, $3, $4, md5($4), $5, $6, $7::jsonb, true)
+              VALUES ($1, $2, $3, md5($3), $4, $5, $6::jsonb, true)
               ON CONFLICT (address_book_id, primary_email) WHERE primary_email IS NOT NULL DO NOTHING
-            `, [addressBookId, userId, uid, vcard, displayName, primaryEmail, emails]);
+            `, [addressBookId, uid, vcard, displayName, primaryEmail, emails]);
           })
       );
-      const inserted = upsertResults.filter(r => r.status === 'fulfilled' && r.value?.rowCount > 0).length;
-
-      // Bump sync_token only when new contacts were actually added so CardDAV
-      // clients that use getctag/sync-token pick up newly discovered senders.
-      if (inserted > 0) {
-        await query(
-          'UPDATE address_books SET sync_token = gen_random_uuid()::text, updated_at = NOW() WHERE id = $1',
-          [addressBookId]
-        );
-      }
     } catch (err) {
-      console.warn(`upsertAutoContacts error for user ${userId}:`, err.message);
+      console.warn('upsertAutoContacts error:', err.message);
     }
   }
 

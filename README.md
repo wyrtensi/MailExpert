@@ -37,7 +37,7 @@ Implemented: full dependency modernization (Express 5, ImapFlow 2, Nodemailer 10
 ## Features
 
 - **Unified inbox** — all accounts merged in one view, sorted by date
-- **Sender imagery** — real manual/CardDAV contact photos take priority, with optional domain favicons proxied and cached through Twenty Icons and deterministic initials as the offline fallback; disable sender favicons under Appearance to prevent lookups for your user
+- **Sender imagery** — saved contact photos take priority, with optional domain favicons proxied and cached through Twenty Icons and deterministic initials as the offline fallback; disable sender favicons under Appearance to prevent lookups for your user
 - **Email categorization** — automatic inbox tabs (Primary, Newsletters, Social, Notifications, Other) sort incoming mail by type using header detection and sender heuristics; AI reclassify button for misclassifications
 - **Unsubscribe** — one-click unsubscribe button appears in the message pane for detected newsletters; sends the request or opens the unsubscribe URL automatically
 - **Conversation threads** — messages grouped into reply chains with inline sent replies
@@ -68,7 +68,6 @@ Implemented: full dependency modernization (Express 5, ImapFlow 2, Nodemailer 10
 - **SSO / OIDC** — single sign-on via any OpenID Connect provider; group claims from the IdP can be mapped to the MailExpert admin role, with optional RP-initiated (end-session) logout to sign out of the provider too
 - **Microsoft 365 / OAuth2** — work accounts via Azure App Registration; personal Outlook.com via device code flow
 - **Todoist integration** — create tasks directly from emails; tasks include a deep link back to the original message
-- **CardDAV** — expose your MailExpert contacts as a CardDAV address book for sync with phone and desktop contact apps; contact photos sync and appear as sender avatars in the message list
 - **GTD workflow** — optional Getting-Things-Done rail: label threads Todo / Watch / Delegated / Someday / Reference (each backed by a real IMAP folder) with the t / w / d keys; opt in per account, see below
 
 ---

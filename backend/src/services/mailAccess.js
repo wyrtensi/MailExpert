@@ -23,8 +23,9 @@ export async function getOwnedAccount(userId, accountId) {
 }
 
 // Every mailbox (light columns for listing/iteration). The caller filters by its own
-// per-account config (e.g. which accounts have a feature enabled).
-export async function listUserAccounts(userId) {
+// per-account config (e.g. which accounts have a feature enabled). Callers still pass a userId;
+// mailboxes are shared, so it is not needed.
+export async function listUserAccounts() {
   const { rows } = await query(
     `SELECT id, email_address, folder_mappings, include_in_unified_inbox, enabled
        FROM email_accounts

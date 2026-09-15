@@ -13,7 +13,7 @@ const LOCAL_ONLY_PREFIXES = [
   '/api/auth/register', '/api/auth/login', '/api/auth/2fa', '/api/auth/forgot-password',
   '/api/auth/reset-password', '/api/auth/registration-status', '/api/auth/invite',
   '/api/auth/profile/recovery-email', '/api/auth/oidc', '/auth/oidc', '/api/totp',
-  '/api/admin/invites', '/api/admin/oidc', '/carddav', '/.well-known/carddav',
+  '/api/admin/invites', '/api/admin/oidc',
 ];
 const LOCAL_ONLY_PATTERNS = [/^\/api\/admin\/users\/[^/]+\/totp\/disable$/];
 

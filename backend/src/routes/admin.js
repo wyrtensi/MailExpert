@@ -8,7 +8,6 @@ import { createSmtpTransport } from '../services/smtpTransport.js';
 import { getConnectionPolicy, invalidateConnectionPolicyCache } from '../services/connectionPolicy.js';
 import { reloadAuthSettings } from '../services/authLimiter.js';
 import { imapManager } from '../index.js';
-import { stopCardavUser } from '../services/carddavSync.js';
 import { pluginRegistry } from '../plugins/registry.js';
 import { uuidParam } from '../utils/uuid.js';
 import { getAuthSettings } from '../services/auth/authSettings.js';
@@ -229,7 +228,6 @@ router.delete('/users/:id', async (req, res) => {
     return sendAdminUserError(res, err);
   }
 
-  stopCardavUser(id);
   await signOutEverywhere(id);
   await query('DELETE FROM users WHERE id = $1', [id]);
   // Let plugins clean up any user-scoped data the FK cascade can't reach (GTD removes the

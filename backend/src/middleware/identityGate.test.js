@@ -38,7 +38,7 @@ beforeAll(async () => {
     req.session = sessionFor(req.get('x-test-session') || 'default');
     next();
   });
-  app.use(['/api', '/oauth', '/auth/oidc', '/carddav', '/.well-known/carddav'], createIdentityGate({
+  app.use(['/api', '/oauth', '/auth/oidc'], createIdentityGate({
     getSettings: () => state.settings,
     verifyToken: (...args) => state.verifyToken(...args),
     resolveUser: (...args) => state.resolveUser(...args),
@@ -72,7 +72,7 @@ describe('isLocalOnlyPath', () => {
     '/api/auth/reset-password', '/api/auth/registration-status', '/api/auth/invite/abc',
     '/api/auth/profile/recovery-email', '/api/auth/oidc/providers', '/auth/oidc/corp/start', '/api/totp/setup',
     '/api/admin/invites', '/api/admin/invites/1', '/api/admin/oidc',
-    '/api/admin/users/11111111-1111-1111-1111-111111111111/totp/disable', '/carddav/', '/.well-known/carddav',
+    '/api/admin/users/11111111-1111-1111-1111-111111111111/totp/disable',
   ])('marks %s', (path) => {
     expect(isLocalOnlyPath(path)).toBe(true);
   });
@@ -90,7 +90,7 @@ describe('identityGate', () => {
   });
 
   it('hides local sign-in routes in google mode', async () => {
-    for (const path of ['/api/auth/login', '/auth/oidc/corp/start', '/carddav/', '/.well-known/carddav']) {
+    for (const path of ['/api/auth/login', '/auth/oidc/corp/start']) {
       expect((await call(path, { token: 'good-token' })).status).toBe(404);
     }
     expect(state.resolveUser).not.toHaveBeenCalled();

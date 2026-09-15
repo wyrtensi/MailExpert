@@ -3,6 +3,7 @@ import { query } from '../services/db.js';
 import { requireAuth } from '../middleware/auth.js';
 import { generateVCard } from '../utils/vcard.js';
 import { safeFetch } from '../services/safeFetch.js';
+import { defaultAddressBookId } from '../services/addressBooks.js';
 import crypto from 'crypto';
 
 const router = Router();
@@ -23,38 +24,16 @@ function gravatarCacheSet(hash, entry) {
   gravatarCache.set(hash, entry);
 }
 
-// Resolve the user's default address book id, creating it if needed.
-async function defaultAddressBook(userId) {
-  const r = await query(
-    `INSERT INTO address_books (user_id, name)
-     VALUES ($1, 'Personal')
-     ON CONFLICT (user_id, name) DO UPDATE SET updated_at = NOW()
-     RETURNING id`,
-    [userId]
-  );
-  return r.rows[0].id;
-}
-
-// Bump the address book sync_token so CardDAV clients re-sync.
-async function bumpSyncToken(addressBookId) {
-  await query(
-    `UPDATE address_books SET sync_token = gen_random_uuid()::text, updated_at = NOW()
-     WHERE id = $1`,
-    [addressBookId]
-  );
-}
-
 // GET /api/contacts
 // Query params: q (search), limit, offset, is_auto (true|false|'')
 router.get('/', async (req, res) => {
   const { q, limit = 50, offset = 0, is_auto } = req.query;
-  const userId = req.session.userId;
   const cap = Math.min(parseInt(limit) || 50, 500);
   const off = Math.max(0, parseInt(offset) || 0);
 
-  const conditions = ['c.user_id = $1'];
-  const params = [userId];
-  let p = 2;
+  const conditions = [];
+  const params = [];
+  let p = 1;
 
   if (q && q.trim()) {
     params.push(`%${q.trim()}%`);
@@ -74,6 +53,8 @@ router.get('/', async (req, res) => {
     conditions.push('c.is_auto = false');
   }
 
+  const where = conditions.length ? `WHERE ${conditions.join(' AND ')}` : '';
+
   try {
     const result = await query(`
       SELECT
@@ -81,11 +62,9 @@ router.get('/', async (req, res) => {
         c.primary_email, c.emails, c.phones, c.organization,
         c.notes, c.is_auto, c.send_count, c.last_sent,
         c.etag, c.created_at, c.updated_at,
-        (c.photo_data IS NOT NULL) AS has_contact_photo,
-        (ab.source = 'carddav') AS read_only
+        (c.photo_data IS NOT NULL) AS has_contact_photo
       FROM contacts c
-      JOIN address_books ab ON ab.id = c.address_book_id
-      WHERE ${conditions.join(' AND ')}
+      ${where}
       ORDER BY
         c.is_auto ASC,
         c.send_count DESC,
@@ -94,7 +73,7 @@ router.get('/', async (req, res) => {
     `, [...params, cap, off]);
 
     const total = await query(
-      `SELECT COUNT(*) FROM contacts c WHERE ${conditions.join(' AND ')}`,
+      `SELECT COUNT(*) FROM contacts c ${where}`,
       params
     );
 
@@ -110,16 +89,15 @@ router.get('/', async (req, res) => {
 // This route must remain ABOVE /:id to prevent Express matching "photo" as an id.
 router.get('/photo', async (req, res) => {
   const { email } = req.query;
-  const userId = req.session.userId;
 
   if (!email || typeof email !== 'string') return res.status(400).end();
 
   try {
     const result = await query(
       `SELECT photo_data FROM contacts
-       WHERE user_id = $1 AND primary_email = lower($2) AND photo_data IS NOT NULL
+       WHERE primary_email = lower($1) AND photo_data IS NOT NULL
        LIMIT 1`,
-      [userId, email.trim()]
+      [email.trim()]
     );
 
     if (!result.rows.length) return res.status(404).end();
@@ -198,18 +176,15 @@ router.get('/gravatar', async (req, res) => {
 
 // GET /api/contacts/:id
 router.get('/:id', async (req, res) => {
-  const userId = req.session.userId;
   try {
     const result = await query(
       `SELECT c.id, c.uid, c.display_name, c.first_name, c.last_name,
               c.primary_email, c.emails, c.phones, c.organization,
               c.notes, c.photo_data, c.is_auto, c.send_count, c.last_sent,
-              c.etag, c.vcard, c.created_at, c.updated_at,
-              (ab.source = 'carddav') AS read_only
+              c.etag, c.vcard, c.created_at, c.updated_at
        FROM contacts c
-       JOIN address_books ab ON ab.id = c.address_book_id
-       WHERE c.id = $1 AND c.user_id = $2`,
-      [req.params.id, userId]
+       WHERE c.id = $1`,
+      [req.params.id]
     );
     if (!result.rows.length) return res.status(404).json({ error: 'Contact not found' });
     res.json(result.rows[0]);
@@ -221,7 +196,6 @@ router.get('/:id', async (req, res) => {
 
 // POST /api/contacts
 router.post('/', async (req, res) => {
-  const userId = req.session.userId;
   const {
     displayName, firstName, lastName,
     emails = [], phones = [],
@@ -240,28 +214,27 @@ router.post('/', async (req, res) => {
   }
 
   try {
-    const addressBookId = await defaultAddressBook(userId);
+    const addressBookId = await defaultAddressBookId();
     const uid = crypto.randomUUID();
     const vcard = generateVCard({ uid, displayName, firstName, lastName, emails, phones, organization, notes });
     const etag = crypto.createHash('md5').update(vcard).digest('hex');
 
     const result = await query(`
       INSERT INTO contacts (
-        address_book_id, user_id, uid, vcard, etag,
+        address_book_id, uid, vcard, etag,
         display_name, first_name, last_name, primary_email,
         emails, phones, organization, notes, is_auto
-      ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13, false)
+      ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12, false)
       RETURNING id, uid, display_name, first_name, last_name,
                 primary_email, emails, phones, organization, notes,
                 is_auto, send_count, last_sent, etag, created_at, updated_at
     `, [
-      addressBookId, userId, uid, vcard, etag,
+      addressBookId, uid, vcard, etag,
       displayName || null, firstName || null, lastName || null, primaryEmail,
       JSON.stringify(emails), JSON.stringify(phones),
       organization || null, notes || null,
     ]);
 
-    await bumpSyncToken(addressBookId);
     res.status(201).json(result.rows[0]);
   } catch (err) {
     if (err.code === '23505') return res.status(409).json({ error: 'A contact with that email already exists' });
@@ -272,7 +245,6 @@ router.post('/', async (req, res) => {
 
 // PATCH /api/contacts/:id
 router.patch('/:id', async (req, res) => {
-  const userId = req.session.userId;
   const {
     displayName, firstName, lastName,
     emails, phones, organization, notes,
@@ -282,18 +254,9 @@ router.patch('/:id', async (req, res) => {
   if (phones !== undefined && !Array.isArray(phones)) return res.status(400).json({ error: 'phones must be an array' });
 
   try {
-    // Load current contact (with its book source to block edits to synced contacts)
-    const cur = await query(
-      `SELECT c.*, ab.source AS book_source FROM contacts c
-       JOIN address_books ab ON ab.id = c.address_book_id
-       WHERE c.id = $1 AND c.user_id = $2`,
-      [req.params.id, userId]
-    );
+    const cur = await query('SELECT * FROM contacts WHERE id = $1', [req.params.id]);
     if (!cur.rows.length) return res.status(404).json({ error: 'Contact not found' });
     const c = cur.rows[0];
-    if (c.book_source === 'carddav') {
-      return res.status(403).json({ error: 'This contact is synced from CardDAV and is read-only' });
-    }
 
     const newEmails    = emails    !== undefined ? emails    : c.emails;
     const newPhones    = phones    !== undefined ? phones    : c.phones;
@@ -325,7 +288,7 @@ router.patch('/:id', async (req, res) => {
         organization = $7, notes = $8,
         vcard = $9, etag = $10, updated_at = NOW(),
         is_auto = false
-      WHERE id = $11 AND user_id = $12
+      WHERE id = $11
       RETURNING id, uid, display_name, first_name, last_name,
                 primary_email, emails, phones, organization, notes,
                 is_auto, send_count, last_sent, etag, created_at, updated_at
@@ -335,10 +298,9 @@ router.patch('/:id', async (req, res) => {
       JSON.stringify(newEmails), JSON.stringify(newPhones),
       newOrg || null, newNotes || null,
       vcard, etag,
-      req.params.id, userId,
+      req.params.id,
     ]);
 
-    await bumpSyncToken(c.address_book_id);
     res.json(result.rows[0]);
   } catch (err) {
     if (err.code === '23505') return res.status(409).json({ error: 'A contact with that email already exists' });
@@ -349,24 +311,9 @@ router.patch('/:id', async (req, res) => {
 
 // DELETE /api/contacts/:id
 router.delete('/:id', async (req, res) => {
-  const userId = req.session.userId;
   try {
-    // Block deletion of CardDAV-synced (read-only) contacts; they reappear on next sync anyway.
-    const owner = await query(
-      `SELECT ab.source FROM contacts c JOIN address_books ab ON ab.id = c.address_book_id
-       WHERE c.id = $1 AND c.user_id = $2`,
-      [req.params.id, userId]
-    );
-    if (!owner.rows.length) return res.status(404).json({ error: 'Contact not found' });
-    if (owner.rows[0].source === 'carddav') {
-      return res.status(403).json({ error: 'This contact is synced from CardDAV and is read-only' });
-    }
-    const result = await query(
-      'DELETE FROM contacts WHERE id = $1 AND user_id = $2 RETURNING address_book_id',
-      [req.params.id, userId]
-    );
+    const result = await query('DELETE FROM contacts WHERE id = $1 RETURNING id', [req.params.id]);
     if (!result.rows.length) return res.status(404).json({ error: 'Contact not found' });
-    await bumpSyncToken(result.rows[0].address_book_id);
     res.json({ ok: true });
   } catch (err) {
     console.error('Contact delete error:', err);

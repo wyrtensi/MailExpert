@@ -153,17 +153,17 @@ async function processMicrosoftTokens(userId, tokens, { tenantId, clientId, publ
 
   if (!email) throw new Error('Could not retrieve email address from Microsoft profile — ensure the openid, email, and profile scopes are granted');
 
-  // Serialize the check-then-insert per (user, email) with a transaction-scoped
-  // advisory lock. Two OAuth callbacks racing for the same mailbox would otherwise
-  // both miss the SELECT and each INSERT, producing duplicate account rows. The
-  // second waiter blocks until the first commits, then sees the row and updates it.
+  // Serialize the check-then-insert per mailbox address with a transaction-scoped advisory
+  // lock. Two OAuth callbacks racing for the same mailbox would otherwise both miss the SELECT
+  // and each INSERT, producing duplicate account rows. The second waiter blocks until the first
+  // commits, then sees the row and updates it. Mailboxes are shared, so the address alone names one.
   const account = await withTransaction(async (client) => {
     await client.query('SELECT pg_advisory_xact_lock(hashtext($1))',
-      [`oauth-account:${userId}:${email.toLowerCase()}`]);
+      [`oauth-account:${email.toLowerCase()}`]);
 
     const existing = await client.query(
-      'SELECT id FROM email_accounts WHERE user_id = $1 AND email_address = $2',
-      [userId, email]
+      'SELECT id FROM email_accounts WHERE lower(email_address) = lower($1) ORDER BY created_at LIMIT 1',
+      [email]
     );
 
     let accountId;
@@ -182,7 +182,7 @@ async function processMicrosoftTokens(userId, tokens, { tenantId, clientId, publ
       const color = colors[Math.floor(Math.random() * colors.length)];
       const result = await client.query(`
         INSERT INTO email_accounts (
-          user_id, name, email_address, color, protocol,
+          added_by, name, email_address, color, protocol,
           imap_host, imap_port, imap_tls,
           smtp_host, smtp_port, smtp_tls,
           auth_user,

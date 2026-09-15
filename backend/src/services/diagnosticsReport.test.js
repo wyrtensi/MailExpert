@@ -99,9 +99,9 @@ describe('scrubReport (safety net)', () => {
 describe('buildServerReport', () => {
   beforeEach(() => query.mockReset());
 
-  it('produces a hashed, PII-free, user-scoped report from the allowlist', async () => {
+  it('produces a hashed, PII-free report of every mailbox from the allowlist', async () => {
     query.mockImplementation((sql) => {
-      if (/FROM email_accounts WHERE user_id/.test(sql)) {
+      if (/FROM email_accounts ORDER BY/.test(sql)) {
         return Promise.resolve({ rows: [
           { id: 'acct-1', protocol: 'imap', oauth_provider: null, imap_host: 'imap.gmail.com', enabled: true, include_in_unified_inbox: true, last_sync: new Date(Date.now() - 42000).toISOString(), sync_error: null },
           { id: 'acct-2', protocol: 'imap', oauth_provider: null, imap_host: 'mail.my-company.example', enabled: true, include_in_unified_inbox: false, last_sync: null, sync_error: 'Invalid credentials for bob@corp.com' },
@@ -127,10 +127,7 @@ describe('buildServerReport', () => {
     const report = await buildServerReport('user-9', 'deadbeefdeadbeef');
     const json = JSON.stringify(report);
 
-    // scoped: every account query filtered by the requesting user
-    const acctCalls = query.mock.calls.filter(c => /email_accounts WHERE user_id/.test(c[0]));
-    expect(acctCalls.length).toBeGreaterThan(0);
-    expect(acctCalls.every(c => c[1]?.[0] === 'user-9')).toBe(true);
+    expect(query.mock.calls.some(c => /user_id/.test(c[0]))).toBe(false);
 
     // no raw ids, emails, custom folder names, or account hosts leak
     expect(json).not.toContain('acct-1');
@@ -206,7 +203,7 @@ describe('buildServerReport — unread counts INBOX only', () => {
 
   it('ignores Spam/Junk unread, so the report agrees with the app badge', async () => {
     query.mockImplementation((sql) => {
-      if (/FROM email_accounts WHERE user_id/.test(sql)) {
+      if (/FROM email_accounts ORDER BY/.test(sql)) {
         return Promise.resolve({ rows: [
           { id: 'acct-1', protocol: 'imap', oauth_provider: null, imap_host: 'imap.gmail.com', enabled: true, include_in_unified_inbox: true, last_sync: new Date().toISOString(), sync_error: null },
         ] });
@@ -230,14 +227,14 @@ describe('buildServerReport — unread counts INBOX only', () => {
     expect(spam.unread).toBe(16);
   });
 
-  it('scopes the unread query to the requesting user and to INBOX', async () => {
+  it('counts unread in INBOX of every enabled mailbox', async () => {
     query.mockResolvedValue({ rows: [] });
     await buildServerReport('user-9', 'deadbeefdeadbeef');
     const unreadCall = query.mock.calls.find(c => /FROM messages m/.test(c[0]));
     expect(unreadCall).toBeTruthy();
-    expect(unreadCall[0]).toMatch(/a\.user_id = \$1/);
+    expect(unreadCall[0]).toMatch(/a\.enabled = true/);
     expect(unreadCall[0]).toMatch(/m\.folder = 'INBOX'/);
     expect(unreadCall[0]).toMatch(/is_read = false/);
-    expect(unreadCall[1]).toEqual(['user-9']);
+    expect(unreadCall[1]).toBeUndefined();
   });
 });

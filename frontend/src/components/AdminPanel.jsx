@@ -40,6 +40,7 @@ import { isGoogleReconnectRequired } from '../utils/googleOAuth.js';
 import { getEffectiveShortcuts, getGroupedActions, ACTION_DEFS, SPECIAL_KEY_LABELS, parseModKey, modLabel } from '../utils/defaultShortcuts.js';
 import { isValidForwardAddress } from '../utils/ruleActions.js';
 import { folderParentLabel } from '../utils/folderDisplay.js';
+import { accountLabel } from '../utils/accountLabel.js';
 
 // ─── Shared field component ───────────────────────────────────────────────────
 function Field({ label, required, children }) {
@@ -2125,151 +2126,6 @@ function LayoutsTab() {
 }
 
 // ─── Integrations Tab ────────────────────────────────────────────────────────
-// CardDAV contact sync (e.g. Nextcloud). One-way, read-only pull.
-function CardDavCard() {
-  const { t } = useTranslation();
-  const [status, setStatus] = useState(null); // null while loading
-  const [expanded, setExpanded] = useState(false);
-  const [form, setForm] = useState({ serverUrl: '', username: '', password: '', dupMode: 'separate', intervalMin: 60 });
-  const [connecting, setConnecting] = useState(false);
-  const [syncing, setSyncing] = useState(false);
-  const [disconnecting, setDisconnecting] = useState(false);
-  const [error, setError] = useState('');
-
-  useEffect(() => { api.carddav.status().then(setStatus).catch(() => setStatus({ connected: false })); }, []);
-
-  const connected = status?.connected;
-  const loading = status === null;
-
-  const handleConnect = async () => {
-    setConnecting(true); setError('');
-    try {
-      const s = await api.carddav.connect({
-        serverUrl: form.serverUrl.trim(), username: form.username.trim(),
-        password: form.password, dupMode: form.dupMode, intervalMin: Number(form.intervalMin),
-      });
-      setStatus(s); setForm(f => ({ ...f, password: '' }));
-    } catch (e) { setError(e.message || t('admin.integrations.carddav.connectFailed')); }
-    finally { setConnecting(false); }
-  };
-  const handleSync = async () => {
-    setSyncing(true); setError('');
-    try { const r = await api.carddav.sync(); setStatus(r.status); if (!r.ok && r.error) setError(r.error); }
-    catch (e) { setError(e.message); }
-    finally { setSyncing(false); }
-  };
-  const handleDisconnect = async () => {
-    setDisconnecting(true); setError('');
-    try { await api.carddav.disconnect(); setStatus({ connected: false }); }
-    catch (e) { setError(e.message); }
-    finally { setDisconnecting(false); }
-  };
-  const updateSetting = async (patch) => {
-    setStatus(s => ({ ...s, ...patch }));
-    try { await api.carddav.update(patch); } catch (e) { setError(e.message); }
-  };
-
-  const inputStyle = { padding: '8px 10px', borderRadius: 8, border: '1px solid var(--border)', background: 'var(--bg-primary)', color: 'var(--text-primary)', fontSize: 13, outline: 'none', width: '100%', boxSizing: 'border-box' };
-  const labelStyle = { fontSize: 12, fontWeight: 500, color: 'var(--text-secondary)', display: 'block', marginBottom: 5 };
-  const errBox = error && (
-    <div style={{ fontSize: 13, color: 'var(--red, #f87171)', padding: '8px 10px', borderRadius: 6, background: 'rgba(248,113,113,0.08)' }}>{error}</div>
-  );
-
-  return (
-    <div style={{ border: '1px solid var(--border-subtle)', borderRadius: 12, overflow: 'hidden', marginBottom: 12 }}>
-      <div
-        onClick={() => setExpanded(!expanded)}
-        style={{ padding: '14px 16px', display: 'flex', alignItems: 'center', gap: 12, cursor: 'pointer', background: 'var(--bg-tertiary)' }}
-        onMouseEnter={e => e.currentTarget.style.background = 'var(--bg-hover)'}
-        onMouseLeave={e => e.currentTarget.style.background = 'var(--bg-tertiary)'}
-      >
-        <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="var(--accent)" strokeWidth="2">
-          <path d="M20 21v-2a4 4 0 00-4-4H8a4 4 0 00-4 4v2"/><circle cx="12" cy="7" r="4"/>
-        </svg>
-        <div style={{ flex: 1 }}>
-          <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
-            <span style={{ fontSize: 14, fontWeight: 600, color: 'var(--text-primary)' }}>{t('admin.integrations.carddav.title')}</span>
-            <span style={{ fontSize: 11, padding: '2px 8px', borderRadius: 10, background: (!loading && connected) ? 'rgba(34,197,94,0.1)' : 'var(--bg-primary)', color: (!loading && connected) ? '#22c55e' : 'var(--text-tertiary)', border: `1px solid ${(!loading && connected) ? '#22c55e' : 'var(--border)'}` }}>
-              {loading ? '...' : (connected ? t('admin.integrations.carddav.connected') : t('admin.integrations.carddav.notConnected'))}
-            </span>
-          </div>
-          <div style={{ fontSize: 12, color: 'var(--text-tertiary)', marginTop: 2 }}>{t('admin.integrations.carddav.description')}</div>
-        </div>
-        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="var(--text-tertiary)" strokeWidth="2.5" style={{ transform: expanded ? 'rotate(180deg)' : 'none', transition: 'transform 0.2s', flexShrink: 0 }}><polyline points="6 9 12 15 18 9"/></svg>
-      </div>
-
-      {expanded && (
-        <div style={{ padding: '16px 18px', borderTop: '1px solid var(--border-subtle)', display: 'flex', flexDirection: 'column', gap: 12 }}>
-          {loading ? (
-            <div style={{ color: 'var(--text-tertiary)', fontSize: 13 }}>{t('admin.integrations.loading')}</div>
-          ) : connected ? (
-            <>
-              <div style={{ fontSize: 13, color: 'var(--text-secondary)' }}>
-                <div><strong style={{ color: 'var(--text-primary)' }}>{status.username}</strong> @ {status.serverUrl}</div>
-                <div style={{ marginTop: 4 }}>
-                  {t('admin.integrations.carddav.summary', { contacts: status.contactCount ?? 0, books: status.bookCount ?? 0 })}
-                  {' · '}
-                  {t('admin.integrations.carddav.lastSync', { when: status.lastSyncAt ? new Date(status.lastSyncAt).toLocaleString() : t('common.never') })}
-                </div>
-                {status.lastError && (
-                  <div style={{ marginTop: 4, color: 'var(--red, #f87171)' }}>{t('admin.integrations.carddav.syncFailed', { error: status.lastError })}</div>
-                )}
-              </div>
-
-              <div>
-                <label style={labelStyle}>{t('admin.integrations.carddav.dupLabel')}</label>
-                <select value={status.dupMode || 'separate'} onChange={e => updateSetting({ dupMode: e.target.value })} style={{ ...inputStyle, cursor: 'pointer' }}>
-                  <option value="separate">{t('admin.integrations.carddav.dupSeparate')}</option>
-                  <option value="merge">{t('admin.integrations.carddav.dupMerge')}</option>
-                  <option value="skip">{t('admin.integrations.carddav.dupSkip')}</option>
-                </select>
-              </div>
-              <div>
-                <label style={labelStyle}>{t('admin.integrations.carddav.intervalLabel')}</label>
-                <input type="number" min="15" max="1440" value={status.intervalMin || 60}
-                  onChange={e => setStatus(s => ({ ...s, intervalMin: e.target.value }))}
-                  onBlur={e => updateSetting({ intervalMin: Number(e.target.value) })} style={inputStyle} />
-              </div>
-              {errBox}
-              <div style={{ display: 'flex', gap: 8 }}>
-                <button onClick={handleSync} disabled={syncing} style={{ padding: '6px 14px', borderRadius: 7, cursor: syncing ? 'default' : 'pointer', border: 'none', background: 'var(--accent)', color: 'var(--accent-text)', fontSize: 13, fontWeight: 500, opacity: syncing ? 0.7 : 1 }}>
-                  {syncing ? t('admin.integrations.carddav.syncing') : t('admin.integrations.carddav.syncNow')}
-                </button>
-                <button onClick={handleDisconnect} disabled={disconnecting} style={{ padding: '6px 14px', borderRadius: 7, cursor: disconnecting ? 'default' : 'pointer', border: '1px solid var(--border)', background: 'transparent', color: 'var(--text-secondary)', fontSize: 13, opacity: disconnecting ? 0.6 : 1 }}>
-                  {disconnecting ? t('common.loading') : t('admin.integrations.carddav.disconnect')}
-                </button>
-              </div>
-            </>
-          ) : (
-            <>
-              <div><label style={labelStyle}>{t('admin.integrations.carddav.serverLabel')}</label>
-                <input type="text" value={form.serverUrl} onChange={e => setForm(f => ({ ...f, serverUrl: e.target.value }))} placeholder={t('admin.integrations.carddav.serverPh')} style={inputStyle} /></div>
-              <div><label style={labelStyle}>{t('admin.integrations.carddav.userLabel')}</label>
-                <input type="text" value={form.username} onChange={e => setForm(f => ({ ...f, username: e.target.value }))} placeholder={t('admin.integrations.carddav.userPh')} style={inputStyle} /></div>
-              <div><label style={labelStyle}>{t('admin.integrations.carddav.passLabel')}</label>
-                <input type="password" autoComplete="new-password" value={form.password} onChange={e => setForm(f => ({ ...f, password: e.target.value }))} placeholder={t('admin.integrations.carddav.passPh')} style={inputStyle} /></div>
-              <div><label style={labelStyle}>{t('admin.integrations.carddav.dupLabel')}</label>
-                <select value={form.dupMode} onChange={e => setForm(f => ({ ...f, dupMode: e.target.value }))} style={{ ...inputStyle, cursor: 'pointer' }}>
-                  <option value="separate">{t('admin.integrations.carddav.dupSeparate')}</option>
-                  <option value="merge">{t('admin.integrations.carddav.dupMerge')}</option>
-                  <option value="skip">{t('admin.integrations.carddav.dupSkip')}</option>
-                </select></div>
-              {errBox}
-              <div style={{ display: 'flex', gap: 8 }}>
-                <button onClick={handleConnect} disabled={connecting || !form.serverUrl.trim() || !form.username.trim() || !form.password}
-                  style={{ padding: '6px 14px', borderRadius: 7, cursor: (connecting || !form.serverUrl.trim() || !form.username.trim() || !form.password) ? 'default' : 'pointer', border: 'none', background: 'var(--accent)', color: 'var(--accent-text)', fontSize: 13, fontWeight: 500, opacity: (connecting || !form.serverUrl.trim() || !form.username.trim() || !form.password) ? 0.7 : 1 }}>
-                  {connecting ? t('admin.integrations.carddav.connecting') : t('admin.integrations.carddav.connect')}
-                </button>
-              </div>
-              <div style={{ fontSize: 12, color: 'var(--text-tertiary)', lineHeight: 1.5 }}>{t('admin.integrations.carddav.help')}</div>
-            </>
-          )}
-        </div>
-      )}
-    </div>
-  );
-}
-
 function IntegrationsTab() {
   const { t } = useTranslation();
   const { setAccounts, setTodoistConnected, user } = useStore();
@@ -2932,8 +2788,6 @@ function IntegrationsTab() {
               </div>
             )}
           </div>
-
-          <CardDavCard />
         </div>
       )}
     </div>
@@ -4102,7 +3956,8 @@ function AiActionsTab() {
 // ─── Categories Section ───────────────────────────────────────────────────────
 function CategoriesSection({ initialSubTab }) {
   const { t } = useTranslation();
-  const { accounts, categorizationEnabled, setCategorizationEnabled } = useStore();
+  const { accounts, categorizationEnabled, setCategorizationEnabled, user } = useStore();
+  const isAdmin = !!user?.isAdmin;
   const [sources, setSources] = useState([]);
   const [builtinSets, setBuiltinSets] = useState([]);
   const [loading, setLoading] = useState(true);
@@ -4212,11 +4067,13 @@ function CategoriesSection({ initialSubTab }) {
       <div style={{ display: 'flex', alignItems: 'flex-start', gap: 10, marginBottom: 20 }}>
         <button
           type="button"
-          onClick={() => setCategorizationEnabled(!categorizationEnabled)}
+          disabled={!isAdmin}
+          onClick={() => isAdmin && setCategorizationEnabled(!categorizationEnabled)}
           style={{
-            width: 36, height: 20, borderRadius: 10, border: 'none', cursor: 'pointer', padding: 0,
+            width: 36, height: 20, borderRadius: 10, border: 'none', cursor: isAdmin ? 'pointer' : 'not-allowed', padding: 0,
             background: categorizationEnabled ? 'var(--accent)' : TOGGLE_OFF_BACKGROUND,
             position: 'relative', transition: 'background 0.2s', flexShrink: 0, marginTop: 1,
+            opacity: isAdmin ? 1 : 0.5,
           }}
         >
           <span style={{
@@ -4227,6 +4084,9 @@ function CategoriesSection({ initialSubTab }) {
         <div>
           <div style={{ fontSize: 13, color: 'var(--text-primary)', fontWeight: 500 }}>{t('admin.categories.globalEnabled')}</div>
           <div style={{ fontSize: 11, color: 'var(--text-tertiary)', marginTop: 2 }}>{t('admin.categories.globalEnabledDesc')}</div>
+          {!isAdmin && (
+            <div style={{ fontSize: 11, color: 'var(--text-tertiary)', marginTop: 2 }}>{t('common.adminOnly')}</div>
+          )}
         </div>
       </div>
 
@@ -5693,7 +5553,8 @@ function RulesTab() {
   function blankForm(prefill = {}) {
     return {
       name: prefill.name || '',
-      accountId: '',
+      // A rule applies to one account: the one the message came from, or the first one.
+      accountId: prefill.accountId || accounts[0]?.id || '',
       conditionLogic: 'AND',
       conditions: [{
         field: 'from',
@@ -5723,10 +5584,10 @@ function RulesTab() {
         destSeen = true;
       }
       return true;
-    }).filter(a => !(a.type === 'move' && !rule.account_id));
+    });
     setFormData({
       name: rule.name,
-      accountId: rule.account_id || '',
+      accountId: rule.account_id,
       conditionLogic: rule.condition_logic || 'AND',
       conditions: Array.isArray(rule.conditions) ? rule.conditions : [],
       actions,
@@ -5750,7 +5611,7 @@ function RulesTab() {
     try {
       const saved = await api.updateRule(rule.id, {
         name: rule.name,
-        accountId: rule.account_id || null,
+        accountId: rule.account_id,
         conditionLogic: rule.condition_logic,
         conditions: rule.conditions,
         actions: rule.actions,
@@ -5775,6 +5636,10 @@ function RulesTab() {
       setFormError(t('admin.rules.errorRequired'));
       return;
     }
+    if (!accountId) {
+      setFormError(t('admin.rules.errorAccount'));
+      return;
+    }
     const moveAction = actions.find(a => a.type === 'move');
     if (moveAction && !moveAction.value?.trim()) {
       setFormError(t('admin.rules.errorMoveFolder'));
@@ -5790,7 +5655,7 @@ function RulesTab() {
     try {
       const payload = {
         name: name.trim(),
-        accountId: accountId || null,
+        accountId,
         conditionLogic,
         conditions,
         actions,
@@ -5936,22 +5801,17 @@ function RulesTab() {
           />
         </Field>
 
-        <Field label={t('admin.rules.accountLabel')}>
+        <Field label={t('admin.rules.accountLabel')} required>
           <select
             style={inputStyle}
             value={fd.accountId}
-            onChange={e => setFormData(p => {
-              const newAccountId = e.target.value;
-              return {
-                ...p,
-                accountId: newAccountId,
-                actions: newAccountId
-                  ? p.actions.map(a => a.type === 'move' ? { ...a, value: '' } : a)
-                  : p.actions.filter(a => a.type !== 'move'),
-              };
-            })}
+            // A move destination belongs to one account, so switching accounts clears it.
+            onChange={e => setFormData(p => ({
+              ...p,
+              accountId: e.target.value,
+              actions: p.actions.map(a => a.type === 'move' ? { ...a, value: '' } : a),
+            }))}
           >
-            <option value="">{t('admin.rules.accountAll')}</option>
             {accounts.map(a => (
               <option key={a.id} value={a.id}>{a.name || a.email_address}</option>
             ))}
@@ -6069,20 +5929,14 @@ function RulesTab() {
           {ACTION_TYPES.map(({ type, label }) => {
             const checked = fd.actions.some(a => a.type === type);
             const moveVal = fd.actions.find(a => a.type === 'move')?.value || '';
-            const moveDisabled = type === 'move' && !fd.accountId;
             return (
               <div key={type} style={{ marginBottom: 8 }}>
-                <label style={{ display: 'flex', alignItems: 'center', gap: 8, cursor: moveDisabled ? 'default' : 'pointer', fontSize: 13, opacity: moveDisabled ? 0.45 : 1 }}>
-                  <input type="checkbox" checked={checked} disabled={moveDisabled} onChange={() => toggleAction(type)} />
+                <label style={{ display: 'flex', alignItems: 'center', gap: 8, cursor: 'pointer', fontSize: 13 }}>
+                  <input type="checkbox" checked={checked} onChange={() => toggleAction(type)} />
                   {label}
                 </label>
-                {moveDisabled && (
-                  <div style={{ fontSize: 11, color: 'var(--text-tertiary)', marginLeft: 22, marginTop: 2 }}>
-                    {t('admin.rules.actionMoveRequiresAccount')}
-                  </div>
-                )}
                 {type === 'move' && checked && (() => {
-                  const allFolders = fd.accountId ? (storeFolders[fd.accountId] || []) : [];
+                  const allFolders = storeFolders[fd.accountId] || [];
                   const movableFolders = allFolders.filter(f => f.path && f.path !== 'INBOX');
                   if (movableFolders.length > 0) {
                     return (
@@ -6284,7 +6138,7 @@ function RulesTab() {
                 <div style={{ flex: 1, minWidth: 0 }}>
                   <div style={{ fontWeight: 600, fontSize: 13, marginBottom: 2 }}>{rule.name || '(unnamed)'}</div>
                   <div style={{ fontSize: 11, color: 'var(--text-secondary)', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>
-                    {conditionSummary(rule)} → {actionSummary(rule)}
+                    {accountLabel(accounts, rule.account_id)} · {conditionSummary(rule)} → {actionSummary(rule)}
                   </div>
                 </div>
                 <div style={{ display: 'flex', gap: 6, flexShrink: 0 }}>
@@ -6313,11 +6167,15 @@ function RulesTab() {
 // ─── Block List Tab ────────────────────────────────────────────────────────────
 function BlockListTab() {
   const { t } = useTranslation();
+  const { accounts } = useStore();
   const [entries, setEntries] = useState([]);
   const [loading, setLoading] = useState(true);
   const [newEmail, setNewEmail] = useState('');
+  const [accountId, setAccountId] = useState('');
   const [adding, setAdding] = useState(false);
   const [error, setError] = useState('');
+  // An entry blocks a sender for one account; until one is picked, the first account.
+  const selectedAccountId = accountId || accounts[0]?.id || '';
 
   useEffect(() => {
     api.getBlockList()
@@ -6328,11 +6186,11 @@ function BlockListTab() {
   async function handleAdd(e) {
     e.preventDefault();
     const email = newEmail.trim();
-    if (!email) return;
+    if (!email || !selectedAccountId) return;
     setAdding(true);
     setError('');
     try {
-      const entry = await api.addToBlockList(email);
+      const entry = await api.addToBlockList(selectedAccountId, email);
       setEntries(prev => [entry, ...prev]);
       setNewEmail('');
     } catch {
@@ -6354,9 +6212,19 @@ function BlockListTab() {
       <p style={{ fontSize: 13, color: 'var(--text-secondary)', marginTop: 0, marginBottom: 16 }}>
         {t('admin.blockList.description')}
       </p>
-      <form onSubmit={handleAdd} style={{ display: 'flex', gap: 8, marginBottom: 20 }}>
+      <form onSubmit={handleAdd} style={{ display: 'flex', gap: 8, marginBottom: 20, flexWrap: 'wrap' }}>
+        <select
+          style={{ ...inputStyle, flex: '0 1 220px' }}
+          aria-label={t('admin.rules.accountLabel')}
+          value={selectedAccountId}
+          onChange={e => setAccountId(e.target.value)}
+        >
+          {accounts.map(a => (
+            <option key={a.id} value={a.id}>{a.name || a.email_address}</option>
+          ))}
+        </select>
         <input
-          style={{ ...inputStyle, flex: 1 }}
+          style={{ ...inputStyle, flex: 1, minWidth: 180 }}
           type="email"
           value={newEmail}
           onChange={e => setNewEmail(e.target.value)}
@@ -6364,7 +6232,7 @@ function BlockListTab() {
         />
         <button
           type="submit"
-          disabled={adding || !newEmail.trim()}
+          disabled={adding || !newEmail.trim() || !selectedAccountId}
           style={{ padding: '8px 16px', background: 'var(--accent)', color: 'var(--accent-text)', border: 'none', borderRadius: 7, fontWeight: 600, fontSize: 13, cursor: adding ? 'not-allowed' : 'pointer', opacity: adding ? 0.7 : 1, flexShrink: 0 }}
         >
           {t('admin.blockList.addButton')}
@@ -6378,6 +6246,7 @@ function BlockListTab() {
       {entries.map(entry => (
         <div key={entry.id} style={{ display: 'flex', alignItems: 'center', gap: 10, background: 'var(--bg-tertiary)', border: '1px solid var(--border)', borderRadius: 8, padding: '10px 14px', marginBottom: 6 }}>
           <span style={{ flex: 1, fontSize: 13, fontFamily: 'monospace', wordBreak: 'break-all' }}>{entry.email_address}</span>
+          <span style={{ fontSize: 12, color: 'var(--text-secondary)', flexShrink: 0 }}>{accountLabel(accounts, entry.account_id)}</span>
           <button
             onClick={() => handleRemove(entry.id)}
             style={{ padding: '4px 10px', background: 'none', border: '1px solid var(--red)', borderRadius: 6, fontSize: 12, cursor: 'pointer', color: 'var(--red)', flexShrink: 0 }}

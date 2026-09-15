@@ -13,7 +13,7 @@ vi.mock('../services/connectionPolicy.js', () => ({
   invalidateConnectionPolicyCache: vi.fn(),
 }));
 vi.mock('../services/authLimiter.js', () => ({ reloadAuthSettings: vi.fn() }));
-vi.mock('../services/carddavSync.js', () => ({ stopCardavUser: vi.fn() }));
+vi.mock('../services/categorizer.js', () => ({ invalidateGlobalCategorizationCache: vi.fn() }));
 vi.mock('../plugins/registry.js', () => ({ pluginRegistry: { runHook: vi.fn(async () => {}) } }));
 vi.mock('./auth.js', () => ({ destroyUserSessions: vi.fn(async () => {}) }));
 vi.mock('../services/websocket.js', () => ({ closeUserSockets: vi.fn() }));
@@ -206,16 +206,6 @@ describe('PATCH /api/admin/users/:id', () => {
 });
 
 describe('DELETE /api/admin/users/:id', () => {
-  const mailboxes = (count) => [/FROM email_accounts WHERE user_id = \$1/, { rows: [{ count }] }];
-
-  it('keeps mailbox owners in google mode until mailboxes are shared', async () => {
-    vi.stubEnv('AUTH_MODE', 'google');
-    installTransaction([lock, target(USER_ROW), mailboxes(2)]);
-    expect(await send('DELETE', `/users/${USER_ID}`)).toMatchObject({ status: 409, body: { code: 'user_has_mailboxes' } });
-    expect(imapManager.disconnectAccount).not.toHaveBeenCalled();
-    expect(query).not.toHaveBeenCalled();
-  });
-
   it('refuses a bootstrap admin and the last active admin', async () => {
     vi.stubEnv('BOOTSTRAP_ADMIN_EMAILS', 'user@example.com');
     installTransaction([lock, target(USER_ROW)]);
@@ -226,20 +216,14 @@ describe('DELETE /api/admin/users/:id', () => {
     expect((await send('DELETE', `/users/${USER_ID}`)).body.code).toBe('last_admin');
   });
 
-  it('signs the user out everywhere, deletes them and disconnects the mailboxes the delete removes', async () => {
-    const MAILBOX_ID = '00000000-0000-0000-0000-0000000000c1';
+  it('signs the user out everywhere and deletes them, keeping the mailboxes', async () => {
     installTransaction([lock, target(USER_ROW)]);
-    query.mockImplementation(async (sql) => (
-      sql.startsWith('SELECT id FROM email_accounts WHERE user_id') ? { rows: [{ id: MAILBOX_ID }] } : { rows: [] }
-    ));
+    query.mockResolvedValue({ rows: [] });
     expect(await send('DELETE', `/users/${USER_ID}`)).toEqual({ status: 200, body: { ok: true } });
     expect(destroyUserSessions).toHaveBeenCalledWith(USER_ID);
     expect(closeUserSockets).toHaveBeenCalledWith(imapManager.wss, USER_ID);
     expect(query).toHaveBeenCalledWith('DELETE FROM users WHERE id = $1', [USER_ID]);
-    expect(imapManager.disconnectAccount).toHaveBeenCalledWith(MAILBOX_ID);
-    const deleteCall = query.mock.calls.findIndex(([sql]) => sql.startsWith('DELETE FROM users'));
-    expect(imapManager.disconnectAccount.mock.invocationCallOrder[0])
-      .toBeGreaterThan(query.mock.invocationCallOrder[deleteCall]);
+    expect(imapManager.disconnectAccount).not.toHaveBeenCalled();
   });
 });
 

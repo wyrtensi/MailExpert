@@ -2,34 +2,26 @@ import { query } from './db.js';
 import { completeText } from './aiProvider.js';
 import { detectCategoryFromHeaders } from './messageParser.js';
 
-// In-memory cache of social domains per user. Populated on first use,
-// invalidated when the user updates their category_list_sources.
-// Structure: Map<userId, { domains: Set<string>, expiry: number }>
-const socialDomainCache = new Map();
+// Social domains and the categorization switch are install-wide. Both are cached briefly and
+// dropped when someone changes category_list_sources or an admin flips the switch.
 const CACHE_TTL_MS = 5 * 60 * 1000; // 5 minutes
+let socialDomainCache = null;         // { domains: Set<string>, expiry: number }
+let globalCategorizationCache = null; // { value: boolean, expiry: number }
 
-export function invalidateSocialDomainCache(userId) {
-  socialDomainCache.delete(userId);
+export function invalidateSocialDomainCache() {
+  socialDomainCache = null;
 }
 
-// Cache for per-user global categorization preference (from users.preferences JSONB).
-// Structure: Map<userId, { value: boolean, expiry: number }>
-const globalCategorizationCache = new Map();
-
-export async function getGlobalCategorizationEnabled(userId) {
-  const cached = globalCategorizationCache.get(userId);
-  if (cached && cached.expiry > Date.now()) return cached.value;
-  const result = await query(
-    "SELECT (preferences->>'categorizationEnabled')::boolean AS val FROM users WHERE id = $1",
-    [userId]
-  );
-  const value = result.rows[0]?.val === true;
-  globalCategorizationCache.set(userId, { value, expiry: Date.now() + CACHE_TTL_MS });
+export async function getGlobalCategorizationEnabled() {
+  if (globalCategorizationCache && globalCategorizationCache.expiry > Date.now()) return globalCategorizationCache.value;
+  const result = await query("SELECT value FROM system_settings WHERE key = 'categorization_enabled'");
+  const value = result.rows[0]?.value === 'true';
+  globalCategorizationCache = { value, expiry: Date.now() + CACHE_TTL_MS };
   return value;
 }
 
-export function invalidateGlobalCategorizationCache(userId) {
-  globalCategorizationCache.delete(userId);
+export function invalidateGlobalCategorizationCache() {
+  globalCategorizationCache = null;
 }
 
 // Known shipping carrier / logistics sender domains → 'automated'.
@@ -71,15 +63,13 @@ const BUILTIN_SETS = {
   ],
 };
 
-async function loadSocialDomains(userId) {
-  const cached = socialDomainCache.get(userId);
-  if (cached && cached.expiry > Date.now()) return cached.domains;
+async function loadSocialDomains() {
+  if (socialDomainCache && socialDomainCache.expiry > Date.now()) return socialDomainCache.domains;
 
   const result = await query(
     `SELECT source_type, value, resolved_domains
      FROM category_list_sources
-     WHERE user_id = $1 AND enabled = true`,
-    [userId]
+     WHERE enabled = true`
   );
 
   const domains = new Set();
@@ -94,12 +84,12 @@ async function loadSocialDomains(userId) {
     }
   }
 
-  socialDomainCache.set(userId, { domains, expiry: Date.now() + CACHE_TTL_MS });
+  socialDomainCache = { domains, expiry: Date.now() + CACHE_TTL_MS };
   return domains;
 }
 
 // Determines the category for a single message given its parsed headers,
-// sender address, and the user's social domain set.
+// sender address, and the install's social domain set.
 // Returns 'primary' | 'newsletter' | 'promotion' | 'automated' | 'social'.
 export function classifyMessage(parsedHeaders, fromEmail, socialDomains) {
   // Social check first — user intent overrides header-based detection.
@@ -158,8 +148,8 @@ Category:`;
 
 // Assigns a category to a message and writes it to the DB.
 // Used during IMAP sync for new messages when categorization is enabled.
-export async function categorizeAndStore(messageId, parsedHeaders, fromEmail, userId) {
-  const socialDomains = await loadSocialDomains(userId);
+export async function categorizeAndStore(messageId, parsedHeaders, fromEmail) {
+  const socialDomains = await loadSocialDomains();
   const category = classifyMessage(parsedHeaders, fromEmail, socialDomains);
   if (category !== 'primary') {
     await query('UPDATE messages SET category = $1 WHERE id = $2', [category, messageId]);
@@ -171,8 +161,8 @@ export async function categorizeAndStore(messageId, parsedHeaders, fromEmail, us
 // Fetches headers from DB (is_bulk + from_email are already stored) and applies
 // header-based detection without an IMAP round-trip. Social domain matching
 // requires a separate header fetch and is handled in imapManager.refreshCategories().
-export async function backfillCategories(accountId, userId) {
-  const socialDomains = await loadSocialDomains(userId);
+export async function backfillCategories(accountId) {
+  const socialDomains = await loadSocialDomains();
 
   // Process in batches of 500 to avoid memory pressure.
   //

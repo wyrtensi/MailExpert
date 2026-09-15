@@ -97,19 +97,19 @@ export async function listThreadHeadsByLabels(accountId, { labels, labelFolders,
 // platform). An ordinary mutation MailExpert itself writes to the DB (archive, delete, move,
 // snooze, read, star) never trips the periodic sync tick — which only re-emits when the IMAP
 // server's fingerprint moves — so a label-driven feed can lag a full tick behind. This lets a
-// feature (and, later, a sandboxed plugin) ask core to broadcast a scoped refresh event to the
-// owning user IFF the mutation was relevant to its labels. Relevance is either:
+// feature (and, later, a sandboxed plugin) ask core to broadcast a refresh event to every
+// client IFF the mutation was relevant to its labels. Relevance is either:
 //   1. one of the acted messages still shares its RFC Message-ID with a live row in one of the
 //      label folders (the thread has, or is, a label copy) — `messageIds` are RFC Message-IDs
 //      (not row PKs) so this survives the acted row being moved/deleted by the mutation; or
 //   2. one of the acted rows' PRE-mutation folders was itself a label folder — covers a
 //      mutation that removes the last label copy of a thread, where #1 finds nothing.
 // #2 is a pure in-memory check (no query). #1 is one indexed EXISTS. `event` is the broadcast
-// type; the plugin never names another user — the broadcast is scoped to `userId`. imapManager
+// type; mailboxes are shared, so the event goes to every client. imapManager
 // is injected so this stays unit-testable without a live socket server. Returns whether it
 // broadcast.
-export async function notifyOnLabelTouch(imapManager, { accountId, userId, messageIds, actedFolders, labelFolders, event }) {
-  if (!accountId || !userId || !event) return false;
+export async function notifyOnLabelTouch(imapManager, { accountId, messageIds, actedFolders, labelFolders, event }) {
+  if (!accountId || !event) return false;
   const ids = [...new Set((messageIds || []).filter(Boolean))];
   if (!ids.length) return false;
   const folderPaths = [...new Set(labelFolders || [])];
@@ -128,7 +128,7 @@ export async function notifyOnLabelTouch(imapManager, { accountId, userId, messa
     [accountId, ids, folderPaths]
   );
   if (preMutationHit || rows.length) {
-    imapManager.broadcast({ type: event, accountId }, userId);
+    imapManager.broadcast({ type: event, accountId });
     return true;
   }
   return false;

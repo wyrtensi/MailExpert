@@ -22,9 +22,7 @@ vi.mock('../services/authLimiter.js', () => ({
 vi.mock('../services/authEvents.js', () => ({ logAuthEvent: vi.fn() }));
 vi.mock('../services/mailer.js', () => ({ sendSystemEmail: vi.fn() }));
 vi.mock('./oidc.js', () => ({ buildEndSessionUrl: vi.fn() }));
-vi.mock('../services/categorizer.js', () => ({
-  invalidateGlobalCategorizationCache: vi.fn(),
-}));
+vi.mock('../services/categorizer.js', () => ({ getGlobalCategorizationEnabled: vi.fn(async () => false) }));
 vi.mock('../services/redis.js', () => ({
   redisClient: { scan: vi.fn(), get: vi.fn(), del: vi.fn() },
 }));

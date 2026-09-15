@@ -24,7 +24,7 @@ import { archiveInboxCopy as _archiveInboxCopy } from '../services/archiveInbox.
 // unread/union counts. See services/labelsRead.js for the correctness contract.
 export { listThreadHeadsByLabels } from '../services/labelsRead.js';
 
-// "Did an ordinary mail mutation touch one of my labelled threads?" → scoped user broadcast.
+// "Did an ordinary mail mutation touch one of my labelled threads?" → refresh broadcast.
 export { notifyOnLabelTouch } from '../services/labelsRead.js';
 
 // ── Labels (write) ────────────────────────────────────────────────────────────
@@ -43,9 +43,9 @@ export const resolveLabelCopyUid = labelsWrite.resolveLabelCopyUid;
 export const archiveInboxCopy = (account, inboxCopy) => _archiveInboxCopy(getMailEngine(), account, inboxCopy);
 
 // ── Realtime broadcast ────────────────────────────────────────────────────────
-// Push a payload to a specific user's live sessions. A plugin can notify its own clients; it
-// cannot address other users or subsystems (the engine + user scoping are enforced here).
-export const broadcast = (payload, userId) => getMailEngine().broadcast(payload, userId);
+// Push a payload to live sessions: every client for a mailbox event, or one user's sessions when
+// a userId is given. The engine itself is never exposed.
+export const broadcast = (...args) => getMailEngine().broadcast(...args);
 
 // ── Summarize ─────────────────────────────────────────────────────────────────
 // Condense a message into one line via the configured AI provider (fails closed when the

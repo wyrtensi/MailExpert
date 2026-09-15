@@ -58,8 +58,8 @@ export function resolveDoneFolders({ enabled, folders, states, existing }) {
 }
 
 // GET /api/gtd/sections — thread heads + counts per GTD state for GTD display surfaces.
-// accountId absent => unified across the user's gtd_enabled accounts; present => scoped
-// to that owned account. Ownership + gtd_enabled filtering happen in the service.
+// accountId absent => unified across the gtd_enabled mailboxes; present => scoped to that
+// mailbox. gtd_enabled filtering happens in the service.
 // (Router is mounted at /api/gtd, so the paths here omit the gtd/ prefix.)
 router.get('/sections', async (req, res) => {
   const { accountId, limit } = req.query;
@@ -76,7 +76,6 @@ router.get('/sections', async (req, res) => {
   // per account when its batch completes so clients upgrade on the next refetch.
   queueGistGeneration({
     sections: result.sections,
-    userId: req.session.userId,
     broadcast,
   }).catch(err => console.warn('GTD gist generation error:', err.message));
 });
@@ -135,9 +134,8 @@ router.get('/pet/:slug/sheet', async (req, res) => {
   res.send(sheet.data);
 });
 
-// Load a message the caller owns, or send a 404. The email_accounts join is the
-// ownership filter (a.user_id = $2); the message row itself carries everything the
-// callers need (account_id, uid, folder, message_id), so no account column is selected.
+// Load a message by id, or send a 404. The message row carries everything the callers need
+// (account_id, uid, folder, message_id), so no account column is selected.
 // POST /api/gtd/classify { messageId, state } — apply a GTD label by COPYing the
 // message into the state's designated folder (the message stays in its current
 // folder; classify never removes it from the inbox). Thin: resolve the folder,
@@ -331,7 +329,7 @@ router.post('/done', async (req, res) => {
 
   // One terminal refresh so GTD section data converges to the post-done state (removeMessageCopy
   // also emits mid-op, but this covers the archive that follows it).
-  broadcast({ type: 'gtd_sections_updated', accountId: msg.account_id }, account.user_id);
+  broadcast({ type: 'gtd_sections_updated', accountId: msg.account_id });
 
   res.json({ ok: true, removed, archived, noArchiveFolder, archiveFailed });
 });

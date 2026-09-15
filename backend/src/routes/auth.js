@@ -13,7 +13,7 @@ import { authLimiterConfig } from '../services/authLimiter.js';
 import { logAuthEvent } from '../services/authEvents.js';
 import { sendSystemEmail } from '../services/mailer.js';
 import { buildEndSessionUrl } from './oidc.js';
-import { invalidateGlobalCategorizationCache } from '../services/categorizer.js';
+import { getGlobalCategorizationEnabled } from '../services/categorizer.js';
 import { sanitizeGtdPrefs } from '../utils/gtdPrefs.js';
 import { sanitizeRightSidebarPrefs } from '../utils/rightSidebarPrefs.js';
 import { redisClient } from '../services/redis.js';
@@ -755,10 +755,11 @@ router.get('/invite/:token', async (req, res) => {
 
 export async function getPreferences(req, res) {
   if (!req.session.userId) return res.status(401).json({ error: 'Not authenticated' });
-  const [userResult, cssResult, syncSettings] = await Promise.all([
+  const [userResult, cssResult, syncSettings, categorizationEnabled] = await Promise.all([
     query('SELECT preferences FROM users WHERE id = $1', [req.session.userId]),
     query("SELECT value FROM system_settings WHERE key = 'custom_css'"),
     loadSyncSettings(),
+    getGlobalCategorizationEnabled(),
   ]);
   const prefs = userResult.rows[0]?.preferences || {};
   const customCss = cssResult.rows[0]?.value;
@@ -766,6 +767,8 @@ export async function getPreferences(req, res) {
   // Install-wide and read-only here: the client uses it only to refresh the list while the
   // WebSocket is down. Admins change it through PATCH /api/admin/settings.
   prefs.syncInterval = syncSettings.syncIntervalSec;
+  // Install-wide and read-only here too: admins switch categorization through PATCH /api/admin/settings.
+  prefs.categorizationEnabled = categorizationEnabled;
   res.json(prefs);
 }
 
@@ -778,7 +781,7 @@ export async function patchPreferences(req, res) {
           threadedView, plaintextEmail, hoverQuickActions, swipeActions,
           expandedAccounts, collapsedFolders, favoriteFolders, recentFolders, fontSize,
           showAppBadge, showFaviconBadge, replyDefault, sidebarWidth,
-          categorizationEnabled, markReadBehavior, markReadDelay, aiActions,
+          markReadBehavior, markReadDelay, aiActions,
           autoLockMinutes, showMobileAvatars, gravatarAvatars,
           folderOrder, senderFavicons, showMessagePreviews, defaultSender } = req.body;
   // GTD content and generic right-sidebar layout preferences are independent flat
@@ -862,21 +865,20 @@ export async function patchPreferences(req, res) {
       || CASE WHEN $23::boolean IS NOT NULL THEN jsonb_build_object('showFaviconBadge', $23::boolean) ELSE '{}'::jsonb END
       || CASE WHEN $24::text IS NOT NULL THEN jsonb_build_object('replyDefault', $24::text) ELSE '{}'::jsonb END
       || CASE WHEN $25::text IS NOT NULL THEN jsonb_build_object('sidebarWidth', $25::text) ELSE '{}'::jsonb END
-      || CASE WHEN $26::boolean IS NOT NULL THEN jsonb_build_object('categorizationEnabled', $26::boolean) ELSE '{}'::jsonb END
-      || CASE WHEN $27::text IS NOT NULL THEN jsonb_build_object('markReadBehavior', $27::text) ELSE '{}'::jsonb END
-      || CASE WHEN $28::text IS NOT NULL THEN jsonb_build_object('markReadDelay', $28::text) ELSE '{}'::jsonb END
-      || CASE WHEN $29::jsonb IS NOT NULL THEN jsonb_build_object('aiActions', $29::jsonb) ELSE '{}'::jsonb END
-      || CASE WHEN $30::int IS NOT NULL THEN jsonb_build_object('rightSidebarWidth', $30::int) ELSE '{}'::jsonb END
-      || CASE WHEN $31::boolean IS NOT NULL THEN jsonb_build_object('rightSidebarHidden', $31::boolean) ELSE '{}'::jsonb END
-      || CASE WHEN $32::jsonb IS NOT NULL THEN jsonb_build_object('gtdCollapsedSections', $32::jsonb) ELSE '{}'::jsonb END
-      || CASE WHEN $33::text IS NOT NULL THEN jsonb_build_object('gtdPetSlug', $33::text) ELSE '{}'::jsonb END
-      || CASE WHEN $34::text IS NOT NULL THEN jsonb_build_object('autoLockMinutes', $34::text) ELSE '{}'::jsonb END
-      || CASE WHEN $35::boolean IS NOT NULL THEN jsonb_build_object('showMobileAvatars', $35::boolean) ELSE '{}'::jsonb END
-      || CASE WHEN $36::boolean IS NOT NULL THEN jsonb_build_object('gravatarAvatars', $36::boolean) ELSE '{}'::jsonb END
-      || CASE WHEN $37::jsonb IS NOT NULL THEN jsonb_build_object('folderOrder', $37::jsonb) ELSE '{}'::jsonb END
-      || CASE WHEN $38::boolean IS NOT NULL THEN jsonb_build_object('senderFavicons', $38::boolean) ELSE '{}'::jsonb END
-      || CASE WHEN $39::boolean IS NOT NULL THEN jsonb_build_object('showMessagePreviews', $39::boolean) ELSE '{}'::jsonb END
-      || CASE WHEN $40::text IS NOT NULL THEN jsonb_build_object('defaultSender', $40::text) ELSE '{}'::jsonb END
+      || CASE WHEN $26::text IS NOT NULL THEN jsonb_build_object('markReadBehavior', $26::text) ELSE '{}'::jsonb END
+      || CASE WHEN $27::text IS NOT NULL THEN jsonb_build_object('markReadDelay', $27::text) ELSE '{}'::jsonb END
+      || CASE WHEN $28::jsonb IS NOT NULL THEN jsonb_build_object('aiActions', $28::jsonb) ELSE '{}'::jsonb END
+      || CASE WHEN $29::int IS NOT NULL THEN jsonb_build_object('rightSidebarWidth', $29::int) ELSE '{}'::jsonb END
+      || CASE WHEN $30::boolean IS NOT NULL THEN jsonb_build_object('rightSidebarHidden', $30::boolean) ELSE '{}'::jsonb END
+      || CASE WHEN $31::jsonb IS NOT NULL THEN jsonb_build_object('gtdCollapsedSections', $31::jsonb) ELSE '{}'::jsonb END
+      || CASE WHEN $32::text IS NOT NULL THEN jsonb_build_object('gtdPetSlug', $32::text) ELSE '{}'::jsonb END
+      || CASE WHEN $33::text IS NOT NULL THEN jsonb_build_object('autoLockMinutes', $33::text) ELSE '{}'::jsonb END
+      || CASE WHEN $34::boolean IS NOT NULL THEN jsonb_build_object('showMobileAvatars', $34::boolean) ELSE '{}'::jsonb END
+      || CASE WHEN $35::boolean IS NOT NULL THEN jsonb_build_object('gravatarAvatars', $35::boolean) ELSE '{}'::jsonb END
+      || CASE WHEN $36::jsonb IS NOT NULL THEN jsonb_build_object('folderOrder', $36::jsonb) ELSE '{}'::jsonb END
+      || CASE WHEN $37::boolean IS NOT NULL THEN jsonb_build_object('senderFavicons', $37::boolean) ELSE '{}'::jsonb END
+      || CASE WHEN $38::boolean IS NOT NULL THEN jsonb_build_object('showMessagePreviews', $38::boolean) ELSE '{}'::jsonb END
+      || CASE WHEN $39::text IS NOT NULL THEN jsonb_build_object('defaultSender', $39::text) ELSE '{}'::jsonb END
     WHERE id = $1
   `, [req.session.userId, theme ?? null, font ?? null, layout ?? null, notificationSound ?? null,
       pageSize ?? null, scrollMode ?? null,
@@ -884,14 +886,10 @@ export async function patchPreferences(req, res) {
       language ?? null, threadedView ?? null, plaintextEmail ?? null, hoverQuickActions ?? null,
       swipeActionsJson, expandedAccountsJson, collapsedFoldersJson, favoriteFoldersJson, recentFoldersJson, fontSizeVal,
       showAppBadge ?? null, showFaviconBadge ?? null, replyDefaultVal, sidebarWidthVal,
-      categorizationEnabled ?? null, markReadBehaviorVal, markReadDelayVal, aiActionsJson,
+      markReadBehaviorVal, markReadDelayVal, aiActionsJson,
       rightSidebarWidth, rightSidebarHidden, gtdCollapsedSectionsJson, gtdPetSlug, autoLockMinutesVal,
       showMobileAvatars ?? null, gravatarAvatars ?? null, folderOrderJson, senderFaviconsVal,
       showMessagePreviews ?? null, defaultSenderVal]);
-
-  if (categorizationEnabled != null) {
-    invalidateGlobalCategorizationCache(req.session.userId);
-  }
 
   res.json({ ok: true });
 }

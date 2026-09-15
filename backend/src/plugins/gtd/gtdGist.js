@@ -85,7 +85,7 @@ async function generateForAccount(accountId, ids) {
 // Lazily generate gists for the waiting heads in a sections payload. Fire-and-forget
 // from the sections route — never blocks the response. Short-circuits (no queries)
 // when there are no candidates or no provider is configured.
-export async function queueGistGeneration({ sections, userId, broadcast } = {}) {
+export async function queueGistGeneration({ sections, broadcast } = {}) {
   const candidates = selectGistCandidates(sections).filter(c => !_inFlight.has(c.id));
   if (!candidates.length) return;
 
@@ -124,7 +124,7 @@ export async function queueGistGeneration({ sections, userId, broadcast } = {}) 
         ids.forEach(id => { _inFlight.delete(id); reserved.delete(id); });
       }
       if (wrote > 0 && typeof broadcast === 'function') {
-        broadcast({ type: 'gtd_sections_updated', accountId }, userId);
+        broadcast({ type: 'gtd_sections_updated', accountId });
       }
     }
   } finally {

@@ -1765,7 +1765,7 @@ ${bodyContent}
         break;
       case 'createRuleFromMessage': {
         const store = useStore.getState();
-        store.setRulesPreFill?.({ fromEmail: message.from_email, fromName: message.from_name });
+        store.setRulesPreFill?.({ accountId: message.account_id, fromEmail: message.from_email, fromName: message.from_name });
         store.setAdminTab('rules');
         store.setShowAdmin(true);
         break;
@@ -1773,7 +1773,7 @@ ${bodyContent}
       case 'addToBlockList': {
         const email = message.from_email;
         if (!email) break;
-        api.addToBlockList(email).then(() => {
+        api.addToBlockList(message.account_id, email).then(() => {
           addNotification({ title: t('blockList.blocked'), body: email });
         }).catch(() => {
           addNotification({ title: t('blockList.errorAdd'), body: email });

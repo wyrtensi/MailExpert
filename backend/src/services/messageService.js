@@ -1,11 +1,8 @@
 import { query } from './db.js';
 import { resolveAccountScope } from './unifiedInbox.js';
 
-export async function listMessages({ userId, accountId, folder = 'INBOX', limit = 50, offset = 0, unreadOnly, threaded, category }) {
-  const accountsResult = await query(
-    'SELECT id, include_in_unified_inbox FROM email_accounts WHERE user_id = $1 AND enabled = true',
-    [userId]
-  );
+export async function listMessages({ accountId, folder = 'INBOX', limit = 50, offset = 0, unreadOnly, threaded, category }) {
+  const accountsResult = await query('SELECT id, include_in_unified_inbox FROM email_accounts WHERE enabled = true');
   const {
     accountIds: scopedAccountIds,
     resolvedAccountId,
@@ -112,12 +109,11 @@ export async function listMessages({ userId, accountId, folder = 'INBOX', limit 
                a.name  AS account_name,
                a.email_address AS account_email,
                a.color AS account_color,
-               (co.id IS NOT NULL) AS has_contact_photo
+               EXISTS (SELECT 1 FROM contacts co
+                        WHERE co.primary_email = lower(m.from_email)
+                          AND co.photo_data IS NOT NULL) AS has_contact_photo
         FROM messages m
         JOIN email_accounts a ON m.account_id = a.id
-        LEFT JOIN contacts co ON co.user_id = a.user_id
-                              AND co.primary_email = lower(m.from_email)
-                              AND co.photo_data IS NOT NULL
         WHERE ${where}
           AND m.thread_key IN (SELECT thread_id FROM paged_threads)
         ORDER BY m.account_id,
@@ -190,12 +186,11 @@ export async function listMessages({ userId, accountId, folder = 'INBOX', limit 
            m.has_attachments, m.account_id, m.category,
            m.list_unsubscribe, m.list_unsubscribe_post, m.delivery_addresses,
            a.name as account_name, a.email_address as account_email, a.color as account_color,
-           (co.id IS NOT NULL) AS has_contact_photo
+           EXISTS (SELECT 1 FROM contacts co
+                    WHERE co.primary_email = lower(m.from_email)
+                      AND co.photo_data IS NOT NULL) AS has_contact_photo
     FROM messages m
     JOIN email_accounts a ON m.account_id = a.id
-    LEFT JOIN contacts co ON co.user_id = a.user_id
-                          AND co.primary_email = lower(m.from_email)
-                          AND co.photo_data IS NOT NULL
     WHERE ${where}
     -- m.id breaks exact date ties. Without it the sort is unspecified, so LIMIT/OFFSET
     -- paging could show a row twice or skip it entirely, and the client-side duplicate

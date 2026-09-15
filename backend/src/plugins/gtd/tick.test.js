@@ -102,7 +102,7 @@ describe('gtd hooks — gtdSyncTick', () => {
     expect(threadKeysInFolders).toHaveBeenCalledWith('acct-tick-changed', ['Todo']);
     expect(runGtdTransitions).toHaveBeenCalledWith(mgr, account, ['thr-1', 'thr-2']);
     expect(mgr.broadcast).toHaveBeenCalledTimes(1);
-    expect(mgr.broadcast).toHaveBeenCalledWith({ type: 'gtd_sections_updated', accountId: 'acct-tick-changed' }, 'user-1');
+    expect(mgr.broadcast).toHaveBeenCalledWith({ type: 'gtd_sections_updated', accountId: 'acct-tick-changed' });
   });
 
   it('broadcasts gtd_sections_updated when an empty folder gains its first message', async () => {
@@ -117,7 +117,7 @@ describe('gtd hooks — gtdSyncTick', () => {
     const account = { id: 'acct-tick-first', user_id: 'user-1' };
     await gtdSyncTick({ mgr, account });
     expect(runGtdTransitions).toHaveBeenCalledWith(mgr, account, ['thr-first']);
-    expect(mgr.broadcast).toHaveBeenCalledWith({ type: 'gtd_sections_updated', accountId: 'acct-tick-first' }, 'user-1');
+    expect(mgr.broadcast).toHaveBeenCalledWith({ type: 'gtd_sections_updated', accountId: 'acct-tick-first' });
   });
 
   it('keeps processing remaining folders when one folder sync throws', async () => {

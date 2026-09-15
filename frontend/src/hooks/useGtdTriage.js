@@ -238,14 +238,14 @@ export function useGtdTriage() {
       }
       case 'createRuleFromMessage': {
         const store = useStore.getState();
-        store.setRulesPreFill({ fromEmail: thread.from_email, fromName: thread.from_name });
+        store.setRulesPreFill({ accountId: thread.account_id, fromEmail: thread.from_email, fromName: thread.from_name });
         store.setAdminTab('rules');
         store.setShowAdmin(true);
         break;
       }
       case 'addToBlockList':
         if (thread.from_email) {
-          api.addToBlockList(thread.from_email)
+          api.addToBlockList(thread.account_id, thread.from_email)
             .then(() => addNotification({ title: t('blockList.blocked'), body: thread.from_email }))
             .catch(() => addNotification({ title: t('blockList.errorAdd'), body: thread.from_email }));
         }

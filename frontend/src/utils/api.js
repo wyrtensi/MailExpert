@@ -333,15 +333,6 @@ export const api = {
   updateContact: (id, data) => request('PATCH',  `/contacts/${id}`, data),
   deleteContact: (id)       => request('DELETE', `/contacts/${id}`),
 
-  // CardDAV contact sync (Nextcloud etc.)
-  carddav: {
-    status:     ()     => request('GET',    '/carddav'),
-    connect:    (data) => request('POST',   '/carddav/connect', data),
-    update:     (data) => request('PATCH',  '/carddav', data),
-    sync:       ()     => request('POST',   '/carddav/sync'),
-    disconnect: ()     => request('DELETE', '/carddav'),
-  },
-
   // Image whitelist
   addToImageWhitelist: (entry) => request('POST', '/auth/preferences/whitelist-add', entry),
 
@@ -363,10 +354,10 @@ export const api = {
   deleteDraft: (accountId, uid, folder) =>
     request('DELETE', `/mail/draft/${uid}?accountId=${encodeURIComponent(accountId)}&folder=${encodeURIComponent(folder)}`),
 
-  // Block List
-  getBlockList:          ()      => request('GET',    '/block-list'),
-  addToBlockList:        (email) => request('POST',   '/block-list', { emailAddress: email }),
-  removeFromBlockList:   (id)    => request('DELETE', `/block-list/${id}`),
+  // Block List — each entry blocks a sender for one account
+  getBlockList:          ()                 => request('GET',    '/block-list'),
+  addToBlockList:        (accountId, email) => request('POST',   '/block-list', { accountId, emailAddress: email }),
+  removeFromBlockList:   (id)               => request('DELETE', `/block-list/${id}`),
 
   // AI assistant
   ai: {

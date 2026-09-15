@@ -104,7 +104,7 @@ describe('runGtdTransitions', () => {
     await runGtdTransitions(mgr, account, ['t1']);
     expect(mgr.removeMessageCopy).toHaveBeenCalledWith('acct-1', 11, 'Todo');
     expect(mgr.removeMessageCopy).not.toHaveBeenCalledWith('acct-1', 12, 'Watch');
-    expect(mgr.broadcast).toHaveBeenCalledWith({ type: 'gtd_sections_updated', accountId: 'acct-1' }, 'user-1');
+    expect(mgr.broadcast).toHaveBeenCalledWith({ type: 'gtd_sections_updated', accountId: 'acct-1' });
   });
 
   it('strips Watch and Delegated when the last message is not from the owner, leaving Todo', async () => {
@@ -279,7 +279,7 @@ describe('runTransitionsForSentMessage', () => {
     const midCall = query.mock.calls.find(([sql]) => sql.includes('message_id = ANY'));
     expect(midCall[1]).toEqual(['acct-1', ['abc@example.com', '<abc@example.com>']]);
     expect(mgr.removeMessageCopy).toHaveBeenCalledWith('acct-1', 81, 'Todo');
-    expect(mgr.broadcast).toHaveBeenCalledWith({ type: 'gtd_sections_updated', accountId: 'acct-1' }, 'user-1');
+    expect(mgr.broadcast).toHaveBeenCalledWith({ type: 'gtd_sections_updated', accountId: 'acct-1' });
   });
 
   it('no-ops when the Sent copy has not synced yet (Message-ID resolves to nothing)', async () => {

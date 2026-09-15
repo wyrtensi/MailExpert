@@ -11,6 +11,7 @@ import { redisClient } from '../services/redis.js';
 import { redactEmail } from '../utils/redact.js';
 import { resolveSentFolder } from '../utils/mailUtils.js';
 import { generateVCard } from '../utils/vcard.js';
+import { defaultAddressBookId } from '../services/addressBooks.js';
 import { createAccountSmtpTransport } from '../services/smtpTransport.js';
 import { imapManager } from '../index.js';
 import { pluginRegistry } from '../plugins/registry.js';
@@ -182,7 +183,7 @@ router.post('/send', async (req, res) => {
   const normalizedSubject = sanitizeHeaderValue(subject || '');
 
   const [result, prefResult] = await Promise.all([
-    query('SELECT * FROM email_accounts WHERE id = $1 AND user_id = $2', [accountId, req.session.userId]),
+    query('SELECT * FROM email_accounts WHERE id = $1', [accountId]),
     query('SELECT preferences FROM users WHERE id = $1', [req.session.userId]),
   ]);
   if (!result.rows.length) return res.status(404).json({ error: 'Account not found' });
@@ -221,14 +222,13 @@ router.post('/send', async (req, res) => {
   let resolvedFwdAttachments = [];
   if (forwardedAttachments?.length) {
     try {
-      // Resolve every referenced message in a SINGLE ownership-scoped query so a large
-      // forwardedAttachments array can't fan out into one DB round-trip per entry.
+      // Resolve every referenced message in a SINGLE query so a large forwardedAttachments
+      // array can't fan out into one DB round-trip per entry.
       const distinctMsgIds = [...new Set(forwardedAttachments.map(fa => fa.messageId))];
       const msgRows = await query(
         `SELECT m.id, m.uid, m.folder, m.attachments, m.account_id FROM messages m
-         JOIN email_accounts a ON m.account_id = a.id
-         WHERE m.id = ANY($1::uuid[]) AND a.user_id = $2`,
-        [distinctMsgIds, req.session.userId]
+         WHERE m.id = ANY($1::uuid[])`,
+        [distinctMsgIds]
       );
       const msgById = new Map(msgRows.rows.map(m => [m.id, m]));
 
@@ -387,18 +387,10 @@ router.post('/send', async (req, res) => {
     // Fire-and-forget — a DB error here must never affect the send response.
     const allRecipients = [...normalizedTo, ...normalizedCc, ...normalizedBcc];
     if (allRecipients.length) {
-      const userId = req.session.userId;
       const now = new Date();
       setImmediate(async () => {
         try {
-          // Ensure the user's default address book exists
-          const abResult = await query(
-            `INSERT INTO address_books (user_id, name) VALUES ($1, 'Personal')
-             ON CONFLICT (user_id, name) DO UPDATE SET updated_at = NOW()
-             RETURNING id`,
-            [userId]
-          );
-          const addressBookId = abResult.rows[0].id;
+          const addressBookId = await defaultAddressBookId();
 
           const results = await Promise.allSettled(allRecipients.map(addr => {
             const { name, email } = parseAddress(addr);
@@ -409,41 +401,27 @@ router.post('/send', async (req, res) => {
             const emails = [{ value: primaryEmail, type: 'other', primary: true }];
             const vcard  = generateVCard({ uid, displayName, emails });
             const etag   = createHash('md5').update(vcard).digest('hex');
-            // Upsert by (user_id, primary_email) — bump send_count and promote from is_auto.
+            // Upsert by (address book, primary_email) — bump send_count and promote from is_auto.
             // On conflict, preserve an existing vcard; only fill it in if the row had none.
             return query(`
               INSERT INTO contacts (
-                address_book_id, user_id, uid, vcard, etag,
+                address_book_id, uid, vcard, etag,
                 display_name, primary_email, emails, is_auto, send_count, last_sent
               )
-              VALUES ($1, $2, $3, $4, $5, $6, $7, $8::jsonb, false, 1, $9)
+              VALUES ($1, $2, $3, $4, $5, $6, $7::jsonb, false, 1, $8)
               ON CONFLICT (address_book_id, primary_email) WHERE primary_email IS NOT NULL DO UPDATE
                 SET send_count   = contacts.send_count + 1,
-                    last_sent    = $9,
+                    last_sent    = $8,
                     is_auto      = false,
-                    display_name = CASE WHEN contacts.is_auto THEN $6 ELSE contacts.display_name END,
+                    display_name = CASE WHEN contacts.is_auto THEN $5 ELSE contacts.display_name END,
                     vcard        = COALESCE(contacts.vcard, EXCLUDED.vcard),
                     etag         = COALESCE(contacts.etag,  EXCLUDED.etag),
                     updated_at   = NOW()
-              RETURNING address_book_id
-            `, [addressBookId, userId, uid, vcard, etag, displayName, primaryEmail, JSON.stringify(emails), now]);
+            `, [addressBookId, uid, vcard, etag, displayName, primaryEmail, JSON.stringify(emails), now]);
           }));
 
           const failed = results.filter(r => r.status === 'rejected');
           if (failed.length) console.warn('Contact upsert errors:', failed.map(r => r.reason?.message));
-
-          // Collect distinct address books actually modified (contacts may live in non-default books).
-          const booksToSync = new Set();
-          for (const r of results) {
-            if (r.status === 'fulfilled' && r.value?.rows?.[0]?.address_book_id) {
-              booksToSync.add(r.value.rows[0].address_book_id);
-            }
-          }
-          if (!booksToSync.size) booksToSync.add(addressBookId);
-
-          await Promise.all([...booksToSync].map(bookId =>
-            query('UPDATE address_books SET sync_token = gen_random_uuid()::text, updated_at = NOW() WHERE id = $1', [bookId])
-          ));
         } catch (err) {
           console.warn('Contact upsert setup error:', err.message);
         }

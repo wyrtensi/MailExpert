@@ -11,7 +11,7 @@ vi.mock('./oauth/tokenManager.js', async (importOriginal) => ({
 vi.mock('./emailSanitizer.js', () => ({ sanitizeEmail: vi.fn() }));
 vi.mock('./encryption.js', () => ({ decrypt: vi.fn() }));
 vi.mock('./aiProvider.js', () => ({ getAiStatus: vi.fn(), completeText: vi.fn() }));
-vi.mock('./pushNotifications.js', () => ({ sendPushToUser: vi.fn() }));
+vi.mock('./pushNotifications.js', () => ({ sendPushToActiveUsers: vi.fn() }));
 vi.mock('../utils/redact.js', () => ({ redactEmail: vi.fn(() => 'redacted') }));
 vi.mock('./hostValidation.js', () => ({ resolveForConnection: vi.fn(), createPinnedLookup: vi.fn() }));
 vi.mock('./connectionPolicy.js', () => ({ getConnectionPolicy: vi.fn() }));
@@ -297,7 +297,7 @@ describe('manual sync of one mailbox', () => {
     expect(syncMessages).toHaveBeenCalledWith(expect.objectContaining({ id: 'mailbox-1' }), client, 'INBOX', 20, false, true);
     expect(mgr.lastSyncOkAt.has('mailbox-1')).toBe(true);
     expect(mgr.syncingAccounts.has('mailbox-1')).toBe(false);
-    expect(mgr.broadcast).toHaveBeenCalledWith({ type: 'sync_complete', accountId: 'mailbox-1' }, 'u1');
+    expect(mgr.broadcast).toHaveBeenCalledWith({ type: 'sync_complete', accountId: 'mailbox-1' });
   });
 
   it('does nothing for a mailbox disabled after the request', async () => {
@@ -341,7 +341,7 @@ describe('manual sync of one mailbox', () => {
 
     expect(syncFolders).toHaveBeenCalledWith(expect.objectContaining({ id: 'mailbox-1' }), client);
     expect(mgr.lastFolderSyncAt.has('mailbox-1')).toBe(true);
-    expect(mgr.broadcast).toHaveBeenCalledWith({ type: 'folders_synced', accountId: 'mailbox-1' }, 'u1');
+    expect(mgr.broadcast).toHaveBeenCalledWith({ type: 'folders_synced', accountId: 'mailbox-1' });
   });
 
   it('reports a connect in progress', () => {

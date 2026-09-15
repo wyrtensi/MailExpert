@@ -56,7 +56,7 @@ describe('GET /api/mail/unread-counts unified total', () => {
     });
   });
 
-  it('preserves unknown, empty, and stale counts distinctly, with user-scoped uncached responses', async () => {
+  it('preserves unknown, empty, and stale counts distinctly, with uncached responses', async () => {
     query.mockResolvedValueOnce({ rows: [
       { account_id: 'unknown', count: null },
       { account_id: 'empty', count: '0', server_counts_at: new Date(), server_count_revision: '2' },
@@ -67,7 +67,7 @@ describe('GET /api/mail/unread-counts unified total', () => {
     expect(await response.json()).toMatchObject({ total: 3, complete: false,
       byAccount: { unknown: null, empty: 0, offline: 3 },
       snapshots: { unknown: { known: false, stale: true }, empty: { known: true, stale: false }, offline: { stale: true, attemptRevision: '4' } } });
-    expect(query.mock.calls[0][1]).toEqual(['user-1']);
+    expect(query.mock.calls[0][1]).toBeUndefined();
     expect(query.mock.calls[0][0]).toContain('LEFT JOIN folders');
     expect(query.mock.calls[0][0]).not.toContain('FROM messages');
   });

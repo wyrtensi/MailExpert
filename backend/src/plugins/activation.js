@@ -9,6 +9,7 @@
 // State lives in `users.preferences.enabledPlugins` (a JSONB array of plugin ids). Absent = none
 // activated (default OFF). A short-TTL per-user cache keeps the hot paths (getGtdConfig et al.)
 // from hitting the DB on every call; `invalidateActivationCache` is called on every toggle.
+// Per-mailbox gates ask whether any active user activated the plugin, because mailboxes are shared.
 import { query } from '../services/db.js';
 
 const activationCache = new Map(); // userId -> { value: Set<pluginId>, expiry }
@@ -44,13 +45,29 @@ export async function isPluginActivated(userId, pluginId) {
   return (await getActivatedPlugins(userId)).has(pluginId);
 }
 
-// Whether a plugin is activated for the user who OWNS an account. Lets a plugin compose activation
-// into per-account logic without holding the account's userId (it resolves the owner internally).
-export async function isPluginActivatedForAccount(pluginId, accountId) {
-  const { rows } = await query('SELECT user_id FROM email_accounts WHERE id = $1', [accountId]);
-  const userId = rows[0]?.user_id;
-  if (!userId) return false;
-  return isPluginActivated(userId, pluginId);
+const activatedByAnyoneCache = new Map(); // pluginId -> { value: boolean, expiry }
+
+// Whether a plugin is on for a mailbox. Mailboxes are shared by every user, so it is on when any
+// active user has activated it. Plugins keep passing the account id; the answer does not depend on it.
+export async function isPluginActivatedForAccount(pluginId) {
+  const cached = activatedByAnyoneCache.get(pluginId);
+  if (cached && cached.expiry > Date.now()) return cached.value;
+  let value;
+  try {
+    const { rows } = await query(
+      `SELECT EXISTS (
+         SELECT 1 FROM users
+          WHERE disabled_at IS NULL AND preferences->'enabledPlugins' ? $1
+       ) AS activated`,
+      [pluginId]
+    );
+    value = rows[0]?.activated === true;
+  } catch {
+    // A prefs read blip degrades to "not activated" rather than throwing on a hot path.
+    value = false;
+  }
+  activatedByAnyoneCache.set(pluginId, { value, expiry: Date.now() + CACHE_TTL_MS });
+  return value;
 }
 
 // Turn a plugin on/off for a user (persisted to preferences.enabledPlugins) and drop the cache so
@@ -66,5 +83,6 @@ export async function setPluginActivated(userId, pluginId, activated) {
     [userId, JSON.stringify([...set])]
   );
   invalidateActivationCache(userId);
+  activatedByAnyoneCache.delete(pluginId);
   return set;
 }

@@ -132,8 +132,8 @@ router.post('/draft', async (req, res) => {
   if (!accountId) return res.status(400).json({ error: 'accountId required' });
 
   const ownerCheck = await query(
-    'SELECT id FROM email_accounts WHERE id = $1 AND user_id = $2',
-    [accountId, req.session.userId]
+    'SELECT id FROM email_accounts WHERE id = $1',
+    [accountId]
   );
   if (!ownerCheck.rows.length) return res.status(404).json({ error: 'Account not found' });
 
@@ -195,8 +195,8 @@ router.delete('/draft/:uid', async (req, res) => {
   if (!accountId || !folder) return res.status(400).json({ error: 'accountId and folder required' });
 
   const ownerCheck = await query(
-    'SELECT * FROM email_accounts WHERE id = $1 AND user_id = $2',
-    [accountId, req.session.userId]
+    'SELECT * FROM email_accounts WHERE id = $1',
+    [accountId]
   );
   if (!ownerCheck.rows.length) return res.status(404).json({ error: 'Account not found' });
 

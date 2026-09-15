@@ -7,8 +7,8 @@ import { validateHost, resolveForConnection } from '../services/hostValidation.j
 import { createSmtpTransport } from '../services/smtpTransport.js';
 import { getConnectionPolicy, invalidateConnectionPolicyCache } from '../services/connectionPolicy.js';
 import { reloadAuthSettings } from '../services/authLimiter.js';
+import { invalidateGlobalCategorizationCache } from '../services/categorizer.js';
 import { imapManager } from '../index.js';
-import { stopCardavUser } from '../services/carddavSync.js';
 import { pluginRegistry } from '../plugins/registry.js';
 import { uuidParam } from '../utils/uuid.js';
 import { getAuthSettings } from '../services/auth/authSettings.js';
@@ -224,29 +224,13 @@ router.delete('/users/:id', async (req, res) => {
       if (countsAsActiveAdmin(current, googleMode) && !(await otherActiveAdminExists(client, id, googleMode))) {
         throw new AdminUserError(409, 'last_admin', 'At least one active admin must remain');
       }
-      // Mailboxes still belong to one user: deleting the owner would delete them with it.
-      if (googleMode) {
-        const { rows: [{ count }] } = await client.query(
-          'SELECT COUNT(*)::int AS count FROM email_accounts WHERE user_id = $1',
-          [id],
-        );
-        if (count > 0) throw new AdminUserError(409, 'user_has_mailboxes', 'This user still owns mailboxes');
-      }
     });
   } catch (err) {
     return sendAdminUserError(res, err);
   }
 
-  // While mailboxes still belong to one user, the FK cascade deletes this user's mailboxes too:
-  // stop their live connections after the delete, as DELETE /api/accounts/:id does.
-  const { rows: ownedMailboxes } = await query('SELECT id FROM email_accounts WHERE user_id = $1', [id]);
-  stopCardavUser(id);
   await signOutEverywhere(id);
   await query('DELETE FROM users WHERE id = $1', [id]);
-  for (const mailbox of ownedMailboxes) {
-    imapManager.disconnectAccount(mailbox.id)
-      .catch(err => console.warn(`Disconnect after user delete for ${mailbox.id}:`, err.message));
-  }
   // Let plugins clean up any user-scoped data the FK cascade can't reach (GTD removes the
   // imported pet, stored under a slug derived from the user id rather than an FK). Best-effort
   // and after the delete: the user row is already gone, so a hook failure must not misreport a
@@ -283,7 +267,7 @@ router.patch('/settings', async (req, res) => {
   const { registration_open, internal_auth_disabled, auth_max_attempts, auth_window_minutes,
     allow_private_hosts, allow_insecure_tls, allow_nonstandard_ports,
     mfa_enforcement, mfa_device_trust, custom_css,
-    sync_interval_sec, folder_sync_interval_sec } = req.body;
+    sync_interval_sec, folder_sync_interval_sec, categorization_enabled } = req.body;
   // Checked before anything is written, so a bad interval never leaves a half-applied update.
   const syncIntervalSec = sync_interval_sec === undefined ? null : parseSyncIntervalSec(sync_interval_sec);
   if (sync_interval_sec !== undefined && syncIntervalSec === null) {
@@ -292,6 +276,9 @@ router.patch('/settings', async (req, res) => {
   const folderSyncIntervalSec = folder_sync_interval_sec === undefined ? null : parseFolderSyncIntervalSec(folder_sync_interval_sec);
   if (folder_sync_interval_sec !== undefined && folderSyncIntervalSec === null) {
     return res.status(400).json({ error: 'folder_sync_interval_sec must be 0, 900, 1800 or 3600', code: 'invalid_field' });
+  }
+  if (categorization_enabled !== undefined && typeof categorization_enabled !== 'boolean') {
+    return res.status(400).json({ error: 'categorization_enabled must be a boolean', code: 'invalid_field' });
   }
   if (typeof registration_open === 'boolean') {
     await query(
@@ -419,6 +406,15 @@ router.patch('/settings', async (req, res) => {
       console.error('Applying mailbox sync intervals failed:', err.message);
     }
     console.log(`[admin] ${req.session.userId} changed mailbox sync intervals`);
+  }
+  if (typeof categorization_enabled === 'boolean') {
+    await query(
+      `INSERT INTO system_settings (key, value, updated_at) VALUES ($1, $2, NOW())
+       ON CONFLICT (key) DO UPDATE SET value = $2, updated_at = NOW()`,
+      ['categorization_enabled', categorization_enabled ? 'true' : 'false']
+    );
+    invalidateGlobalCategorizationCache();
+    console.log(`[admin] ${req.session.userId} set categorization_enabled=${categorization_enabled}`);
   }
   invalidateConnectionPolicyCache();
   res.json({ ok: true });

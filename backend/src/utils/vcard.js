@@ -1,5 +1,5 @@
 // vCard 3.0 parser and generator (RFC 2426).
-// Used by the contacts REST API and the CardDAV server.
+// Used by the contacts REST API.
 
 // Sanitize a vCard parameter value (e.g. TYPE=...).
 // Strips CR, LF, and other characters that are structural in vCard lines.

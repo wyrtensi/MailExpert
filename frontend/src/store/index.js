@@ -537,7 +537,7 @@ export const useStore = create((set, get) => ({
   // Contacts view
   showContacts: false,
   setShowContacts: (v) => set({ showContacts: v }),
-  rulesPreFill: null, // { fromEmail, fromName, subject } — transient, set by context menu
+  rulesPreFill: null, // { accountId, fromEmail, fromName } — transient, set by context menu
   setRulesPreFill: (v) => set({ rulesPreFill: v }),
 
   backfillProgress: {}, // { [accountId]: { synced: N, total: N } | null } — transient
@@ -705,9 +705,12 @@ export const useStore = create((set, get) => ({
   },
 
   categorizationEnabled: false,
+  // Install-wide: only an admin can switch it, so a refused change reverts the toggle.
   setCategorizationEnabled: (val) => {
+    const previous = get().categorizationEnabled;
     set({ categorizationEnabled: val });
-    schedulePrefSave({ categorizationEnabled: val });
+    api.admin.updateSettings({ categorization_enabled: val })
+      .catch(() => set({ categorizationEnabled: previous }));
   },
 
   // Unread counts per category for the tab bar badges { primary: N, newsletter: N, ... }

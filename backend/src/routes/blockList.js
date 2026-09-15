@@ -1,16 +1,15 @@
 import { Router } from 'express';
 import { query } from '../services/db.js';
 import { requireAuth } from '../middleware/auth.js';
+import { requireMailbox } from '../utils/requireMailbox.js';
 
 const router = Router();
 router.use(requireAuth);
 
+// The block list of every mailbox; each entry names the mailbox it applies to.
 router.get('/', async (req, res) => {
   try {
-    const result = await query(
-      'SELECT * FROM block_list WHERE user_id = $1 ORDER BY created_at DESC',
-      [req.session.userId]
-    );
+    const result = await query('SELECT * FROM block_list ORDER BY created_at DESC');
     res.json(result.rows);
   } catch (err) {
     console.error('GET /block-list error:', err.message);
@@ -19,21 +18,23 @@ router.get('/', async (req, res) => {
 });
 
 router.post('/', async (req, res) => {
-  const { emailAddress } = req.body;
+  const { accountId, emailAddress } = req.body;
   if (!emailAddress || typeof emailAddress !== 'string' || !emailAddress.trim()) {
     return res.status(400).json({ error: 'emailAddress is required' });
   }
+  const email = emailAddress.trim().toLowerCase();
   try {
+    const mailboxId = await requireMailbox(accountId, res);
+    if (!mailboxId) return;
     const result = await query(
-      `INSERT INTO block_list (user_id, email_address)
+      `INSERT INTO block_list (account_id, email_address)
        VALUES ($1, $2)
-       ON CONFLICT (user_id, email_address) DO NOTHING
+       ON CONFLICT (account_id, email_address) DO NOTHING
        RETURNING *`,
-      [req.session.userId, emailAddress.trim().toLowerCase()]
+      [mailboxId, email]
     );
     const row = result.rows[0] ?? (
-      await query('SELECT * FROM block_list WHERE user_id = $1 AND email_address = $2',
-        [req.session.userId, emailAddress.trim().toLowerCase()])
+      await query('SELECT * FROM block_list WHERE account_id = $1 AND email_address = $2', [mailboxId, email])
     ).rows[0];
     res.status(201).json(row);
   } catch (err) {
@@ -44,10 +45,7 @@ router.post('/', async (req, res) => {
 
 router.delete('/:id', async (req, res) => {
   try {
-    const result = await query(
-      'DELETE FROM block_list WHERE id = $1 AND user_id = $2 RETURNING id',
-      [req.params.id, req.session.userId]
-    );
+    const result = await query('DELETE FROM block_list WHERE id = $1 RETURNING id', [req.params.id]);
     if (!result.rows.length) return res.status(404).json({ error: 'Entry not found' });
     res.json({ ok: true });
   } catch (err) {

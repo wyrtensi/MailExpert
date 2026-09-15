@@ -2,6 +2,7 @@ import { Router } from 'express';
 import { query } from '../services/db.js';
 import { requireAuth } from '../middleware/auth.js';
 import { applyInboxRules, isDangerousRegex } from '../services/inboxRules.js';
+import { requireMailbox } from '../utils/requireMailbox.js';
 
 const router = Router();
 router.use(requireAuth);
@@ -75,10 +76,7 @@ export function normalizeActions(actions) {
 
 router.get('/', async (req, res) => {
   try {
-    const result = await query(
-      'SELECT * FROM inbox_rules WHERE user_id = $1 ORDER BY priority ASC, created_at ASC',
-      [req.session.userId]
-    );
+    const result = await query('SELECT * FROM inbox_rules ORDER BY priority ASC, created_at ASC');
     res.json(result.rows);
   } catch (err) {
     console.error('GET /rules error:', err.message);
@@ -93,18 +91,12 @@ router.post('/run', async (req, res) => {
   let accountIds;
   try {
     if (accountId) {
-      const owned = await query(
-        'SELECT id FROM email_accounts WHERE id = $1 AND user_id = $2',
-        [accountId, req.session.userId]
-      );
-      if (!owned.rows.length) return res.status(404).json({ error: 'Account not found' });
-      accountIds = [accountId];
+      const mailboxId = await requireMailbox(accountId, res);
+      if (!mailboxId) return;
+      accountIds = [mailboxId];
     } else {
-      const accts = await query(
-        'SELECT id FROM email_accounts WHERE user_id = $1',
-        [req.session.userId]
-      );
-      accountIds = accts.rows.map(r => r.id);
+      const mailboxes = await query('SELECT id FROM email_accounts');
+      accountIds = mailboxes.rows.map(r => r.id);
     }
   } catch (err) {
     console.error('POST /rules/run account lookup error:', err.message);
@@ -114,41 +106,41 @@ router.post('/run', async (req, res) => {
   // The sweep can take minutes on a large mailbox — well past any proxy
   // timeout, which used to surface as a 504 while the run kept going
   // server-side. Respond immediately and run in the background; the
-  // rules_run_complete WebSocket event delivers the result. One run per user
-  // at a time.
+  // rules_run_complete WebSocket event delivers the result to whoever started
+  // it. A mailbox is swept by one run at a time, whoever started it.
+  if (accountIds.some(id => runInFlight.has(id))) return res.status(409).json({ error: 'Rules are already running' });
+  accountIds.forEach(id => runInFlight.add(id));
   const userId = req.session.userId;
-  if (runInFlight.has(userId)) return res.status(409).json({ error: 'Rules are already running' });
-  runInFlight.add(userId);
   res.status(202).json({ ok: true, started: true });
 
   (async () => {
     try {
-      const { processed, matched } = await runRulesSweep(userId, accountIds, imapMgr);
+      const { processed, matched } = await runRulesSweep(accountIds, imapMgr);
       imapMgr?.broadcast?.({ type: 'rules_run_complete', ok: true, processed, matched }, userId);
     } catch (err) {
       console.error('POST /rules/run sweep error:', err.message);
       imapMgr?.broadcast?.({ type: 'rules_run_complete', ok: false }, userId);
     } finally {
-      runInFlight.delete(userId);
+      accountIds.forEach(id => runInFlight.delete(id));
     }
   })();
 });
 
-// Users with a background "Run rules on inbox" sweep in flight.
+// Mailboxes with a background "Run rules on inbox" sweep in flight.
 const runInFlight = new Set();
 
-// Applies the user's rules to every INBOX message of the given accounts, in
+// Applies each mailbox's rules to every INBOX message of the given mailboxes, in
 // batches. Per-account failures are logged and skipped so one bad account
 // never aborts the rest. Returns the totals for the completion notice.
-async function runRulesSweep(userId, accountIds, imapMgr) {
+async function runRulesSweep(accountIds, imapMgr) {
   let processed = 0;
   let matched = 0;
 
   for (const acctId of accountIds) {
     try {
       const rulesCheck = await query(
-        'SELECT COUNT(*) AS cnt FROM inbox_rules WHERE user_id = $1 AND enabled = true AND (account_id IS NULL OR account_id = $2)',
-        [userId, acctId]
+        'SELECT COUNT(*) AS cnt FROM inbox_rules WHERE enabled = true AND account_id = $1',
+        [acctId]
       );
       if (parseInt(rulesCheck.rows[0].cnt, 10) === 0) continue;
 
@@ -222,46 +214,34 @@ router.post('/', async (req, res) => {
   }
   const conditionError = validateConditions(conditions);
   if (conditionError) return res.status(400).json({ error: conditionError });
-  let normalizedActions = normalizeActions(actions);
+  const normalizedActions = normalizeActions(actions);
   const actionError = validateActions(normalizedActions);
   if (actionError) return res.status(400).json({ error: actionError });
-  normalizedActions = normalizedActions
-    .filter(a => accountId || a.type !== 'move');
   try {
-    if (accountId) {
-      const owned = await query(
-        'SELECT id FROM email_accounts WHERE id = $1 AND user_id = $2',
-        [accountId, req.session.userId]
-      );
-      if (!owned.rows.length) return res.status(403).json({ error: 'Account not found' });
-    }
-    // Strip move actions for all-account rules — a move needs a known account to
-    // resolve folder paths. The UI enforces this but a direct API call could bypass it.
+    const mailboxId = await requireMailbox(accountId, res);
+    if (!mailboxId) return;
     const moveAction = normalizedActions.find(a => a.type === 'move' && a.value?.trim());
-    if (moveAction && accountId) {
+    if (moveAction) {
       const folderResult = await query(
         `SELECT COUNT(*) AS total, COUNT(*) FILTER (WHERE path = $2) AS match
          FROM folders WHERE account_id = $1`,
-        [accountId, moveAction.value.trim()]
+        [mailboxId, moveAction.value.trim()]
       );
       const { total, match } = folderResult.rows[0];
       if (parseInt(total) > 0 && parseInt(match) === 0) {
         return res.status(400).json({ error: 'Move destination folder not found for this account' });
       }
     }
-    const countResult = await query(
-      'SELECT COUNT(*) AS cnt FROM inbox_rules WHERE user_id = $1',
-      [req.session.userId]
-    );
+    const countResult = await query('SELECT COUNT(*) AS cnt FROM inbox_rules');
     const priority = parseInt(countResult.rows[0].cnt);
     const result = await query(
       `INSERT INTO inbox_rules
-         (user_id, account_id, name, enabled, stop_processing, priority, condition_logic, conditions, actions)
+         (created_by, account_id, name, enabled, stop_processing, priority, condition_logic, conditions, actions)
        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
        RETURNING *`,
       [
         req.session.userId,
-        accountId || null,
+        mailboxId,
         name || '',
         enabled !== false,
         !!stopProcessing,
@@ -285,25 +265,18 @@ router.put('/:id', async (req, res) => {
   }
   const conditionError = validateConditions(conditions);
   if (conditionError) return res.status(400).json({ error: conditionError });
-  let normalizedActions = normalizeActions(actions);
+  const normalizedActions = normalizeActions(actions);
   const actionError = validateActions(normalizedActions);
   if (actionError) return res.status(400).json({ error: actionError });
-  normalizedActions = normalizedActions
-    .filter(a => accountId || a.type !== 'move');
   try {
-    if (accountId) {
-      const owned = await query(
-        'SELECT id FROM email_accounts WHERE id = $1 AND user_id = $2',
-        [accountId, req.session.userId]
-      );
-      if (!owned.rows.length) return res.status(403).json({ error: 'Account not found' });
-    }
+    const mailboxId = await requireMailbox(accountId, res);
+    if (!mailboxId) return;
     const moveAction = normalizedActions.find(a => a.type === 'move' && a.value?.trim());
-    if (moveAction && accountId) {
+    if (moveAction) {
       const folderResult = await query(
         `SELECT COUNT(*) AS total, COUNT(*) FILTER (WHERE path = $2) AS match
          FROM folders WHERE account_id = $1`,
-        [accountId, moveAction.value.trim()]
+        [mailboxId, moveAction.value.trim()]
       );
       const { total, match } = folderResult.rows[0];
       if (parseInt(total) > 0 && parseInt(match) === 0) {
@@ -314,18 +287,17 @@ router.put('/:id', async (req, res) => {
       `UPDATE inbox_rules
        SET name = $1, account_id = $2, enabled = $3, stop_processing = $4,
            condition_logic = $5, conditions = $6, actions = $7, updated_at = NOW()
-       WHERE id = $8 AND user_id = $9
+       WHERE id = $8
        RETURNING *`,
       [
         name || '',
-        accountId || null,
+        mailboxId,
         enabled !== false,
         !!stopProcessing,
         conditionLogic === 'OR' ? 'OR' : 'AND',
         JSON.stringify(conditions),
         JSON.stringify(normalizedActions),
         req.params.id,
-        req.session.userId,
       ]
     );
     if (!result.rows.length) return res.status(404).json({ error: 'Rule not found' });
@@ -339,8 +311,8 @@ router.put('/:id', async (req, res) => {
 router.delete('/:id', async (req, res) => {
   try {
     const result = await query(
-      'DELETE FROM inbox_rules WHERE id = $1 AND user_id = $2 RETURNING id',
-      [req.params.id, req.session.userId]
+      'DELETE FROM inbox_rules WHERE id = $1 RETURNING id',
+      [req.params.id]
     );
     if (!result.rows.length) return res.status(404).json({ error: 'Rule not found' });
     res.json({ ok: true });
@@ -354,12 +326,12 @@ router.patch('/reorder', async (req, res) => {
   const { ids } = req.body;
   if (!Array.isArray(ids)) return res.status(400).json({ error: 'ids must be an array' });
   try {
-    // Verify all ids belong to this user before updating
-    const owned = await query(
-      'SELECT id FROM inbox_rules WHERE id = ANY($1::uuid[]) AND user_id = $2',
-      [ids, req.session.userId]
+    // Every id must be an existing rule before anything is renumbered
+    const found = await query(
+      'SELECT id FROM inbox_rules WHERE id = ANY($1::uuid[])',
+      [ids]
     );
-    if (owned.rows.length !== ids.length) {
+    if (found.rows.length !== ids.length) {
       return res.status(403).json({ error: 'One or more rules not found' });
     }
     for (let i = 0; i < ids.length; i++) {

@@ -21,9 +21,9 @@ const {
   adjustFolderCounts,
 } = await import('../utils/mailUtils.js');
 const { forwardRuleMessage } = await import('./ruleForwarder.js');
-import { applyInboxRules } from './inboxRules.js';
+import { applyInboxRules, applyBlockList } from './inboxRules.js';
 
-const account = { id: 'acc-1', user_id: 'user-1', folder_mappings: {} };
+const account = { id: 'acc-1', folder_mappings: {} };
 
 const mkMsg = (overrides = {}) => ({
   id: 'msg-1', uid: 100, folder: 'INBOX', account_id: 'acc-1',
@@ -34,7 +34,7 @@ const mkMsg = (overrides = {}) => ({
 });
 
 const mkRule = (actions, overrides = {}) => ({
-  id: 'rule-1', user_id: 'user-1', account_id: null, enabled: true,
+  id: 'rule-1', account_id: 'acc-1', enabled: true,
   stop_processing: false, condition_logic: 'AND',
   conditions: [{ field: 'from', operator: 'contains', value: 'sender@' }],
   actions,
@@ -822,5 +822,20 @@ describe('applyInboxRules — to not_contains requires all recipients to not mat
     // no recipient contains 'filtered' → condition true → move fires
     expect(result.remaining).toHaveLength(0);
     expect(mockImap.bulkMoveMessages).toHaveBeenCalledOnce();
+  });
+});
+
+describe('rules and block list are per mailbox', () => {
+  it('loads the enabled rules of the mailbox only', async () => {
+    query.mockResolvedValueOnce({ rows: [] });
+    await applyInboxRules([mkMsg()], account, mockImap);
+    expect(query).toHaveBeenCalledWith(expect.stringMatching(/WHERE account_id = \$1 AND enabled = true/), ['acc-1']);
+  });
+
+  it('reads the block list of the mailbox only', async () => {
+    query.mockResolvedValueOnce({ rows: [] });
+    const remaining = await applyBlockList([mkMsg()], account, mockImap);
+    expect(query).toHaveBeenCalledWith('SELECT email_address FROM block_list WHERE account_id = $1', ['acc-1']);
+    expect(remaining).toHaveLength(1);
   });
 });

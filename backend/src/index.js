@@ -32,9 +32,6 @@ import { setMailEngine } from './plugins/mailEngine.js';
 import pluginsRoutes from './routes/plugins.js';
 import senderFaviconsRoutes from './routes/senderFavicons.js';
 import diagnosticsRoutes from './routes/diagnostics.js';
-import carddavRouter from './routes/carddav.js';
-import carddavAccountRouter from './routes/carddavAccount.js';
-import { startCardavScheduler } from './services/carddavSync.js';
 import { encryptExistingCredentials, query } from './services/db.js';
 import { runMigrations } from './services/migrations.js';
 import { parseVCard } from './utils/vcard.js';
@@ -161,15 +158,14 @@ app.use(sessionMiddleware);
 
 // Google sign-in mode: every request to these surfaces needs an approved, active user (a
 // Cloudflare Access token or a direct Google sign-in session); local sign-in routes are 404.
-app.use(['/api', '/oauth', '/auth/oidc', '/carddav', '/.well-known/carddav'], identityGate);
+app.use(['/api', '/oauth', '/auth/oidc'], identityGate);
 
 // CSRF defense-in-depth for the cookie-authenticated /api surface. A mutating
 // request must carry a custom header that a cross-site <form> cannot set and a
 // cross-origin fetch cannot send without a CORS preflight — which the CORS policy
 // above restricts to FRONTEND_URL. SameSite=lax cookies are the primary defense;
-// this closes same-site/subdomain and legacy-browser gaps. The external DAV server
-// (/carddav) and OAuth flows (/oauth) are mounted outside /api and use their own
-// auth, so they are intentionally not gated here.
+// this closes same-site/subdomain and legacy-browser gaps. OAuth flows (/oauth) are
+// mounted outside /api and use their own auth, so they are intentionally not gated here.
 const CSRF_SAFE_METHODS = new Set(['GET', 'HEAD', 'OPTIONS']);
 app.use('/api', (req, res, next) => {
   if (CSRF_SAFE_METHODS.has(req.method)) return next();
@@ -214,7 +210,6 @@ app.use('/api/rules', rulesRoutes);
 app.use('/api/block-list', blockListRoutes);
 app.use('/api/contacts', contactsRoutes);
 app.use('/api/todoist', todoistRoutes);
-app.use('/api/carddav', carddavAccountRouter);
 app.use('/api', aiRoutes);
 app.use('/api', categoriesRoutes);
 // Tier-1 plugin routers, mounted via the plugin registry (see src/plugins/). Registered
@@ -229,11 +224,6 @@ for (const plugin of pluginRegistry.list()) {
 }
 app.use('/api/sender-favicons', senderFaviconsRoutes);
 app.use('/api/diagnostics', diagnosticsRoutes);
-
-// CardDAV server — body is read lazily inside each handler via rawBody()
-app.use('/carddav', carddavRouter);
-// RFC 6764 well-known redirect — handle all methods so PROPFIND probes also redirect
-app.all('/.well-known/carddav', (req, res) => res.redirect(308, '/carddav/'));
 
 app.get('/api/health', (req, res) => res.json({ status: 'ok' }));
 app.get('/api/version', (_req, res) => res.json({ version: APP_VERSION, sha: process.env.BUILD_SHA || 'dev' }));
@@ -259,8 +249,8 @@ setupWebSocket(wss, sessionMiddleware);
 // Run pending schema migrations then start
 await runMigrations();
 
-// One-time backfill: populate photo_data from existing vcard column for contacts
-// that were synced before CardDAV PUT started persisting photo_data.
+// One-time backfill: populate photo_data from the stored vcard for contacts saved
+// before photo_data was persisted.
 async function backfillContactPhotos() {
   const { rows } = await query(
     `SELECT id, vcard FROM contacts WHERE vcard IS NOT NULL AND photo_data IS NULL`
@@ -289,9 +279,6 @@ await loadIntegrationConfigs();
 
 // Start background snooze watcher — polls every 60 seconds to restore snoozed messages
 imapManager.startSnoozeWatcher();
-
-// Schedule periodic CardDAV contact sync for any connected accounts.
-startCardavScheduler();
 
 // Mailboxes are serviced by the server: apply the install-wide sync cadence, then connect every
 // enabled IMAP mailbox through a bounded queue (IMAP_CONNECT_CONCURRENCY). Signing in, signing

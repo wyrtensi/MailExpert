@@ -2,7 +2,9 @@ import { describe, it, expect, vi, beforeEach } from 'vitest';
 
 vi.mock('../services/db.js', () => ({ query: vi.fn() }));
 import { query } from '../services/db.js';
-import { getActivatedPlugins, isPluginActivated, setPluginActivated, invalidateActivationCache } from './activation.js';
+import {
+  getActivatedPlugins, isPluginActivated, isPluginActivatedForAccount, setPluginActivated, invalidateActivationCache,
+} from './activation.js';
 
 describe('plugin activation', () => {
   beforeEach(() => {
@@ -77,5 +79,32 @@ describe('plugin activation', () => {
     expect(set).toEqual(new Set(['other']));
     const updateCall = query.mock.calls.find(([sql]) => /UPDATE users/.test(sql));
     expect(updateCall[1]).toEqual(['u6', JSON.stringify(['other'])]);
+  });
+});
+
+describe('plugin activation for a mailbox', () => {
+  beforeEach(() => {
+    query.mockReset();
+    invalidateActivationCache('u1');
+  });
+
+  it('is on when any active user turned the plugin on, cached per plugin', async () => {
+    query.mockResolvedValueOnce({ rows: [{ activated: true }] });
+    expect(await isPluginActivatedForAccount('gtd-any', 'acct-1')).toBe(true);
+    expect(await isPluginActivatedForAccount('gtd-any', 'acct-2')).toBe(true);
+    expect(query).toHaveBeenCalledTimes(1);
+    const [sql, params] = query.mock.calls[0];
+    expect(sql).toMatch(/disabled_at IS NULL/);
+    expect(sql).toMatch(/preferences->'enabledPlugins' \? \$1/);
+    expect(params).toEqual(['gtd-any']);
+  });
+
+  it('forgets the answer when someone toggles the plugin', async () => {
+    query.mockResolvedValueOnce({ rows: [{ activated: false }] });
+    expect(await isPluginActivatedForAccount('gtd-toggle', 'acct-1')).toBe(false);
+    query.mockResolvedValueOnce({ rows: [{ list: [] }] }).mockResolvedValueOnce({ rows: [] });
+    await setPluginActivated('u1', 'gtd-toggle', true);
+    query.mockResolvedValueOnce({ rows: [{ activated: true }] });
+    expect(await isPluginActivatedForAccount('gtd-toggle', 'acct-1')).toBe(true);
   });
 });

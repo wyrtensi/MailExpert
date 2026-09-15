@@ -210,7 +210,7 @@ describe('GET /oauth/google/callback', () => {
 
     const lock = sqlCall(/pg_advisory_xact_lock/);
     expect(lock[0]).toMatch(/hashtext\(\$1\)/);
-    expect(lock[1]).toEqual([`oauth-account:${USER_ID}:user@gmail.com`]);
+    expect(lock[1]).toEqual([`oauth-account:user@gmail.com`]);
 
     const [insertSql, insertParams] = sqlCall(/^\s*INSERT INTO email_accounts/);
     expect(insertSql).toMatch(/'imap\.gmail\.com', 993, true/);
@@ -238,8 +238,8 @@ describe('GET /oauth/google/callback', () => {
 
     expect(res.headers.get('location')).toBe('/?oauth_success=google&oauth_result=updated');
     const lock = sqlCall(/pg_advisory_xact_lock/);
-    expect(lock[1]).toEqual([`oauth-account:${USER_ID}:user@gmail.com`]);
-    expect(sqlCall(/^\s*SELECT id, oauth_refresh_token, oauth_app_id FROM email_accounts/)[0]).toMatch(/lower\(email_address\) = lower\(\$2\)/);
+    expect(lock[1]).toEqual([`oauth-account:user@gmail.com`]);
+    expect(sqlCall(/^\s*SELECT id, oauth_refresh_token, oauth_app_id FROM email_accounts/)[0]).toMatch(/lower\(email_address\) = lower\(\$1\)/);
     const [updateSql, updateParams] = sqlCall(/^\s*UPDATE email_accounts/);
     expect(updateSql).toMatch(/oauth_refresh_token = COALESCE\(\$2, oauth_refresh_token\)/);
     expect(updateSql).toMatch(/oauth_reconnect_required = false/);

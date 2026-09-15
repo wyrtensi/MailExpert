@@ -155,7 +155,7 @@ export async function runGtdTransitions(imapManager, account, threadKeys) {
 
   // One batched emit per run (not per stripped copy) so the rail converges once.
   if (anyStripped) {
-    imapManager.broadcast({ type: 'gtd_sections_updated', accountId: account.id }, account.user_id);
+    imapManager.broadcast({ type: 'gtd_sections_updated', accountId: account.id });
   }
 }
 

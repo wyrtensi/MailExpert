@@ -50,7 +50,7 @@ export async function sectionsChanged({ mgr, account, changedCount }) {
   if (!(changedCount > 0)) return;
   try {
     const { enabled } = await getGtdConfig(account.id);
-    if (enabled) mgr.broadcast({ type: 'gtd_sections_updated', accountId: account.id }, account.user_id);
+    if (enabled) mgr.broadcast({ type: 'gtd_sections_updated', accountId: account.id });
   } catch (err) {
     logger.debug(`GTD sections refresh emit skipped for ${account.id}: ${err.message}`);
   }
@@ -129,7 +129,7 @@ export async function gtdSyncTick({ mgr, account }) {
       } catch (err) {
         console.warn(`GTD transitions error ${account.id}:`, err.message);
       }
-      mgr.broadcast({ type: 'gtd_sections_updated', accountId: account.id }, account.user_id);
+      mgr.broadcast({ type: 'gtd_sections_updated', accountId: account.id });
     }
   } catch (err) {
     console.warn(`GTD tick error ${account.id}:`, err.message);
@@ -148,7 +148,7 @@ export async function gtdSyncTick({ mgr, account }) {
 export function emitAfterDeferredCopySync(mgr, account, toFolder, srcUid, fromFolder) {
   return mgr.syncFolderOnDemand(account, toFolder)
     .then(async () => {
-      mgr.broadcast({ type: 'gtd_sections_updated', accountId: account.id }, account.user_id);
+      mgr.broadcast({ type: 'gtd_sections_updated', accountId: account.id });
       if (!(await getGtdConfig(account.id)).enabled) return;
       try {
         const threadKey = await getThreadKeyForUid(account.id, srcUid, fromFolder);
@@ -166,7 +166,7 @@ export function emitAfterDeferredCopySync(mgr, account, toFolder, srcUid, fromFo
 // inserted yet, kick off the deferred reconcile. That reconcile is intentionally NOT awaited so
 // the label write never blocks on the destination sync. Never throws into core.
 export async function afterLabelCopy({ mgr, account, toFolder, fromFolder, srcUid, newUid }) {
-  mgr.broadcast({ type: 'gtd_sections_updated', accountId: account.id }, account.user_id);
+  mgr.broadcast({ type: 'gtd_sections_updated', accountId: account.id });
   if (newUid == null) {
     emitAfterDeferredCopySync(mgr, account, toFolder, srcUid, fromFolder);
   }
@@ -175,17 +175,17 @@ export async function afterLabelCopy({ mgr, account, toFolder, fromFolder, srcUi
 // runHook('afterLabelRemove'): core just deleted one folder's copy of a message. Broadcast the
 // GTD section refresh so clients refetch — same manager-level emit the pre-plugin code did.
 export async function afterLabelRemove({ mgr, account }) {
-  mgr.broadcast({ type: 'gtd_sections_updated', accountId: account.id }, account.user_id);
+  mgr.broadcast({ type: 'gtd_sections_updated', accountId: account.id });
 }
 
 // runHook('onMailMutation'): an ordinary mail mutation (archive/delete/move/read/star/snooze)
 // acted on a batch of rows in the mail route. Broadcast the GTD section refresh when the mutation
 // touched a labelled thread. Thin adapter over emitGtdIfRelevant, which self-gates on gtd_enabled
-// and delegates the relevance check + scoped broadcast to core's notifyOnLabelTouch. The route
+// and delegates the relevance check + broadcast to core's notifyOnLabelTouch. The route
 // fires this per affected account; the hook swallows per-plugin errors so a completed mutation is
 // never turned into a 500.
-export async function onMailMutation({ imapManager, accountId, userId, messageIds, actedFolders }) {
-  await emitGtdIfRelevant(imapManager, accountId, userId, messageIds, actedFolders);
+export async function onMailMutation({ imapManager, accountId, messageIds, actedFolders }) {
+  await emitGtdIfRelevant(imapManager, accountId, messageIds, actedFolders);
 }
 
 // runHook('onSentMessage'): a sent message just synced into the Sent folder. Re-run GTD

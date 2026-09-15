@@ -11,7 +11,7 @@
 // plaintext HTTP on a trusted network. Redirect downgrades to http are refused too.
 //
 // Use for outbound fetches to attacker-influenced or user-configured URLs
-// (one-click unsubscribe, category list sources, CardDAV discovery). Admin-configured
+// (one-click unsubscribe, category list sources). Admin-configured
 // provider URLs that intentionally point at internal hosts (the AI base URL)
 // deliberately keep using plain fetch.
 

@@ -20,7 +20,8 @@
     "unknown": "Desconocido",
     "error": "Error: {{message}}",
     "dismiss": "Descartar",
-    "loadMore": "Cargar más"
+    "loadMore": "Cargar más",
+    "adminOnly": "Solo un administrador puede cambiar esto."
   },
   "login": {
     "google": {
@@ -690,7 +691,6 @@
       "nameLabel": "Nombre de la regla",
       "namePlaceholder": "ej. Mover boletines",
       "accountLabel": "Aplicar a",
-      "accountAll": "Todas las cuentas",
       "conditionLogicLabel": "Coincide",
       "conditionLogicAnd": "todas las condiciones (AND)",
       "conditionLogicOr": "cualquier condición (OR)",
@@ -723,6 +723,7 @@
       "saveButton": "Guardar regla",
       "saving": "Guardando…",
       "errorRequired": "Se requiere nombre, al menos una condición y una acción.",
+      "errorAccount": "Elige una cuenta para esta regla.",
       "errorMoveFolder": "Ingresa una carpeta de destino para la acción Mover.",
       "errorForwardEmail": "Introduce una dirección de reenvío válida.",
       "errorSave": "No se pudo guardar la regla.",
@@ -738,8 +739,7 @@
       "bodyConditionNote": "Las reglas de cuerpo solo se ejecutan si el cuerpo del mensaje ya está descargado. Si aún no se ha obtenido cuando llega el mensaje, la regla se omite y el mensaje permanece en la bandeja de entrada — las reglas de cuerpo no se aplican retroactivamente.",
       "subTabRules": "Reglas",
       "subTabBlockList": "Lista de bloqueo",
-      "actionMoveSelectFolder": "Seleccionar carpeta…",
-      "actionMoveRequiresAccount": "Requiere una cuenta específica"
+      "actionMoveSelectFolder": "Seleccionar carpeta…"
     },
     "blockList": {
       "description": "Los correos de remitentes bloqueados se mueven automáticamente a la papelera.",
@@ -1053,7 +1053,7 @@
       "mailboxSyncTitle": "Sincronización de buzones",
       "mailboxSyncDesc": "Con qué frecuencia el servidor sincroniza todos los buzones. El ajuste se aplica a toda la instalación.",
       "allowPrivateHosts": "Permitir hosts privados / locales",
-      "allowPrivateHostsDesc": "Permite conectarse a servidores de correo IMAP/SMTP, servidores CardDAV y proveedores de IA en direcciones privadas o locales (p. ej. 127.0.0.1, 192.168.x.x). Necesario para protonmail-bridge, un servidor CardDAV/Nextcloud autoalojado o un modelo de IA local.",
+      "allowPrivateHostsDesc": "Permite conectarse a servidores de correo IMAP/SMTP y proveedores de IA en direcciones privadas o locales (p. ej. 127.0.0.1, 192.168.x.x). Necesario para protonmail-bridge o un modelo de IA local.",
       "allowInsecureTls": "Permitir TLS no seguro",
       "allowInsecureTlsDesc": "Permite a los usuarios desactivar la verificación del certificado TLS por cuenta. Necesario para servidores con certificados autofirmados.",
       "allowNonstandardPorts": "Permitir puertos no estándar",
@@ -1452,33 +1452,6 @@
         "tokenLabel": "Token de API personal",
         "tokenPh": "Pega tu token de API de Todoist",
         "help": "Encuentra tu token en Todoist Configuración → Integraciones → Desarrollador"
-      },
-      "carddav": {
-        "title": "Contactos CardDAV",
-        "description": "Sincroniza contactos desde un servidor CardDAV como Nextcloud.",
-        "connected": "Conectado",
-        "notConnected": "No conectado",
-        "serverLabel": "URL del servidor",
-        "serverPh": "https://cloud.ejemplo.com",
-        "userLabel": "Usuario",
-        "userPh": "tu usuario de Nextcloud",
-        "passLabel": "Contraseña de aplicación",
-        "passPh": "contraseña de aplicación (no la de inicio de sesión)",
-        "dupLabel": "Cuando un contacto ya existe",
-        "dupSeparate": "Mantener ambos (libreta separada)",
-        "dupMerge": "Combinar: gana CardDAV",
-        "dupSkip": "Omitir el contacto CardDAV",
-        "intervalLabel": "Intervalo de sincronización (minutos)",
-        "connect": "Conectar",
-        "connecting": "Conectando…",
-        "connectFailed": "Error al conectar",
-        "disconnect": "Desconectar",
-        "syncNow": "Sincronizar ahora",
-        "syncing": "Sincronizando…",
-        "lastSync": "Última sincronización: {{when}}",
-        "summary": "{{contacts}} contactos en {{books}} libretas",
-        "syncFailed": "La última sincronización falló: {{error}}",
-        "help": "Usa una contraseña de aplicación de Nextcloud, no la de inicio de sesión: los usuarios de SSO deben crear una en Ajustes → Seguridad. Los contactos se sincronizan en un solo sentido y son de solo lectura en MailExpert."
       }
     },
     "ssoLinked": {
@@ -1584,8 +1557,7 @@
       "work": "Trabajo",
       "home": "Casa",
       "other": "Otro"
-    },
-    "carddavBadge": "Sincronizado desde CardDAV"
+    }
   },
   "todoist": {
     "title": "Crear tarea en Todoist",

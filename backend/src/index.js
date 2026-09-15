@@ -44,6 +44,7 @@ import { getUpdateStatus } from './services/updateCheck.js';
 import { recordHttp } from './services/performanceMetrics.js';
 import { defaultEmptyBody } from './middleware/defaultEmptyBody.js';
 import { authSettingsError } from './services/auth/authSettings.js';
+import { identityGate } from './middleware/identityGate.js';
 
 const packageMeta = JSON.parse(readFileSync(new URL('../package.json', import.meta.url), 'utf-8'));
 let buildMeta = {};
@@ -155,6 +156,10 @@ app.use((err, req, res, next) => {
   next(err);
 });
 app.use(sessionMiddleware);
+
+// Google sign-in mode: every request to these surfaces needs an approved, active user (a
+// Cloudflare Access token or a direct Google sign-in session); local sign-in routes are 404.
+app.use(['/api', '/oauth', '/auth/oidc', '/carddav', '/.well-known/carddav'], identityGate);
 
 // CSRF defense-in-depth for the cookie-authenticated /api surface. A mutating
 // request must carry a custom header that a cross-site <form> cannot set and a

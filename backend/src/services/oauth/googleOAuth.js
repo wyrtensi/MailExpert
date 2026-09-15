@@ -10,6 +10,7 @@ export const GOOGLE_JWKS_URL = 'https://www.googleapis.com/oauth2/v3/certs';
 export const GOOGLE_ISSUERS = ['https://accounts.google.com', 'accounts.google.com'];
 export const GOOGLE_MAIL_SCOPE = 'https://mail.google.com/';
 export const GOOGLE_SCOPES = `openid email profile ${GOOGLE_MAIL_SCOPE}`;
+export const GOOGLE_SIGN_IN_SCOPES = 'openid email';
 
 // Errors carry a stable `code` (safe to show and to put in redirect URLs) and, when the
 // provider returned one, its OAuth error code in `oauthError`. The message never includes
@@ -49,6 +50,21 @@ export function buildGoogleAuthorizationUrl({ clientId, state, codeChallenge, re
     state,
   });
   if (loginHint) params.set('login_hint', loginHint);
+  return `${GOOGLE_AUTH_URL}?${params}`;
+}
+
+// Sign-in to MailExpert itself: only the identity, no mailbox access and no refresh token.
+export function buildGoogleSignInUrl({ clientId, state, codeChallenge, redirectUri }) {
+  const params = new URLSearchParams({
+    client_id: clientId,
+    redirect_uri: redirectUri,
+    response_type: 'code',
+    scope: GOOGLE_SIGN_IN_SCOPES,
+    prompt: 'select_account',
+    code_challenge: codeChallenge,
+    code_challenge_method: 'S256',
+    state,
+  });
   return `${GOOGLE_AUTH_URL}?${params}`;
 }
 

@@ -1069,6 +1069,8 @@
       "qrCodeAlt": "Kod QR",
       "mailPolicyTitle": "Zasady połączeń z serwerem pocztowym",
       "mailPolicyDesc": "Określ, które typy połączeń mogą konfigurować użytkownicy. Wyłącz te opcje we wdrożeniach dostępnych z Internetu.",
+      "mailboxSyncTitle": "Synchronizacja skrzynek",
+      "mailboxSyncDesc": "Jak często serwer synchronizuje wszystkie skrzynki. Ustawienie dotyczy całej instalacji.",
       "allowPrivateHosts": "Zezwalaj na prywatne/lokalne hosty",
       "allowPrivateHostsDesc": "Zezwala na łączenie się z serwerami poczty IMAP/SMTP, serwerami CardDAV i dostawcami AI pod prywatnymi lub lokalnymi adresami (np. 127.0.0.1, 192.168.x.x). Wymagane dla protonmail-bridge, samodzielnie hostowanego serwera CardDAV/Nextcloud lub lokalnego modelu AI.",
       "allowInsecureTls": "Zezwalaj na niezabezpieczony TLS",

@@ -296,9 +296,10 @@ export const api = {
   },
 
   // Sync
-  syncNow: (accountId) => request('POST', '/mail/sync', accountId ? { accountId } : {}),
+  // Manual sync is per mailbox: the server answers { ok, skipped } and rejects a request without one.
+  syncNow: (accountId) => request('POST', '/mail/sync', { accountId }),
   syncFolder: (accountId, folder) => request('POST', '/mail/sync-folder', { accountId, folder }),
-  syncFoldersNow: (accountId) => request('POST', '/mail/sync-folders', accountId ? { accountId } : {}),
+  syncFoldersNow: (accountId) => request('POST', '/mail/sync-folders', { accountId }),
 
   // Folder management
   createFolder: (accountId, name, parentPath) => request('POST', '/mail/folders', { accountId, name, parentPath }),

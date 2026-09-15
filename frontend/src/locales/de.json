@@ -979,6 +979,8 @@
       "qrCodeAlt": "QR-Code",
       "mailPolicyTitle": "Verbindungsrichtlinie für Mailserver",
       "mailPolicyDesc": "Legt fest, welche Verbindungstypen Benutzer konfigurieren dürfen. Für öffentlich zugängliche Instanzen deaktivieren.",
+      "mailboxSyncTitle": "Postfach-Synchronisierung",
+      "mailboxSyncDesc": "Wie oft der Server alle Postfächer synchronisiert. Gilt für die gesamte Installation.",
       "allowPrivateHosts": "Private / lokale Hosts erlauben",
       "allowPrivateHostsDesc": "Ermöglicht Verbindungen zu IMAP-/SMTP-Mailservern, CardDAV-Servern und KI-Anbietern unter privaten oder lokalen Adressen (z.B. 127.0.0.1, 192.168.x.x). Erforderlich für protonmail-bridge, einen selbst gehosteten CardDAV-/Nextcloud-Server oder ein lokales KI-Modell.",
       "allowInsecureTls": "Unsicheres TLS erlauben",

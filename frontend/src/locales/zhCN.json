@@ -1050,6 +1050,8 @@
       "qrCodeAlt": "QR码",
       "mailPolicyTitle": "邮件服务器连接策略",
       "mailPolicyDesc": "控制用户可以配置的连接类型。面向互联网的部署请禁用这些选项。",
+      "mailboxSyncTitle": "邮箱同步",
+      "mailboxSyncDesc": "服务器同步所有邮箱的频率。此设置适用于整个安装。",
       "allowPrivateHosts": "允许私有/本地主机",
       "allowPrivateHostsDesc": "允许连接到私有或本地地址的 IMAP/SMTP 邮件服务器、CardDAV 服务器和 AI 提供商（例如 127.0.0.1、192.168.x.x）。protonmail-bridge、自托管的 CardDAV/Nextcloud 服务器或本地 AI 模型需要此选项。",
       "allowInsecureTls": "允许不安全的 TLS",

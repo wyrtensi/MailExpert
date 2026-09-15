@@ -1,0 +1,176 @@
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+
+vi.mock('imapflow', () => ({ ImapFlow: vi.fn() }));
+vi.mock('./db.js', () => ({ query: vi.fn() }));
+vi.mock('./messageParser.js', () => ({ parseMessage: vi.fn(), buildSnippetFromHtml: vi.fn(), snippetFromBody: vi.fn(), decodeMimeWords: vi.fn(), detectBulkFromParsedHeaders: vi.fn(), parseRawHeaders: vi.fn(), enrichParsedMetadata: vi.fn((parsed) => parsed) }));
+vi.mock('./oauth/tokenManager.js', async (importOriginal) => ({
+  OAuthTokenError: (await importOriginal()).OAuthTokenError,
+  ensureFreshOAuthAccount: vi.fn(async (account) => account),
+}));
+vi.mock('./emailSanitizer.js', () => ({ sanitizeEmail: vi.fn() }));
+vi.mock('./encryption.js', () => ({ decrypt: vi.fn() }));
+vi.mock('./aiProvider.js', () => ({ getAiStatus: vi.fn(), completeText: vi.fn() }));
+vi.mock('./pushNotifications.js', () => ({ sendPushToUser: vi.fn() }));
+vi.mock('../utils/redact.js', () => ({ redactEmail: vi.fn(() => 'redacted') }));
+vi.mock('./hostValidation.js', () => ({ resolveForConnection: vi.fn(), createPinnedLookup: vi.fn() }));
+vi.mock('./connectionPolicy.js', () => ({ getConnectionPolicy: vi.fn() }));
+
+import { query } from './db.js';
+import { ImapManager, parseConnectConcurrency } from './imapManager.js';
+
+// Mailboxes are serviced by the server: they connect at startup and stay connected no matter
+// who signs in or out.
+
+const TIMERS = ['_healthCheckTimer', '_snippetSchedulerTimer', '_stalenessCheckTimer', '_flagPushReconcilerTimer', '_folderStatusTimer'];
+function newManager() {
+  const mgr = new ImapManager(null);
+  for (const key of TIMERS) clearInterval(mgr[key]);
+  mgr.broadcast = vi.fn();
+  return mgr;
+}
+
+const mailbox = (n, over = {}) => ({
+  id: `mailbox-${n}`,
+  user_id: 'u1',
+  enabled: true,
+  protocol: 'imap',
+  email_address: `m${n}@example.com`,
+  imap_host: 'imap.example.com',
+  imap_port: 993,
+  oauth_reconnect_required: false,
+  ...over,
+});
+
+// Database rows by id. List queries honour the enabled/IMAP/reconsent filter the way Postgres would.
+const rows = new Map();
+const enabledImap = (row) => row.enabled && row.protocol === 'imap' && !row.oauth_reconnect_required;
+function installDb() {
+  query.mockImplementation(async (sql, params = []) => {
+    if (/WHERE enabled = true AND protocol = 'imap' AND oauth_reconnect_required = false/.test(sql)) {
+      return { rows: [...rows.values()].filter(enabledImap) };
+    }
+    if (/^\s*SELECT \* FROM email_accounts WHERE id = \$1/.test(sql)) {
+      const row = rows.get(params[0]);
+      const onlyEnabledImap = /enabled = true AND protocol = 'imap'/.test(sql);
+      return { rows: row && (!onlyEnabledImap || (row.enabled && row.protocol === 'imap')) ? [row] : [] };
+    }
+    if (/WHERE id = ANY\(\$1::uuid\[\]\)/.test(sql)) {
+      return { rows: params[0].map((id) => rows.get(id)).filter(Boolean) };
+    }
+    return { rows: [] };
+  });
+}
+
+beforeEach(() => {
+  vi.clearAllMocks();
+  rows.clear();
+  installDb();
+  vi.spyOn(console, 'log').mockImplementation(() => {});
+});
+afterEach(() => {
+  vi.restoreAllMocks();
+  vi.useRealTimers();
+});
+
+// connectAccount stand-in that keeps each connect open until the test releases it, marking the
+// mailbox connecting and then connected the way the real method does.
+function holdConnects(mgr) {
+  const pending = [];
+  let inFlight = 0;
+  let maxInFlight = 0;
+  vi.spyOn(mgr, 'connectAccount').mockImplementation((account) => {
+    mgr.connectingAccounts.add(account.id);
+    inFlight += 1;
+    maxInFlight = Math.max(maxInFlight, inFlight);
+    return new Promise((resolve) => pending.push(() => {
+      mgr.connectingAccounts.delete(account.id);
+      mgr.connections.set(account.id, {});
+      inFlight -= 1;
+      resolve(true);
+    }));
+  });
+  return { pending, maxInFlight: () => maxInFlight };
+}
+
+async function releaseAll(held) {
+  while (held.pending.length) {
+    held.pending.shift()();
+    await vi.advanceTimersByTimeAsync(10_000);
+  }
+}
+
+describe('connectAllEnabled', () => {
+  it('connects every enabled mailbox, at most `concurrency` at a time', async () => {
+    vi.useFakeTimers();
+    for (let n = 1; n <= 5; n += 1) rows.set(`mailbox-${n}`, mailbox(n));
+    rows.set('mailbox-6', mailbox(6, { enabled: false }));
+    rows.set('mailbox-7', mailbox(7, { oauth_reconnect_required: true }));
+    const mgr = newManager();
+    const held = holdConnects(mgr);
+
+    const done = mgr.connectAllEnabled({ concurrency: 2 });
+    await vi.advanceTimersByTimeAsync(10_000);
+    expect(mgr.connectAccount).toHaveBeenCalledTimes(2);
+
+    await releaseAll(held);
+    await done;
+    expect(mgr.connectAccount.mock.calls.map(([account]) => account.id))
+      .toEqual(['mailbox-1', 'mailbox-2', 'mailbox-3', 'mailbox-4', 'mailbox-5']);
+    expect(held.maxInFlight()).toBe(2);
+    expect(mgr._startupQueued.size).toBe(0);
+  });
+
+  it('leaves mailboxes waiting in the queue to the queue when the health check runs', async () => {
+    vi.useFakeTimers();
+    const intervalSpy = vi.spyOn(globalThis, 'setInterval');
+    for (let n = 1; n <= 3; n += 1) rows.set(`mailbox-${n}`, mailbox(n));
+    const mgr = newManager();
+    const healthCheck = intervalSpy.mock.calls.find(([, ms]) => ms === 90000)[0];
+    const held = holdConnects(mgr);
+
+    const done = mgr.connectAllEnabled({ concurrency: 1 });
+    await vi.advanceTimersByTimeAsync(10_000);
+    await healthCheck();
+    expect(mgr.connectAccount).toHaveBeenCalledTimes(1);
+
+    await releaseAll(held);
+    await done;
+    expect(mgr.connectAccount).toHaveBeenCalledTimes(3);
+  });
+
+  it('re-reads a mailbox at its turn and skips one disabled while it waited', async () => {
+    vi.useFakeTimers();
+    rows.set('mailbox-1', mailbox(1));
+    rows.set('mailbox-2', mailbox(2));
+    const mgr = newManager();
+    const held = holdConnects(mgr);
+
+    const done = mgr.connectAllEnabled({ concurrency: 1 });
+    await vi.advanceTimersByTimeAsync(10_000);
+    rows.set('mailbox-2', mailbox(2, { enabled: false }));
+    await releaseAll(held);
+    await done;
+
+    expect(mgr.connectAccount.mock.calls.map(([account]) => account.id)).toEqual(['mailbox-1']);
+  });
+
+  it('skips a mailbox that is already connected', async () => {
+    vi.useFakeTimers();
+    rows.set('mailbox-1', mailbox(1));
+    rows.set('mailbox-2', mailbox(2));
+    const mgr = newManager();
+    mgr.connections.set('mailbox-1', {});
+    vi.spyOn(mgr, 'connectAccount').mockResolvedValue(true);
+
+    const done = mgr.connectAllEnabled();
+    await vi.advanceTimersByTimeAsync(10_000);
+    await done;
+
+    expect(mgr.connectAccount.mock.calls.map(([account]) => account.id)).toEqual(['mailbox-2']);
+  });
+
+  it('reads IMAP_CONNECT_CONCURRENCY and falls back to 3', () => {
+    expect(parseConnectConcurrency('5')).toBe(5);
+    for (const raw of [undefined, '', '0', '-2', 'many']) expect(parseConnectConcurrency(raw)).toBe(3);
+  });
+});

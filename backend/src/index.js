@@ -292,28 +292,10 @@ imapManager.startSnoozeWatcher();
 // Schedule periodic CardDAV contact sync for any connected accounts.
 startCardavScheduler();
 
-// Re-connect all enabled IMAP accounts on startup with bounded concurrency so a
-// large user base doesn't hammer IMAP servers and the DB connection pool at once.
-try {
-  const startupResult = await query(
-    "SELECT DISTINCT user_id FROM email_accounts WHERE enabled = true AND protocol = 'imap'"
-  );
-  if (startupResult.rows.length) {
-    console.log(`Reconnecting accounts for ${startupResult.rows.length} user(s) on startup`);
-    const MAX_CONCURRENT = 3;
-    const queue = [...startupResult.rows];
-    function connectNext() {
-      if (!queue.length) return;
-      const { user_id } = queue.shift();
-      imapManager.connectAllForUser(user_id)
-        .catch(err => console.error(`Startup connect failed for user ${user_id}:`, err.message))
-        .finally(connectNext);
-    }
-    for (let i = 0; i < Math.min(MAX_CONCURRENT, queue.length); i++) connectNext();
-  }
-} catch (err) {
-  console.error('Startup account connection error:', err.message);
-}
+// Mailboxes are serviced by the server: every enabled IMAP mailbox connects through a bounded
+// queue (IMAP_CONNECT_CONCURRENCY). Signing in, signing out and sockets never connect them.
+imapManager.connectAllEnabled()
+  .catch(err => console.error('Startup mailbox connection error:', err.message));
 
 const PORT = process.env.PORT || 3000;
 httpServer.listen(PORT, () => {

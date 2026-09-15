@@ -317,6 +317,15 @@ export function persistentEligible(orderedHostAccountIds, accountId, cap) {
 // `maxPersistentPerHost` (none do by default, so no provider is capped unless an operator opts in).
 const PERSISTENT_CAP_ENV = parsePersistentCap(process.env.IMAP_MAX_PERSISTENT_PER_HOST);
 
+// How many mailboxes the startup queue connects at the same time. Not a cap on mailboxes: every
+// enabled one connects, the queue only spreads the logins out. Empty or invalid = 3.
+export const DEFAULT_CONNECT_CONCURRENCY = 3;
+export function parseConnectConcurrency(raw) {
+  const n = Number.parseInt(raw, 10);
+  return Number.isInteger(n) && n > 0 ? n : DEFAULT_CONNECT_CONCURRENCY;
+}
+const IMAP_CONNECT_CONCURRENCY = parseConnectConcurrency(process.env.IMAP_CONNECT_CONCURRENCY);
+
 // Decide a folder's sync fetch strategy from its CONDSTORE modseq state. Pure and total so
 // it can be exhaustively unit-tested — it is the load-bearing correctness decision for delta
 // sync. A nonempty server mailbox with no local UID is an incomplete cache whose modseq
@@ -1737,6 +1746,7 @@ export class ImapManager {
     this.syncStartedAt = new Map();   // accountId -> ms when the current sync tick began (hung-sync detection)
     this.syncThrottleSkips = new Map(); // accountId -> remaining ticks to skip when throttled
     this.connectingAccounts = new Set(); // prevent concurrent connectAccount calls for same account
+    this._startupQueued = new Set(); // accountId — waiting for its turn in connectAllEnabled's queue
     this.userSyncIntervalMs = new Map(); // userId -> interval ms (user-configurable)
     this.userFolderSyncIntervalMs = new Map(); // userId -> folder-structure sync ms (0 = never)
     this.lastFolderSyncAt = new Map(); // accountId -> last folder-structure sync timestamp
@@ -1773,6 +1783,8 @@ export class ImapManager {
           "SELECT id, email_address, imap_host, oauth_provider FROM email_accounts WHERE enabled = true AND protocol = 'imap' AND oauth_reconnect_required = false"
         );
         for (const row of result.rows) {
+          // The startup queue will connect it; reconnecting here would bypass the queue's limit.
+          if (this._startupQueued.has(row.id)) continue;
           // A poll-only account (per-host budget) holds no persistent connection by design; while
           // its poll timer is live it is healthy, so don't treat it as "not connected" and try to
           // reconnect it into an always-on connection. If its timer somehow died it falls through
@@ -6210,6 +6222,52 @@ export class ImapManager {
       // deleted by an external mail client, which nothing else here would refresh. Cheap gate.
       await emitSectionsChanged(this.pluginFacade, account, deletedCount);
     }
+  }
+
+  // Connects every enabled IMAP mailbox; called once at startup. At most `concurrency` connects run
+  // at the same time and successive launches keep each provider's spacing (#218), so a large
+  // install storms neither its mail servers nor the DB pool. The health check leaves queued
+  // mailboxes alone, and each row is re-read at its turn so a change made while it waited counts.
+  async connectAllEnabled({ concurrency = IMAP_CONNECT_CONCURRENCY } = {}) {
+    const { rows } = await query(
+      `SELECT * FROM email_accounts
+        WHERE enabled = true AND protocol = 'imap' AND oauth_reconnect_required = false
+        ORDER BY created_at ASC NULLS FIRST, id ASC`
+    );
+    const queue = rows.filter(account => this._needsConnect(account.id));
+    if (!queue.length) return;
+    const total = queue.length;
+    for (const account of queue) this._startupQueued.add(account.id);
+    const workers = Math.min(Math.max(1, concurrency), total);
+    console.log(`Connecting ${total} mailbox(es) on startup, ${workers} at a time`);
+
+    let nextLaunchAt = Date.now();
+    const work = async () => {
+      while (queue.length) {
+        const queued = queue.shift();
+        const launchAt = Math.max(nextLaunchAt, Date.now());
+        nextLaunchAt = launchAt + connectStaggerFor(providerProfile(queued), total);
+        const wait = launchAt - Date.now();
+        if (wait > 0) await new Promise(resolve => setTimeout(resolve, wait));
+        this._startupQueued.delete(queued.id);
+        try {
+          if (!this._needsConnect(queued.id)) continue;
+          const { rows: [account] } = await query('SELECT * FROM email_accounts WHERE id = $1', [queued.id]);
+          if (!account?.enabled || account.protocol !== 'imap' || account.oauth_reconnect_required) continue;
+          await this.connectAccount(account);
+        } catch (err) {
+          console.error(`Startup connect failed for ${logAccount(queued)}:`, err.message);
+        }
+      }
+    };
+    await Promise.all(Array.from({ length: workers }, work));
+  }
+
+  // Whether nothing holds or is opening this mailbox's connection. A poll-only mailbox with a live
+  // timer holds no connection by design and counts as connected.
+  _needsConnect(accountId) {
+    if (this.connections.has(accountId) || this.connectingAccounts.has(accountId)) return false;
+    return !(this._pollOnlyAccounts.has(accountId) && this.syncIntervals.has(accountId));
   }
 
   async connectAllForUser(userId) {

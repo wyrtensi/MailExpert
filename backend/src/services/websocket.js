@@ -49,7 +49,7 @@ export function closeUserSockets(wss, userId) {
   }
 }
 
-export function setupWebSocket(wss, sessionMiddleware, imapManager, { authorize = authorizeSocketUser } = {}) {
+export function setupWebSocket(wss, sessionMiddleware, { authorize = authorizeSocketUser } = {}) {
   wss.on('connection', (ws, req) => {
     // Transport errors can arrive during session lookup, before authentication.
     ws.on('error', err => {
@@ -102,10 +102,6 @@ export function setupWebSocket(wss, sessionMiddleware, imapManager, { authorize 
           ws._diagCounted = true;
           console.log(`WebSocket connected for user ${userId}`);
           ws.send(JSON.stringify({ type: 'connected' }));
-          // Re-establish IMAP connections if the server restarted (skips already-connected accounts)
-          imapManager.connectAllForUser(userId).catch(reconnectErr => {
-            console.error('WebSocket account reconnect failed:', reconnectErr.message);
-          });
         })
         .catch((authErr) => {
           // Only the error class: a lookup failure must not end in a message with details.

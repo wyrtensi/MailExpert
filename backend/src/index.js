@@ -253,7 +253,7 @@ app.use((err, req, res, _next) => {
 });
 
 // WebSocket
-setupWebSocket(wss, sessionMiddleware, imapManager);
+setupWebSocket(wss, sessionMiddleware);
 
 // Run pending schema migrations then start
 await runMigrations();

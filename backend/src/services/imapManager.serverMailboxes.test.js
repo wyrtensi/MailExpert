@@ -1,3 +1,4 @@
+import { readFile } from 'node:fs/promises';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 vi.mock('imapflow', () => ({ ImapFlow: vi.fn() }));
@@ -173,4 +174,19 @@ describe('connectAllEnabled', () => {
     expect(parseConnectConcurrency('5')).toBe(5);
     for (const raw of [undefined, '', '0', '-2', 'many']) expect(parseConnectConcurrency(raw)).toBe(3);
   });
+});
+
+describe('mailboxes do not follow sign-in', () => {
+  it('has no per-user connect or disconnect', () => {
+    expect(ImapManager.prototype.connectAllForUser).toBeUndefined();
+    expect(ImapManager.prototype.disconnectUser).toBeUndefined();
+  });
+
+  it.each(['routes/auth.js', 'routes/oidc.js', 'routes/authGoogle.js', 'services/websocket.js', 'middleware/identityGate.js'])(
+    '%s never connects or disconnects mailboxes',
+    async (file) => {
+      const source = await readFile(new URL(`../${file}`, import.meta.url), 'utf8');
+      expect(source).not.toMatch(/connectAllForUser|disconnectUser|imapManager\.(connect|disconnect)/);
+    },
+  );
 });

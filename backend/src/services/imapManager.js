@@ -2240,9 +2240,9 @@ export class ImapManager {
     }
 
     // Guard against concurrent connect calls for the same account.
-    // This happens when startup and a WebSocket connection both call connectAllForUser
-    // before the first connectAccount completes — without this, both would connect the
-    // same account in parallel, leaving one interval/client permanently orphaned.
+    // This happens when the startup queue, the health check or a manual reconnect reach the
+    // same account before the first connectAccount completes — without this, both would connect
+    // the same account in parallel, leaving one interval/client permanently orphaned.
     if (this.connectingAccounts.has(account.id)) {
       console.log(`Already connecting ${logAccount(account)}, skipping duplicate`);
       return false;
@@ -2519,18 +2519,6 @@ export class ImapManager {
       if (client) { try { await client.logout(); } catch { /* already closed */ } }
       if (slotHeld) this._bgConnSem.release(host);
       this.syncingAccounts.delete(account.id);
-    }
-  }
-
-  async disconnectUser(userId) {
-    try {
-      const result = await query(
-        "SELECT id FROM email_accounts WHERE user_id = $1 AND protocol = 'imap'",
-        [userId]
-      );
-      await Promise.all(result.rows.map(a => this.disconnectAccount(a.id)));
-    } catch (err) {
-      console.error(`disconnectUser error for user ${userId}:`, err.message);
     }
   }
 
@@ -6268,60 +6256,5 @@ export class ImapManager {
   _needsConnect(accountId) {
     if (this.connections.has(accountId) || this.connectingAccounts.has(accountId)) return false;
     return !(this._pollOnlyAccounts.has(accountId) && this.syncIntervals.has(accountId));
-  }
-
-  async connectAllForUser(userId) {
-    // Load the user's preferred sync interval before starting any account intervals.
-    // Without this, a user who set e.g. 30 s would silently revert to 60 s after
-    // a container restart until they next change the setting.
-    try {
-      const prefResult = await query('SELECT preferences FROM users WHERE id = $1', [userId]);
-      const prefs = prefResult.rows[0]?.preferences || {};
-      const sec = parseInt(prefs.syncInterval);
-      // Bounded by MIN_SYNC_INTERVAL_MS rather than a bare 15 so the floor stays tied to the
-      // constant AUTO_IDLE_DELAY_MS is checked against — raising one without the other is what
-      // would silently disable IDLE again.
-      if (sec * 1000 >= MIN_SYNC_INTERVAL_MS && sec <= 120) {
-        this.userSyncIntervalMs.set(userId, sec * 1000);
-      }
-      const folderSec = parseInt(prefs.folderSyncInterval);
-      if ([0, 900, 1800, 3600].includes(folderSec)) {
-        this.userFolderSyncIntervalMs.set(userId, folderSec * 1000);
-      }
-    } catch (err) {
-      console.warn(`Failed to load sync preference for user ${userId}:`, err.message);
-    }
-
-    const result = await query(
-      'SELECT * FROM email_accounts WHERE user_id = $1 AND enabled = true AND protocol = $2',
-      [userId, 'imap']
-    );
-    // Space out initial connects to stay under per-IP connection rate limits — wider for strict
-    // providers (PurelyMail) and scaled by account count, so a large fleet doesn't storm the
-    // server and trip an IP ban / account lock. (#218)
-    // Skip accounts already connected OR mid-connect (e.g. via the health check), and OAuth
-    // accounts whose grant was revoked: they wait for reconsent, which connects them itself.
-    const eligible = result.rows.filter(a =>
-      !this.connections.has(a.id) && !this.connectingAccounts.has(a.id) && !a.oauth_reconnect_required);
-    if (eligible.length) {
-      const staggers = eligible.map(a => connectStaggerFor(providerProfile(a), eligible.length));
-      const min = Math.min(...staggers), max = Math.max(...staggers);
-      const totalMs = staggers.reduce((sum, v) => sum + v, 0);
-      const range = min === max ? `${min}ms` : `${min}-${max}ms`;
-      // Soak diagnostic (#218): shows the pacing at a glance so you don't have to infer it
-      // from the gaps between the per-account "Connecting …" lines.
-      console.log(`Auto-connecting ${eligible.length} account(s): connect stagger ${range}, ~${Math.round(totalMs / 1000)}s total spread`);
-      let delay = 0;
-      for (let i = 0; i < eligible.length; i++) {
-        const account = eligible[i];
-        setTimeout(
-          () => this.connectAccount(account).catch(err =>
-            console.error(`Auto-connect failed for ${logAccount(account)}:`, err.message)
-          ),
-          delay,
-        );
-        delay += staggers[i];
-      }
-    }
   }
 }

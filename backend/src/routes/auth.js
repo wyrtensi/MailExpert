@@ -223,7 +223,6 @@ router.post('/register', authLimiter, async (req, res) => {
     req.session.userId = newUser.id;
     req.session.username = newUser.username;
     req.session.isAdmin = newUser.is_admin;
-    imapManager.connectAllForUser(newUser.id);
     res.json({ user: { id: newUser.id, username: newUser.username, displayName: null, avatar: null, isAdmin: newUser.is_admin, totpEnabled: false } });
   } catch (err) {
     await client.query('ROLLBACK').catch(rbErr => console.error('Registration ROLLBACK error:', rbErr.message));
@@ -287,7 +286,6 @@ router.post('/login', authLimiter, async (req, res) => {
         req.session.userId = user.id;
         req.session.username = user.username;
         req.session.isAdmin = user.is_admin;
-        imapManager.connectAllForUser(user.id);
         logAuthEvent('login_success', { username: user.username, userId: user.id, ip: req.ip, success: true });
         res.locals.resetRateLimit?.();
         return res.json({ user: { id: user.id, username: user.username, displayName: user.display_name, avatar: user.avatar, isAdmin: user.is_admin, totpEnabled: user.totp_enabled } });
@@ -332,9 +330,6 @@ router.post('/login', authLimiter, async (req, res) => {
     req.session.userId = user.id;
     req.session.username = user.username;
     req.session.isAdmin = user.is_admin;
-
-    // Start IMAP connections for this user
-    imapManager.connectAllForUser(user.id);
 
     logAuthEvent('login_success', { username: user.username, userId: user.id, ip: req.ip, success: true });
     res.locals.resetRateLimit?.();
@@ -400,7 +395,6 @@ router.post('/2fa/challenge', authLimiter, async (req, res) => {
     try { await createTrustedDevice(user.id, req, res); } catch (err) { console.error('createTrustedDevice failed:', err.message); }
   }
 
-  imapManager.connectAllForUser(user.id);
   logAuthEvent('totp_success', { username: user.username, userId: user.id, ip: req.ip, success: true });
   res.locals.resetRateLimit?.();
   rlReset(`totp:${uid}`);
@@ -516,7 +510,6 @@ router.post('/2fa/verify-email-otp', authLimiter, async (req, res) => {
     try { await createTrustedDevice(user.id, req, res); } catch (err) { console.error('createTrustedDevice failed:', err.message); }
   }
 
-  imapManager.connectAllForUser(user.id);
   logAuthEvent('totp_success', { username: user.username, userId: user.id, ip: req.ip, success: true });
   res.locals.resetRateLimit?.();
   rlReset(`totp:${uid}`);
@@ -586,7 +579,6 @@ router.post('/2fa/enrollment/enable', authLimiter, async (req, res) => {
   req.session.username = user.username;
   req.session.isAdmin = user.is_admin;
 
-  imapManager.connectAllForUser(user.id);
   logAuthEvent('totp_success', { username: user.username, userId: user.id, ip: req.ip, success: true });
   res.locals.resetRateLimit?.();
   rlReset(`totp:${uid}`);
@@ -625,7 +617,6 @@ router.post('/logout', async (req, res) => {
     res.clearCookie('mf_td', { ...cookieOpts, httpOnly: true });
     res.json({ ok: true, endSessionUrl });
   });
-  if (userId) imapManager.disconnectUser(userId);
 });
 
 router.get('/me', async (req, res) => {

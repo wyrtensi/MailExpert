@@ -211,13 +211,14 @@ CREATE INDEX IF NOT EXISTS idx_email_accounts_lower_email
 
 ## Миграция существующей установки
 
-В `0053`, в той же транзакции:
-1. Если в `integration_config` есть `provider = 'google'` с `clientId`, соответствующим шаблону, и `clientSecret` — создать приложение «Google 1» (secret копируется как есть, он уже зашифрован).
-2. Привязать к нему все ящики `oauth_provider = 'google'`.
-3. Заполнить журнал: `(app_id, lower(email_address), NULL)` для этих ящиков.
+`0053` создаёт только схему. Перенос данных выполняет `importLegacyGoogleConfig()` при старте (`loadIntegrationConfigs`), в одной транзакции под `pg_advisory_xact_lock(hashtext('google-oauth-app-import'))` и только пока приложений нет: SQL-миграция не может зашифровать секрет, сохранённый открытым текстом старыми версиями.
+
+1. Источник — `integration_config` (`provider = 'google'`, `clientId` и `clientSecret`), иначе `GOOGLE_CLIENT_ID` и `GOOGLE_CLIENT_SECRET`.
+2. Client ID не по шаблону или нерасшифровываемый secret — ошибка в логе без значений, импорт не выполняется.
+3. Создать приложение «Google 1» (secret шифруется), привязать к нему все ящики `oauth_provider = 'google'` без приложения, заполнить журнал `(app_id, lower(email_address))`.
 4. Оставить в записи `integration_config` только `redirectUri`.
 
-При старте (`loadIntegrationConfigs`): если приложений нет, а заданы `GOOGLE_CLIENT_ID` и `GOOGLE_CLIENT_SECRET` — выполнить шаги 1–3 из переменных окружения (secret шифруется). После этого `GOOGLE_CLIENT_ID`/`GOOGLE_CLIENT_SECRET` не читаются; `GOOGLE_REDIRECT_URI` остаётся значением callback по умолчанию. `.env.example` и README описывают это.
+После импорта `GOOGLE_CLIENT_ID`/`GOOGLE_CLIENT_SECRET` не читаются; `GOOGLE_REDIRECT_URI` остаётся общим callback. `.env.example` описывает это.
 
 Google-ящики без приложения (Google не был настроен) при обновлении токена получают «нужно переподключить».
 
@@ -249,7 +250,7 @@ Google-ящики без приложения (Google не был настрое
 
 ## Разбиение на PR
 
-1. **Backend: данные.** Миграция, импорт из env, `refreshGoogleToken` по приложению ящика, `app_unavailable`. Поведение для пользователя не меняется: единственное приложение работает как раньше. Для этого в PR 1 `getGoogleConfig()`/`isGoogleConfigured()` берут `client_id`/`client_secret` из самого раннего приложения не в `disabled` (`redirectUri` — из `integration_config`, затем `GOOGLE_REDIRECT_URI`), `applyGoogleEnv` больше не пишет и не удаляет `GOOGLE_CLIENT_ID`/`GOOGLE_CLIENT_SECRET`, а старый callback привязывает созданный ящик к этому приложению и пишет журнал. Миграции уже выполняются до `loadIntegrationConfigs()` (`backend/src/index.js`), поэтому импорт из env видит новые таблицы.
+1. **Backend: данные.** Миграция, импорт из env, `refreshGoogleToken` по приложению ящика, `app_unavailable`. Поведение для пользователя не меняется: единственное приложение работает как раньше. Для этого в PR 1 `resolveGoogleConfig()` берёт `client_id`/`client_secret` из самого раннего приложения не в `disabled` (`redirectUri` — из `integration_config`, затем `GOOGLE_REDIRECT_URI`), `applyGoogleEnv` больше не пишет и не удаляет `GOOGLE_CLIENT_ID`/`GOOGLE_CLIENT_SECRET`, а старый callback привязывает созданный ящик к этому приложению и пишет журнал. Миграции уже выполняются до `loadIntegrationConfigs()` (`backend/src/index.js`), поэтому импорт из env видит новые таблицы.
 2. **Backend: потоки и API.** `start`/`launch`/переподключение/callback, `known-emails`, выбор и брони, отзыв, новые коды; `/api/admin/google-apps`; статус; доменный сервер и `kind: 'domain'`; ограничение ручного добавления.
 3. **Frontend: админка.** «Google-приложения» и «Доменный почтовый сервер».
 4. **Frontend: пользователь.** «Добавить аккаунт» с тремя вариантами и подсказкой при вводе email, переподключение слева, новые ключи локалей.

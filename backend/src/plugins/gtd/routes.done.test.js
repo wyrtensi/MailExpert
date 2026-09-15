@@ -64,7 +64,7 @@ function buildApp() {
 // archive UPDATE/DELETE — the authority for whether this call or a concurrent /done won the race.
 function stubQueries({ inbox = inboxCopy, archiveWrite = { rowCount: 1 } } = {}) {
   query.mockImplementation(async (sql) => {
-    if (sql.includes('FROM messages m') && sql.includes('JOIN email_accounts')) return { rows: [msg] };
+    if (sql.startsWith('SELECT m.* FROM messages m WHERE m.id')) return { rows: [msg] };
     if (sql.startsWith('SELECT * FROM email_accounts')) return { rows: [account] };
     if (sql.startsWith('SELECT id, uid, is_read FROM messages')) return { rows: inbox ? [inbox] : [] };
     if (sql.startsWith('SELECT uid FROM messages')) return { rows: [{ uid: 10 }] };
@@ -143,7 +143,7 @@ describe('POST /api/gtd/done — strip-ok + archive-fail', () => {
 
   it('releases both move guards when the non-UIDPLUS archive write throws', async () => {
     query.mockImplementation(async (sql) => {
-      if (sql.includes('FROM messages m') && sql.includes('JOIN email_accounts')) return { rows: [msg] };
+      if (sql.startsWith('SELECT m.* FROM messages m WHERE m.id')) return { rows: [msg] };
       if (sql.startsWith('SELECT * FROM email_accounts')) return { rows: [account] };
       if (sql.startsWith('SELECT id, uid, is_read FROM messages')) return { rows: [inboxCopy] };
       if (sql.startsWith('SELECT uid FROM messages')) return { rows: [{ uid: 10 }] };

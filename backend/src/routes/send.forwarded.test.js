@@ -50,7 +50,7 @@ describe('POST /api/mail/send — forwarded attachment guards (#F2)', () => {
 
   it('rejects an oversized forwarded batch by declared size, before fetching any attachment', async () => {
     query.mockImplementation((sql) => {
-      if (sql.includes('FROM email_accounts WHERE id = $1 AND user_id = $2')) return Promise.resolve({ rows: [ACCOUNT] });
+      if (sql.includes('FROM email_accounts WHERE id = $1')) return Promise.resolve({ rows: [ACCOUNT] });
       if (sql.includes('SELECT preferences FROM users')) return Promise.resolve({ rows: [{ preferences: {} }] });
       if (sql.includes('FROM messages m') && sql.includes('m.id = ANY')) {
         return Promise.resolve({ rows: [{

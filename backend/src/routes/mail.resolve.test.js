@@ -41,7 +41,7 @@ describe('GET /api/mail/resolve-message account scope', () => {
     query.mockReset();
   });
 
-  it('scopes a durable Message-ID lookup to the requested owned account', async () => {
+  it('scopes a durable Message-ID lookup to the requested account', async () => {
     query.mockResolvedValueOnce({ rows: [{ id: 'current-row', account_id: ACCOUNT_ID }] });
 
     const url = new URL(`${base}/api/mail/resolve-message`);
@@ -51,8 +51,8 @@ describe('GET /api/mail/resolve-message account scope', () => {
 
     expect(response.status).toBe(200);
     const [sql, params] = query.mock.calls[0];
-    expect(sql).toContain('m.account_id = $3');
-    expect(params).toEqual([MESSAGE_ID, 'user-1', ACCOUNT_ID]);
+    expect(sql).toContain('m.account_id = $2');
+    expect(params).toEqual([MESSAGE_ID, ACCOUNT_ID]);
   });
 
   it('keeps unscoped deep-link resolution backward compatible', async () => {
@@ -62,7 +62,7 @@ describe('GET /api/mail/resolve-message account scope', () => {
 
     expect(response.status).toBe(200);
     const [, params] = query.mock.calls[0];
-    expect(params).toEqual([MESSAGE_ID, 'user-1', null]);
+    expect(params).toEqual([MESSAGE_ID, null]);
   });
 
   it('rejects a malformed account scope before querying', async () => {

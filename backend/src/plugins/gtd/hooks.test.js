@@ -332,12 +332,12 @@ describe('gtd hooks — account settings (enrichAccount / validateAccountSetting
 describe('gtd hooks — onPluginActivationChanged', () => {
   beforeEach(() => { query.mockReset(); invalidateGtdConfigCache.mockReset(); });
 
-  it('invalidates GTD config cache for all the user\'s accounts when gtd is toggled', async () => {
-    // onPluginActivationChanged lists the user's accounts via the listUserAccounts capability
-    // (user-scoped query) and invalidates GTD's config cache for each.
+  it('invalidates GTD config cache for every mailbox when gtd is toggled', async () => {
+    // onPluginActivationChanged lists the mailboxes via the listUserAccounts capability and
+    // invalidates GTD's config cache for each.
     query.mockResolvedValueOnce({ rows: [{ id: 'a1' }, { id: 'a2' }] });
     await onPluginActivationChanged({ userId: 'u1', pluginId: 'gtd', activated: false });
-    expect(query.mock.calls[0][1]).toEqual(['u1']);
+    expect(query.mock.calls[0][1]).toBeUndefined();
     expect(invalidateGtdConfigCache).toHaveBeenCalledWith('a1');
     expect(invalidateGtdConfigCache).toHaveBeenCalledWith('a2');
   });

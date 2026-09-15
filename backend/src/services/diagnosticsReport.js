@@ -103,18 +103,15 @@ export function scrubReport(obj) {
   return { scrubbed: walk(obj), counters };
 }
 
-// Assemble the server-owned sections of the report, scoped to one user.
+// Assemble the server-owned sections of the report. Mailboxes are shared, so every mailbox is in it.
 export async function buildServerReport(userId, salt) {
   const accRes = await query(
     `SELECT id, protocol, oauth_provider, imap_host, enabled, include_in_unified_inbox, last_sync, sync_error
-     FROM email_accounts WHERE user_id = $1 ORDER BY sort_order NULLS LAST, created_at`,
-    [userId],
+     FROM email_accounts ORDER BY sort_order NULLS LAST, created_at`,
   );
   const folRes = await query(
     `SELECT f.account_id, f.name, f.special_use, f.total_count, f.unread_count
-     FROM folders f JOIN email_accounts a ON a.id = f.account_id
-     WHERE a.user_id = $1`,
-    [userId],
+     FROM folders f JOIN email_accounts a ON a.id = f.account_id`,
   );
 
   // Unread must mirror what the user actually sees in the badge, which counts INBOX only
@@ -126,10 +123,9 @@ export async function buildServerReport(userId, salt) {
     `SELECT m.account_id, COUNT(*)::int AS count
        FROM messages m
        JOIN email_accounts a ON a.id = m.account_id
-      WHERE a.user_id = $1 AND a.enabled = true
+      WHERE a.enabled = true
         AND m.folder = 'INBOX' AND m.is_read = false AND m.is_deleted = false
       GROUP BY m.account_id`,
-    [userId],
   );
   const inboxUnreadByAcct = new Map(unreadRes.rows.map(r => [r.account_id, Number(r.count) || 0]));
 
@@ -191,11 +187,11 @@ export async function buildServerReport(userId, salt) {
   let redisOk = true;
   try { await redisClient.ping(); } catch { redisOk = false; }
 
-  // Recent categorized warnings, scoped to this user's accounts (account-less
+  // Recent categorized warnings for the install's mailboxes (account-less
   // server warnings are global). Account ids are hashed with the report salt.
-  const userAccountIds = new Set(accRes.rows.map(a => a.id));
+  const mailboxIds = new Set(accRes.rows.map(a => a.id));
   const warnings = getWarningsRaw()
-    .filter(w => !w.accountId || userAccountIds.has(w.accountId))
+    .filter(w => !w.accountId || mailboxIds.has(w.accountId))
     .map(w => ({
       code: w.code,
       ...(w.accountId ? { accountRef: hashRef(w.accountId, salt) } : {}),
@@ -203,11 +199,11 @@ export async function buildServerReport(userId, salt) {
       lastSeenAgeSeconds: Math.round((Date.now() - w.lastT) / 1000),
     }));
 
-  // Sync-consistency signals (Phase 1 reliability instrumentation), scoped to this
-  // user's accounts and hashed. Magnitudes are counts (e.g. ghost rows in a response,
+  // Sync-consistency signals (Phase 1 reliability instrumentation) for the install's
+  // mailboxes, hashed. Magnitudes are counts (e.g. ghost rows in a response,
   // messages missed above the synced UID), never message content.
   const syncSignals = getSyncSignalsRaw()
-    .filter(s => !s.accountId || userAccountIds.has(s.accountId))
+    .filter(s => !s.accountId || mailboxIds.has(s.accountId))
     .map(s => ({
       signal: s.sig,
       ...(s.accountId ? { accountRef: hashRef(s.accountId, salt) } : {}),

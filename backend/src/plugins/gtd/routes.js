@@ -135,9 +135,8 @@ router.get('/pet/:slug/sheet', async (req, res) => {
   res.send(sheet.data);
 });
 
-// Load a message the caller owns, or send a 404. The email_accounts join is the
-// ownership filter (a.user_id = $2); the message row itself carries everything the
-// callers need (account_id, uid, folder, message_id), so no account column is selected.
+// Load a message by id, or send a 404. The message row carries everything the callers need
+// (account_id, uid, folder, message_id), so no account column is selected.
 // POST /api/gtd/classify { messageId, state } — apply a GTD label by COPYing the
 // message into the state's designated folder (the message stays in its current
 // folder; classify never removes it from the inbox). Thin: resolve the folder,

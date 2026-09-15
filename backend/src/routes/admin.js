@@ -224,29 +224,14 @@ router.delete('/users/:id', async (req, res) => {
       if (countsAsActiveAdmin(current, googleMode) && !(await otherActiveAdminExists(client, id, googleMode))) {
         throw new AdminUserError(409, 'last_admin', 'At least one active admin must remain');
       }
-      // Mailboxes still belong to one user: deleting the owner would delete them with it.
-      if (googleMode) {
-        const { rows: [{ count }] } = await client.query(
-          'SELECT COUNT(*)::int AS count FROM email_accounts WHERE user_id = $1',
-          [id],
-        );
-        if (count > 0) throw new AdminUserError(409, 'user_has_mailboxes', 'This user still owns mailboxes');
-      }
     });
   } catch (err) {
     return sendAdminUserError(res, err);
   }
 
-  // While mailboxes still belong to one user, the FK cascade deletes this user's mailboxes too:
-  // stop their live connections after the delete, as DELETE /api/accounts/:id does.
-  const { rows: ownedMailboxes } = await query('SELECT id FROM email_accounts WHERE user_id = $1', [id]);
   stopCardavUser(id);
   await signOutEverywhere(id);
   await query('DELETE FROM users WHERE id = $1', [id]);
-  for (const mailbox of ownedMailboxes) {
-    imapManager.disconnectAccount(mailbox.id)
-      .catch(err => console.warn(`Disconnect after user delete for ${mailbox.id}:`, err.message));
-  }
   // Let plugins clean up any user-scoped data the FK cascade can't reach (GTD removes the
   // imported pet, stored under a slug derived from the user id rather than an FK). Best-effort
   // and after the delete: the user row is already gone, so a hook failure must not misreport a

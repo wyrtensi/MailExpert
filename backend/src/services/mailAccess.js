@@ -4,42 +4,31 @@
 // (surfaced through the plugin-api barrel). Each is a specific, auditable query — never an
 // arbitrary statement — so the surface a plugin can reach is exactly what's here and nothing more.
 //
-// Scoping: user-entry reads (loadOwnedMessage, listUserAccounts, getOwnedAccount) are keyed by
-// userId and enforce ownership. Account-scoped reads take an accountId the caller has already
-// established it owns (via one of the user-keyed reads) and only ever read within that account —
-// they never span accounts or users.
+// Scoping: every mailbox is shared by all users of the install, so the entry reads
+// (loadOwnedMessage, listUserAccounts, getOwnedAccount) check only that the message or mailbox
+// exists. They keep their userId parameter and names so plugins need no change. Account-scoped
+// reads take an accountId from one of the entry reads and only ever read within that account.
 import { query } from './db.js';
 
-// A message the user owns (joined through their accounts), or null. Full row (m.*).
+// A message by id, or null. Full row (m.*).
 export async function loadOwnedMessage(userId, messageId) {
-  const { rows } = await query(
-    `SELECT m.*
-       FROM messages m
-       JOIN email_accounts a ON a.id = m.account_id
-      WHERE m.id = $1 AND a.user_id = $2`,
-    [messageId, userId]
-  );
+  const { rows } = await query('SELECT m.* FROM messages m WHERE m.id = $1', [messageId]);
   return rows[0] || null;
 }
 
-// One of the user's accounts by id (ownership enforced), or null. Full row.
+// A mailbox by id, or null. Full row.
 export async function getOwnedAccount(userId, accountId) {
-  const { rows } = await query(
-    'SELECT * FROM email_accounts WHERE id = $1 AND user_id = $2',
-    [accountId, userId]
-  );
+  const { rows } = await query('SELECT * FROM email_accounts WHERE id = $1', [accountId]);
   return rows[0] || null;
 }
 
-// All of the user's accounts (light columns for listing/iteration). The caller filters by its
-// own per-account config (e.g. which accounts have a feature enabled).
+// Every mailbox (light columns for listing/iteration). The caller filters by its own
+// per-account config (e.g. which accounts have a feature enabled).
 export async function listUserAccounts(userId) {
   const { rows } = await query(
     `SELECT id, email_address, folder_mappings, include_in_unified_inbox, enabled
        FROM email_accounts
-      WHERE user_id = $1
-      ORDER BY sort_order, created_at`,
-    [userId]
+      ORDER BY sort_order, created_at`
   );
   return rows;
 }

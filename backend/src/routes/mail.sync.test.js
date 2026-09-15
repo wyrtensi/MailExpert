@@ -35,8 +35,8 @@ describe.each([
     imapManager[method].mockReset().mockReturnValue({ started: true });
     mailboxRow = { id: ACCOUNT_ID, enabled: true, protocol: 'imap' };
     query.mockImplementation(async (sql, params = []) => (
-      sql.includes('FROM email_accounts WHERE id = $1 AND user_id = $2')
-        && params[0] === ACCOUNT_ID && params[1] === 'user-1' && mailboxRow
+      sql.includes('FROM email_accounts WHERE id = $1')
+        && params[0] === ACCOUNT_ID && mailboxRow
         ? { rows: [mailboxRow] }
         : { rows: [] }
     ));
@@ -53,7 +53,7 @@ describe.each([
     expect(imapManager[method]).not.toHaveBeenCalled();
   });
 
-  it('answers 404 for a mailbox the user cannot reach', async () => {
+  it('answers 404 for a mailbox that does not exist', async () => {
     mailboxRow = null;
     expect((await post({ accountId: ACCOUNT_ID })).status).toBe(404);
     expect(imapManager[method]).not.toHaveBeenCalled();

@@ -31,7 +31,7 @@ describe('POST /api/mail/folders/empty — async background empty', () => {
   beforeEach(() => {
     query.mockReset(); imapManager.emptyFolder.mockReset(); imapManager.broadcast.mockReset();
     query.mockImplementation((sql) => {
-      if (sql.includes('FROM email_accounts WHERE id = $1 AND user_id = $2')) return Promise.resolve({ rows: [ACCOUNT] });
+      if (sql.includes('FROM email_accounts WHERE id = $1')) return Promise.resolve({ rows: [ACCOUNT] });
       return Promise.resolve({ rows: [] });
     });
   });

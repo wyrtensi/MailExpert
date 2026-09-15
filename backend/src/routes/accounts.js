@@ -71,8 +71,8 @@ router.get('/', async (req, res) => {
             include_in_unified_inbox,
             last_sync, sync_error, sort_order, folder_mappings, signature, created_at,
             categorization_enabled
-     FROM email_accounts WHERE user_id = $1 ORDER BY sort_order, created_at`,
-    [req.session.userId]
+     FROM email_accounts
+     ORDER BY sort_order, created_at`
   );
 
   // Attach aliases to each account in one query
@@ -146,7 +146,7 @@ router.post('/', async (req, res) => {
   try {
     const result = await query(`
       INSERT INTO email_accounts (
-        user_id, name, sender_name, email_address, color, protocol,
+        added_by, name, sender_name, email_address, color, protocol,
         imap_host, imap_port, imap_tls, imap_skip_tls_verify, smtp_host, smtp_port, smtp_tls,
         auth_user, auth_pass, smtp_auth_user, smtp_auth_pass, oauth_provider, oauth_access_token, oauth_refresh_token,
         signature
@@ -178,8 +178,8 @@ router.put('/:id', async (req, res) => {
   const { id } = req.params;
   const updates = req.body;
 
-  // Verify ownership.
-  const check = await query('SELECT id FROM email_accounts WHERE id = $1 AND user_id = $2', [id, req.session.userId]);
+  // The mailbox must exist.
+  const check = await query('SELECT id FROM email_accounts WHERE id = $1', [id]);
   if (!check.rows.length) return res.status(404).json({ error: 'Account not found' });
 
   if ('name' in updates && hasHeaderInjectionChars(updates.name)) {
@@ -322,7 +322,7 @@ router.put('/:id', async (req, res) => {
 router.delete('/:id', async (req, res) => {
   try {
     const { id } = req.params;
-    const check = await query('SELECT id FROM email_accounts WHERE id = $1 AND user_id = $2', [id, req.session.userId]);
+    const check = await query('SELECT id FROM email_accounts WHERE id = $1', [id]);
     if (!check.rows.length) return res.status(404).json({ error: 'Account not found' });
 
     // Delete from DB first (cascades to messages and folders immediately).
@@ -341,7 +341,7 @@ router.delete('/:id', async (req, res) => {
 
 router.post('/:id/reconnect', async (req, res) => {
   const { id } = req.params;
-  const result = await query('SELECT * FROM email_accounts WHERE id = $1 AND user_id = $2', [id, req.session.userId]);
+  const result = await query('SELECT * FROM email_accounts WHERE id = $1', [id]);
   if (!result.rows.length) return res.status(404).json({ error: 'Account not found' });
 
   // A second press while this mailbox is still connecting starts nothing.
@@ -356,7 +356,7 @@ router.post('/:id/reconnect', async (req, res) => {
 
 router.get('/:id/aliases', async (req, res) => {
   const { id } = req.params;
-  const check = await query('SELECT id FROM email_accounts WHERE id = $1 AND user_id = $2', [id, req.session.userId]);
+  const check = await query('SELECT id FROM email_accounts WHERE id = $1', [id]);
   if (!check.rows.length) return res.status(404).json({ error: 'Account not found' });
 
   const result = await query(
@@ -377,7 +377,7 @@ router.post('/:id/aliases', async (req, res) => {
     return res.status(400).json({ error: 'Fields cannot contain control characters' });
   }
 
-  const check = await query('SELECT id FROM email_accounts WHERE id = $1 AND user_id = $2', [id, req.session.userId]);
+  const check = await query('SELECT id FROM email_accounts WHERE id = $1', [id]);
   if (!check.rows.length) return res.status(404).json({ error: 'Account not found' });
 
   const result = await query(
@@ -399,8 +399,8 @@ router.put('/:id/aliases/:aliasId', async (req, res) => {
   const check = await query(
     `SELECT a.id, a.account_id FROM account_aliases a
      JOIN email_accounts e ON a.account_id = e.id
-     WHERE a.id = $1 AND e.user_id = $2 AND e.id = $3`,
-    [aliasId, req.session.userId, id]
+     WHERE a.id = $1 AND e.id = $2`,
+    [aliasId, id]
   );
   if (!check.rows.length) return res.status(404).json({ error: 'Alias not found' });
 
@@ -418,8 +418,8 @@ router.delete('/:id/aliases/:aliasId', async (req, res) => {
   const check = await query(
     `SELECT a.id, a.account_id FROM account_aliases a
      JOIN email_accounts e ON a.account_id = e.id
-     WHERE a.id = $1 AND e.user_id = $2 AND e.id = $3`,
-    [aliasId, req.session.userId, id]
+     WHERE a.id = $1 AND e.id = $2`,
+    [aliasId, id]
   );
   if (!check.rows.length) return res.status(404).json({ error: 'Alias not found' });
 
@@ -430,7 +430,7 @@ router.delete('/:id/aliases/:aliasId', async (req, res) => {
 
 router.get('/:id/folders', async (req, res) => {
   const { id } = req.params;
-  const check = await query('SELECT id FROM email_accounts WHERE id = $1 AND user_id = $2', [id, req.session.userId]);
+  const check = await query('SELECT id FROM email_accounts WHERE id = $1', [id]);
   if (!check.rows.length) return res.status(404).json({ error: 'Account not found' });
 
   const result = await query(
@@ -445,8 +445,8 @@ router.get('/:id/folders', async (req, res) => {
 router.post('/:id/reindex', async (req, res) => {
   try {
     const result = await query(
-      "SELECT * FROM email_accounts WHERE id = $1 AND user_id = $2 AND enabled = true AND protocol = 'imap'",
-      [req.params.id, req.session.userId]
+      "SELECT * FROM email_accounts WHERE id = $1 AND enabled = true AND protocol = 'imap'",
+      [req.params.id]
     );
     if (!result.rows.length) return res.status(404).json({ error: 'Account not found' });
 

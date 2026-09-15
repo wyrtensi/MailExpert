@@ -111,22 +111,23 @@ router.get('/callback', async (req, res) => {
   }
 });
 
-// Create or update the Gmail account for (userId, email) under a transaction-scoped
-// advisory lock so racing callbacks for one mailbox cannot insert duplicates. The account
-// is bound to the app whose client issued the tokens.
+// Create or update the Gmail mailbox with this address under a transaction-scoped advisory
+// lock so racing callbacks for one mailbox cannot insert duplicates. Mailboxes are shared, so
+// the address alone names one; userId only records who added it. The account is bound to the
+// app whose client issued the tokens.
 async function upsertGoogleAccount(userId, identity, tokens, appId) {
   const email = identity.email.toLowerCase();
   const encryptedAccess = encrypt(tokens.accessToken);
   const encryptedRefresh = tokens.refreshToken ? encrypt(tokens.refreshToken) : null;
 
   return withTransaction(async (client) => {
-    await client.query('SELECT pg_advisory_xact_lock(hashtext($1))', [`oauth-account:${userId}:${email}`]);
+    await client.query('SELECT pg_advisory_xact_lock(hashtext($1))', [`oauth-account:${email}`]);
 
     const existing = await client.query(
       `SELECT id, oauth_refresh_token, oauth_app_id FROM email_accounts
-       WHERE user_id = $1 AND lower(email_address) = lower($2)
+       WHERE lower(email_address) = lower($1)
        ORDER BY created_at LIMIT 1`,
-      [userId, email],
+      [email],
     );
 
     let accountId;
@@ -156,7 +157,7 @@ async function upsertGoogleAccount(userId, identity, tokens, appId) {
       const color = ACCOUNT_COLORS[Math.floor(Math.random() * ACCOUNT_COLORS.length)];
       const inserted = await client.query(`
         INSERT INTO email_accounts (
-          user_id, name, email_address, color, protocol,
+          added_by, name, email_address, color, protocol,
           imap_host, imap_port, imap_tls,
           smtp_host, smtp_port, smtp_tls,
           auth_user,

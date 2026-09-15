@@ -64,14 +64,14 @@ describe('getGtdSections — account resolution', () => {
     }
   });
 
-  it('scopes the accounts read to the user (via the listUserAccounts capability)', async () => {
+  it('reads every mailbox (via the listUserAccounts capability)', async () => {
     query.mockResolvedValueOnce({ rows: [] });
     await getGtdSections({ userId: 'u1' });
-    // listUserAccounts issues the user-scoped account read; the enabled filter is applied in JS
+    // listUserAccounts issues the account read; the enabled filter is applied in JS
     // and the per-account GTD gate via getGtdConfig — no gtd_enabled in the SQL anymore.
     const [sql, params] = query.mock.calls[0];
-    expect(sql).toContain('user_id = $1');
-    expect(params).toEqual(['u1']);
+    expect(sql).not.toContain('user_id');
+    expect(params).toBeUndefined();
   });
 
   it('excludes accounts the caller does not own when accountId is supplied', async () => {

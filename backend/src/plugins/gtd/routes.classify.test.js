@@ -54,7 +54,7 @@ const account = { id: ACCT_ID, user_id: 'u1', folder_mappings: {} };
 // so a test can drive the not-owned (msg:null) / no-sibling (sibling:null) branches.
 function stubQueries({ msg = inboxMsg, acct = account, sibling = null, exact = { uid: 77 } } = {}) {
   query.mockImplementation(async (sql) => {
-    if (sql.includes('FROM messages m') && sql.includes('JOIN email_accounts')) return { rows: msg ? [msg] : [] };
+    if (sql.startsWith('SELECT m.* FROM messages m WHERE m.id')) return { rows: msg ? [msg] : [] };
     if (sql.startsWith('SELECT * FROM email_accounts')) return { rows: acct ? [acct] : [] };
     if (sql.includes('thread_key = $4') || sql.includes('message_id = $4')) return { rows: exact ? [exact] : [] };
     if (sql.startsWith('SELECT uid FROM messages')) return { rows: sibling ? [sibling] : [] };
@@ -167,7 +167,7 @@ describe('POST /api/gtd/classify — apply a GTD label (COPY)', () => {
     expect(imapManager.copyMessage).not.toHaveBeenCalled();
   });
 
-  it("404s a message the caller doesn't own (the email_accounts join returns nothing)", async () => {
+  it('404s a message that does not exist', async () => {
     stubQueries({ msg: null });
     const res = await classify({ messageId: MSG_ID, state: 'todo' });
     expect(res.status).toBe(404);

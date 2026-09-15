@@ -182,7 +182,7 @@ router.post('/send', async (req, res) => {
   const normalizedSubject = sanitizeHeaderValue(subject || '');
 
   const [result, prefResult] = await Promise.all([
-    query('SELECT * FROM email_accounts WHERE id = $1 AND user_id = $2', [accountId, req.session.userId]),
+    query('SELECT * FROM email_accounts WHERE id = $1', [accountId]),
     query('SELECT preferences FROM users WHERE id = $1', [req.session.userId]),
   ]);
   if (!result.rows.length) return res.status(404).json({ error: 'Account not found' });
@@ -221,14 +221,13 @@ router.post('/send', async (req, res) => {
   let resolvedFwdAttachments = [];
   if (forwardedAttachments?.length) {
     try {
-      // Resolve every referenced message in a SINGLE ownership-scoped query so a large
-      // forwardedAttachments array can't fan out into one DB round-trip per entry.
+      // Resolve every referenced message in a SINGLE query so a large forwardedAttachments
+      // array can't fan out into one DB round-trip per entry.
       const distinctMsgIds = [...new Set(forwardedAttachments.map(fa => fa.messageId))];
       const msgRows = await query(
         `SELECT m.id, m.uid, m.folder, m.attachments, m.account_id FROM messages m
-         JOIN email_accounts a ON m.account_id = a.id
-         WHERE m.id = ANY($1::uuid[]) AND a.user_id = $2`,
-        [distinctMsgIds, req.session.userId]
+         WHERE m.id = ANY($1::uuid[])`,
+        [distinctMsgIds]
       );
       const msgById = new Map(msgRows.rows.map(m => [m.id, m]));
 

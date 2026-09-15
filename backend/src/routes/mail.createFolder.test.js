@@ -33,7 +33,7 @@ describe('POST /api/mail/folders — create through ensureFolder', () => {
     query.mockReset(); imapManager.ensureFolder.mockReset();
     accountDelimiter = '.';
     query.mockImplementation((sql) => {
-      if (sql.includes('FROM email_accounts WHERE id = $1 AND user_id = $2')) return Promise.resolve({ rows: [ACCOUNT] });
+      if (sql.includes('FROM email_accounts WHERE id = $1')) return Promise.resolve({ rows: [ACCOUNT] });
       if (sql.includes('SELECT delimiter FROM folders')) {
         return Promise.resolve({ rows: accountDelimiter ? [{ delimiter: accountDelimiter }] : [] });
       }

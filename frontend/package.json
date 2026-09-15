@@ -159,7 +159,7 @@
     "react": "^19.3.0",
     "react-dom": "^19.3.0",
     "react-i18next": "^17.0.14",
-    "react-router": "^7.18.3",
+    "react-router": "^8.3.1",
     "zustand": "^5.0.15"
   },
   "devDependencies": {
@@ -175,5 +175,10 @@
     "jsdom": "^30.0.1",
     "tailwindcss": "^4.3.3",
     "vite": "^8.3.0"
+  },
+  "overrides": {
+    "xcode": {
+      "uuid": "^11.1.1"
+    }
   }
 }

@@ -20,9 +20,7 @@ vi.mock('../services/authLimiter.js', () => ({
 vi.mock('../services/authEvents.js', () => ({ logAuthEvent: vi.fn() }));
 vi.mock('../services/mailer.js', () => ({ sendSystemEmail: vi.fn() }));
 vi.mock('./oidc.js', () => ({ buildEndSessionUrl: vi.fn() }));
-vi.mock('../services/categorizer.js', () => ({
-  invalidateGlobalCategorizationCache: vi.fn(),
-}));
+vi.mock('../services/categorizer.js', () => ({ getGlobalCategorizationEnabled: vi.fn(async () => true) }));
 vi.mock('../services/redis.js', () => ({ redisClient: {} }));
 vi.mock('../services/rateLimiter.js', () => ({
   consume: vi.fn(),
@@ -50,10 +48,10 @@ describe('PATCH /auth/preferences folderOrder', () => {
     const [sql, params] = query.mock.calls[0];
     expect(sql).toContain('SET preferences = preferences');
     expect(sql).toContain(
-      "jsonb_build_object('folderOrder', $37::jsonb)",
+      "jsonb_build_object('folderOrder', $36::jsonb)",
     );
     expect(params[0]).toBe('user-1');
-    expect(params[36]).toBe(JSON.stringify(folderOrder));
+    expect(params[35]).toBe(JSON.stringify(folderOrder));
     expect(res.json).toHaveBeenCalledWith({ ok: true });
   });
 });
@@ -70,10 +68,10 @@ describe('PATCH /auth/preferences senderFavicons', () => {
 
     const [sql, params] = query.mock.calls[0];
     expect(sql).toContain(
-      "jsonb_build_object('senderFavicons', $38::boolean)",
+      "jsonb_build_object('senderFavicons', $37::boolean)",
     );
     expect(params[0]).toBe('user-1');
-    expect(params[37]).toBe(true);
+    expect(params[36]).toBe(true);
     expect(res.json).toHaveBeenCalledWith({ ok: true });
   });
 
@@ -105,26 +103,26 @@ describe('PATCH /auth/preferences defaultSender (#417)', () => {
   it('persists an account default', async () => {
     const res = await run({ defaultSender: `account:${A}` });
     const [sql, params] = query.mock.calls[0];
-    expect(sql).toContain("jsonb_build_object('defaultSender', $40::text)");
-    expect(params[39]).toBe(`account:${A}`);
+    expect(sql).toContain("jsonb_build_object('defaultSender', $39::text)");
+    expect(params[38]).toBe(`account:${A}`);
     expect(res.json).toHaveBeenCalledWith({ ok: true });
   });
 
   it('persists an alias default, so an identity can be the default and not just an account', async () => {
     await run({ defaultSender: `alias:${A}:${B}` });
-    expect(query.mock.calls[0][1][39]).toBe(`alias:${A}:${B}`);
+    expect(query.mock.calls[0][1][38]).toBe(`alias:${A}:${B}`);
   });
 
   it('persists an empty string, which is how the preference is cleared', async () => {
     // '' is meaningful: it means "no preference, fall back to last used". It must be
     // written rather than treated as an absent key, or clearing would silently no-op.
     await run({ defaultSender: '' });
-    expect(query.mock.calls[0][1][39]).toBe('');
+    expect(query.mock.calls[0][1][38]).toBe('');
   });
 
   it('leaves the stored value untouched when the key is absent', async () => {
     await run({ theme: 'dark' });
-    expect(query.mock.calls[0][1][39]).toBe(null);
+    expect(query.mock.calls[0][1][38]).toBe(null);
   });
 
   it('rejects malformed values instead of storing something unusable', async () => {
@@ -144,7 +142,14 @@ describe('sync intervals are install-wide', () => {
     await patchPreferences({ session: { userId: 'user-1' }, body: { syncInterval: '15', folderSyncInterval: '0' } }, res);
     const [sql, params] = query.mock.calls[0];
     expect(sql).not.toMatch(/syncInterval|folderSyncInterval/);
-    expect(params).toHaveLength(40);
+    expect(params).toHaveLength(39);
+    expect(res.json).toHaveBeenCalledWith({ ok: true });
+  });
+
+  it('PATCH ignores the old per-user categorization switch', async () => {
+    const res = { status: vi.fn().mockReturnThis(), json: vi.fn() };
+    await patchPreferences({ session: { userId: 'user-1' }, body: { categorizationEnabled: true } }, res);
+    expect(query.mock.calls[0][0]).not.toContain('categorizationEnabled');
     expect(res.json).toHaveBeenCalledWith({ ok: true });
   });
 
@@ -156,6 +161,6 @@ describe('sync intervals are install-wide', () => {
     });
     const res = { status: vi.fn().mockReturnThis(), json: vi.fn() };
     await getPreferences({ session: { userId: 'user-1' } }, res);
-    expect(res.json).toHaveBeenCalledWith({ theme: 'dark', syncInterval: 120 });
+    expect(res.json).toHaveBeenCalledWith({ theme: 'dark', syncInterval: 120, categorizationEnabled: true });
   });
 });

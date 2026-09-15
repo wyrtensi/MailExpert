@@ -3507,9 +3507,9 @@ export class ImapManager {
             // including self-mail and duplicate deliveries within one mailbox.
 
             let msgCategory = null;
-            if (account.categorization_enabled || await getGlobalCategorizationEnabled(account.user_id)) {
+            if (account.categorization_enabled || await getGlobalCategorizationEnabled()) {
               try {
-                const socialDomains = await loadSocialDomains(account.user_id);
+                const socialDomains = await loadSocialDomains();
                 msgCategory = classifyMessage(parsed.parsedHeaders, parsed.fromEmail, socialDomains);
                 if (msgCategory === 'primary') msgCategory = null;
               } catch { /* non-fatal — leave category NULL */ }
@@ -4174,9 +4174,9 @@ export class ImapManager {
                 const bfThreadId = await computeThreadId(account.id, bfMsgId, bfReplyTo, bfRefs, sanitizeStr(parsed.subject));
 
                 let bfCategory = null;
-                if (account.categorization_enabled || await getGlobalCategorizationEnabled(account.user_id)) {
+                if (account.categorization_enabled || await getGlobalCategorizationEnabled()) {
                   try {
-                    const socialDomains = await loadSocialDomains(account.user_id);
+                    const socialDomains = await loadSocialDomains();
                     bfCategory = classifyMessage(parsed.parsedHeaders, parsed.fromEmail, socialDomains);
                     if (bfCategory === 'primary') bfCategory = null;
                   } catch { /* non-fatal */ }

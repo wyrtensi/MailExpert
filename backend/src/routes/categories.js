@@ -1,7 +1,7 @@
 import { Router } from 'express';
 import { query } from '../services/db.js';
 import { requireAuth } from '../middleware/auth.js';
-import { invalidateSocialDomainCache, backfillCategories, aiClassifyMessage, BUILTIN_SETS } from '../services/categorizer.js';
+import { invalidateSocialDomainCache, backfillCategories, aiClassifyMessage, BUILTIN_SETS, getGlobalCategorizationEnabled } from '../services/categorizer.js';
 import { validateHost } from '../services/hostValidation.js';
 import { safeFetch } from '../services/safeFetch.js';
 
@@ -70,9 +70,7 @@ router.get('/categories/sources', requireAuth, async (req, res) => {
             array_length(resolved_domains, 1) AS domain_count,
             last_fetched_at, fetch_ok, fetch_error, created_at
      FROM category_list_sources
-     WHERE user_id = $1
-     ORDER BY source_type, created_at`,
-    [req.session.userId]
+     ORDER BY source_type, created_at`
   );
   res.json({ sources: result.rows, builtinSets: Object.keys(BUILTIN_SETS) });
 });
@@ -111,13 +109,13 @@ router.post('/categories/sources', requireAuth, async (req, res) => {
 
   try {
     const result = await query(
-      `INSERT INTO category_list_sources (user_id, source_type, value, label)
-       VALUES ($1, $2, $3, $4)
-       ON CONFLICT (user_id, source_type, value) DO UPDATE SET enabled = true
+      `INSERT INTO category_list_sources (source_type, value, label)
+       VALUES ($1, $2, $3)
+       ON CONFLICT (source_type, value) DO UPDATE SET enabled = true
        RETURNING id, source_type, value, label, enabled, last_fetched_at, fetch_ok, fetch_error, created_at`,
-      [req.session.userId, sourceType, trimmedValue, label?.trim() || null]
+      [sourceType, trimmedValue, label?.trim() || null]
     );
-    invalidateSocialDomainCache(req.session.userId);
+    invalidateSocialDomainCache();
 
     const source = result.rows[0];
 
@@ -131,7 +129,7 @@ router.post('/categories/sources', requireAuth, async (req, res) => {
            WHERE id = $4`,
           [domains, !error, error, source.id]
         );
-        invalidateSocialDomainCache(req.session.userId);
+        invalidateSocialDomainCache();
       })().catch(() => {});
     }
 
@@ -150,13 +148,13 @@ router.patch('/categories/sources/:id', requireAuth, async (req, res) => {
 
   const result = await query(
     `UPDATE category_list_sources SET enabled = $1
-     WHERE id = $2 AND user_id = $3
+     WHERE id = $2
      RETURNING id, source_type, value, label, enabled, last_fetched_at, fetch_ok, fetch_error`,
-    [enabled, req.params.id, req.session.userId]
+    [enabled, req.params.id]
   );
   if (!result.rows.length) return res.status(404).json({ error: 'Source not found' });
 
-  invalidateSocialDomainCache(req.session.userId);
+  invalidateSocialDomainCache();
   res.json({ source: result.rows[0] });
 });
 
@@ -164,12 +162,12 @@ router.patch('/categories/sources/:id', requireAuth, async (req, res) => {
 
 router.delete('/categories/sources/:id', requireAuth, async (req, res) => {
   const result = await query(
-    'DELETE FROM category_list_sources WHERE id = $1 AND user_id = $2 RETURNING id',
-    [req.params.id, req.session.userId]
+    'DELETE FROM category_list_sources WHERE id = $1 RETURNING id',
+    [req.params.id]
   );
   if (!result.rows.length) return res.status(404).json({ error: 'Source not found' });
 
-  invalidateSocialDomainCache(req.session.userId);
+  invalidateSocialDomainCache();
   res.json({ ok: true });
 });
 
@@ -177,8 +175,8 @@ router.delete('/categories/sources/:id', requireAuth, async (req, res) => {
 
 router.post('/categories/sources/:id/refresh', requireAuth, async (req, res) => {
   const check = await query(
-    'SELECT id, source_type, value FROM category_list_sources WHERE id = $1 AND user_id = $2',
-    [req.params.id, req.session.userId]
+    'SELECT id, source_type, value FROM category_list_sources WHERE id = $1',
+    [req.params.id]
   );
   if (!check.rows.length) return res.status(404).json({ error: 'Source not found' });
 
@@ -192,7 +190,7 @@ router.post('/categories/sources/:id/refresh', requireAuth, async (req, res) => 
      WHERE id = $4`,
     [domains, !error, error, source.id]
   );
-  invalidateSocialDomainCache(req.session.userId);
+  invalidateSocialDomainCache();
 
   res.json({ ok: true, domainCount: domains.length, error: error || null });
 });
@@ -201,20 +199,19 @@ router.post('/categories/sources/:id/refresh', requireAuth, async (req, res) => 
 
 router.post('/categories/recategorize/:accountId', requireAuth, async (req, res) => {
   const check = await query(
-    `SELECT ea.id FROM email_accounts ea
-     JOIN users u ON u.id = ea.user_id
-     WHERE ea.id = $1 AND ea.user_id = $2
-       AND (ea.categorization_enabled = true OR (u.preferences->>'categorizationEnabled')::boolean = true)`,
-    [req.params.accountId, req.session.userId]
+    'SELECT id, categorization_enabled FROM email_accounts WHERE id = $1',
+    [req.params.accountId]
   );
-  if (!check.rows.length) return res.status(404).json({ error: 'Account not found or categorization not enabled' });
+  const mailbox = check.rows[0];
+  if (!mailbox || !(mailbox.categorization_enabled || await getGlobalCategorizationEnabled())) {
+    return res.status(404).json({ error: 'Account not found or categorization not enabled' });
+  }
 
   // Run in background — large inboxes can take a while
-  const userId = req.session.userId;
   const accountId = req.params.accountId;
   (async () => {
     try {
-      const processed = await backfillCategories(accountId, userId);
+      const processed = await backfillCategories(accountId);
       console.log(`Re-categorization complete: ${processed} messages for account ${accountId}`);
     } catch (err) {
       console.error(`Re-categorization error for account ${accountId}:`, err.message);
@@ -235,9 +232,8 @@ router.post('/categories/ai-classify/:messageId', requireAuth, async (req, res) 
   const msgResult = await query(`
     SELECT m.subject, m.from_email, m.snippet
     FROM messages m
-    JOIN email_accounts a ON m.account_id = a.id
-    WHERE m.id = $1 AND a.user_id = $2 AND m.is_deleted = false
-  `, [messageId, req.session.userId]);
+    WHERE m.id = $1 AND m.is_deleted = false
+  `, [messageId]);
 
   if (!msgResult.rows.length) return res.status(404).json({ error: 'Message not found' });
   const { subject, from_email, snippet } = msgResult.rows[0];
@@ -247,10 +243,8 @@ router.post('/categories/ai-classify/:messageId', requireAuth, async (req, res) 
 
   // Persist the AI-assigned category.
   await query(
-    `UPDATE messages SET category = $1
-     FROM email_accounts a
-     WHERE messages.id = $2 AND messages.account_id = a.id AND a.user_id = $3`,
-    [category === 'primary' ? null : category, messageId, req.session.userId]
+    'UPDATE messages SET category = $1 WHERE id = $2',
+    [category === 'primary' ? null : category, messageId]
   );
 
   res.json({ ok: true, category });

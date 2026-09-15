@@ -5,7 +5,7 @@ vi.mock('./aiProvider.js', () => ({ completeText: vi.fn() }));
 
 import { query } from './db.js';
 import { completeText } from './aiProvider.js';
-import { aiClassifyMessage, backfillCategories } from './categorizer.js';
+import { aiClassifyMessage, backfillCategories, getGlobalCategorizationEnabled, invalidateGlobalCategorizationCache, loadSocialDomains, invalidateSocialDomainCache } from './categorizer.js';
 
 beforeEach(() => {
   query.mockReset();
@@ -106,7 +106,7 @@ describe('backfillCategories paging', () => {
     // the rows pushed past a window were silently never classified at all.
     const { seen } = makeStore(mkRows(1200, 2));
 
-    const processed = await backfillCategories('acct-1', 'user-1');
+    const processed = await backfillCategories('acct-1');
 
     expect(duplicatesIn(seen)).toEqual([]);
     expect(seen.length).toBe(1200);
@@ -116,7 +116,7 @@ describe('backfillCategories paging', () => {
   it('leaves no bulk message uncategorized', async () => {
     const { byId } = makeStore(mkRows(1100, 3)); // every third row is bulk
 
-    await backfillCategories('acct-1', 'user-1');
+    await backfillCategories('acct-1');
 
     const missed = [...byId.values()].filter(r => r.is_bulk && r.category !== 'newsletter');
     expect(missed.map(r => r.id)).toEqual([]);
@@ -127,7 +127,7 @@ describe('backfillCategories paging', () => {
     // The keyset cursor still advances past rows it has already seen.
     const { seen, byId } = makeStore(mkRows(1300, 0));
 
-    const processed = await backfillCategories('acct-1', 'user-1');
+    const processed = await backfillCategories('acct-1');
 
     expect(processed).toBe(1300);
     expect(duplicatesIn(seen)).toEqual([]);
@@ -136,7 +136,7 @@ describe('backfillCategories paging', () => {
 
   it('pages with a keyset cursor, never an OFFSET', async () => {
     makeStore(mkRows(600, 2));
-    await backfillCategories('acct-1', 'user-1');
+    await backfillCategories('acct-1');
 
     const selects = query.mock.calls.filter(c => /SELECT id, from_email, is_bulk/.test(c[0]));
     expect(selects.length).toBeGreaterThan(1);
@@ -151,7 +151,31 @@ describe('backfillCategories paging', () => {
 
   it('handles an empty account', async () => {
     const { seen } = makeStore([]);
-    expect(await backfillCategories('acct-1', 'user-1')).toBe(0);
+    expect(await backfillCategories('acct-1')).toBe(0);
     expect(seen.length).toBe(0);
+  });
+});
+
+describe('install-wide categorization', () => {
+  it('reads the system switch once per cache window', async () => {
+    invalidateGlobalCategorizationCache();
+    query.mockResolvedValueOnce({ rows: [{ value: 'true' }] });
+    expect(await getGlobalCategorizationEnabled()).toBe(true);
+    expect(await getGlobalCategorizationEnabled()).toBe(true);
+    expect(query).toHaveBeenCalledTimes(1);
+    expect(query.mock.calls[0][0]).toContain("key = 'categorization_enabled'");
+
+    invalidateGlobalCategorizationCache();
+    query.mockResolvedValueOnce({ rows: [] });
+    expect(await getGlobalCategorizationEnabled()).toBe(false);
+  });
+
+  it('builds one social domain set from every enabled source', async () => {
+    invalidateSocialDomainCache();
+    query.mockResolvedValueOnce({ rows: [{ source_type: 'manual', value: 'Example.com', resolved_domains: null }] });
+    expect(await loadSocialDomains()).toEqual(new Set(['example.com']));
+    const [sql, params] = query.mock.calls[0];
+    expect(sql).not.toContain('user_id');
+    expect(params).toBeUndefined();
   });
 });

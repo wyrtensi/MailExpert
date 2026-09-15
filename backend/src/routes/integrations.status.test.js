@@ -20,17 +20,42 @@ vi.mock('../middleware/auth.js', () => ({
   requireAdmin: (_req, res, next) => (authState.admin ? next() : res.status(403).json({ error: 'Admin access required' })),
 }));
 const googleApps = vi.hoisted(() => ({ config: null }));
-vi.mock('../services/oauth/googleApps.js', () => ({
-  resolveGoogleConfig: vi.fn(async () => googleApps.config),
-}));
+vi.mock('../services/oauth/googleApps.js', () => {
+  class GoogleAppError extends Error {
+    constructor(code) {
+      super(code);
+      this.code = code;
+    }
+  }
+  return {
+    GoogleAppError,
+    resolveGoogleConfig: vi.fn(async () => googleApps.config),
+    getDefaultGoogleApp: vi.fn(async () => null),
+    saveDefaultGoogleAppCompat: vi.fn(async () => 'app-1'),
+    setGoogleAppStatus: vi.fn(async () => []),
+    importLegacyGoogleConfig: vi.fn(async () => null),
+  };
+});
 
 import express from 'express';
 import integrationsRoutes, { loadIntegrationConfigs } from './integrations.js';
 import { query } from '../services/db.js';
+import {
+  GoogleAppError,
+  getDefaultGoogleApp,
+  importLegacyGoogleConfig,
+  saveDefaultGoogleAppCompat,
+  setGoogleAppStatus,
+} from '../services/oauth/googleApps.js';
+
+const CLIENT_ID = '123456789012-abc123def456.apps.googleusercontent.com';
+const REDIRECT_URI = 'https://mail.example.com/oauth/google/callback';
+const imapManagerStub = { disconnectAccount: vi.fn(async () => {}) };
 
 function buildApp() {
   const app = express();
   app.use(express.json());
+  app.set('imapManager', imapManagerStub);
   app.use('/api/integrations', integrationsRoutes);
   app.use((err, _req, res, next) => { void err; void next; res.status(500).json({ error: 'Internal server error' }); });
   return app;
@@ -61,6 +86,15 @@ afterEach(() => {
   googleApps.config = null;
   query.mockReset();
   query.mockImplementation(async () => ({ rows: [] }));
+  getDefaultGoogleApp.mockReset();
+  getDefaultGoogleApp.mockImplementation(async () => null);
+  saveDefaultGoogleAppCompat.mockReset();
+  saveDefaultGoogleAppCompat.mockImplementation(async () => 'app-1');
+  setGoogleAppStatus.mockReset();
+  setGoogleAppStatus.mockImplementation(async () => []);
+  importLegacyGoogleConfig.mockReset();
+  importLegacyGoogleConfig.mockImplementation(async () => null);
+  imapManagerStub.disconnectAccount.mockClear();
 });
 
 describe('GET /api/integrations/status (non-admin capability check)', () => {
@@ -111,7 +145,7 @@ describe('GET /api/integrations (config read) stays admin-only', () => {
 });
 
 
-describe('Google integration config (admin)', () => {
+describe('Google integration settings (admin, single-app compatibility)', () => {
   const post = (body) => fetch(`${base}/api/integrations/google`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
@@ -119,35 +153,45 @@ describe('Google integration config (admin)', () => {
   });
 
   it('rejects non-admin writes', async () => {
-    const res = await post({ clientId: 'gid', clientSecret: 's', redirectUri: 'https://x/cb' });
+    const res = await post({ clientId: CLIENT_ID, clientSecret: 's', redirectUri: REDIRECT_URI });
     expect(res.status).toBe(403);
+    expect(saveDefaultGoogleAppCompat).not.toHaveBeenCalled();
     expect(query).not.toHaveBeenCalled();
   });
 
-  it('saves only the known fields, encrypts the secret at rest and applies env vars', async () => {
+  it('saves the client into the default app and keeps only the callback URL in integration_config', async () => {
     authState.admin = true;
-    const res = await post({ clientId: 'gid', clientSecret: 'gsecret', redirectUri: 'https://mail.example.com/oauth/google/callback', tenantId: 'ignored' });
+    const res = await post({ clientId: CLIENT_ID, clientSecret: 'gsecret', redirectUri: REDIRECT_URI, tenantId: 'ignored' });
     expect(res.status).toBe(200);
 
+    expect(saveDefaultGoogleAppCompat).toHaveBeenCalledWith({ clientId: CLIENT_ID, clientSecret: 'gsecret' });
     const [sql, params] = query.mock.calls.find(([q]) => /INSERT INTO integration_config/.test(q));
     expect(sql).toMatch(/ON CONFLICT \(provider\)/);
-    expect(params).toEqual(['google', { clientId: 'gid', clientSecret: 'enc:gsecret', redirectUri: 'https://mail.example.com/oauth/google/callback' }]);
-    expect(process.env.GOOGLE_CLIENT_ID).toBe('gid');
-    expect(process.env.GOOGLE_CLIENT_SECRET).toBe('gsecret');
-    expect(process.env.GOOGLE_REDIRECT_URI).toBe('https://mail.example.com/oauth/google/callback');
+    expect(params).toEqual(['google', { redirectUri: REDIRECT_URI }]);
+    expect(process.env.GOOGLE_REDIRECT_URI).toBe(REDIRECT_URI);
+    expect(process.env.GOOGLE_CLIENT_ID).toBeUndefined();
+    expect(process.env.GOOGLE_CLIENT_SECRET).toBeUndefined();
   });
 
   it('keeps the stored secret when the redacted placeholder is posted', async () => {
     authState.admin = true;
-    query.mockImplementation(async (sql) => (/SELECT config FROM integration_config/.test(sql)
-      ? { rows: [{ config: { clientId: 'old', clientSecret: 'enc:stored-secret', redirectUri: 'https://old/cb' } }] }
-      : { rows: [] }));
-
-    const res = await post({ clientId: 'gid2', clientSecret: '••••••••', redirectUri: 'https://new/cb' });
+    const res = await post({ clientId: CLIENT_ID, clientSecret: '••••••••', redirectUri: REDIRECT_URI });
     expect(res.status).toBe(200);
-    const [, params] = query.mock.calls.find(([q]) => /INSERT INTO integration_config/.test(q));
-    expect(params[1]).toEqual({ clientId: 'gid2', clientSecret: 'enc:stored-secret', redirectUri: 'https://new/cb' });
-    expect(process.env.GOOGLE_CLIENT_SECRET).toBe('stored-secret');
+    expect(saveDefaultGoogleAppCompat).toHaveBeenCalledWith({ clientId: CLIENT_ID, clientSecret: null });
+  });
+
+  it.each([
+    ['client_id_invalid', 400],
+    ['client_secret_required', 400],
+    ['app_same_project', 409],
+    ['app_in_use', 409],
+  ])('maps %s to HTTP %i without touching integration_config', async (code, status) => {
+    authState.admin = true;
+    saveDefaultGoogleAppCompat.mockRejectedValueOnce(new GoogleAppError(code));
+    const res = await post({ clientId: 'gid', clientSecret: 's', redirectUri: REDIRECT_URI });
+    expect(res.status).toBe(status);
+    expect((await res.json()).code).toBe(code);
+    expect(query).not.toHaveBeenCalled();
   });
 
   it.each(['google', 'microsoft'])('rejects a %s client secret that mixes the redaction placeholder with other text', async (provider) => {
@@ -157,57 +201,75 @@ describe('Google integration config (admin)', () => {
       const res = await fetch(`${base}/api/integrations/${provider}`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ clientId: 'gid', clientSecret, redirectUri: 'https://x/cb' }),
+        body: JSON.stringify({ clientId: CLIENT_ID, clientSecret, redirectUri: 'https://x/cb' }),
       });
       expect(res.status).toBe(400);
       const body = await res.json();
       expect(body).toEqual({ error: 'Client secret contains the redaction placeholder; enter the full secret', code: 'client_secret_redacted' });
     }
     expect(query).not.toHaveBeenCalled();
+    expect(saveDefaultGoogleAppCompat).not.toHaveBeenCalled();
     expect(process.env.MS_CLIENT_ID).toBe('unchanged');
-    expect(process.env.GOOGLE_CLIENT_ID).toBeUndefined();
   });
 
-  it('clears env vars for fields removed from the saved config', async () => {
+  it('clears the callback URL env var when it is removed', async () => {
     authState.admin = true;
     process.env.GOOGLE_REDIRECT_URI = 'https://stale/cb';
-    const res = await post({ clientId: 'gid', clientSecret: 'gsecret', redirectUri: '' });
+    const res = await post({ clientId: CLIENT_ID, clientSecret: 'gsecret', redirectUri: '' });
     expect(res.status).toBe(200);
+    const [, params] = query.mock.calls.find(([q]) => /INSERT INTO integration_config/.test(q));
+    expect(params).toEqual(['google', {}]);
     expect(process.env.GOOGLE_REDIRECT_URI).toBeUndefined();
-    const status = await fetch(`${base}/api/integrations/status`);
-    expect((await status.json()).google).toEqual({ configured: false });
   });
 
-  it('returns the google config with the secret redacted', async () => {
+  it('returns the default app client ID with the secret redacted and drops legacy fields', async () => {
     authState.admin = true;
     const updatedAt = '2026-09-14T00:00:00.000Z';
-    query.mockResolvedValue({ rows: [{ provider: 'google', config: { clientId: 'gid', clientSecret: 'enc:real-secret', redirectUri: 'https://x/cb' }, updated_at: updatedAt }] });
+    query.mockResolvedValue({ rows: [{ provider: 'google', config: { clientId: 'legacy-id', clientSecret: 'enc:real-secret', redirectUri: 'https://x/cb' }, updated_at: updatedAt }] });
+    getDefaultGoogleApp.mockResolvedValue({ id: 'app-1', client_id: CLIENT_ID, client_secret: 'enc:app-secret' });
 
     const res = await fetch(`${base}/api/integrations`);
     const text = await res.text();
-    expect(text).not.toContain('real-secret');
-    expect(JSON.parse(text).google).toEqual({ clientId: 'gid', clientSecret: '••••••••', redirectUri: 'https://x/cb', updated_at: updatedAt });
+    expect(text).not.toMatch(/real-secret|app-secret|legacy-id/);
+    expect(JSON.parse(text).google).toEqual({ clientId: CLIENT_ID, clientSecret: '••••••••', redirectUri: 'https://x/cb', updated_at: updatedAt });
   });
 
-  it('deletes the config and clears the env vars', async () => {
+  it('disables the default app, disconnects its mailboxes and clears the callback URL on delete', async () => {
     authState.admin = true;
-    process.env.GOOGLE_CLIENT_ID = 'gid';
-    process.env.GOOGLE_CLIENT_SECRET = 'gsecret';
     process.env.GOOGLE_REDIRECT_URI = 'https://x/cb';
+    getDefaultGoogleApp.mockResolvedValue({ id: 'app-1', client_id: CLIENT_ID });
+    setGoogleAppStatus.mockResolvedValue(['acc-1', 'acc-2']);
 
     const res = await fetch(`${base}/api/integrations/google`, { method: 'DELETE' });
+
     expect(res.status).toBe(200);
     expect(query.mock.calls[0]).toEqual(['DELETE FROM integration_config WHERE provider = $1', ['google']]);
-    for (const k of GOOGLE_VARS) expect(process.env[k]).toBeUndefined();
+    expect(setGoogleAppStatus).toHaveBeenCalledWith('app-1', 'disabled');
+    expect(imapManagerStub.disconnectAccount.mock.calls.map(([id]) => id)).toEqual(['acc-1', 'acc-2']);
+    expect(process.env.GOOGLE_REDIRECT_URI).toBeUndefined();
   });
 
-  it('loads the google config into env vars on startup', async () => {
-    query.mockResolvedValue({ rows: [{ provider: 'google', config: { clientId: 'gid', clientSecret: 'enc:loaded-secret', redirectUri: 'https://x/cb' } }] });
+  it('loads only the callback URL on startup and imports the single-app client', async () => {
+    process.env.GOOGLE_CLIENT_ID = 'env-client';
+    query.mockResolvedValue({ rows: [{ provider: 'google', config: { clientId: CLIENT_ID, clientSecret: 'enc:loaded-secret', redirectUri: 'https://x/cb' } }] });
     const logSpy = vi.spyOn(console, 'log').mockImplementation(() => {});
     await loadIntegrationConfigs();
     logSpy.mockRestore();
-    expect(process.env.GOOGLE_CLIENT_ID).toBe('gid');
-    expect(process.env.GOOGLE_CLIENT_SECRET).toBe('loaded-secret');
     expect(process.env.GOOGLE_REDIRECT_URI).toBe('https://x/cb');
+    expect(process.env.GOOGLE_CLIENT_ID).toBe('env-client');
+    expect(process.env.GOOGLE_CLIENT_SECRET).toBeUndefined();
+    expect(importLegacyGoogleConfig).toHaveBeenCalledTimes(1);
+  });
+
+  it('keeps starting when the import fails and logs only the error code', async () => {
+    importLegacyGoogleConfig.mockRejectedValueOnce(Object.assign(new Error('boom enc:secret-value'), { code: 'import_failed' }));
+    const logSpy = vi.spyOn(console, 'log').mockImplementation(() => {});
+    const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+    await expect(loadIntegrationConfigs()).resolves.toBeUndefined();
+    const logged = JSON.stringify(errorSpy.mock.calls);
+    logSpy.mockRestore();
+    errorSpy.mockRestore();
+    expect(logged).toMatch(/import_failed/);
+    expect(logged).not.toMatch(/boom|secret-value/);
   });
 });

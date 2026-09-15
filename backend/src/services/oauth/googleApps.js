@@ -141,3 +141,47 @@ export async function importLegacyGoogleConfig() {
     return appId;
   });
 }
+
+// Compatibility for the single-app settings card until the multi-app admin UI replaces it:
+// saving a client ID updates that app (re-activating it), or replaces the default app when
+// the default has no mailboxes yet. `clientSecret` null keeps the stored secret.
+export async function saveDefaultGoogleAppCompat({ clientId, clientSecret }) {
+  const projectNumber = parseGoogleClientId(clientId);
+  if (!projectNumber) throw new GoogleAppError('client_id_invalid');
+  const normalizedClientId = clientId.trim();
+
+  return withTransaction(async (client) => {
+    await client.query("SELECT pg_advisory_xact_lock(hashtext('google-oauth-app-import'))");
+
+    const same = await client.query('SELECT id FROM google_oauth_apps WHERE client_id = $1', [normalizedClientId]);
+    if (same.rows.length) {
+      const appId = same.rows[0].id;
+      await client.query(
+        `UPDATE google_oauth_apps SET status = 'active', client_secret = COALESCE($2, client_secret), updated_at = NOW()
+         WHERE id = $1`,
+        [appId, clientSecret ? encrypt(clientSecret) : null],
+      );
+      return appId;
+    }
+    if (!clientSecret) throw new GoogleAppError('client_secret_required');
+
+    const current = await client.query(
+      `SELECT a.id, (SELECT count(*) FROM email_accounts e WHERE e.oauth_app_id = a.id)::int AS accounts
+       FROM google_oauth_apps a WHERE a.status <> 'disabled' ORDER BY a.created_at, a.id LIMIT 1`,
+    );
+    if (current.rows.length) {
+      if (current.rows[0].accounts > 0) throw new GoogleAppError('app_in_use');
+      await client.query('DELETE FROM google_oauth_apps WHERE id = $1', [current.rows[0].id]);
+    }
+
+    const taken = await client.query('SELECT 1 FROM google_oauth_apps WHERE project_number = $1', [projectNumber]);
+    if (taken.rows.length) throw new GoogleAppError('app_same_project');
+
+    const inserted = await client.query(
+      `INSERT INTO google_oauth_apps (label, client_id, client_secret, project_number)
+       VALUES ($1, $2, $3, $4) RETURNING id`,
+      ['Google 1', normalizedClientId, encrypt(clientSecret), projectNumber],
+    );
+    return inserted.rows[0].id;
+  });
+}

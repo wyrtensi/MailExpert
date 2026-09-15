@@ -15,7 +15,7 @@ import { query } from '../services/db.js';
 import { applyInboxRules } from '../services/inboxRules.js';
 
 const ACCOUNT_ID = 'e5e5e5e5-5555-4555-8555-e5e5e5e5e5e5';
-const ACCOUNT = { id: ACCOUNT_ID, user_id: 'user-1' };
+const ACCOUNT = { id: ACCOUNT_ID };
 const imapManager = { broadcast: vi.fn() };
 
 function buildApp() {
@@ -39,7 +39,7 @@ describe('POST /api/rules/run — background sweep', () => {
     rulesCount = 1;
     messageBatches = [[{ id: 'm1', uid: 1, folder: 'INBOX' }, { id: 'm2', uid: 2, folder: 'INBOX' }]];
     query.mockImplementation((sql) => {
-      if (sql.includes('FROM email_accounts WHERE user_id = $1')) return Promise.resolve({ rows: [{ id: ACCOUNT_ID }] });
+      if (sql === 'SELECT id FROM email_accounts') return Promise.resolve({ rows: [{ id: ACCOUNT_ID }] });
       if (sql.includes('FROM inbox_rules')) return Promise.resolve({ rows: [{ cnt: String(rulesCount) }] });
       if (sql.includes('FROM email_accounts WHERE id = $1')) return Promise.resolve({ rows: [ACCOUNT] });
       if (sql.includes('FROM messages')) return Promise.resolve({ rows: messageBatches.shift() || [] });
@@ -62,7 +62,7 @@ describe('POST /api/rules/run — background sweep', () => {
     expect(completion()?.[1]).toBe('user-1');   // scoped to the requesting user
   });
 
-  it('rejects a second run while one is in flight with 409, then accepts again', async () => {
+  it('rejects a second run while a mailbox is still being swept with 409, then accepts again', async () => {
     let release;
     applyInboxRules.mockImplementation(() => new Promise(r => { release = r; }));
     const first = await run();
@@ -78,7 +78,7 @@ describe('POST /api/rules/run — background sweep', () => {
     await tick();
   });
 
-  it('completes with zero totals and no rule evaluation when the user has no rules', async () => {
+  it('completes with zero totals and no rule evaluation when the mailbox has no rules', async () => {
     rulesCount = 0;
     const res = await run();
     expect(res.status).toBe(202);

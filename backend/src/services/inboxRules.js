@@ -1,13 +1,12 @@
 import { query } from './db.js';
 import { resolveArchiveFolder, isAllMailFolder, resolveTrashFolder, resolveAllTrashPaths, getDeleteStrategy, adjustFolderCounts } from '../utils/mailUtils.js';
 
-async function getRulesForAccount(userId, accountId) {
+async function getRulesForAccount(accountId) {
   const result = await query(
     `SELECT * FROM inbox_rules
-     WHERE user_id = $1 AND enabled = true
-       AND (account_id IS NULL OR account_id = $2)
+     WHERE account_id = $1 AND enabled = true
      ORDER BY priority ASC, created_at ASC`,
-    [userId, accountId]
+    [accountId]
   );
   return result.rows;
 }
@@ -150,7 +149,7 @@ export async function applyInboxRules(messages, account, imapManager) {
 
   let rules;
   try {
-    rules = await getRulesForAccount(account.user_id, account.id);
+    rules = await getRulesForAccount(account.id);
   } catch (err) {
     console.error('inboxRules: failed to load rules:', err.message);
     return { remaining: messages, mutedIds: new Set() };
@@ -331,8 +330,8 @@ export async function applyBlockList(messages, account, imapManager) {
   let blockedRows;
   try {
     const res = await query(
-      'SELECT email_address FROM block_list WHERE user_id = $1',
-      [account.user_id]
+      'SELECT email_address FROM block_list WHERE account_id = $1',
+      [account.id]
     );
     blockedRows = res.rows;
   } catch (err) {

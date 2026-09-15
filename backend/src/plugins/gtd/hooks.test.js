@@ -48,7 +48,7 @@ describe('gtd hooks — sectionsChanged', () => {
     const imap = mgr();
     await sectionsChanged({ mgr: imap, account, changedCount: 4 });
     expect(imap.broadcast).toHaveBeenCalledTimes(1);
-    expect(imap.broadcast).toHaveBeenCalledWith({ type: 'gtd_sections_updated', accountId: 'a1' }, 'u1');
+    expect(imap.broadcast).toHaveBeenCalledWith({ type: 'gtd_sections_updated', accountId: 'a1' });
   });
 
   it('does not broadcast when GTD is disabled for the account', async () => {
@@ -144,7 +144,7 @@ describe('gtd hooks — emitAfterDeferredCopySync', () => {
     const account = { id: 'acct-1', user_id: 'user-1' }; // gtd_enabled falsy → no transition re-run
     await emitAfterDeferredCopySync(mgr, account, 'Todo', 100, 'INBOX');
     expect(mgr.syncFolderOnDemand).toHaveBeenCalledWith(account, 'Todo');
-    expect(mgr.broadcast).toHaveBeenCalledWith({ type: 'gtd_sections_updated', accountId: 'acct-1' }, 'user-1');
+    expect(mgr.broadcast).toHaveBeenCalledWith({ type: 'gtd_sections_updated', accountId: 'acct-1' });
     expect(runGtdTransitions).not.toHaveBeenCalled();
   });
 
@@ -184,7 +184,7 @@ describe('gtd hooks — afterLabelCopy / afterLabelRemove', () => {
     const mgr = { broadcast: vi.fn(), syncFolderOnDemand: vi.fn() };
     const account = { id: 'a1', user_id: 'u1' };
     await afterLabelCopy({ mgr, account, toFolder: 'Todo', fromFolder: 'INBOX', srcUid: 5, newUid: 42 });
-    expect(mgr.broadcast).toHaveBeenCalledWith({ type: 'gtd_sections_updated', accountId: 'a1' }, 'u1');
+    expect(mgr.broadcast).toHaveBeenCalledWith({ type: 'gtd_sections_updated', accountId: 'a1' });
     expect(mgr.syncFolderOnDemand).not.toHaveBeenCalled();
   });
 
@@ -192,14 +192,14 @@ describe('gtd hooks — afterLabelCopy / afterLabelRemove', () => {
     const mgr = { broadcast: vi.fn(), syncFolderOnDemand: vi.fn().mockResolvedValue(undefined) };
     const account = { id: 'a1', user_id: 'u1' };
     await afterLabelCopy({ mgr, account, toFolder: 'Todo', fromFolder: 'INBOX', srcUid: 5, newUid: null });
-    expect(mgr.broadcast).toHaveBeenCalledWith({ type: 'gtd_sections_updated', accountId: 'a1' }, 'u1');
+    expect(mgr.broadcast).toHaveBeenCalledWith({ type: 'gtd_sections_updated', accountId: 'a1' });
     expect(mgr.syncFolderOnDemand).toHaveBeenCalledWith(account, 'Todo');
   });
 
   it('afterLabelRemove broadcasts the section refresh', async () => {
     const mgr = { broadcast: vi.fn() };
     await afterLabelRemove({ mgr, account: { id: 'a1', user_id: 'u1' } });
-    expect(mgr.broadcast).toHaveBeenCalledWith({ type: 'gtd_sections_updated', accountId: 'a1' }, 'u1');
+    expect(mgr.broadcast).toHaveBeenCalledWith({ type: 'gtd_sections_updated', accountId: 'a1' });
   });
 });
 
@@ -209,8 +209,8 @@ describe('gtd hooks — route-layer adapters (onMailMutation / onSentMessage / o
   it('onMailMutation delegates to emitGtdIfRelevant with the mutation context', async () => {
     emitGtdIfRelevant.mockResolvedValueOnce(undefined);
     const mgr = {};
-    await onMailMutation({ imapManager: mgr, accountId: 'a1', userId: 'u1', messageIds: ['<m1>'], actedFolders: ['INBOX'] });
-    expect(emitGtdIfRelevant).toHaveBeenCalledWith(mgr, 'a1', 'u1', ['<m1>'], ['INBOX']);
+    await onMailMutation({ imapManager: mgr, accountId: 'a1', messageIds: ['<m1>'], actedFolders: ['INBOX'] });
+    expect(emitGtdIfRelevant).toHaveBeenCalledWith(mgr, 'a1', ['<m1>'], ['INBOX']);
   });
 
   it('onSentMessage delegates to runTransitionsForSentMessage', async () => {

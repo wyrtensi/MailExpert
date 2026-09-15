@@ -41,10 +41,10 @@ function mapHead(row) {
   };
 }
 
-// Build the GTD display sections for a user. Unified across the user's gtd_enabled
-// accounts when accountId is null, or scoped to a single owned account otherwise.
-// Ownership + the gtd_enabled/enabled filter live in the accounts query, so a foreign
-// or disabled accountId simply resolves to no targets and yields empty sections.
+// Build the GTD display sections. Unified across the gtd_enabled mailboxes when accountId is
+// null, or scoped to a single mailbox otherwise. The gtd_enabled/enabled filter lives in the
+// accounts read, so an unknown or disabled accountId simply resolves to no targets and yields
+// empty sections.
 export async function getGtdSections({ userId, accountId = null, limit } = {}) {
   const safeLimit = Math.min(Math.max(parseInt(limit) || DEFAULT_LIMIT, 1), MAX_LIMIT);
 
@@ -136,19 +136,18 @@ export async function getGtdSections({ userId, accountId = null, limit } = {}) {
 // cached). One broadcast per call regardless of how many messages qualified. imapManager
 // is injected (like the transition engine) so this stays unit-testable without a live
 // socket server.
-export async function emitGtdIfRelevant(imapManager, accountId, userId, messageIds, actedFolders) {
-  if (!accountId || !userId) return;
+export async function emitGtdIfRelevant(imapManager, accountId, messageIds, actedFolders) {
+  if (!accountId) return;
   const ids = [...new Set((messageIds || []).filter(Boolean))];
   if (!ids.length) return; // short-circuit before touching config (no getGtdConfig on an empty batch)
 
   const { enabled, folders } = await getGtdConfig(accountId);
   if (!enabled) return;
 
-  // Delegate relevance + the scoped broadcast to the generic labels-touch notify capability;
+  // Delegate relevance + the broadcast to the generic labels-touch notify capability;
   // GTD only supplies its designated label folders and its refresh event name.
   await notifyOnLabelTouch(imapManager, {
     accountId,
-    userId,
     messageIds: ids,
     actedFolders,
     labelFolders: [...new Set(Object.values(folders))],

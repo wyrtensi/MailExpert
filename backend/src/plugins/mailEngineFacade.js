@@ -16,7 +16,7 @@
 export function createPluginMailFacade(engine) {
   return Object.freeze({
     // Realtime broadcast to a user's live sessions.
-    broadcast: (payload, userId) => engine.broadcast(payload, userId),
+    broadcast: (...args) => engine.broadcast(...args),
 
     // Is the account's persistent (IDLE) sync connection live? Replaces raw `connections` access so
     // a plugin can't reach another account's authenticated IMAP client.

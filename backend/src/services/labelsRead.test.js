@@ -27,9 +27,9 @@ describe('listThreadHeadsByLabels', () => {
 describe('notifyOnLabelTouch', () => {
   beforeEach(() => query.mockReset());
   const mgr = () => ({ broadcast: vi.fn() });
-  const base = { accountId: 'a1', userId: 'u1', labelFolders: ['Todo', 'Watch'], event: 'gtd_sections_updated' };
+  const base = { accountId: 'a1', labelFolders: ['Todo', 'Watch'], event: 'gtd_sections_updated' };
 
-  it('broadcasts (scoped to the user) when an acted message has a live sibling in a label folder', async () => {
+  it('broadcasts to every client when an acted message has a live sibling in a label folder', async () => {
     query.mockResolvedValueOnce({ rows: [{ '?column?': 1 }] });
     const imap = mgr();
     const did = await notifyOnLabelTouch(imap, { ...base, messageIds: ['<m1>', '<m2>'] });
@@ -37,7 +37,7 @@ describe('notifyOnLabelTouch', () => {
     const [sql, params] = query.mock.calls[0];
     expect(sql).toMatch(/message_id = ANY\(\$2::text\[\]\)/);
     expect(params).toEqual(['a1', ['<m1>', '<m2>'], ['Todo', 'Watch']]);
-    expect(imap.broadcast).toHaveBeenCalledWith({ type: 'gtd_sections_updated', accountId: 'a1' }, 'u1');
+    expect(imap.broadcast).toHaveBeenCalledWith({ type: 'gtd_sections_updated', accountId: 'a1' });
   });
 
   it('broadcasts on a pre-mutation folder hit even when no post-mutation sibling remains', async () => {

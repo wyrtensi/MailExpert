@@ -117,7 +117,7 @@ describe('POST /api/gtd/done — archive count-adjust race', () => {
     expect(await res.json()).toMatchObject({ ok: true, archived: true, archiveFailed: false });
     expect(adjustFolderCounts).toHaveBeenCalledTimes(2);
     // The terminal refresh so the rail converges post-done.
-    expect(imapManager.broadcast).toHaveBeenCalledWith({ type: 'gtd_sections_updated', accountId: ACCT_ID }, 'u1');
+    expect(imapManager.broadcast).toHaveBeenCalledWith({ type: 'gtd_sections_updated', accountId: ACCT_ID });
   });
 
   it('no count drift, archived=false when a concurrent /done already moved the INBOX row (rowCount 0)', async () => {
@@ -165,7 +165,7 @@ describe('POST /api/gtd/done — strip-ok + archive-fail', () => {
     expect(res.status).toBe(200);
     expect(await res.json()).toMatchObject({ ok: true, archived: true, archiveFailed: false, noArchiveFolder: false });
     // The terminal refresh so the rail converges post-done.
-    expect(imapManager.broadcast).toHaveBeenCalledWith({ type: 'gtd_sections_updated', accountId: ACCT_ID }, 'u1');
+    expect(imapManager.broadcast).toHaveBeenCalledWith({ type: 'gtd_sections_updated', accountId: ACCT_ID });
   });
 
   it('strip failure still 500s — the contract only softens the archive step, not the label strip', async () => {

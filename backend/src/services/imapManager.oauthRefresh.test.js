@@ -11,7 +11,7 @@ vi.mock('./messageParser.js', () => ({ parseMessage: vi.fn(), buildSnippetFromHt
 vi.mock('./emailSanitizer.js', () => ({ sanitizeEmail: vi.fn() }));
 vi.mock('./encryption.js', () => ({ decrypt: vi.fn(v => v), encrypt: vi.fn(v => v) }));
 vi.mock('./aiProvider.js', () => ({ getAiStatus: vi.fn(), completeText: vi.fn() }));
-vi.mock('./pushNotifications.js', () => ({ sendPushToUser: vi.fn() }));
+vi.mock('./pushNotifications.js', () => ({ sendPushToActiveUsers: vi.fn() }));
 vi.mock('../utils/redact.js', () => ({ redactEmail: vi.fn(() => 'redacted') }));
 vi.mock('./hostValidation.js', () => ({ resolveForConnection: vi.fn(), createPinnedLookup: vi.fn() }));
 vi.mock('./connectionPolicy.js', () => ({ getConnectionPolicy: vi.fn() }));
@@ -231,7 +231,7 @@ describe('oauth_reconnect_required', () => {
 
     expect(rows.get(acct.id).oauth_reconnect_required).toBe(true);
     expect(syncErrorWrites(acct.id)).toEqual(['oauth_reconnect_required']);
-    expect(mgr.broadcast).toHaveBeenCalledWith({ type: 'account_error', accountId: acct.id, error: 'oauth_reconnect_required' }, 'u1');
+    expect(mgr.broadcast).toHaveBeenCalledWith({ type: 'account_error', accountId: acct.id, error: 'oauth_reconnect_required' });
     expect(ImapFlow).not.toHaveBeenCalled();
     expect(mgr.connectingAccounts.has(acct.id)).toBe(false);
     // Neither the refusal backoff nor the auth cooldown: those expire and retry on their own.
@@ -350,7 +350,7 @@ describe('oauth_reconnect_required', () => {
     await mgr._clearAccountError(acct);
 
     expect(rows.get(acct.id).sync_error).toBe('oauth_reconnect_required');
-    expect(mgr.broadcast).not.toHaveBeenCalledWith({ type: 'account_connected', accountId: acct.id }, 'u1');
+    expect(mgr.broadcast).not.toHaveBeenCalledWith({ type: 'account_connected', accountId: acct.id });
   });
 
   it('keeps the stable code in sync_error when a refusal streak is recorded for a flagged account', async () => {
@@ -365,7 +365,7 @@ describe('oauth_reconnect_required', () => {
     expect(syncErrorWrites(acct.id)).toHaveLength(1);
     expect(rows.get(acct.id).sync_error).toBe('oauth_reconnect_required');
     expect(mgr._syncErrorState.has(acct.id)).toBe(false);
-    expect(mgr.broadcast).not.toHaveBeenCalledWith(expect.objectContaining({ type: 'account_error' }), 'u1');
+    expect(mgr.broadcast).not.toHaveBeenCalledWith(expect.objectContaining({ type: 'account_error' }));
   });
 
   it('still records the stable code itself for a flagged account', async () => {
@@ -378,7 +378,7 @@ describe('oauth_reconnect_required', () => {
     expect(rows.get(acct.id).sync_error).toBe('oauth_reconnect_required');
     expect(mgr._syncErrorState.get(acct.id)).toBe('oauth_reconnect_required');
     expect(mgr.broadcast).toHaveBeenCalledWith(
-      { type: 'account_error', accountId: acct.id, error: 'oauth_reconnect_required' }, 'u1');
+      { type: 'account_error', accountId: acct.id, error: 'oauth_reconnect_required' });
   });
 
   it('does not let a late refusal or auth failure replace the reconnect-required gate', async () => {
@@ -611,7 +611,7 @@ describe('reconnect-required on paths other than connect', () => {
   function expectReconnectRequiredApplied(mgr, acct, live) {
     expect(rows.get(acct.id).oauth_reconnect_required).toBe(true);
     expect(syncErrorWrites(acct.id)).toEqual(['oauth_reconnect_required']);
-    expect(mgr.broadcast).toHaveBeenCalledWith({ type: 'account_error', accountId: acct.id, error: 'oauth_reconnect_required' }, 'u1');
+    expect(mgr.broadcast).toHaveBeenCalledWith({ type: 'account_error', accountId: acct.id, error: 'oauth_reconnect_required' });
     expect(mgr._connectCooldown.get(acct.id)?.until).toBe(Infinity);
     expect(mgr.syncIntervals.has(acct.id)).toBe(false);
     expect(mgr.connections.has(acct.id)).toBe(false);
@@ -622,7 +622,7 @@ describe('reconnect-required on paths other than connect', () => {
   function expectTransientUnchanged(mgr, acct, live) {
     expect(rows.get(acct.id).oauth_reconnect_required).toBe(false);
     expect(syncErrorWrites(acct.id)).toEqual([]);
-    expect(mgr.broadcast).not.toHaveBeenCalledWith(expect.objectContaining({ type: 'account_error' }), 'u1');
+    expect(mgr.broadcast).not.toHaveBeenCalledWith(expect.objectContaining({ type: 'account_error' }));
     expect(mgr._connectCooldown.has(acct.id)).toBe(false);
     expect(mgr.connections.get(acct.id)).toBe(live.client);
     expect(live.client.close).not.toHaveBeenCalled();

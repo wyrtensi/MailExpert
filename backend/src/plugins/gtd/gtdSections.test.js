@@ -396,7 +396,7 @@ describe('emitGtdIfRelevant', () => {
 
   it('broadcasts when an acted message has a live sibling in a designated GTD folder', async () => {
     query.mockResolvedValueOnce({ rows: [{ '?column?': 1 }] }); // EXISTS hit
-    await emitGtdIfRelevant(mgr, 'acc-1', 'u1', ['<mid-1@x>', '<mid-2@x>']);
+    await emitGtdIfRelevant(mgr, 'acc-1', ['<mid-1@x>', '<mid-2@x>']);
 
     const [sql, params] = query.mock.calls[0];
     expect(sql).toContain('message_id = ANY($2::text[])');
@@ -404,38 +404,38 @@ describe('emitGtdIfRelevant', () => {
     expect(params[0]).toBe('acc-1');
     expect(params[1]).toEqual(['<mid-1@x>', '<mid-2@x>']);
     expect(params[2]).toEqual(['Todo', 'Watch', 'Delegated', 'Someday', 'Reference']);
-    expect(mgr.broadcast).toHaveBeenCalledWith({ type: 'gtd_sections_updated', accountId: 'acc-1' }, 'u1');
+    expect(mgr.broadcast).toHaveBeenCalledWith({ type: 'gtd_sections_updated', accountId: 'acc-1' });
   });
 
   it('runs the EXISTS query but does not broadcast when no sibling lives in a GTD folder', async () => {
     query.mockResolvedValueOnce({ rows: [] }); // no GTD sibling
-    await emitGtdIfRelevant(mgr, 'acc-1', 'u1', ['<mid-1@x>']);
+    await emitGtdIfRelevant(mgr, 'acc-1', ['<mid-1@x>']);
     expect(query).toHaveBeenCalledTimes(1);
     expect(mgr.broadcast).not.toHaveBeenCalled();
   });
 
   it('broadcasts when an acted row was itself in a GTD folder pre-mutation, even with zero post-mutation siblings', async () => {
     query.mockResolvedValueOnce({ rows: [] }); // EXISTS finds nothing — mutation removed the last GTD-folder copy
-    await emitGtdIfRelevant(mgr, 'acc-1', 'u1', ['<mid-1@x>'], ['Todo']);
+    await emitGtdIfRelevant(mgr, 'acc-1', ['<mid-1@x>'], ['Todo']);
     expect(query).toHaveBeenCalledTimes(1);
-    expect(mgr.broadcast).toHaveBeenCalledWith({ type: 'gtd_sections_updated', accountId: 'acc-1' }, 'u1');
+    expect(mgr.broadcast).toHaveBeenCalledWith({ type: 'gtd_sections_updated', accountId: 'acc-1' });
   });
 
   it('does not broadcast when actedFolders has no overlap with the account\'s GTD folders', async () => {
     query.mockResolvedValueOnce({ rows: [] });
-    await emitGtdIfRelevant(mgr, 'acc-1', 'u1', ['<mid-1@x>'], ['INBOX']);
+    await emitGtdIfRelevant(mgr, 'acc-1', ['<mid-1@x>'], ['INBOX']);
     expect(mgr.broadcast).not.toHaveBeenCalled();
   });
 
   it('does no query and no broadcast when GTD is disabled for the account', async () => {
     getGtdConfig.mockResolvedValueOnce({ enabled: false, folders: DEFAULT_FOLDERS });
-    await emitGtdIfRelevant(mgr, 'acc-1', 'u1', ['<mid-1@x>']);
+    await emitGtdIfRelevant(mgr, 'acc-1', ['<mid-1@x>']);
     expect(query).not.toHaveBeenCalled();
     expect(mgr.broadcast).not.toHaveBeenCalled();
   });
 
   it('short-circuits with no query when there are no message ids', async () => {
-    await emitGtdIfRelevant(mgr, 'acc-1', 'u1', [null, undefined, '']);
+    await emitGtdIfRelevant(mgr, 'acc-1', [null, undefined, '']);
     expect(getGtdConfig).not.toHaveBeenCalled();
     expect(query).not.toHaveBeenCalled();
     expect(mgr.broadcast).not.toHaveBeenCalled();

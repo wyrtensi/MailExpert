@@ -17,17 +17,20 @@ if (pushConfigured) {
 }
 
 /**
- * Send a Web Push notification to every subscribed device for a user.
+ * Send a Web Push notification to every subscribed device of every active user. Mailboxes are
+ * shared, so new mail concerns everyone who subscribed a device.
  * Stale subscriptions (410 / 404 from the push service) are pruned automatically.
  * Errors from individual devices never throw — they are logged and skipped so
  * one bad subscription can't block delivery to the rest.
  */
-export async function sendPushToUser(userId, payload) {
+export async function sendPushToActiveUsers(payload) {
   if (!pushConfigured) return;
 
   const result = await query(
-    'SELECT id, endpoint, p256dh, auth FROM push_subscriptions WHERE user_id = $1',
-    [userId]
+    `SELECT s.id, s.endpoint, s.p256dh, s.auth
+       FROM push_subscriptions s
+       JOIN users u ON u.id = s.user_id
+      WHERE u.disabled_at IS NULL`
   );
   if (result.rows.length === 0) return;
 
@@ -51,7 +54,7 @@ export async function sendPushToUser(userId, payload) {
         // Push service has invalidated this subscription — remove it.
         staleIds.push(row.id);
       } else {
-        console.warn(`Push send failed for user ${userId} endpoint ${row.endpoint.slice(0, 40)}…:`, err.message);
+        console.warn(`Push send failed for endpoint ${row.endpoint.slice(0, 40)}…:`, err.message);
       }
     }
   }));

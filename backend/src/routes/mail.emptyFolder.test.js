@@ -51,6 +51,8 @@ describe('POST /api/mail/folders/empty — async background empty', () => {
     expect(clearedDb()).toBe(true);
     expect(emittedType('folder_emptied')?.ok).toBe(true);
     expect(emittedType('sync_complete')).toBeTruthy();
+    // Folder events reach every client, not only the user who emptied the folder.
+    expect(imapManager.broadcast.mock.calls.every((call) => call.length === 1)).toBe(true);
   });
 
   it('leaves the DB rows intact and reports failure when the IMAP empty throws', async () => {

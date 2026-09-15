@@ -47,7 +47,7 @@ describe('queueGistGeneration — provider gating', () => {
   const oneWaiting = { watch: { threads: [{ id: 'w1', account_id: 'a1', gist: null }] } };
 
   it('does no work at all when there are no candidates', async () => {
-    await queueGistGeneration({ sections: { watch: { threads: [] } }, userId: 'u1', broadcast: vi.fn() });
+    await queueGistGeneration({ sections: { watch: { threads: [] } }, broadcast: vi.fn() });
     expect(getAiStatus).not.toHaveBeenCalled();
     expect(completeText).not.toHaveBeenCalled();
     expect(query).not.toHaveBeenCalled();
@@ -57,7 +57,7 @@ describe('queueGistGeneration — provider gating', () => {
     getAiStatus.mockResolvedValue({ enabled: false, features: { summarize: true } });
     const broadcast = vi.fn();
 
-    await queueGistGeneration({ sections: oneWaiting, userId: 'u1', broadcast });
+    await queueGistGeneration({ sections: oneWaiting, broadcast });
 
     expect(getAiStatus).toHaveBeenCalledTimes(1);
     expect(completeText).not.toHaveBeenCalled();
@@ -67,7 +67,7 @@ describe('queueGistGeneration — provider gating', () => {
 
   it('does not run generation when the provider is present but summarize is disabled', async () => {
     getAiStatus.mockResolvedValue({ enabled: true, features: { summarize: false } });
-    await queueGistGeneration({ sections: oneWaiting, userId: 'u1', broadcast: vi.fn() });
+    await queueGistGeneration({ sections: oneWaiting, broadcast: vi.fn() });
     expect(getAiStatus).toHaveBeenCalledTimes(1);
     expect(completeText).not.toHaveBeenCalled();
     expect(query).not.toHaveBeenCalled();
@@ -75,7 +75,7 @@ describe('queueGistGeneration — provider gating', () => {
 
   it('treats provider status failures as unavailable', async () => {
     getAiStatus.mockRejectedValue(new Error('status unavailable'));
-    await expect(queueGistGeneration({ sections: oneWaiting, userId: 'u1', broadcast: vi.fn() }))
+    await expect(queueGistGeneration({ sections: oneWaiting, broadcast: vi.fn() }))
       .resolves.toBeUndefined();
     expect(completeText).not.toHaveBeenCalled();
     expect(query).not.toHaveBeenCalled();
@@ -124,7 +124,7 @@ describe('queueGistGeneration — write path', () => {
     mockDb();
     const broadcast = vi.fn();
 
-    await queueGistGeneration({ sections: waitingHeads(['w1']), userId: 'u1', broadcast });
+    await queueGistGeneration({ sections: waitingHeads(['w1']), broadcast });
 
     expect(completeText).toHaveBeenCalledWith([
       { role: 'user', content: expect.stringContaining('Subject: S w1') },
@@ -141,14 +141,14 @@ describe('queueGistGeneration — write path', () => {
     expect(updateCall[1]).toEqual(['a1', 'w1', 'gtd', JSON.stringify({ gist: 'waiting on their reply' })]);
 
     expect(broadcast).toHaveBeenCalledTimes(1);
-    expect(broadcast).toHaveBeenCalledWith({ type: 'gtd_sections_updated', accountId: 'a1' }, 'u1');
+    expect(broadcast).toHaveBeenCalledWith({ type: 'gtd_sections_updated', accountId: 'a1' });
   });
 
   it('does not broadcast when the UPDATE writes nothing (wrote === 0 — a newer head won the race)', async () => {
     mockDb({ updateRowCount: 0 });
     const broadcast = vi.fn();
 
-    await queueGistGeneration({ sections: waitingHeads(['w1']), userId: 'u1', broadcast });
+    await queueGistGeneration({ sections: waitingHeads(['w1']), broadcast });
 
     expect(completeText).toHaveBeenCalledTimes(1);
     expect(fetch).not.toHaveBeenCalled();
@@ -161,7 +161,7 @@ describe('queueGistGeneration — write path', () => {
     const broadcast = vi.fn();
     const ids = Array.from({ length: 25 }, (_, i) => `w${i}`);
 
-    await queueGistGeneration({ sections: waitingHeads(ids), userId: 'u1', broadcast });
+    await queueGistGeneration({ sections: waitingHeads(ids), broadcast });
 
     const selectCall = query.mock.calls.find((c) => isBodySelect(c[0]));
     expect(selectCall[1][0]).toHaveLength(20); // only the cap's worth reaches the DB
@@ -187,12 +187,12 @@ describe('queueGistGeneration — write path', () => {
     const broadcast = vi.fn();
     const sections = waitingHeads(['w1']);
 
-    const first = queueGistGeneration({ sections, userId: 'u1', broadcast });
+    const first = queueGistGeneration({ sections, broadcast });
     // Overlaps while `first` is still awaiting its provider load. With the id reserved
     // synchronously up front, this call finds no candidates and short-circuits before
     // it ever reaches the provider gate; without the fix it too would pass the filter,
     // load the provider, and regenerate w1 (2 config reads, 2 selects, 2 fetches).
-    const second = queueGistGeneration({ sections, userId: 'u1', broadcast });
+    const second = queueGistGeneration({ sections, broadcast });
 
     releaseConfig();
     await Promise.all([first, second]);

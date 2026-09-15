@@ -259,7 +259,7 @@ export class FolderStatusMonitor {
       this.nextCheck.set(account.id, Date.now() + Math.min(600000, STATUS_INTERVAL_MS * 2 ** Math.min(failures - 1, 4)));
       console.warn(`Folder status cycle failed for account ${account.id}: ${err.message}`);
     } finally {
-      if (any || failed) this.broadcast({ type: 'folder_counts', accountId: account.id }, account.user_id);
+      if (any || failed) this.broadcast({ type: 'folder_counts', accountId: account.id });
       if (queryMs != null) {
         recordStatusCycle(account.imap_host, mode || 'not-connected', { ms: Date.now() - startedAt, queryMs, failed: cycleFailed });
       }

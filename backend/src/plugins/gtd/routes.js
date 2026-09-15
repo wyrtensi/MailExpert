@@ -58,8 +58,8 @@ export function resolveDoneFolders({ enabled, folders, states, existing }) {
 }
 
 // GET /api/gtd/sections — thread heads + counts per GTD state for GTD display surfaces.
-// accountId absent => unified across the user's gtd_enabled accounts; present => scoped
-// to that owned account. Ownership + gtd_enabled filtering happen in the service.
+// accountId absent => unified across the gtd_enabled mailboxes; present => scoped to that
+// mailbox. gtd_enabled filtering happens in the service.
 // (Router is mounted at /api/gtd, so the paths here omit the gtd/ prefix.)
 router.get('/sections', async (req, res) => {
   const { accountId, limit } = req.query;
@@ -76,7 +76,6 @@ router.get('/sections', async (req, res) => {
   // per account when its batch completes so clients upgrade on the next refetch.
   queueGistGeneration({
     sections: result.sections,
-    userId: req.session.userId,
     broadcast,
   }).catch(err => console.warn('GTD gist generation error:', err.message));
 });
@@ -330,7 +329,7 @@ router.post('/done', async (req, res) => {
 
   // One terminal refresh so GTD section data converges to the post-done state (removeMessageCopy
   // also emits mid-op, but this covers the archive that follows it).
-  broadcast({ type: 'gtd_sections_updated', accountId: msg.account_id }, account.user_id);
+  broadcast({ type: 'gtd_sections_updated', accountId: msg.account_id });
 
   res.json({ ok: true, removed, archived, noArchiveFolder, archiveFailed });
 });

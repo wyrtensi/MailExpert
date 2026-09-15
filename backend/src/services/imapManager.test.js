@@ -12,7 +12,7 @@ vi.mock('./oauth/tokenManager.js', async (importOriginal) => ({
 vi.mock('./emailSanitizer.js', () => ({ sanitizeEmail: vi.fn() }));
 vi.mock('./encryption.js', () => ({ decrypt: vi.fn() }));
 vi.mock('./aiProvider.js', () => ({ getAiStatus: vi.fn(), completeText: vi.fn() }));
-vi.mock('./pushNotifications.js', () => ({ sendPushToUser: vi.fn() }));
+vi.mock('./pushNotifications.js', () => ({ sendPushToActiveUsers: vi.fn() }));
 vi.mock('../utils/redact.js', () => ({ redactEmail: vi.fn() }));
 vi.mock('./hostValidation.js', () => ({ resolveForConnection: vi.fn(), createPinnedLookup: vi.fn() }));
 vi.mock('./connectionPolicy.js', () => ({ getConnectionPolicy: vi.fn() }));
@@ -1077,7 +1077,7 @@ describe('syncMessages — empty local cache vs nonempty server (wiring)', () =>
       if (sql.includes('SELECT gtd_enabled, gtd_folders FROM email_accounts')) {
         return Promise.resolve({ rows: [{ gtd_enabled: false, gtd_folders: {} }] });
       }
-      if (sql.includes("preferences->>'categorizationEnabled'")) return Promise.resolve({ rows: [{ val: false }] });
+      if (sql.includes("key = 'categorization_enabled'")) return Promise.resolve({ rows: [{ value: 'false' }] });
       if (sql.includes('INSERT INTO messages')) return Promise.resolve({ rows: [{ id: 'msg-1', is_new: true }] });
       if (sql.includes('UPDATE folders SET highest_modseq')) return Promise.resolve({ rows: [] });
       if (sql.includes('UPDATE email_accounts SET last_sync')) return Promise.resolve({ rows: [] });
@@ -1738,7 +1738,7 @@ describe('account error reporting: transient failures must not paint the account
     await ImapManager.prototype._recordAccountError.call(self, account, 'Connection not available');
     expect(query).toHaveBeenCalledTimes(1);
     expect(self.broadcast).toHaveBeenCalledWith(
-      expect.objectContaining({ type: 'account_error', accountId: 'acct-1' }), 'u1');
+      expect.objectContaining({ type: 'account_error', accountId: 'acct-1' }));
   });
 
   it('a success between refusals resets the run, so routine pushback never accumulates', async () => {
@@ -1768,7 +1768,7 @@ describe('account error reporting: transient failures must not paint the account
     const self = ctx();
     await ImapManager.prototype._recordAccountError.call(self, account, detail);
     expect(self.broadcast).toHaveBeenCalledWith(
-      expect.objectContaining({ type: 'account_error', error: detail }), 'u1');
+      expect.objectContaining({ type: 'account_error', error: detail }));
   });
 
   it('still de-duplicates once an error has been surfaced', async () => {
@@ -2082,7 +2082,7 @@ describe('_recordAccountError / _clearAccountError', () => {
       ['IMAP connect timeout (30000ms)', 'a1'],
     );
     expect(m.broadcast).toHaveBeenCalledWith(
-      { type: 'account_error', accountId: 'a1', error: 'IMAP connect timeout (30000ms)' }, 'u1',
+      { type: 'account_error', accountId: 'a1', error: 'IMAP connect timeout (30000ms)' },
     );
   });
 
@@ -2108,7 +2108,7 @@ describe('_recordAccountError / _clearAccountError', () => {
     expect(query).toHaveBeenLastCalledWith(
       'UPDATE email_accounts SET sync_error = NULL WHERE id = $1 AND oauth_reconnect_required = false', ['a1'],
     );
-    expect(m.broadcast).toHaveBeenCalledWith({ type: 'account_connected', accountId: 'a1' }, 'u1');
+    expect(m.broadcast).toHaveBeenCalledWith({ type: 'account_connected', accountId: 'a1' });
   });
 
   it('writes through on the first clear after a restart, when the DB may hold a stale error', async () => {
@@ -3104,7 +3104,7 @@ describe('backfill stops on a provider refusal (#433)', () => {
       expect(mgr._bgConnSem.activeCount('imap.mail.yahoo.com')).toBe(0);
       expect(mgr.backfillRunning.size).toBe(0);
       expect(mgr.backfillAllRunning.has(acct.id)).toBe(false);
-      expect(mgr.broadcast).toHaveBeenCalledWith({ type: 'backfill_all_complete', accountId: acct.id }, acct.user_id);
+      expect(mgr.broadcast).toHaveBeenCalledWith({ type: 'backfill_all_complete', accountId: acct.id });
     });
   });
 
@@ -3138,7 +3138,7 @@ describe('backfill stops on a provider refusal (#433)', () => {
     await ImapManager.prototype.backfillAllFolders.call(mgr, acct);
     expect(mgr.backfillMessages.mock.calls.map(c => c[1])).toEqual(['INBOX', 'A']);
     expect(mgr._bgConnSem.activeCount('imap.mail.yahoo.com')).toBe(0);
-    expect(mgr.broadcast).toHaveBeenCalledWith({ type: 'backfill_all_complete', accountId: acct.id }, acct.user_id);
+    expect(mgr.broadcast).toHaveBeenCalledWith({ type: 'backfill_all_complete', accountId: acct.id });
     expect(mgr.backfillAllRunning.has(acct.id)).toBe(false);
   });
 
@@ -3157,7 +3157,7 @@ describe('backfill stops on a provider refusal (#433)', () => {
     await ImapManager.prototype.backfillAllFolders.call(mgr, acct);
     expect(mgr.backfillMessages).not.toHaveBeenCalled();
     expect(mgr._bgConnSem.activeCount('imap.mail.yahoo.com')).toBe(0);
-    expect(mgr.broadcast).toHaveBeenCalledWith({ type: 'backfill_all_complete', accountId: acct.id }, acct.user_id);
+    expect(mgr.broadcast).toHaveBeenCalledWith({ type: 'backfill_all_complete', accountId: acct.id });
   });
 
   it('still backfills every folder when nothing is refused', async () => {

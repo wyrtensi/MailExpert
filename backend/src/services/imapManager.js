@@ -14,7 +14,7 @@ import { logger } from './logger.js';
 import { recordBroadcast, recordWarning, recordSyncSignal } from './diagnosticsRing.js';
 import { recordImapLogin, recordImapEvent } from './imapMetrics.js';
 import { decrypt } from './encryption.js';
-import { sendPushToUser } from './pushNotifications.js';
+import { sendPushToActiveUsers } from './pushNotifications.js';
 import { redactEmail } from '../utils/redact.js';
 import { adjustFolderCounts, resolveSpamFolder } from '../utils/mailUtils.js';
 import { resolveForConnection, createPinnedLookup } from './hostValidation.js';
@@ -1720,7 +1720,7 @@ export class ImapManager {
     this.folderStatusMonitor = new FolderStatusMonitor({
       withClient: (account, fn) => this._withCountClient(account, fn),
       enqueueSync: (account, path, status) => this._queueObservedFolder(account, path, status),
-      broadcast: (event, userId) => this.broadcast(event, userId),
+      broadcast: (...args) => this.broadcast(...args),
     });
     // OAuth accounts waiting for reconsent are skipped: they cannot log in.
     this._folderStatusTimer = setInterval(() => {
@@ -2182,10 +2182,7 @@ export class ImapManager {
       // Guard on typeof prevCount: during initial mailbox select ImapFlow may
       // emit exists with prevCount=undefined, which would produce a wrong delta.
       if (typeof count === 'number' && typeof prevCount === 'number') {
-        this.broadcast(
-          { type: 'exists_hint', accountId: account.id, delta: count - prevCount },
-          account.user_id
-        );
+        this.broadcast({ type: 'exists_hint', accountId: account.id, delta: count - prevCount });
       }
       if (this.syncingAccounts.has(account.id)) return;
       // Named for the IMAP response that fired it, NOT for IDLE. An untagged EXISTS arrives
@@ -2372,7 +2369,7 @@ export class ImapManager {
       this._connectCooldown.delete(account.id); // healthy again — clear any refusal cooldown
       this.folderStatusMonitor?.refresh(account).catch(() => {});
       console.log(`Connected account: ${logAccount(account)}`);
-      this.broadcast({ type: 'account_connected', accountId: account.id }, account.user_id);
+      this.broadcast({ type: 'account_connected', accountId: account.id });
       return true;
     } catch (err) {
       const detail = extractImapError(err);
@@ -2452,7 +2449,7 @@ export class ImapManager {
     this._pollOnlyAccounts.add(account.id);
     console.log(`Poll-only mode for ${logAccount(account)} — ${account.imap_host} at persistent-connection budget; polling INBOX on the interval instead of holding IDLE`);
     this._clearAccountError(account).catch(() => {});
-    this.broadcast({ type: 'account_connected', accountId: account.id }, account.user_id);
+    this.broadcast({ type: 'account_connected', accountId: account.id });
     // Initial poll now, then on the interval. Stagger the first tick so many demoted accounts on one
     // host don't all open at the same instant (mirrors _startSyncInterval's jitter).
     this._pollOnlyTick(account).catch(err => console.warn(`Poll-only initial sync failed for ${logAccount(account)}: ${err.message}`));
@@ -2497,7 +2494,7 @@ export class ImapManager {
       if (folderSyncDue(this.folderSyncIntervalMs, this.lastFolderSyncAt.get(account.id))) {
         this.lastFolderSyncAt.set(account.id, Date.now());
         await raceTimeout(this.syncFolders(fresh, client), 20000, 'Poll-only folder sync')
-          .then(() => this.broadcast({ type: 'folders_synced', accountId: account.id }, account.user_id))
+          .then(() => this.broadcast({ type: 'folders_synced', accountId: account.id }))
           .catch(err => console.warn(`Poll-only folder sync failed for ${logAccount(account)}: ${err.message}`));
       }
 
@@ -2510,7 +2507,7 @@ export class ImapManager {
       this._connectCooldown.delete(account.id);
       await this._clearAccountError(account);
       if ((syncResult?.insertedCount || 0) > 0 && !syncResult?.broadcastedNewMessages) {
-        this.broadcast({ type: 'sync_complete', accountId: account.id }, account.user_id);
+        this.broadcast({ type: 'sync_complete', accountId: account.id });
       }
     } catch (err) {
       const detail = extractImapError(err);
@@ -2635,7 +2632,7 @@ export class ImapManager {
       );
       if (result?.rowCount === 0) return;
       this._syncErrorState.set(account.id, detail);
-      this.broadcast({ type: 'account_error', accountId: account.id, error: detail }, account.user_id);
+      this.broadcast({ type: 'account_error', accountId: account.id, error: detail });
     } catch (err) {
       // Leave _syncErrorState untouched so the next failure retries the write.
       console.warn(`Could not record sync_error for ${logAccount(account)}: ${err.message}`);
@@ -2664,7 +2661,7 @@ export class ImapManager {
       if (result?.rowCount === 0) return;
       this._syncErrorState.set(account.id, null);
       if (typeof prev === 'string') {
-        this.broadcast({ type: 'account_connected', accountId: account.id }, account.user_id);
+        this.broadcast({ type: 'account_connected', accountId: account.id });
       }
     } catch (err) {
       console.warn(`Could not clear sync_error for ${logAccount(account)}: ${err.message}`);
@@ -2831,7 +2828,7 @@ export class ImapManager {
       this._connectCooldown.delete(account.id);
       await this._clearAccountError(account);
       if ((syncResult?.insertedCount || 0) > 0 && !syncResult?.broadcastedNewMessages) {
-        this.broadcast({ type: 'sync_complete', accountId: account.id }, account.user_id);
+        this.broadcast({ type: 'sync_complete', accountId: account.id });
       }
 
       const ticks = (this.syncTickCount.get(account.id) || 0) + 1;
@@ -2846,7 +2843,7 @@ export class ImapManager {
           // connection must not stall the sync tick. Isolated so a timeout logs
           // and the rest of the tick (flag poll, reconcile) still runs.
           await raceTimeout(this.syncFolders(syncAccount, activeClient), 20000, 'Periodic folder sync');
-          this.broadcast({ type: 'folders_synced', accountId: account.id }, syncAccount.user_id);
+          this.broadcast({ type: 'folders_synced', accountId: account.id });
         } catch (err) {
           console.warn(`Periodic folder sync failed for ${logAccount(syncAccount)}:`, err.message);
         }
@@ -3009,7 +3006,7 @@ export class ImapManager {
           const changed = await this._applyFlagUpdates(account, 'INBOX', flagsToUpdate);
           if (changed > 0) {
             console.log(`Flag sync: ${changed} flag change(s) for ${logAccount(account)}, broadcasting`);
-            this.broadcast({ type: 'flags_synced', accountId: account.id }, account.user_id);
+            this.broadcast({ type: 'flags_synced', accountId: account.id });
             // A read/star flip on an INBOX row changes GTD-relevant state (section thread-unread
             // counts, the Inbox pill badge, two-way GTD entry star). This reactive/poll flag path is a
             // mutation the periodic GTD tick — which syncs only the label folders, never INBOX —
@@ -3261,7 +3258,7 @@ export class ImapManager {
             await query('DELETE FROM messages WHERE account_id=$1 AND folder=$2 AND uid=ANY($3::bigint[]) AND (synced_at IS NULL OR synced_at < $4) AND EXISTS (SELECT 1 FROM folders WHERE account_id=$1 AND path=$2 AND uid_validity=$5)', [account.id, path, gone, cutoff, String(observed.uidValidity)]);
           }
           if (changed || gone.length) {
-            this.broadcast({ type: 'flags_synced', accountId: account.id }, account.user_id);
+            this.broadcast({ type: 'flags_synced', accountId: account.id });
             await emitSectionsChanged(this.pluginFacade, account, changed + gone.length);
           }
           complete = !missing;
@@ -3702,7 +3699,7 @@ export class ImapManager {
             const changed = await this._applyFlagUpdates(account, folder, flagsToUpdate);
             logger.debug(`Delta flag scan OK for ${logAccount(account)}/${folder}: ${flagsToUpdate.length} fetched, ${changed} changed in ${Date.now() - deltaStartedAt}ms (uid>=${deltaLow}), modseq ${storedModseq}->${serverModseq}`);
             if (changed > 0) {
-              this.broadcast({ type: 'flags_synced', accountId: account.id }, account.user_id);
+              this.broadcast({ type: 'flags_synced', accountId: account.id });
               // Externally-changed flags on a GTD-designated folder's rows now flow through this new
               // delta path (per-folder flag deltas). A read/star flip on a label-folder OR INBOX copy
               // is GTD-relevant, so refresh GTD section data like the other mutation paths rather than waiting
@@ -3807,7 +3804,7 @@ export class ImapManager {
             type: 'new_messages', accountId: account.id,
             folder, messages: newMessages.slice(-5), count: newMessages.length,
             alertMessages: alertMessages.slice(-5), alertCount,
-          }, account.user_id);
+          });
           if (newMessages.length > 0) broadcastedNewMessages = true;
           // Web Push — INBOX only, alert-eligible messages only. Non-inbox folder syncs
           // (Archive, Spam, on-demand) can surface old or filtered messages; sending push
@@ -3826,19 +3823,18 @@ export class ImapManager {
               // fall back to the inbox if the id is somehow absent.
               url: latest.id ? `/?m=${latest.id}` : '/',
             };
-            // Try to include the total unread count for the home screen badge.
+            // Include the unread count across every enabled mailbox for the home screen badge.
             // If the query fails for any reason, send the push without it so
             // notifications are never silently dropped.
             query(
               `SELECT COUNT(*)::int AS total FROM messages m
                JOIN email_accounts a ON a.id = m.account_id
-               WHERE a.user_id = $1 AND a.enabled = true AND m.folder = 'INBOX' AND m.is_read = false AND m.is_deleted = false`,
-              [account.user_id]
+               WHERE a.enabled = true AND m.folder = 'INBOX' AND m.is_read = false AND m.is_deleted = false`
             ).then(r => {
-              sendPushToUser(account.user_id, { ...basePayload, unreadCount: r.rows[0]?.total ?? 0 })
+              sendPushToActiveUsers({ ...basePayload, unreadCount: r.rows[0]?.total ?? 0 })
                 .catch(err => console.warn('Push notification error:', err.message));
             }).catch(() => {
-              sendPushToUser(account.user_id, basePayload)
+              sendPushToActiveUsers(basePayload)
                 .catch(err => console.warn('Push notification error:', err.message));
             });
           }
@@ -4073,7 +4069,7 @@ export class ImapManager {
       this.broadcast({
         type: 'backfill_progress', accountId: account.id,
         synced: dbCount, total: serverTotal,
-      }, account.user_id);
+      });
 
       // Step 4 — fetch missing UIDs in batches using UID FETCH (stable, regardless of
       // concurrent deletions).  For non-Gmail providers also fetch and cache the full
@@ -4290,7 +4286,7 @@ export class ImapManager {
             this.broadcast({
               type: 'backfill_progress', accountId: account.id,
               synced: dbCount + i, total: serverTotal,
-            }, account.user_id);
+            });
           }
 
           await new Promise(r => setTimeout(r, cfg.batchDelay));
@@ -4329,7 +4325,7 @@ export class ImapManager {
          WHERE account_id = $1 AND path = $2`,
         [account.id, folder]
       ).catch(err => console.error(`Folder count update after backfill failed for ${logAccount(account)}/${folder}:`, err.message));
-      this.broadcast({ type: 'backfill_complete', accountId: account.id }, account.user_id);
+      this.broadcast({ type: 'backfill_complete', accountId: account.id });
       // Backfill wrote rows the GTD tick's fingerprint can't detect (before==after); if this
       // folder is a designated GTD folder and any row changed, nudge GTD section clients. One emit per
       // affected folder (backfillAllFolders loops here); the client debounces. Gated cheaply
@@ -4491,7 +4487,7 @@ export class ImapManager {
     // Broadcast start BEFORE waiting on the per-host semaphore so a queued reindex shows as
     // "in progress" in the admin UI instead of looking idle while it waits for a slot. The
     // matching backfill_all_complete always fires from the finally, so the pair stays balanced.
-    this.broadcast({ type: 'backfill_all_start', accountId: account.id }, account.user_id);
+    this.broadcast({ type: 'backfill_all_start', accountId: account.id });
     let slotHeld = false;
     // One backfill connection for the whole run: folders reuse it instead of logging in each time.
     const session = { client: null, batchesOnConn: 0 };
@@ -4556,7 +4552,7 @@ export class ImapManager {
       if (session.client) { try { await session.client.logout(); } catch { /* already disconnected */ } }
       if (slotHeld) this._bgConnSem.release(host); // free the per-host slot for the next background job
       this.backfillAllRunning.delete(account.id);
-      this.broadcast({ type: 'backfill_all_complete', accountId: account.id }, account.user_id);
+      this.broadcast({ type: 'backfill_all_complete', accountId: account.id });
       // Both run as background jobs after the complete signal — neither should block the UI.
       this.refreshBulkFlags(account).catch(err =>
         console.warn(`Bulk flag refresh failed for ${logAccount(account)}:`, err.message)
@@ -4948,7 +4944,7 @@ export class ImapManager {
       });
       console.log(`syncFolderOnDemand done: ${logAccount(account)}/${folder}`);
       // sync_complete fires mailexpert:refresh in the frontend, reloading the message list
-      this.broadcast({ type: 'sync_complete', accountId: account.id }, account.user_id);
+      this.broadcast({ type: 'sync_complete', accountId: account.id });
     } catch (err) {
       console.error(`On-demand sync error ${logAccount(account)}/${folder}:`, err.message);
     } finally {
@@ -4983,7 +4979,7 @@ export class ImapManager {
         await withFreshClient(account, async (client) => {
           await this.syncMessages(account, client, spamPath, 50, false, true);
         });
-        this.broadcast({ type: 'folders_synced', accountId: account.id }, account.user_id);
+        this.broadcast({ type: 'folders_synced', accountId: account.id });
       } finally {
         this._bgConnSem.release(host);
       }
@@ -5954,7 +5950,7 @@ export class ImapManager {
         this.syncStartedAt.delete(account.id);
       }
     } finally {
-      this.broadcast({ type: 'sync_complete', accountId: account.id }, account.user_id);
+      this.broadcast({ type: 'sync_complete', accountId: account.id });
     }
   }
 
@@ -5979,7 +5975,7 @@ export class ImapManager {
         await raceTimeout(this.syncFolders(account, client), 20000, 'Manual folder sync');
       }
       this.lastFolderSyncAt.set(account.id, Date.now());
-      this.broadcast({ type: 'folders_synced', accountId: account.id }, account.user_id);
+      this.broadcast({ type: 'folders_synced', accountId: account.id });
     } catch (err) {
       console.error(`syncFoldersNow error for ${logAccount(account)}:`, err.message);
     }
@@ -6000,7 +5996,7 @@ export class ImapManager {
     // Find snoozed messages whose snooze_until has passed and which are still in
     // the snoozed folder (joined via stable Message-ID header).
     const due = await query(`
-      SELECT sm.id AS snooze_id, sm.user_id, sm.account_id,
+      SELECT sm.id AS snooze_id, sm.account_id,
              sm.message_id_header, sm.original_folder, sm.snoozed_folder, m.uid, m.is_read
       FROM snoozed_messages sm
       JOIN messages m ON m.account_id = sm.account_id
@@ -6081,8 +6077,8 @@ export class ImapManager {
         adjustFolderCounts(row.account_id, row.snoozed_folder, -1, row.is_read ? 0 : -1);
         adjustFolderCounts(row.account_id, row.original_folder, 1, 1); // always +1 unread on wakeup
 
-        // Notify the user's open clients so the message reappears
-        this.broadcast({ type: 'snooze_wakeup', accountId: row.account_id }, row.user_id);
+        // Notify open clients so the message reappears
+        this.broadcast({ type: 'snooze_wakeup', accountId: row.account_id });
 
         console.log(`Snooze wakeup: message ${row.message_id_header} restored to ${row.original_folder}`);
       } catch (err) {
@@ -6240,7 +6236,7 @@ export class ImapManager {
     }
 
     if (deletedCount > 0) {
-      this.broadcast({ type: 'sync_complete', accountId: account.id }, account.user_id);
+      this.broadcast({ type: 'sync_complete', accountId: account.id });
       // Reconcile just removed server-deleted rows across one or more folders. If any was a GTD
       // thread's INBOX (or label) copy GTD section data is now stale — this covers threads archived or
       // deleted by an external mail client, which nothing else here would refresh. Cheap gate.

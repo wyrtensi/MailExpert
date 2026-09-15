@@ -2,7 +2,7 @@ import { Router } from 'express';
 import { query } from '../services/db.js';
 import { requireAuth, requireAdmin } from '../middleware/auth.js';
 import { encrypt, decrypt, isEncrypted } from '../services/encryption.js';
-import { isGoogleConfigured } from '../services/oauth/googleOAuth.js';
+import { resolveGoogleConfig } from '../services/oauth/googleApps.js';
 
 const router = Router();
 
@@ -51,12 +51,13 @@ router.get('/', requireAdmin, async (req, res) => {
 // The OAuth connect routes already require only an authenticated session and bind the
 // resulting mailbox to that user, so no privilege is granted here. (#315)
 router.get('/status', async (req, res) => {
+  const google = await resolveGoogleConfig();
   res.json({
     microsoft: {
       configured: !!process.env.MS_CLIENT_ID,
     },
     google: {
-      configured: isGoogleConfigured(),
+      configured: !!google,
     },
   });
 });

@@ -19,6 +19,10 @@ vi.mock('../middleware/auth.js', () => ({
   requireAuth: (req, _res, next) => { req.session = { userId: 'u1' }; next(); },
   requireAdmin: (_req, res, next) => (authState.admin ? next() : res.status(403).json({ error: 'Admin access required' })),
 }));
+const googleApps = vi.hoisted(() => ({ config: null }));
+vi.mock('../services/oauth/googleApps.js', () => ({
+  resolveGoogleConfig: vi.fn(async () => googleApps.config),
+}));
 
 import express from 'express';
 import integrationsRoutes, { loadIntegrationConfigs } from './integrations.js';
@@ -54,6 +58,7 @@ afterEach(() => {
   delete process.env.MS_CLIENT_ID;
   for (const k of GOOGLE_VARS) delete process.env[k];
   authState.admin = false;
+  googleApps.config = null;
   query.mockReset();
   query.mockImplementation(async () => ({ rows: [] }));
 });
@@ -74,9 +79,12 @@ describe('GET /api/integrations/status (non-admin capability check)', () => {
 
   it('never leaks credentials in the response', async () => {
     process.env.MS_CLIENT_ID = 'super-secret-client-id';
-    process.env.GOOGLE_CLIENT_ID = 'google-client-id';
-    process.env.GOOGLE_CLIENT_SECRET = 'google-client-secret';
-    process.env.GOOGLE_REDIRECT_URI = 'https://mail.example.com/oauth/google/callback';
+    googleApps.config = {
+      appId: 'app-1',
+      clientId: '123456789012-google-client-id.apps.googleusercontent.com',
+      clientSecret: 'google-client-secret',
+      redirectUri: 'https://mail.example.com/oauth/google/callback',
+    };
     const res = await fetch(`${base}/api/integrations/status`);
     const body = await res.text();
     expect(body).not.toContain('super-secret-client-id');
@@ -85,13 +93,11 @@ describe('GET /api/integrations/status (non-admin capability check)', () => {
     expect(body).not.toContain('mail.example.com');
   });
 
-  it('reports google configured only when client id, secret and redirect uri are all set', async () => {
-    process.env.GOOGLE_CLIENT_ID = 'gid';
-    process.env.GOOGLE_CLIENT_SECRET = 'gsecret';
+  it('reports google configured when a Google app resolves', async () => {
     let res = await fetch(`${base}/api/integrations/status`);
     expect((await res.json()).google).toEqual({ configured: false });
 
-    process.env.GOOGLE_REDIRECT_URI = 'https://mail.example.com/oauth/google/callback';
+    googleApps.config = { appId: 'app-1', clientId: 'x', clientSecret: 'y', redirectUri: 'https://mail.example.com/oauth/google/callback' };
     res = await fetch(`${base}/api/integrations/status`);
     expect((await res.json()).google).toEqual({ configured: true });
   });

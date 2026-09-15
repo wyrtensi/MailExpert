@@ -6,11 +6,10 @@ import { redactEmail } from '../utils/redact.js';
 import {
   buildGoogleAuthorizationUrl,
   exchangeGoogleCode,
-  getGoogleConfig,
   hasGoogleMailScope,
-  isGoogleConfigured,
   verifyGoogleIdToken,
 } from '../services/oauth/googleOAuth.js';
+import { resolveGoogleConfig } from '../services/oauth/googleApps.js';
 import { createOAuthState, consumeOAuthState } from '../services/oauth/oauthState.js';
 
 // Mounted at /oauth/google. Redirect targets carry only stable codes — never provider
@@ -38,19 +37,25 @@ const errorRedirect = (code) => `/?oauth_error=${code}&oauth_provider=${PROVIDER
 // Step 1: create state + PKCE and send the user to Google's consent screen.
 router.get('/', async (req, res) => {
   if (!req.session?.userId) return res.status(401).json({ error: 'Not authenticated' });
-  if (!isGoogleConfigured()) return res.redirect(errorRedirect('not_configured'));
 
   const rawHint = typeof req.query.login_hint === 'string' ? req.query.login_hint.trim() : '';
   const loginHint = LOGIN_HINT_PATTERN.test(rawHint) ? rawHint : null;
 
   try {
+    const config = await resolveGoogleConfig();
+    if (!config) return res.redirect(errorRedirect('not_configured'));
     const { state, codeChallenge } = await createOAuthState({
       provider: PROVIDER,
       userId: req.session.userId,
       loginHint,
     });
-    const { redirectUri } = getGoogleConfig();
-    res.redirect(buildGoogleAuthorizationUrl({ state, codeChallenge, redirectUri, loginHint }));
+    res.redirect(buildGoogleAuthorizationUrl({
+      clientId: config.clientId,
+      state,
+      codeChallenge,
+      redirectUri: config.redirectUri,
+      loginHint,
+    }));
   } catch (err) {
     console.error(`Google OAuth start failed: ${err?.name || 'Error'}`);
     res.redirect(errorRedirect('authentication_failed'));
@@ -68,18 +73,24 @@ router.get('/callback', async (req, res) => {
     if (error !== undefined) {
       throw new CallbackError(error === 'access_denied' ? 'access_denied' : 'authentication_failed');
     }
-    if (!isGoogleConfigured()) throw new CallbackError('not_configured');
+    const config = await resolveGoogleConfig();
+    if (!config) throw new CallbackError('not_configured');
     // The flow must finish in the same MailExpert session that started it.
     if (!pending || !req.session?.userId || req.session.userId !== pending.userId) {
       throw new CallbackError('invalid_state');
     }
     if (typeof code !== 'string' || !code) throw new CallbackError('authentication_failed');
 
-    const { clientId, redirectUri } = getGoogleConfig();
-    const tokens = await exchangeGoogleCode({ code, codeVerifier: pending.codeVerifier, redirectUri });
+    const tokens = await exchangeGoogleCode({
+      clientId: config.clientId,
+      clientSecret: config.clientSecret,
+      code,
+      codeVerifier: pending.codeVerifier,
+      redirectUri: config.redirectUri,
+    });
     if (!hasGoogleMailScope(tokens.scope)) throw new CallbackError('scope_missing');
 
-    const identity = await verifyGoogleIdToken({ idToken: tokens.idToken, clientId });
+    const identity = await verifyGoogleIdToken({ idToken: tokens.idToken, clientId: config.clientId });
     const { account, result } = await upsertGoogleAccount(pending.userId, identity, tokens);
 
     reconnectAccount(account, result);

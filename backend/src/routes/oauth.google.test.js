@@ -14,6 +14,11 @@ vi.mock('../services/encryption.js', () => ({
   encrypt: (v) => (v ? `enc(${v})` : v),
   decrypt: (v) => v,
 }));
+// The registry is covered by googleApps.test.js; routes see only the resolved credentials.
+const googleApps = vi.hoisted(() => ({ config: null }));
+vi.mock('../services/oauth/googleApps.js', () => ({
+  resolveGoogleConfig: vi.fn(async () => googleApps.config),
+}));
 
 // In-memory Redis so the real single-use state store runs end to end.
 const redisStore = vi.hoisted(() => new Map());
@@ -40,7 +45,8 @@ import { imapManager } from '../index.js';
 import { withTransaction } from '../services/db.js';
 import { exchangeGoogleCode, verifyGoogleIdToken, GoogleOAuthError } from '../services/oauth/googleOAuth.js';
 
-const CLIENT_ID = 'cid.apps.googleusercontent.com';
+const CLIENT_ID = '123456789012-abc123def456.apps.googleusercontent.com';
+const APP_ID = 'aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa';
 const CLIENT_SECRET = 'client-secret-value';
 const REDIRECT_URI = 'https://mail.example.com/oauth/google/callback';
 const USER_ID = '11111111-1111-1111-1111-111111111111';
@@ -102,9 +108,7 @@ async function startFlow(query = '') {
 
 let logSpies;
 beforeEach(() => {
-  process.env.GOOGLE_CLIENT_ID = CLIENT_ID;
-  process.env.GOOGLE_CLIENT_SECRET = CLIENT_SECRET;
-  process.env.GOOGLE_REDIRECT_URI = REDIRECT_URI;
+  googleApps.config = { appId: APP_ID, clientId: CLIENT_ID, clientSecret: CLIENT_SECRET, redirectUri: REDIRECT_URI };
   redisStore.clear();
   exchangeGoogleCode.mockReset();
   verifyGoogleIdToken.mockReset();
@@ -116,9 +120,6 @@ beforeEach(() => {
   logSpies = ['log', 'warn', 'error', 'info'].map((m) => vi.spyOn(console, m).mockImplementation(() => {}));
 });
 afterEach(() => {
-  delete process.env.GOOGLE_CLIENT_ID;
-  delete process.env.GOOGLE_CLIENT_SECRET;
-  delete process.env.GOOGLE_REDIRECT_URI;
   logSpies.forEach((s) => s.mockRestore());
 });
 const loggedText = () => JSON.stringify(logSpies.flatMap((s) => s.mock.calls));
@@ -142,7 +143,7 @@ describe('GET /oauth/google', () => {
   });
 
   it('redirects with not_configured when the integration is incomplete', async () => {
-    delete process.env.GOOGLE_CLIENT_SECRET;
+    googleApps.config = null;
     const res = await get('/oauth/google');
     expect(res.status).toBe(302);
     expect(res.headers.get('location')).toBe('/?oauth_error=not_configured&oauth_provider=google');
@@ -198,7 +199,9 @@ describe('GET /oauth/google/callback', () => {
 
     expect(res.status).toBe(302);
     expect(res.headers.get('location')).toBe('/?oauth_success=google&oauth_result=created');
-    expect(exchangeGoogleCode).toHaveBeenCalledWith({ code: 'auth-code-xyz', codeVerifier: saved.codeVerifier, redirectUri: REDIRECT_URI });
+    expect(exchangeGoogleCode).toHaveBeenCalledWith({
+      clientId: CLIENT_ID, clientSecret: CLIENT_SECRET, code: 'auth-code-xyz', codeVerifier: saved.codeVerifier, redirectUri: REDIRECT_URI,
+    });
     expect(verifyGoogleIdToken).toHaveBeenCalledWith({ idToken: 'id-tok', clientId: CLIENT_ID });
 
     const lock = sqlCall(/pg_advisory_xact_lock/);
@@ -305,7 +308,7 @@ describe('GET /oauth/google/callback', () => {
 
   it('redirects with not_configured when the integration was removed mid-flow', async () => {
     const { state } = await startFlow();
-    delete process.env.GOOGLE_CLIENT_ID;
+    googleApps.config = null;
     const res = await callback({ code: 'c', state });
     expect(res.headers.get('location')).toBe(errorLocation('not_configured'));
   });

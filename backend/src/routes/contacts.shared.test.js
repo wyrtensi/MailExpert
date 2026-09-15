@@ -65,6 +65,14 @@ describe('contacts are shared', () => {
     expect(noOwnerOrSync()).toBe(true);
   });
 
+  it('finds a contact photo by address alone', async () => {
+    query.mockResolvedValueOnce({ rows: [] });
+    expect((await send('GET', '/photo?email=Dana@Example.com')).status).toBe(404);
+    const [sql, params] = query.mock.calls[0];
+    expect(sql).toMatch(/WHERE primary_email = lower\(\$1\)/);
+    expect(params).toEqual(['Dana@Example.com']);
+  });
+
   it('deletes a contact whoever created it', async () => {
     expect((await send('DELETE', '/c1')).status).toBe(200);
     expect(query).toHaveBeenCalledTimes(1);

@@ -43,6 +43,7 @@ import { ImapManager } from './services/imapManager.js';
 import { getUpdateStatus } from './services/updateCheck.js';
 import { recordHttp } from './services/performanceMetrics.js';
 import { defaultEmptyBody } from './middleware/defaultEmptyBody.js';
+import { authSettingsError } from './services/auth/authSettings.js';
 
 const packageMeta = JSON.parse(readFileSync(new URL('../package.json', import.meta.url), 'utf-8'));
 let buildMeta = {};
@@ -75,6 +76,12 @@ if (!process.env.DB_PASSWORD) {
 }
 if (!process.env.ENCRYPTION_KEY || process.env.ENCRYPTION_KEY.length !== 64) {
   console.error('FATAL: ENCRYPTION_KEY must be set and exactly 64 hex characters (32 bytes). Generate one with: openssl rand -hex 32');
+  process.exit(1);
+}
+// A google sign-in mode without any way to sign in would lock everyone out.
+const authConfigError = authSettingsError();
+if (authConfigError) {
+  console.error(`FATAL: ${authConfigError} Exiting.`);
   process.exit(1);
 }
 // APP_URL is required in production: without it every browser WebSocket connection

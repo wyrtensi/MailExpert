@@ -20,7 +20,8 @@
     "unknown": "Unbekannt",
     "error": "Fehler: {{message}}",
     "dismiss": "Ausblenden",
-    "loadMore": "Mehr laden"
+    "loadMore": "Mehr laden",
+    "adminOnly": "Nur ein Administrator kann das ändern."
   },
   "login": {
     "google": {
@@ -982,7 +983,7 @@
       "mailboxSyncTitle": "Postfach-Synchronisierung",
       "mailboxSyncDesc": "Wie oft der Server alle Postfächer synchronisiert. Gilt für die gesamte Installation.",
       "allowPrivateHosts": "Private / lokale Hosts erlauben",
-      "allowPrivateHostsDesc": "Ermöglicht Verbindungen zu IMAP-/SMTP-Mailservern, CardDAV-Servern und KI-Anbietern unter privaten oder lokalen Adressen (z.B. 127.0.0.1, 192.168.x.x). Erforderlich für protonmail-bridge, einen selbst gehosteten CardDAV-/Nextcloud-Server oder ein lokales KI-Modell.",
+      "allowPrivateHostsDesc": "Ermöglicht Verbindungen zu IMAP-/SMTP-Mailservern und KI-Anbietern unter privaten oder lokalen Adressen (z.B. 127.0.0.1, 192.168.x.x). Erforderlich für protonmail-bridge oder ein lokales KI-Modell.",
       "allowInsecureTls": "Unsicheres TLS erlauben",
       "allowInsecureTlsDesc": "Erlaubt Benutzern, die TLS-Zertifikatsprüfung pro Konto zu deaktivieren. Erforderlich für Server mit selbstsignierten Zertifikaten.",
       "allowNonstandardPorts": "Nicht-standardmäßige Ports erlauben",
@@ -1381,33 +1382,6 @@
         "tokenLabel": "Persönliches API-Token",
         "tokenPh": "Todoist-API-Token einfügen",
         "help": "Token unter Todoist Einstellungen → Integrationen → Entwickler finden"
-      },
-      "carddav": {
-        "title": "CardDAV-Kontakte",
-        "description": "Kontakte von einem CardDAV-Server wie Nextcloud synchronisieren.",
-        "connected": "Verbunden",
-        "notConnected": "Nicht verbunden",
-        "serverLabel": "Server-URL",
-        "serverPh": "https://cloud.beispiel.de",
-        "userLabel": "Benutzername",
-        "userPh": "Ihr Nextcloud-Benutzername",
-        "passLabel": "App-Passwort",
-        "passPh": "App-Passwort (nicht Ihr Login-Passwort)",
-        "dupLabel": "Wenn ein Kontakt bereits existiert",
-        "dupSeparate": "Beide behalten (eigenes Adressbuch)",
-        "dupMerge": "Zusammenführen – CardDAV gewinnt",
-        "dupSkip": "CardDAV-Kontakt überspringen",
-        "intervalLabel": "Sync-Intervall (Minuten)",
-        "connect": "Verbinden",
-        "connecting": "Verbinde…",
-        "connectFailed": "Verbindung fehlgeschlagen",
-        "disconnect": "Trennen",
-        "syncNow": "Jetzt synchronisieren",
-        "syncing": "Synchronisiere…",
-        "lastSync": "Letzte Sync: {{when}}",
-        "summary": "{{contacts}} Kontakte in {{books}} Adressbüchern",
-        "syncFailed": "Letzte Sync fehlgeschlagen: {{error}}",
-        "help": "Verwenden Sie ein Nextcloud-App-Passwort, nicht Ihr Login-Passwort – SSO-Nutzer erstellen es unter Einstellungen → Sicherheit. Kontakte werden einseitig synchronisiert und sind in MailExpert schreibgeschützt."
       }
     },
     "ssoLinked": {
@@ -1428,7 +1402,6 @@
     },
     "rules": {
       "conditionLogicOr": "eine Bedingung (ODER)",
-      "accountAll": "Alle Konten",
       "actionsLabel": "Aktionen",
       "newButton": "Neue Regel",
       "actionDelete": "In den Papierkorb verschieben",
@@ -1456,6 +1429,7 @@
       "deleteButton": "Löschen",
       "actionMovePlaceholder": "Ordnername",
       "errorRequired": "Regelname und mindestens eine Bedingung und Aktion sind erforderlich.",
+      "errorAccount": "Wählen Sie ein Konto für diese Regel.",
       "actionMove": "In Ordner verschieben",
       "actionForward": "Weiterleiten an",
       "actionForwardPlaceholder": "empfaenger@example.com",
@@ -1486,8 +1460,7 @@
       "bodyConditionNote": "Regeln für den Nachrichteninhalt werden nur ausgeführt, wenn der Text bereits heruntergeladen wurde. Falls er beim Eingang noch nicht abgerufen wurde, wird die Regel übersprungen und die Nachricht bleibt im Posteingang – Inhaltsregeln werden nicht nachträglich angewendet.",
       "subTabRules": "Regeln",
       "subTabBlockList": "Blockliste",
-      "actionMoveSelectFolder": "Ordner auswählen…",
-      "actionMoveRequiresAccount": "Erfordert ein bestimmtes Konto"
+      "actionMoveSelectFolder": "Ordner auswählen…"
     },
     "blockList": {
       "description": "E-Mails von blockierten Absendern werden automatisch in den Papierkorb verschoben.",
@@ -1584,8 +1557,7 @@
       "work": "Arbeit",
       "home": "Privat",
       "other": "Sonstige"
-    },
-    "carddavBadge": "Von CardDAV synchronisiert"
+    }
   },
   "todoist": {
     "title": "Todoist-Aufgabe erstellen",

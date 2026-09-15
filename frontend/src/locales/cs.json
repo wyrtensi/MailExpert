@@ -20,7 +20,8 @@
     "unknown": "Neznámé",
     "error": "Chyba: {{message}}",
     "dismiss": "Zavřít",
-    "loadMore": "Načíst další"
+    "loadMore": "Načíst další",
+    "adminOnly": "Změnit to může pouze správce."
   },
   "login": {
     "google": {
@@ -504,8 +505,7 @@
       "work": "Pracovní",
       "home": "Domů",
       "other": "Jiný"
-    },
-    "carddavBadge": "Synchronizováno z CardDAV"
+    }
   },
   "contextMenu": {
     "find": "Najít",
@@ -985,7 +985,6 @@
       "nameLabel": "Název pravidla",
       "namePlaceholder": "např. Přesunout newslettery",
       "accountLabel": "Použít pro",
-      "accountAll": "Všechny účty",
       "conditionLogicLabel": "Splnit",
       "conditionLogicAnd": "všechny podmínky (A ZÁROVEŇ)",
       "conditionLogicOr": "libovolnou podmínku (NEBO)",
@@ -1021,12 +1020,12 @@
       "actionForwardPlaceholder": "prijemce@example.com",
       "actionMovePlaceholder": "Přesná cesta ke složce IMAP (např. Práce nebo INBOX/Práce)",
       "actionMoveSelectFolder": "Vyberte složku…",
-      "actionMoveRequiresAccount": "Vyžaduje konkrétní účet",
       "stopProcessing": "Pokud pravidlo odpovídá, přestat zpracovávat další pravidla",
       "stopProcessingHint": "Pokud toto pravidlo odpovídá, následující pravidla se pro stejnou zprávu nespustí.",
       "saveButton": "Uložit pravidlo",
       "saving": "Ukládání…",
       "errorRequired": "Je vyžadován název pravidla a alespoň jedna podmínka a akce.",
+      "errorAccount": "Vyberte účet pro toto pravidlo.",
       "errorMoveFolder": "Zadejte cílovou složku pro akci Přesunout.",
       "errorForwardEmail": "Zadejte jednu platnou e-mailovou adresu pro přeposílání.",
       "errorSave": "Pravidlo se nepodařilo uložit.",
@@ -1306,7 +1305,7 @@
       "mailboxSyncTitle": "Synchronizace schránek",
       "mailboxSyncDesc": "Jak často server synchronizuje všechny schránky. Nastavení platí pro celou instalaci.",
       "allowPrivateHosts": "Povolit soukromé / místní servery",
-      "allowPrivateHostsDesc": "Umožňuje připojení k poštovním serverům IMAP/SMTP, serverům CardDAV a poskytovatelům AI na soukromých nebo místních adresách (např. 127.0.0.1, 192.168.x.x). Je vyžadováno pro protonmail-bridge, vlastní server CardDAV/Nextcloud nebo místní model AI.",
+      "allowPrivateHostsDesc": "Umožňuje připojení k poštovním serverům IMAP/SMTP a poskytovatelům AI na soukromých nebo místních adresách (např. 127.0.0.1, 192.168.x.x). Je vyžadováno pro protonmail-bridge nebo místní model AI.",
       "allowInsecureTls": "Povolit nezabezpečené TLS",
       "allowInsecureTlsDesc": "Umožňuje uživatelům u jednotlivých účtů vypnout ověřování certifikátů TLS. Je vyžadováno pro servery s certifikáty podepsanými svým držitelem.",
       "allowNonstandardPorts": "Povolit nestandardní porty",
@@ -1575,33 +1574,6 @@
         "tokenLabel": "Osobní token API",
         "tokenPh": "Vložte svůj token API Todoist",
         "help": "Token najdete v Todoist Nastavení → Integrace → Vývojář"
-      },
-      "carddav": {
-        "title": "Kontakty CardDAV",
-        "description": "Synchronizujte kontakty ze serveru CardDAV, například Nextcloud.",
-        "connected": "Připojeno",
-        "notConnected": "Nepřipojeno",
-        "serverLabel": "URL serveru",
-        "serverPh": "https://cloud.example.com",
-        "userLabel": "Uživatelské jméno",
-        "userPh": "vaše uživatelské jméno Nextcloud",
-        "passLabel": "Heslo pro aplikaci",
-        "passPh": "heslo pro aplikaci (nikoli přihlašovací heslo)",
-        "dupLabel": "Pokud kontakt už existuje",
-        "dupSeparate": "Ponechat oba (samostatný adresář)",
-        "dupMerge": "Sloučit — CardDAV má přednost",
-        "dupSkip": "Přeskočit kontakt CardDAV",
-        "intervalLabel": "Interval synchronizace (minuty)",
-        "connect": "Připojit",
-        "connecting": "Připojování…",
-        "connectFailed": "Připojení se nezdařilo",
-        "disconnect": "Odpojit",
-        "syncNow": "Synchronizovat nyní",
-        "syncing": "Synchronizace…",
-        "lastSync": "Poslední synchronizace: {{when}}",
-        "summary": "{{contacts}} kontaktů v {{books}} adresářích",
-        "syncFailed": "Poslední synchronizace selhala: {{error}}",
-        "help": "Použijte heslo pro aplikaci Nextcloud, nikoli přihlašovací heslo — uživatelé SSO si je musí vytvořit v Nastavení → Zabezpečení. Kontakty se synchronizují jednosměrně a v MailExpert jsou jen pro čtení."
       }
     },
     "ai": {

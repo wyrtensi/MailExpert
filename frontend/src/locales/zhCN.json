@@ -20,7 +20,8 @@
     "unknown": "未知",
     "error": "错误：{{message}}",
     "dismiss": "忽略",
-    "loadMore": "加载更多"
+    "loadMore": "加载更多",
+    "adminOnly": "只有管理员可以更改此项。"
   },
   "login": {
     "google": {
@@ -690,7 +691,6 @@
       "nameLabel": "规则名称",
       "namePlaceholder": "例如：移动订阅邮件",
       "accountLabel": "应用于",
-      "accountAll": "所有账户",
       "conditionLogicLabel": "匹配",
       "conditionLogicAnd": "所有条件（与）",
       "conditionLogicOr": "任一条件（或）",
@@ -719,12 +719,12 @@
       "actionForwardPlaceholder": "shoujianren@example.com",
       "actionMovePlaceholder": "文件夹名称",
       "actionMoveSelectFolder": "选择文件夹…",
-      "actionMoveRequiresAccount": "需要指定账户",
       "stopProcessing": "匹配后停止处理后续规则",
       "stopProcessingHint": "若此规则匹配，后续规则将不会对同一邮件运行。",
       "saveButton": "保存规则",
       "saving": "保存中…",
       "errorRequired": "名称、至少一个条件和一个动作为必填项。",
+      "errorAccount": "请为此规则选择账户。",
       "errorMoveFolder": "请为「移动」动作指定目标文件夹。",
       "errorForwardEmail": "请输入一个有效的转发邮箱地址。",
       "errorSave": "无法保存规则。",
@@ -1053,7 +1053,7 @@
       "mailboxSyncTitle": "邮箱同步",
       "mailboxSyncDesc": "服务器同步所有邮箱的频率。此设置适用于整个安装。",
       "allowPrivateHosts": "允许私有/本地主机",
-      "allowPrivateHostsDesc": "允许连接到私有或本地地址的 IMAP/SMTP 邮件服务器、CardDAV 服务器和 AI 提供商（例如 127.0.0.1、192.168.x.x）。protonmail-bridge、自托管的 CardDAV/Nextcloud 服务器或本地 AI 模型需要此选项。",
+      "allowPrivateHostsDesc": "允许连接到私有或本地地址的 IMAP/SMTP 邮件服务器和 AI 提供商（例如 127.0.0.1、192.168.x.x）。protonmail-bridge 或本地 AI 模型需要此选项。",
       "allowInsecureTls": "允许不安全的 TLS",
       "allowInsecureTlsDesc": "允许用户按账户禁用 TLS 证书验证。自签名证书的服务器需要此选项。",
       "allowNonstandardPorts": "允许非标准端口",
@@ -1452,33 +1452,6 @@
         "tokenLabel": "个人 API 令牌",
         "tokenPh": "粘贴您的 Todoist API 令牌",
         "help": "在 Todoist 设置 → 集成 → 开发者中找到您的令牌"
-      },
-      "carddav": {
-        "title": "CardDAV 联系人",
-        "description": "从 Nextcloud 等 CardDAV 服务器同步联系人。",
-        "connected": "已连接",
-        "notConnected": "未连接",
-        "serverLabel": "服务器地址",
-        "serverPh": "https://nextcloud.example.com",
-        "userLabel": "用户名",
-        "userPh": "你的 Nextcloud 用户名",
-        "passLabel": "应用专用密码",
-        "passPh": "应用专用密码（非登录密码）",
-        "dupLabel": "当联系人已存在时",
-        "dupSeparate": "保留两者（单独的通讯簿）",
-        "dupMerge": "合并 — 以 CardDAV 为准",
-        "dupSkip": "跳过该 CardDAV 联系人",
-        "intervalLabel": "同步间隔（分钟）",
-        "connect": "连接",
-        "connecting": "正在连接…",
-        "connectFailed": "连接失败",
-        "disconnect": "断开连接",
-        "syncNow": "立即同步",
-        "syncing": "正在同步…",
-        "lastSync": "上次同步：{{when}}",
-        "summary": "{{books}} 个通讯簿中的 {{contacts}} 个联系人",
-        "syncFailed": "上次同步失败：{{error}}",
-        "help": "请使用 Nextcloud 应用专用密码，而非登录密码——SSO 用户需在“设置 → 安全”中创建。联系人为单向同步，在 MailExpert 中为只读。"
       }
     },
     "ssoLinked": {
@@ -1584,8 +1557,7 @@
       "work": "工作",
       "home": "家庭",
       "other": "其他"
-    },
-    "carddavBadge": "从 CardDAV 同步"
+    }
   },
   "todoist": {
     "title": "创建 Todoist 任务",

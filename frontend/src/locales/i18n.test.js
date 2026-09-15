@@ -342,8 +342,6 @@ const SAME_VALUE_ALLOWED = {
   'admin.ai.chatgptModel': [['cs', 'pl']],
   'admin.ai.model': [['cs', 'en']],
   'admin.appearance.typography': [['cs', 'de']],
-  'admin.integrations.carddav.serverPh': 'any',
-  'admin.integrations.carddav.title': [['cs', 'pl']],
   'admin.messageList.markReadDelaySeconds': [['cs', 'pl']],
   'admin.messageList.markReadDelaySeconds_other': [['cs', 'pl']],
   'admin.tabs.categories': [['cs', 'pl']],

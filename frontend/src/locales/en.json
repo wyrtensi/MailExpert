@@ -20,7 +20,8 @@
     "unknown": "Unknown",
     "error": "Error: {{message}}",
     "dismiss": "Dismiss",
-    "loadMore": "Load more"
+    "loadMore": "Load more",
+    "adminOnly": "Only an administrator can change this."
   },
   "login": {
     "google": {
@@ -690,7 +691,6 @@
       "nameLabel": "Rule name",
       "namePlaceholder": "e.g. Move newsletters",
       "accountLabel": "Apply to",
-      "accountAll": "All accounts",
       "conditionLogicLabel": "Match",
       "conditionLogicAnd": "all conditions (AND)",
       "conditionLogicOr": "any condition (OR)",
@@ -726,12 +726,12 @@
       "actionForwardPlaceholder": "recipient@example.com",
       "actionMovePlaceholder": "Exact IMAP folder path (e.g. Work or INBOX/Work)",
       "actionMoveSelectFolder": "Select a folder…",
-      "actionMoveRequiresAccount": "Requires a specific account",
       "stopProcessing": "Stop processing further rules if this rule matches",
       "stopProcessingHint": "If this rule matches, later rules won't run for the same message.",
       "saveButton": "Save rule",
       "saving": "Saving…",
       "errorRequired": "Rule name and at least one condition and action are required.",
+      "errorAccount": "Choose an account for this rule.",
       "errorMoveFolder": "Please enter a destination folder for the Move action.",
       "errorForwardEmail": "Enter one valid forwarding email address.",
       "errorSave": "Failed to save rule.",
@@ -1053,7 +1053,7 @@
       "mailboxSyncTitle": "Mailbox Sync",
       "mailboxSyncDesc": "How often the server syncs every mailbox. One setting for the whole installation.",
       "allowPrivateHosts": "Allow private / local hosts",
-      "allowPrivateHostsDesc": "Permits connecting to IMAP/SMTP mail servers, CardDAV servers, and AI providers at private or local addresses (e.g. 127.0.0.1, 192.168.x.x). Required for protonmail-bridge, a self-hosted CardDAV/Nextcloud server, or a local AI model.",
+      "allowPrivateHostsDesc": "Permits connecting to IMAP/SMTP mail servers and AI providers at private or local addresses (e.g. 127.0.0.1, 192.168.x.x). Required for protonmail-bridge or a local AI model.",
       "allowInsecureTls": "Allow insecure TLS",
       "allowInsecureTlsDesc": "Allows users to disable TLS certificate verification per account. Required for servers with self-signed certificates.",
       "allowNonstandardPorts": "Allow non-standard ports",
@@ -1452,33 +1452,6 @@
         "tokenLabel": "Personal API token",
         "tokenPh": "Paste your Todoist API token",
         "help": "Find your token in Todoist Settings → Integrations → Developer"
-      },
-      "carddav": {
-        "title": "CardDAV Contacts",
-        "description": "Sync contacts from a CardDAV server such as Nextcloud.",
-        "connected": "Connected",
-        "notConnected": "Not connected",
-        "serverLabel": "Server URL",
-        "serverPh": "https://cloud.example.com",
-        "userLabel": "Username",
-        "userPh": "your Nextcloud username",
-        "passLabel": "App password",
-        "passPh": "app password (not your login password)",
-        "dupLabel": "When a contact already exists",
-        "dupSeparate": "Keep both (separate address book)",
-        "dupMerge": "Merge — CardDAV wins",
-        "dupSkip": "Skip the CardDAV contact",
-        "intervalLabel": "Sync interval (minutes)",
-        "connect": "Connect",
-        "connecting": "Connecting…",
-        "connectFailed": "Failed to connect",
-        "disconnect": "Disconnect",
-        "syncNow": "Sync now",
-        "syncing": "Syncing…",
-        "lastSync": "Last sync: {{when}}",
-        "summary": "{{contacts}} contacts in {{books}} address books",
-        "syncFailed": "Last sync failed: {{error}}",
-        "help": "Use a Nextcloud app password, not your login password — SSO users must create one under Settings → Security. Contacts are synced one-way and are read-only in MailExpert."
       }
     },
     "ssoLinked": {
@@ -1584,8 +1557,7 @@
       "work": "Work",
       "home": "Home",
       "other": "Other"
-    },
-    "carddavBadge": "Synced from CardDAV"
+    }
   },
   "todoist": {
     "title": "Create Todoist Task",

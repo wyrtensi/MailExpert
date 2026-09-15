@@ -20,7 +20,8 @@
     "unknown": "Nieznane",
     "error": "Błąd: {{message}}",
     "dismiss": "Odrzuć",
-    "loadMore": "Wczytaj więcej"
+    "loadMore": "Wczytaj więcej",
+    "adminOnly": "Tylko administrator może to zmienić."
   },
   "login": {
     "google": {
@@ -706,7 +707,6 @@
       "nameLabel": "Nazwa reguły",
       "namePlaceholder": "np. Przenieś newslettery",
       "accountLabel": "Zastosuj do",
-      "accountAll": "Wszystkie konta",
       "conditionLogicLabel": "Dopasowanie",
       "conditionLogicAnd": "Wszystkie warunki (AND)",
       "conditionLogicOr": "Dowolny warunek (OR)",
@@ -742,12 +742,12 @@
       "actionForwardPlaceholder": "odbiorca@example.com",
       "actionMovePlaceholder": "Dokładna ścieżka folderu IMAP (np. Praca lub Odebrane/Praca)",
       "actionMoveSelectFolder": "Wybierz folder…",
-      "actionMoveRequiresAccount": "Wymaga konkretnego konta",
       "stopProcessing": "Zatrzymaj przetwarzanie kolejnych reguł, jeśli ta reguła pasuje",
       "stopProcessingHint": "Jeśli reguła pasuje, późniejsze reguły nie zostaną uruchomione dla tej samej wiadomości.",
       "saveButton": "Zapisz regułę",
       "saving": "Zapisywanie…",
       "errorRequired": "Nazwa reguły, co najmniej jeden warunek i działanie są wymagane.",
+      "errorAccount": "Wybierz konto dla tej reguły.",
       "errorMoveFolder": "Wpisz folder docelowy dla reguły „Przenieś”.",
       "errorForwardEmail": "Wpisz prawidłowy adres e-mail do przekazywania.",
       "errorSave": "Nie udało się zapisać reguły.",
@@ -1072,7 +1072,7 @@
       "mailboxSyncTitle": "Synchronizacja skrzynek",
       "mailboxSyncDesc": "Jak często serwer synchronizuje wszystkie skrzynki. Ustawienie dotyczy całej instalacji.",
       "allowPrivateHosts": "Zezwalaj na prywatne/lokalne hosty",
-      "allowPrivateHostsDesc": "Zezwala na łączenie się z serwerami poczty IMAP/SMTP, serwerami CardDAV i dostawcami AI pod prywatnymi lub lokalnymi adresami (np. 127.0.0.1, 192.168.x.x). Wymagane dla protonmail-bridge, samodzielnie hostowanego serwera CardDAV/Nextcloud lub lokalnego modelu AI.",
+      "allowPrivateHostsDesc": "Zezwala na łączenie się z serwerami poczty IMAP/SMTP i dostawcami AI pod prywatnymi lub lokalnymi adresami (np. 127.0.0.1, 192.168.x.x). Wymagane dla protonmail-bridge lub lokalnego modelu AI.",
       "allowInsecureTls": "Zezwalaj na niezabezpieczony TLS",
       "allowInsecureTlsDesc": "Zezwala użytkownikom na wyłączenie weryfikacji certyfikatu TLS dla konkretnego konta. Wymagane w przypadku serwerów z certyfikatami podpisanymi samodzielnie.",
       "allowNonstandardPorts": "Zezwalaj na niestandardowe porty",
@@ -1471,33 +1471,6 @@
         "tokenLabel": "Osobisty token API",
         "tokenPh": "Wklej swój token API Todoist",
         "help": "Znajdź swój token w Todoist: Ustawienia → Integracje → Deweloper"
-      },
-      "carddav": {
-        "title": "Kontakty CardDAV",
-        "description": "Synchronizuj kontakty z serwerem CardDAV, takim jak Nextcloud.",
-        "connected": "Połączono",
-        "notConnected": "Niepołączone",
-        "serverLabel": "Adres URL serwera",
-        "serverPh": "https://chmurowy.example.com",
-        "userLabel": "Nazwa użytkownika",
-        "userPh": "Nazwa użytkownika Nextcloud",
-        "passLabel": "Hasło aplikacji",
-        "passPh": "Hasło aplikacji (nie hasło logowania)",
-        "dupLabel": "Gdy kontakt już istnieje",
-        "dupSeparate": "Zachowaj oba (osobna książka adresowa)",
-        "dupMerge": "Scal — pierwszeństwo ma CardDAV",
-        "dupSkip": "Pomiń kontakt CardDAV",
-        "intervalLabel": "Częstotliwość synchronizacji (minuty)",
-        "connect": "Połącz",
-        "connecting": "Łączenie…",
-        "connectFailed": "Nie udało się połączyć",
-        "disconnect": "Rozłącz",
-        "syncNow": "Synchronizuj teraz",
-        "syncing": "Synchronizowanie…",
-        "lastSync": "Ostatnia synchronizacja: {{when}}",
-        "summary": "{{contacts}} kontaktów w {{books}} książkach adresowych",
-        "syncFailed": "Ostatnia synchronizacja nie powiodła się: {{error}}",
-        "help": "Użyj hasła aplikacji Nextcloud, nie hasła logowania — użytkownicy SSO muszą utworzyć je w Ustawienia → Bezpieczeństwo. Kontakty są synchronizowane jednokierunkowo i są tylko do odczytu w MailExpert."
       }
     },
     "ssoLinked": {
@@ -1603,8 +1576,7 @@
       "work": "Praca",
       "home": "Dom",
       "other": "Inne"
-    },
-    "carddavBadge": "Zsynchronizowano z CardDAV"
+    }
   },
   "todoist": {
     "title": "Utwórz zadanie Todoist",

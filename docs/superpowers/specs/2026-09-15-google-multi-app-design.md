@@ -87,7 +87,7 @@ CREATE INDEX IF NOT EXISTS idx_email_accounts_lower_email
 
 ## Занятые места и брони
 
-Занято у приложения = записи журнала + действующие брони для email, которых ещё нет в журнале этого приложения.
+Занято у приложения = записи журнала + действующие брони. Бронь снимается на callback до записи в журнал, поэтому один email не считается дважды.
 
 Бронь ставится при старте подключения, когда выбрано приложение, где у email ещё нет записи:
 - Redis sorted set `oauth:google:reservations:<appId>`, member — SHA-256 от email в нижнем регистре, score — время истечения (сейчас + `OAUTH_STATE_TTL_SECONDS`).
@@ -108,7 +108,7 @@ CREATE INDEX IF NOT EXISTS idx_email_accounts_lower_email
 
 ### Добавление Gmail
 
-1. Форма «Добавить аккаунт → Gmail» отправляет `POST /api/oauth/google/start` с `{ email }`.
+1. Форма «Добавить аккаунт → Gmail» отправляет `POST /api/oauth/google/start` с `{ email }`. Маршрут находится под `/api`, а не рядом с `/oauth/google`, потому что меняет состояние (бронь): так на него действуют CSRF-проверка `X-Requested-With` и блокировка экрана из `backend/src/index.js`. `launch` и `callback` остаются под `/oauth/google`.
 2. Сервер проверяет формат email и что ящика с `lower(email_address) = lower(email)` нет ни у одного пользователя MailExpert. Если есть — `409 { code: 'already_connected' }`, в Google не ходим.
 3. `selectGoogleApp`. При ошибке — `409 { code: 'no_app_capacity' }` или `409 { code: 'not_configured' }`.
 4. Сервер создаёт OAuth state: `{ userId, codeVerifier, mode: 'add', appId, email }`.
@@ -216,6 +216,7 @@ Google-ящики без приложения (Google не был настрое
 - Токены, коды авторизации и тексты ответов Google не попадают в логи, URL, ответы API и ошибки — как в текущей реализации.
 - Ключ перехода `flow` одноразовый, 32 случайных байта, в Redis хранится хэш.
 - `openOAuthWindow` по-прежнему принимает только пути `/oauth/`.
+- Ответ `already_connected` от `start` позволяет любому вошедшему пользователю узнать, подключён ли конкретный Gmail у другого пользователя MailExpert. Для схемы «администратор и один общий пользователь» это приемлемо; при появлении отдельных менеджеров проверку нужно пересмотреть.
 
 ## Тесты
 
@@ -235,14 +236,14 @@ Google-ящики без приложения (Google не был настрое
 
 ## Разбиение на PR
 
-1. **Backend: данные.** Миграция, импорт из env, `refreshGoogleToken` по приложению ящика, `app_unavailable`. Поведение для пользователя не меняется: единственное приложение работает как раньше.
+1. **Backend: данные.** Миграция, импорт из env, `refreshGoogleToken` по приложению ящика, `app_unavailable`. Поведение для пользователя не меняется: единственное приложение работает как раньше. Для этого в PR 1 `getGoogleConfig()`/`isGoogleConfigured()` берут `client_id`/`client_secret` из самого раннего приложения не в `disabled` (`redirectUri` — из `integration_config`, затем `GOOGLE_REDIRECT_URI`), `applyGoogleEnv` больше не пишет и не удаляет `GOOGLE_CLIENT_ID`/`GOOGLE_CLIENT_SECRET`, а старый callback привязывает созданный ящик к этому приложению и пишет журнал. Миграции уже выполняются до `loadIntegrationConfigs()` (`backend/src/index.js`), поэтому импорт из env видит новые таблицы.
 2. **Backend: потоки и API.** `start`/`launch`/переподключение/callback, выбор и брони, отзыв, новые коды; `/api/admin/google-apps`; статус; доменный сервер и `kind: 'domain'`; ограничение ручного добавления.
 3. **Frontend: админка.** «Google-приложения» и «Доменный почтовый сервер».
 4. **Frontend: пользователь.** «Добавить аккаунт» с тремя вариантами, переподключение слева, новые ключи локалей.
 5. **Документация.** Инструкция по проектам Google Cloud для этой схемы (часть Task 6), ROADMAP и статусы плана.
 
 **Совместимость между PR** — `main` рабочий после каждого слияния:
-- с PR 1 до PR 3 старая карточка Google продолжает сохранять настройки: `POST /api/integrations/google` с `clientId`/`clientSecret` создаёт или обновляет самое раннее приложение, `DELETE` переводит его в `disabled`;
+- с PR 1 до PR 3 старая карточка Google продолжает работать: `GET /api/integrations` отдаёт `clientId` самого раннего приложения (secret — плейсхолдером), `POST /api/integrations/google` с `clientId`/`clientSecret` создаёт или обновляет это приложение, `DELETE` переводит его в `disabled`;
 - с PR 2 до PR 4 старые `GET /oauth/google` и `GET /oauth/google?login_hint=<email>` работают как прежде: если ящик с таким email есть у пользователя — это переподключение, иначе добавление; приложение выбирается по `selectGoogleApp`, бронь ставится по `login_hint`, без него — без брони; совпадение email на callback проверяется, только если `login_hint` был передан;
 - PR 3 убирает совместимость настроек, PR 4 — совместимость `GET /oauth/google` без `account`.
 

@@ -1,16 +1,20 @@
 import { Router } from 'express';
 import crypto from 'crypto';
-import { query } from '../services/db.js';
+import { query, withTransaction } from '../services/db.js';
 import { requireAdmin } from '../middleware/auth.js';
 import { decrypt, encrypt } from '../services/encryption.js';
 import { validateHost, resolveForConnection } from '../services/hostValidation.js';
-import { createSmtpTransport, createAccountSmtpTransport } from '../services/smtpTransport.js';
+import { createSmtpTransport } from '../services/smtpTransport.js';
 import { getConnectionPolicy, invalidateConnectionPolicyCache } from '../services/connectionPolicy.js';
 import { reloadAuthSettings } from '../services/authLimiter.js';
 import { imapManager } from '../index.js';
 import { stopCardavUser } from '../services/carddavSync.js';
 import { pluginRegistry } from '../plugins/registry.js';
 import { uuidParam } from '../utils/uuid.js';
+import { getAuthSettings } from '../services/auth/authSettings.js';
+import { UserIdentityError, claimOrCreateUserByEmail, normalizeEmail } from '../services/auth/userIdentity.js';
+import { closeUserSockets } from '../services/websocket.js';
+import { destroyUserSessions } from './auth.js';
 
 const router = Router();
 router.use(requireAdmin);
@@ -19,20 +23,100 @@ router.param('id', uuidParam('id'));
 
 // ── Users ──────────────────────────────────────────────────────────────────────
 
+class AdminUserError extends Error {
+  constructor(status, code, message) {
+    super(message);
+    this.status = status;
+    this.code = code;
+  }
+}
+
+const USER_LIST_COLUMNS = 'id, username, email, is_admin, totp_enabled, disabled_at, created_at';
+
+function publicUser(row, bootstrapAdminEmails = getAuthSettings().bootstrapAdminEmails) {
+  return {
+    id: row.id,
+    username: row.username,
+    email: row.email ?? null,
+    isAdmin: row.is_admin,
+    totpEnabled: !!row.totp_enabled,
+    disabledAt: row.disabled_at ?? null,
+    created_at: row.created_at,
+    isBootstrapAdmin: !!row.email && bootstrapAdminEmails.has(row.email.toLowerCase()),
+  };
+}
+
+// Whether the user can still reach the admin panel: an admin, not disabled, and — in google
+// mode, where sign-in is by email — with an email.
+function countsAsActiveAdmin({ is_admin: isAdmin, disabled_at: disabledAt, email }, googleMode) {
+  return !!isAdmin && !disabledAt && (!googleMode || !!email);
+}
+
+async function otherActiveAdminExists(client, userId, googleMode) {
+  const { rows } = await client.query(
+    `SELECT COUNT(*)::int AS count FROM users
+      WHERE is_admin = true AND disabled_at IS NULL AND id <> $1${googleMode ? ' AND email IS NOT NULL' : ''}`,
+    [userId],
+  );
+  return rows[0].count > 0;
+}
+
+// Serializes changes that could leave the install without a reachable admin.
+const lockAdminGuard = (client) => client.query("SELECT pg_advisory_xact_lock(hashtext('users-admin-guard'))");
+
+const lockTargetUser = async (client, id) => {
+  const { rows } = await client.query('SELECT id, email, is_admin, disabled_at FROM users WHERE id = $1 FOR UPDATE', [id]);
+  if (!rows[0]) throw new AdminUserError(404, 'not_found', 'User not found');
+  return rows[0];
+};
+
+const isBootstrapEmail = (settings, email) => !!email && settings.bootstrapAdminEmails.has(email.toLowerCase());
+
+function sendAdminUserError(res, err) {
+  if (!(err instanceof AdminUserError)) throw err;
+  return res.status(err.status).json({ error: err.message, code: err.code });
+}
+
+// End every session and live socket of a user who just lost access.
+async function signOutEverywhere(userId) {
+  await destroyUserSessions(userId);
+  closeUserSockets(imapManager.wss, userId);
+}
+
 router.get('/users', async (req, res) => {
   const limit  = Math.min(parseInt(req.query.limit)  || 100, 200);
   const offset = Math.max(parseInt(req.query.offset) || 0,   0);
   const [result, countResult] = await Promise.all([
     query(
-      'SELECT id, username, is_admin, totp_enabled, created_at FROM users ORDER BY created_at ASC LIMIT $1 OFFSET $2',
+      `SELECT ${USER_LIST_COLUMNS} FROM users ORDER BY created_at ASC LIMIT $1 OFFSET $2`,
       [limit, offset],
     ),
     query('SELECT COUNT(*) AS total FROM users'),
   ]);
+  const { bootstrapAdminEmails } = getAuthSettings();
   res.json({
-    users: result.rows.map(u => ({ ...u, isAdmin: u.is_admin, totpEnabled: u.totp_enabled })),
+    users: result.rows.map((row) => publicUser(row, bootstrapAdminEmails)),
     total: parseInt(countResult.rows[0].total),
   });
+});
+
+// Approving an email is what lets a person sign in when AUTH_MODE=google.
+router.post('/users', async (req, res) => {
+  const email = normalizeEmail(req.body?.email);
+  if (!email) return res.status(400).json({ error: 'A valid email address is required', code: 'email_invalid' });
+  try {
+    const { user, created, claimed } = await withTransaction((client) => claimOrCreateUserByEmail(client, email));
+    if (!created && !claimed) {
+      return res.status(409).json({ error: 'A user with this email already exists', code: 'user_exists' });
+    }
+    console.log(`[admin] ${req.session.userId} approved user ${user.id}`);
+    return res.status(created ? 201 : 200).json({ user: publicUser(user) });
+  } catch (err) {
+    if (err instanceof UserIdentityError) {
+      return res.status(409).json({ error: 'Another user already has this address as a username', code: err.code });
+    }
+    throw err;
+  }
 });
 
 router.post('/users/:id/totp/disable', async (req, res) => {
@@ -49,21 +133,75 @@ router.post('/users/:id/totp/disable', async (req, res) => {
 
 router.patch('/users/:id', async (req, res) => {
   const { id } = req.params;
-  const { isAdmin } = req.body;
+  const body = req.body || {};
+  const { isAdmin, disabled } = body;
+  const emailGiven = Object.hasOwn(body, 'email');
+  const clearingEmail = emailGiven && (body.email === null || body.email === '');
+  const email = emailGiven && !clearingEmail ? normalizeEmail(body.email) : null;
 
-  // Prevent removing your own admin status
+  if (isAdmin !== undefined && typeof isAdmin !== 'boolean') {
+    return res.status(400).json({ error: 'isAdmin must be a boolean', code: 'invalid_field' });
+  }
+  if (disabled !== undefined && typeof disabled !== 'boolean') {
+    return res.status(400).json({ error: 'disabled must be a boolean', code: 'invalid_field' });
+  }
+  if (emailGiven && !clearingEmail && !email) {
+    return res.status(400).json({ error: 'A valid email address is required', code: 'email_invalid' });
+  }
+  if (isAdmin === undefined && disabled === undefined && !emailGiven) {
+    return res.status(400).json({ error: 'No valid fields to update', code: 'no_fields' });
+  }
   if (id === req.session.userId && isAdmin === false) {
-    return res.status(400).json({ error: 'Cannot remove your own admin status' });
+    return res.status(400).json({ error: 'Cannot remove your own admin status', code: 'self_change' });
+  }
+  if (id === req.session.userId && disabled === true) {
+    return res.status(400).json({ error: 'Cannot disable your own account', code: 'self_change' });
   }
 
-  const target = await query('SELECT username FROM users WHERE id = $1', [id]);
-  if (!target.rows.length) return res.status(404).json({ error: 'User not found' });
+  const settings = getAuthSettings();
+  const googleMode = settings.mode === 'google';
+  try {
+    const { row, lostAccess } = await withTransaction(async (client) => {
+      await lockAdminGuard(client);
+      const current = await lockTargetUser(client, id);
+      const after = {
+        is_admin: isAdmin ?? current.is_admin,
+        disabled_at: disabled === undefined ? current.disabled_at : (disabled ? (current.disabled_at ?? new Date()) : null),
+        email: emailGiven ? email : current.email,
+      };
 
-  await query('UPDATE users SET is_admin = $1 WHERE id = $2', [isAdmin, id]);
-  console.log(`[admin] ${req.session.username} set is_admin=${isAdmin} for user ${target.rows[0].username} (${id})`);
+      if (isBootstrapEmail(settings, current.email)
+        && (!after.is_admin || after.disabled_at || after.email !== current.email)) {
+        throw new AdminUserError(409, 'bootstrap_admin', 'Admins from BOOTSTRAP_ADMIN_EMAILS cannot be changed here');
+      }
+      if (countsAsActiveAdmin(current, googleMode) && !countsAsActiveAdmin(after, googleMode)
+        && !(await otherActiveAdminExists(client, id, googleMode))) {
+        throw new AdminUserError(409, 'last_admin', 'At least one active admin must remain');
+      }
+      if (email && email !== current.email) {
+        const { rows: taken } = await client.query('SELECT id FROM users WHERE lower(email) = $1 AND id <> $2', [email, id]);
+        if (taken.length) throw new AdminUserError(409, 'email_taken', 'Another user already has this email');
+      }
 
-  // If user is currently logged in, their session isAdmin will be refreshed on next /me call
-  res.json({ ok: true });
+      const { rows: [updated] } = await client.query(
+        `UPDATE users
+            SET is_admin = $2, email = $3, disabled_at = $4,
+                disabled_by = CASE WHEN $4::timestamptz IS NULL THEN NULL ELSE COALESCE(disabled_by, $5::uuid) END
+          WHERE id = $1
+          RETURNING ${USER_LIST_COLUMNS}`,
+        [id, after.is_admin, after.email, after.disabled_at, req.session.userId],
+      );
+      // Losing the way in: turned off, or in google mode left without an email to sign in with.
+      const lost = (!current.disabled_at && !!after.disabled_at) || (googleMode && !!current.email && !after.email);
+      return { row: updated, lostAccess: lost };
+    });
+
+    if (lostAccess) await signOutEverywhere(id);
+    console.log(`[admin] ${req.session.userId} updated user ${id}`);
+    return res.json({ ok: true, user: publicUser(row, settings.bootstrapAdminEmails) });
+  } catch (err) {
+    return sendAdminUserError(res, err);
+  }
 });
 
 router.delete('/users/:id', async (req, res) => {
@@ -71,19 +209,43 @@ router.delete('/users/:id', async (req, res) => {
   if (id === req.session.userId) {
     return res.status(400).json({ error: 'Cannot delete your own account' });
   }
-  const target = await query('SELECT username FROM users WHERE id = $1', [id]);
-  if (!target.rows.length) return res.status(404).json({ error: 'User not found' });
+  const settings = getAuthSettings();
+  const googleMode = settings.mode === 'google';
+  try {
+    await withTransaction(async (client) => {
+      await lockAdminGuard(client);
+      const current = await lockTargetUser(client, id);
+      if (isBootstrapEmail(settings, current.email)) {
+        throw new AdminUserError(409, 'bootstrap_admin', 'Admins from BOOTSTRAP_ADMIN_EMAILS cannot be deleted here');
+      }
+      if (countsAsActiveAdmin(current, googleMode) && !(await otherActiveAdminExists(client, id, googleMode))) {
+        throw new AdminUserError(409, 'last_admin', 'At least one active admin must remain');
+      }
+      // Mailboxes still belong to one user: deleting the owner would delete them with it.
+      if (googleMode) {
+        const { rows: [{ count }] } = await client.query(
+          'SELECT COUNT(*)::int AS count FROM email_accounts WHERE user_id = $1',
+          [id],
+        );
+        if (count > 0) throw new AdminUserError(409, 'user_has_mailboxes', 'This user still owns mailboxes');
+      }
+    });
+  } catch (err) {
+    return sendAdminUserError(res, err);
+  }
+
   // Stop live per-user workers BEFORE the delete — disconnectUser looks up the
   // user's accounts, which the cascade delete would remove.
   await imapManager.disconnectUser(id).catch(err => console.warn('disconnectUser on delete:', err.message));
   stopCardavUser(id);
+  await signOutEverywhere(id);
   await query('DELETE FROM users WHERE id = $1', [id]);
   // Let plugins clean up any user-scoped data the FK cascade can't reach (GTD removes the
   // imported pet, stored under a slug derived from the user id rather than an FK). Best-effort
   // and after the delete: the user row is already gone, so a hook failure must not misreport a
   // completed delete as a 500. The hook swallows per-plugin errors.
   await pluginRegistry.runHook('onUserDelete', { userId: id });
-  console.log(`[admin] ${req.session.username} deleted user ${target.rows[0].username} (${id})`);
+  console.log(`[admin] ${req.session.userId} deleted user ${id}`);
   res.json({ ok: true });
 });
 
@@ -270,7 +432,7 @@ router.post('/invites', async (req, res) => {
   }
   const inviteUrl = `${appUrl}/register?invite=${token}`;
 
-  // Try to send an invite email — prefer system SMTP, fall back to admin's first SMTP account
+  // Send the invite through the system SMTP only: mailboxes belong to the team, not to the admin.
   let emailSent = false;
   let emailError = null;
   try {
@@ -298,29 +460,7 @@ router.post('/invites', async (req, res) => {
           });
           fromHeader = `${cfg.fromName || 'MailExpert'} <${cfg.fromEmail || cfg.user}>`;
         }
-      } catch { /* fall through to personal account */ }
-    }
-
-    // 2. Fall back to admin's first SMTP-enabled personal account
-    if (!transport) {
-      const accountResult = await query(
-        `SELECT * FROM email_accounts
-         WHERE user_id = $1 AND enabled = true AND smtp_host IS NOT NULL
-         ORDER BY created_at LIMIT 1`,
-        [req.session.userId]
-      );
-      if (accountResult.rows.length) {
-        const account = accountResult.rows[0];
-        // The shared account transport refreshes OAuth tokens through the token manager
-        // instead of using a possibly expired stored access token.
-        const smtp = await createAccountSmtpTransport(account);
-        if (smtp.error) {
-          emailError = smtp.error;
-        } else {
-          transport = smtp.transport;
-          fromHeader = `${account.name} <${account.email_address}>`;
-        }
-      }
+      } catch { /* no usable system SMTP */ }
     }
 
     if (transport) {

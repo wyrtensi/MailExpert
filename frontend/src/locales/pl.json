@@ -23,6 +23,15 @@
     "loadMore": "Wczytaj więcej"
   },
   "login": {
+    "google": {
+      "title": "Logowanie do MailExpert",
+      "desc": "Użyj konta Google zatwierdzonego przez administratora.",
+      "button": "Zaloguj się przez Google",
+      "cloudflareOnly": "Otwórz MailExpert przez link Cloudflare Access swojej organizacji.",
+      "errorNotAllowed": "To konto Google nie jest zatwierdzone w MailExpert. Poproś administratora o dodanie go.",
+      "errorDisabled": "Twój dostęp do MailExpert został wyłączony.",
+      "errorGeneric": "Logowanie przez Google nie powiodło się. Spróbuj ponownie."
+    },
     "tagline": "Twoja ujednolicona skrzynka odbiorcza",
     "signIn": "Zaloguj się",
     "createAccount": "Utwórz konto",
@@ -1106,6 +1115,14 @@
       "footer": "Naciśnij ? w dowolnym miejscu aplikacji, aby wyświetlić listę skrótów."
     },
     "users": {
+      "googleDesc": "Osoby z tej listy mogą logować się przez Google. Każdy zalogowany użytkownik pracuje ze wszystkimi skrzynkami.",
+      "addPh": "Adres e-mail do zatwierdzenia",
+      "add": "Zatwierdź",
+      "disabledBadge": "Wyłączony",
+      "bootstrapBadge": "Z listy BOOTSTRAP_ADMIN_EMAILS",
+      "noEmail": "Brak e-maila — logowanie niemożliwe",
+      "disable": "Wyłącz",
+      "enable": "Włącz",
       "title": "Użytkownicy",
       "description": "Zarządzaj kontami użytkowników i uprawnieniami administratorów",
       "joined": "Dołączono {{date}}",

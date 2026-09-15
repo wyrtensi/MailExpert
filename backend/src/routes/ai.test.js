@@ -93,10 +93,10 @@ afterAll(async () => {
 beforeEach(() => {
   Object.values(mocks).forEach((mock) => mock.mockReset());
   mocks.query.mockImplementation(async (sql, params = []) => {
-    if (/SELECT is_admin FROM users/i.test(sql)) {
+    if (/SELECT is_admin, disabled_at FROM users/i.test(sql)) {
       return { rows: params[0] === ADMIN ? [{ is_admin: true }] : [{ is_admin: false }] };
     }
-    if (/SELECT id FROM users/i.test(sql)) return { rows: params[0] ? [{ id: params[0] }] : [] };
+    if (/SELECT id, disabled_at FROM users/i.test(sql)) return { rows: params[0] ? [{ id: params[0], disabled_at: null }] : [] };
     if (/system_settings/i.test(sql)) return { rows: [] };
     if (/SELECT preferences FROM users/i.test(sql)) return { rows: [{ preferences: {} }] };
     throw new Error(`Unexpected SQL: ${sql}`);

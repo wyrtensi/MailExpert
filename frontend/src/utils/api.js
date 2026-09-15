@@ -146,6 +146,7 @@ export const api = {
   setLockPin: (pin, currentPin) => request('POST', '/auth/lock-pin', { pin, currentPin }),
   removeLockPin: (currentPin) => request('DELETE', '/auth/lock-pin', { currentPin }),
   me: () => request('GET', '/auth/me'),
+  authConfig: () => request('GET', '/auth/config'),
   forgotPassword: (email) => request('POST', '/auth/forgot-password', { email }),
   resetPassword: (token, password) => request('POST', '/auth/reset-password', { token, password }),
   getPreferences: () => request('GET', '/auth/preferences'),
@@ -188,6 +189,7 @@ export const api = {
   // Admin
   admin: {
     getUsers: (params) => request('GET', '/admin/users' + (params ? '?' + new URLSearchParams(params) : '')),
+    createUser: (email) => request('POST', '/admin/users', { email }),
     updateUser: (id, data) => request('PATCH', `/admin/users/${id}`, data),
     deleteUser: (id) => request('DELETE', `/admin/users/${id}`),
     disableUserTotp: (id) => request('POST', `/admin/users/${id}/totp/disable`),

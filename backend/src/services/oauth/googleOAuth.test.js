@@ -26,6 +26,8 @@ const { query } = await import('../db.js');
 const { getGoogleAppById } = await import('./googleApps.js');
 const {
   buildGoogleAuthorizationUrl,
+  buildGoogleSignInUrl,
+  GOOGLE_AUTH_URL,
   exchangeGoogleCode,
   verifyGoogleIdToken,
   refreshGoogleToken,
@@ -304,5 +306,25 @@ describe('refreshGoogleToken', () => {
     const err = await refreshGoogleToken(account).catch(e => e);
     expect(err.code).toBe('not_configured');
     expect(fetchMock).not.toHaveBeenCalled();
+  });
+});
+
+describe('buildGoogleSignInUrl', () => {
+  it('asks only for the identity, with PKCE and an account picker', () => {
+    const url = new URL(buildGoogleSignInUrl({
+      clientId: 'client-id', state: 'st', codeChallenge: 'ch',
+      redirectUri: 'https://direct.example.com/oauth/login/google/callback',
+    }));
+    expect(`${url.origin}${url.pathname}`).toBe(GOOGLE_AUTH_URL);
+    expect(Object.fromEntries(url.searchParams)).toEqual({
+      client_id: 'client-id',
+      redirect_uri: 'https://direct.example.com/oauth/login/google/callback',
+      response_type: 'code',
+      scope: 'openid email',
+      prompt: 'select_account',
+      code_challenge: 'ch',
+      code_challenge_method: 'S256',
+      state: 'st',
+    });
   });
 });

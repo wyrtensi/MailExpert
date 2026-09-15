@@ -7,7 +7,7 @@ import { imapManager } from '../index.js';
 import { decrypt, encrypt } from '../services/encryption.js';
 import { pushConfigured } from '../services/pushNotifications.js';
 import { validateHost, resolveForConnection } from '../services/hostValidation.js';
-import { createSmtpTransport, createAccountSmtpTransport } from '../services/smtpTransport.js';
+import { createSmtpTransport } from '../services/smtpTransport.js';
 import { getConnectionPolicy } from '../services/connectionPolicy.js';
 import { authLimiterConfig } from '../services/authLimiter.js';
 import { logAuthEvent } from '../services/authEvents.js';
@@ -19,6 +19,8 @@ import { sanitizeRightSidebarPrefs } from '../utils/rightSidebarPrefs.js';
 import { redisClient } from '../services/redis.js';
 import { generateTotpSecret, totpKeyUri, verifyTotp } from '../services/totp.js';
 import { consume as rlConsume, reset as rlReset } from '../services/rateLimiter.js';
+import { getAuthSettings } from '../services/auth/authSettings.js';
+import { CF_ACCESS_HEADER } from '../services/auth/cloudflareAccess.js';
 
 const router = Router();
 
@@ -107,6 +109,12 @@ function rateLimit(config) {
   };
 }
 const authLimiter = rateLimit(authLimiterConfig);
+
+// Public: which sign-in screen to show. Only switches, never the configured values.
+router.get('/config', (req, res) => {
+  const settings = getAuthSettings();
+  res.json({ mode: settings.mode, cloudflare: !!settings.cloudflare, googleSignIn: !!settings.googleSignIn });
+});
 
 router.post('/register', authLimiter, async (req, res) => {
   const { username, password, inviteToken } = req.body;
@@ -603,7 +611,12 @@ router.post('/logout', async (req, res) => {
   // build the end-session URL (using the still-present id_token) before destroying the
   // session. buildEndSessionUrl never throws and returns null when it does not apply, so
   // local logout always proceeds. The frontend redirects to this URL if present.
-  const endSessionUrl = await buildEndSessionUrl({ providerId: oidcProviderId, idToken: oidcIdToken });
+  const settings = getAuthSettings();
+  // Leaving through Cloudflare also has to end the Access session, or the next request
+  // signs the user straight back in.
+  const endSessionUrl = settings.mode === 'google'
+    ? (settings.cloudflare && req.get(CF_ACCESS_HEADER) ? '/cdn-cgi/access/logout' : null)
+    : await buildEndSessionUrl({ providerId: oidcProviderId, idToken: oidcIdToken });
 
   req.session.destroy((err) => {
     if (err) console.error('Session destroy error:', err.message);
@@ -617,11 +630,11 @@ router.post('/logout', async (req, res) => {
 
 router.get('/me', async (req, res) => {
   if (!req.session.userId) return res.status(401).json({ error: 'Not authenticated' });
-  const result = await query('SELECT id, username, display_name, avatar, is_admin, totp_enabled, password_hash, lock_pin_hash FROM users WHERE id = $1', [req.session.userId]);
+  const result = await query('SELECT id, username, email, display_name, avatar, is_admin, totp_enabled, password_hash, lock_pin_hash FROM users WHERE id = $1', [req.session.userId]);
   const user = result.rows[0];
   if (!user) return res.status(401).json({ error: 'Not authenticated' });
   req.session.isAdmin = user.is_admin;
-  res.json({ user: { id: user.id, username: user.username, displayName: user.display_name, avatar: user.avatar, isAdmin: user.is_admin, totpEnabled: user.totp_enabled, hasPassword: !!user.password_hash, hasLockPin: !!user.lock_pin_hash, locked: !!req.session.locked } });
+  res.json({ user: { id: user.id, username: user.username, email: user.email, authMode: getAuthSettings().mode, displayName: user.display_name, avatar: user.avatar, isAdmin: user.is_admin, totpEnabled: user.totp_enabled, hasPassword: !!user.password_hash, hasLockPin: !!user.lock_pin_hash, locked: !!req.session.locked } });
 });
 
 // ── Screen-lock PIN (#235) ──────────────────────────────────────────────────
@@ -1008,7 +1021,7 @@ router.post('/forgot-password', authLimiter, async (req, res) => {
 
       // Send the email before persisting the token. If delivery fails, nothing is
       // saved and the user can retry cleanly.
-      // Transport preference: system SMTP → account owner's first personal SMTP account.
+      // Only the system SMTP sends password reset mail: mailboxes belong to the team, not to the account.
       const emailSubject = 'Reset your MailExpert password';
       const emailText = `You requested a password reset for your MailExpert account.\n\nClick the link below to set a new password. This link expires in 1 hour.\n\n${resetUrl}\n\nIf you did not request this, you can ignore this email.`;
       const emailHtml = `
@@ -1045,31 +1058,7 @@ router.post('/forgot-password', authLimiter, async (req, res) => {
             fromHeader = `${cfg.fromName || 'MailExpert'} <${cfg.fromEmail || cfg.user}>`;
           }
         }
-      } catch { /* fall through to personal account */ }
-
-      // 2. Fall back to the account owner's first personal SMTP account,
-      //    then any admin's first SMTP account (mirrors the invite email fallback).
-      if (!transport) {
-        const accountResult = await query(
-          `SELECT ea.* FROM email_accounts ea
-           JOIN users u ON ea.user_id = u.id
-           WHERE ea.enabled = true AND ea.smtp_host IS NOT NULL
-             AND (ea.user_id = $1 OR u.is_admin = true)
-           ORDER BY (ea.user_id = $1) DESC, ea.created_at
-           LIMIT 1`,
-          [user.id]
-        );
-        if (accountResult.rows.length) {
-          const acct = accountResult.rows[0];
-          // The shared account transport refreshes OAuth tokens through the token manager
-          // instead of using a possibly expired stored access token.
-          const smtp = await createAccountSmtpTransport(acct);
-          if (!smtp.error) {
-            transport = smtp.transport;
-            fromHeader = `${acct.name} <${acct.email_address}>`;
-          }
-        }
-      }
+      } catch { /* no usable system SMTP */ }
 
       if (!transport) throw new Error('No email transport available');
       await transport.sendMail({ from: fromHeader, to: trimmed, subject: emailSubject, text: emailText, html: emailHtml });

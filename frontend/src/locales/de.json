@@ -23,6 +23,15 @@
     "loadMore": "Mehr laden"
   },
   "login": {
+    "google": {
+      "title": "Bei MailExpert anmelden",
+      "desc": "Verwenden Sie das Google-Konto, das Ihr Administrator freigegeben hat.",
+      "button": "Mit Google anmelden",
+      "cloudflareOnly": "Öffnen Sie MailExpert über den Cloudflare-Access-Link Ihrer Organisation.",
+      "errorNotAllowed": "Dieses Google-Konto ist für MailExpert nicht freigegeben. Bitten Sie einen Administrator, es hinzuzufügen.",
+      "errorDisabled": "Ihr Zugang zu MailExpert wurde deaktiviert.",
+      "errorGeneric": "Die Anmeldung mit Google ist fehlgeschlagen. Versuchen Sie es erneut."
+    },
     "tagline": "Dein einheitlicher Posteingang",
     "signIn": "Anmelden",
     "createAccount": "Konto erstellen",
@@ -1016,6 +1025,14 @@
       "footer": "Überall in der App ? drücken, um die aktuelle Kürzelbeschreibung zu sehen."
     },
     "users": {
+      "googleDesc": "Die hier aufgeführten Personen können sich mit Google anmelden. Jeder angemeldete Benutzer arbeitet mit allen Postfächern.",
+      "addPh": "Freizugebende E-Mail-Adresse",
+      "add": "Freigeben",
+      "disabledBadge": "Deaktiviert",
+      "bootstrapBadge": "Aus BOOTSTRAP_ADMIN_EMAILS",
+      "noEmail": "Keine E-Mail – Anmeldung nicht möglich",
+      "disable": "Deaktivieren",
+      "enable": "Aktivieren",
       "title": "Benutzer",
       "description": "Benutzerkonten und Administratorrechte verwalten",
       "joined": "Beigetreten {{date}}",

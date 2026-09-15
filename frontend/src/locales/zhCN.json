@@ -23,6 +23,15 @@
     "loadMore": "加载更多"
   },
   "login": {
+    "google": {
+      "title": "登录 MailExpert",
+      "desc": "请使用管理员已批准的 Google 账号。",
+      "button": "使用 Google 登录",
+      "cloudflareOnly": "请通过贵组织的 Cloudflare Access 链接打开 MailExpert。",
+      "errorNotAllowed": "此 Google 账号未获准使用 MailExpert。请联系管理员添加。",
+      "errorDisabled": "你的 MailExpert 访问权限已被关闭。",
+      "errorGeneric": "Google 登录失败，请重试。"
+    },
     "tagline": "您的统一收件箱",
     "signIn": "登录",
     "createAccount": "注册账户",
@@ -1087,6 +1096,14 @@
       "footer": "在应用任意位置按 ? 即可查看当前快捷键参考。"
     },
     "users": {
+      "googleDesc": "此处列出的人员可以使用 Google 登录。每个登录的用户都能处理所有邮箱。",
+      "addPh": "要批准的邮箱地址",
+      "add": "批准",
+      "disabledBadge": "已停用",
+      "bootstrapBadge": "来自 BOOTSTRAP_ADMIN_EMAILS",
+      "noEmail": "无邮箱，无法登录",
+      "disable": "停用",
+      "enable": "启用",
       "title": "用户",
       "description": "管理用户账户及管理员权限",
       "joined": "加入于 {{date}}",

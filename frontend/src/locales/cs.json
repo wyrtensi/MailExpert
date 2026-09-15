@@ -23,6 +23,15 @@
     "loadMore": "Načíst další"
   },
   "login": {
+    "google": {
+      "title": "Přihlášení do MailExpert",
+      "desc": "Použijte účet Google, který schválil váš administrátor.",
+      "button": "Přihlásit se přes Google",
+      "cloudflareOnly": "Otevřete MailExpert přes odkaz Cloudflare Access vaší organizace.",
+      "errorNotAllowed": "Tento účet Google není pro MailExpert schválen. Požádejte administrátora o jeho přidání.",
+      "errorDisabled": "Váš přístup do MailExpert byl vypnut.",
+      "errorGeneric": "Přihlášení přes Google se nezdařilo. Zkuste to znovu."
+    },
     "tagline": "Všechny schránky na jednom místě",
     "signIn": "Přihlásit se",
     "createAccount": "Vytvořit účet",
@@ -1336,6 +1345,14 @@
       "removed": "Nastavení systémového e-mailu bylo odstraněno"
     },
     "users": {
+      "googleDesc": "Lidé v tomto seznamu se mohou přihlásit přes Google. Každý přihlášený uživatel pracuje se všemi schránkami.",
+      "addPh": "E-mailová adresa ke schválení",
+      "add": "Schválit",
+      "disabledBadge": "Vypnutý",
+      "bootstrapBadge": "Ze seznamu BOOTSTRAP_ADMIN_EMAILS",
+      "noEmail": "Bez e-mailu — přihlášení není možné",
+      "disable": "Vypnout",
+      "enable": "Zapnout",
       "title": "Uživatelé",
       "description": "Spravujte uživatelské účty a oprávnění správce",
       "joined": "Připojení: {{date}}",

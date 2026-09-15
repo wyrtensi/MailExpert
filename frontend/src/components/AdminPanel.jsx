@@ -30,6 +30,8 @@ import { usePushNotifications } from '../hooks/usePushNotifications.js';
 import SignatureEditor from './SignatureEditor.jsx';
 import DiagnosticsReportModal from './DiagnosticsReportModal.jsx';
 import ConfirmOverlay from './ConfirmOverlay.jsx';
+import GoogleUsersPanel from './GoogleUsersPanel.jsx';
+import { isGoogleAuthMode } from '../utils/authMode.js';
 import GoogleIntegrationSection, { openGoogleOAuth } from './GoogleIntegrationSection.jsx';
 import { openOAuthWindow } from '../utils/oauthWindow.js';
 import { MICROSOFT_OAUTH_PATH } from '../utils/accountHealth.js';
@@ -4665,9 +4667,10 @@ function SystemEmailSection() {
 // ─── Users Tab ────────────────────────────────────────────────────────────────
 function UsersTab() {
   const { t } = useTranslation();
+  const { user } = useStore();
   return (
     <SubTabs tabs={[
-      { id: 'users', label: t('admin.systemEmail.tabUsers'), content: <UsersAndInvitesPanel /> },
+      { id: 'users', label: t('admin.systemEmail.tabUsers'), content: isGoogleAuthMode(user) ? <GoogleUsersPanel /> : <UsersAndInvitesPanel /> },
       { id: 'systememail', label: t('admin.systemEmail.tabEmail'), content: <SystemEmailSection /> },
     ]} />
   );
@@ -6720,6 +6723,7 @@ const TABS = [
   {
     id: 'sso', labelKey: 'admin.tabs.sso',
     adminOnly: true,
+    localAuthOnly: true,
     icon: <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.75"><rect x="3" y="11" width="18" height="11" rx="2"/><path d="M7 11V7a5 5 0 0110 0v4"/></svg>,
   },
   // About (ungrouped, pinned to bottom)
@@ -7287,6 +7291,8 @@ function SecurityTab() {
   const [success, setSuccess] = useState('');
 
   const totpEnabled = user?.totpEnabled;
+  // Google sign-in mode has no passwords, 2FA, recovery email or linked SSO identities.
+  const googleAuth = isGoogleAuthMode(user);
 
   // Admin-only: login protection settings
   const [maxAttempts, setMaxAttempts] = useState(10);
@@ -7495,7 +7501,7 @@ function SecurityTab() {
       <ScreenLockSection />
 
       {/* Login Protection — admin only */}
-      {user?.isAdmin && (
+      {user?.isAdmin && !googleAuth && (
         <div style={{
           background: 'var(--bg-secondary)', border: '1px solid var(--border)',
           borderRadius: 12, padding: '20px 24px', marginBottom: 20,
@@ -7597,6 +7603,7 @@ function SecurityTab() {
       )}
 
       {/* Status card */}
+      {!googleAuth && (
       <div style={{
         background: 'var(--bg-secondary)', border: '1px solid var(--border)',
         borderRadius: 12, padding: '20px 24px', marginBottom: 20,
@@ -7812,9 +7819,10 @@ function SecurityTab() {
           }}>{success}</div>
         )}
       </div>
+      )}
 
       {/* MFA enforcement — admin only */}
-      {user?.isAdmin && (
+      {user?.isAdmin && !googleAuth && (
         <div style={{
           background: 'var(--bg-secondary)', border: '1px solid var(--border)',
           borderRadius: 12, padding: '20px 24px', marginBottom: 20,
@@ -7905,6 +7913,7 @@ function SecurityTab() {
       )}
 
       {/* Recovery email — all users */}
+      {!googleAuth && (
       <div style={{
         background: 'var(--bg-secondary)', border: '1px solid var(--border)',
         borderRadius: 12, padding: '20px 24px', marginBottom: 20,
@@ -7948,8 +7957,9 @@ function SecurityTab() {
           {recoverySaving ? t('common.saving') : recoverySaved ? t('admin.security.protectionSaved') : t('common.save')}
         </button>
       </div>
+      )}
 
-      <LinkedIdentitiesSection />
+      {!googleAuth && <LinkedIdentitiesSection />}
 
       {/* Activity Log — admin only */}
       {user?.isAdmin && (
@@ -8194,8 +8204,8 @@ function makeSearchIndex(t) {
     { label: t('admin.categories.title'), keywords: ['categories', 'categorize', 'newsletter', 'promotion', 'social', 'automated', 'inbox tabs', 'sort emails', 'classify'], tab: 'categories', breadcrumb: tabLabel('categories') },
     { label: t('admin.categories.gtdReveal'), keywords: ['gtd', 'todo', 'getting things done', 'watch', 'delegated', 'someday', 'reference', 'next action', 'waiting', 'inbox zero', 'pet'], tab: 'categories', subtab: 'gtd', breadcrumb: `${tabLabel('categories')} › ${t('admin.categories.gtdReveal')}` },
     // Security
-    { label: t('admin.security.totpTitle'), keywords: ['2fa', 'totp', 'authenticator', 'two factor', 'otp', 'two-factor', 'mfa', 'security code'], tab: 'security', subtab: 'security', breadcrumb: secCrumb },
-    { label: t('admin.security.ssoTitle'), keywords: ['sso', 'linked', 'identity', 'provider', 'link', 'unlink', 'oidc', 'connect identity'], tab: 'security', subtab: 'security', breadcrumb: secCrumb },
+    { label: t('admin.security.totpTitle'), localAuthOnly: true, keywords: ['2fa', 'totp', 'authenticator', 'two factor', 'otp', 'two-factor', 'mfa', 'security code'], tab: 'security', subtab: 'security', breadcrumb: secCrumb },
+    { label: t('admin.security.ssoTitle'), localAuthOnly: true, keywords: ['sso', 'linked', 'identity', 'provider', 'link', 'unlink', 'oidc', 'connect identity'], tab: 'security', subtab: 'security', breadcrumb: secCrumb },
     { label: t('admin.security.loginProtectionTitle'), keywords: ['login', 'attempts', 'brute force', 'lockout', 'max attempts', 'rate limit'], tab: 'security', subtab: 'security', adminOnly: true, breadcrumb: secCrumb },
     { label: t('admin.security.mailPolicyTitle'), keywords: ['server', 'tls', 'insecure', 'private ip', 'port', 'mail server', 'ssl'], tab: 'security', subtab: 'security', adminOnly: true, breadcrumb: secCrumb },
     { label: t('admin.security.activityTitle'), keywords: ['log', 'activity', 'auth events', 'history', 'login history', 'audit'], tab: 'security', subtab: 'security', adminOnly: true, breadcrumb: secCrumb },
@@ -8211,7 +8221,7 @@ function makeSearchIndex(t) {
     // Admin-only
     { label: t('admin.systemEmail.tabUsers'), keywords: ['user', 'invite', 'admin', 'role', 'manage users', 'add user'], tab: 'users', adminOnly: true, breadcrumb: tabLabel('users') },
     { label: t('admin.systemEmail.tabEmail'), keywords: ['system email', 'smtp', 'admin email', 'invite email', 'outgoing email'], tab: 'users', adminOnly: true, breadcrumb: tabLabel('users') },
-    { label: t('admin.sso.title'), keywords: ['sso', 'oidc', 'single sign on', 'oauth', 'provider', 'identity provider'], tab: 'sso', adminOnly: true, breadcrumb: tabLabel('sso') },
+    { label: t('admin.sso.title'), localAuthOnly: true, keywords: ['sso', 'oidc', 'single sign on', 'oauth', 'provider', 'identity provider'], tab: 'sso', adminOnly: true, breadcrumb: tabLabel('sso') },
   ];
 }
 
@@ -8250,7 +8260,8 @@ export default function AdminPanel() {
   const { t } = useTranslation();
   const { setShowAdmin, adminTab, setAdminTab, user } = useStore();
   const isMobile = useMobile();
-  const visibleTabs = TABS.filter(tab => (!tab.adminOnly || user?.isAdmin) && (!tab.mobileHidden || !isMobile));
+  const visibleTabs = TABS.filter(tab => (!tab.adminOnly || user?.isAdmin) && (!tab.mobileHidden || !isMobile)
+    && (!tab.localAuthOnly || !isGoogleAuthMode(user)));
 
   const tabScrollRef = useRef(null);
   const [tabRightOverflow, setTabRightOverflow] = useState(false);
@@ -8282,6 +8293,7 @@ export default function AdminPanel() {
     ? searchIndex.filter(item => {
         if (item.adminOnly && !user?.isAdmin) return false;
         if (item.mobileHidden && isMobile) return false;
+        if (item.localAuthOnly && isGoogleAuthMode(user)) return false;
         const q = searchQuery.toLowerCase();
         return item.label.toLowerCase().includes(q) || item.keywords.some(k => k.includes(q));
       })
@@ -8332,7 +8344,7 @@ export default function AdminPanel() {
       {adminTab === 'appearance' && <AppearanceTab initialSubTab={pendingSubTab} />}
       {adminTab === 'integrations' && <IntegrationsTab />}
       {adminTab === 'users' && <UsersTab />}
-      {adminTab === 'sso' && <SSOTab />}
+      {adminTab === 'sso' && !isGoogleAuthMode(user) && <SSOTab />}
       {adminTab === 'security' && <SecurityPrivacyTab initialSubTab={pendingSubTab} />}
       {adminTab === 'notifications' && <NotificationsTab />}
       {adminTab === 'shortcuts' && !isMobile && <ShortcutsTab />}

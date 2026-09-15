@@ -6,12 +6,15 @@ import { applyTheme, getInitialTheme } from './themes.js';
 import { applyFontSet, effectiveFontSet } from './fonts.js'; // still used for the instant localStorage apply on mount
 import { applyLayout } from './layouts.js';
 import LoginPage from './components/LoginPage.jsx';
+import GoogleLoginPage from './components/GoogleLoginPage.jsx';
+import { isGoogleAuthMode } from './utils/authMode.js';
 import MailApp from './components/MailApp.jsx';
 import LockScreen from './components/LockScreen.jsx';
 
 export default function App() {
   const { user, setUser, loadPreferences, isLocked, setLocked } = useStore();
   const [checking, setChecking] = useState(true);
+  const [authConfig, setAuthConfig] = useState(null);
 
   // Register service worker on first mount — independent of auth state.
   // The SW itself does nothing until the user explicitly grants push permission.
@@ -57,7 +60,11 @@ export default function App() {
       return;
     }
 
-    api.me()
+    // The sign-in screen depends on the server's mode; an unreachable config means local.
+    const configLoaded = api.authConfig()
+      .then(setAuthConfig)
+      .catch(() => setAuthConfig({ mode: 'local' }));
+    const userLoaded = api.me()
       .then(async (data) => {
         setUser(data.user);
         // Server is authoritative for the screen lock (#235). Reconcile the overlay:
@@ -82,8 +89,8 @@ export default function App() {
         // Clear any stale client lock so a locked session that has since expired
         // doesn't strand the user back on the lock screen after they re-login (#235).
         setLocked(false);
-      })
-      .finally(() => setChecking(false));
+      });
+    Promise.all([configLoaded, userLoaded]).finally(() => setChecking(false));
   }, [loadPreferences, setUser, setLocked]);
 
   if (checking) {
@@ -105,10 +112,12 @@ export default function App() {
     );
   }
 
+  const loginPage = isGoogleAuthMode(authConfig) ? <GoogleLoginPage config={authConfig} /> : <LoginPage />;
+
   return (
     <Routes>
-      <Route path="/login" element={user ? <Navigate to="/" replace /> : <LoginPage />} />
-      <Route path="/register" element={user ? <Navigate to="/" replace /> : <LoginPage />} />
+      <Route path="/login" element={user ? <Navigate to="/" replace /> : loginPage} />
+      <Route path="/register" element={user ? <Navigate to="/" replace /> : loginPage} />
       <Route path="/*" element={user ? (isLocked ? <LockScreen /> : <MailApp />) : <Navigate to="/login" replace />} />
     </Routes>
   );

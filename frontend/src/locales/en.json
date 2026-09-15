@@ -23,6 +23,15 @@
     "loadMore": "Load more"
   },
   "login": {
+    "google": {
+      "title": "Sign in to MailExpert",
+      "desc": "Use the Google account your administrator approved.",
+      "button": "Sign in with Google",
+      "cloudflareOnly": "Open MailExpert through your organization's Cloudflare Access link.",
+      "errorNotAllowed": "This Google account is not approved for MailExpert. Ask an administrator to add it.",
+      "errorDisabled": "Your access to MailExpert has been turned off.",
+      "errorGeneric": "Google sign-in failed. Try again."
+    },
     "tagline": "Your unified inbox",
     "signIn": "Sign in",
     "createAccount": "Create account",
@@ -1087,6 +1096,14 @@
       "footer": "Press ? anywhere in the app to see the current shortcut reference."
     },
     "users": {
+      "googleDesc": "People listed here can sign in with Google. Every signed-in user works with all mailboxes.",
+      "addPh": "Email address to approve",
+      "add": "Approve",
+      "disabledBadge": "Disabled",
+      "bootstrapBadge": "From BOOTSTRAP_ADMIN_EMAILS",
+      "noEmail": "No email — cannot sign in",
+      "disable": "Disable",
+      "enable": "Enable",
       "title": "Users",
       "description": "Manage user accounts and admin privileges",
       "joined": "Joined {{date}}",

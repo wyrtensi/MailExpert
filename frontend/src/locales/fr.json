@@ -23,6 +23,15 @@
     "loadMore": "Charger plus"
   },
   "login": {
+    "google": {
+      "title": "Connexion à MailExpert",
+      "desc": "Utilisez le compte Google approuvé par votre administrateur.",
+      "button": "Se connecter avec Google",
+      "cloudflareOnly": "Ouvrez MailExpert via le lien Cloudflare Access de votre organisation.",
+      "errorNotAllowed": "Ce compte Google n'est pas approuvé pour MailExpert. Demandez à un administrateur de l'ajouter.",
+      "errorDisabled": "Votre accès à MailExpert a été désactivé.",
+      "errorGeneric": "La connexion avec Google a échoué. Réessayez."
+    },
     "tagline": "Votre boîte de réception unifiée",
     "signIn": "Se connecter",
     "createAccount": "Créer un compte",
@@ -1087,6 +1096,14 @@
       "footer": "Appuyez sur ? n'importe où dans l'application pour voir la référence des raccourcis."
     },
     "users": {
+      "googleDesc": "Les personnes listées ici peuvent se connecter avec Google. Chaque utilisateur connecté travaille avec toutes les boîtes aux lettres.",
+      "addPh": "Adresse e-mail à approuver",
+      "add": "Approuver",
+      "disabledBadge": "Désactivé",
+      "bootstrapBadge": "Issu de BOOTSTRAP_ADMIN_EMAILS",
+      "noEmail": "Pas d'e-mail — connexion impossible",
+      "disable": "Désactiver",
+      "enable": "Activer",
       "title": "Utilisateurs",
       "description": "Gérez les comptes utilisateurs et les privilèges administrateur",
       "joined": "Inscrit le {{date}}",

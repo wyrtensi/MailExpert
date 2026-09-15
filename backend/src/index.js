@@ -11,6 +11,7 @@ import { redisClient } from './services/redis.js';
 import sendRoutes from './routes/send.js';
 import draftRoutes from './routes/draft.js';
 import oauthRoutes from './routes/oauth.js';
+import authGoogleRoutes from './routes/authGoogle.js';
 import integrationsRoutes, { loadIntegrationConfigs } from './routes/integrations.js';
 import authRoutes from './routes/auth.js';
 import accountRoutes from './routes/accounts.js';
@@ -43,6 +44,8 @@ import { ImapManager } from './services/imapManager.js';
 import { getUpdateStatus } from './services/updateCheck.js';
 import { recordHttp } from './services/performanceMetrics.js';
 import { defaultEmptyBody } from './middleware/defaultEmptyBody.js';
+import { authSettingsError } from './services/auth/authSettings.js';
+import { identityGate } from './middleware/identityGate.js';
 
 const packageMeta = JSON.parse(readFileSync(new URL('../package.json', import.meta.url), 'utf-8'));
 let buildMeta = {};
@@ -75,6 +78,12 @@ if (!process.env.DB_PASSWORD) {
 }
 if (!process.env.ENCRYPTION_KEY || process.env.ENCRYPTION_KEY.length !== 64) {
   console.error('FATAL: ENCRYPTION_KEY must be set and exactly 64 hex characters (32 bytes). Generate one with: openssl rand -hex 32');
+  process.exit(1);
+}
+// A google sign-in mode without any way to sign in would lock everyone out.
+const authConfigError = authSettingsError();
+if (authConfigError) {
+  console.error(`FATAL: ${authConfigError} Exiting.`);
   process.exit(1);
 }
 // APP_URL is required in production: without it every browser WebSocket connection
@@ -149,6 +158,10 @@ app.use((err, req, res, next) => {
 });
 app.use(sessionMiddleware);
 
+// Google sign-in mode: every request to these surfaces needs an approved, active user (a
+// Cloudflare Access token or a direct Google sign-in session); local sign-in routes are 404.
+app.use(['/api', '/oauth', '/auth/oidc', '/carddav', '/.well-known/carddav'], identityGate);
+
 // CSRF defense-in-depth for the cookie-authenticated /api surface. A mutating
 // request must carry a custom header that a cross-site <form> cannot set and a
 // cross-origin fetch cannot send without a CORS preflight — which the CORS policy
@@ -186,6 +199,7 @@ setMailEngine(imapManager);
 app.use('/api/auth', authRoutes);
 app.use('/api/auth/oidc', oidcApiRouter);
 app.use('/auth/oidc', oidcBrowserRouter);
+app.use('/oauth/login/google', authGoogleRoutes);
 app.use('/oauth', oauthRoutes);
 app.use('/api/integrations', integrationsRoutes);
 app.use('/api/accounts', accountRoutes);

@@ -80,4 +80,13 @@ describe('OAuth state + PKCE store', () => {
     store.set(key, { value: 'not-json' });
     expect(await consumeOAuthState({ provider: 'google', state })).toBeNull();
   });
+
+  it('keeps a sign-in state without a user only for an anonymous consumer', async () => {
+    const first = await createOAuthState({ provider: 'auth-google' });
+    expect(await consumeOAuthState({ provider: 'auth-google', state: first.state })).toBeNull();
+
+    const second = await createOAuthState({ provider: 'auth-google' });
+    expect(await consumeOAuthState({ provider: 'auth-google', state: second.state, anonymous: true }))
+      .toEqual({ userId: null, codeVerifier: expect.any(String), loginHint: null, appId: null });
+  });
 });

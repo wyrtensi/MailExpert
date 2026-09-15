@@ -1,11 +1,13 @@
 import { recordWsConnect, recordWsDisconnect } from './diagnosticsRing.js';
+import { getPublicOrigins } from '../utils/publicOrigins.js';
+import { getAuthSettings } from './auth/authSettings.js';
+import { CF_ACCESS_HEADER, verifyCloudflareAccessToken } from './auth/cloudflareAccess.js';
+import { findUserByEmail, loadUserById } from './auth/userIdentity.js';
 
-// Derive the expected origin from APP_URL once at startup.
-// If APP_URL is not set, origin validation is skipped — log a warning so operators know.
-const ALLOWED_ORIGIN = (() => {
-  try { return process.env.APP_URL ? new URL(process.env.APP_URL).origin : null; } catch { return null; }
-})();
-if (!ALLOWED_ORIGIN) {
+// Accepted browser origins (APP_URL plus APP_ALT_URLS), read once at startup.
+// Without any, origin validation is skipped — log a warning so operators know.
+const ALLOWED_ORIGINS = getPublicOrigins();
+if (!ALLOWED_ORIGINS.length) {
   if (process.env.NODE_ENV === 'production') {
     console.error('FATAL: APP_URL is not set in production — WebSocket connections with an Origin header will be rejected.');
   } else {
@@ -13,22 +15,56 @@ if (!ALLOWED_ORIGIN) {
   }
 }
 
-export function setupWebSocket(wss, sessionMiddleware, imapManager) {
+// The user a WebSocket upgrade belongs to, or null. Google mode applies the rules of the HTTP
+// identity gate but cannot change the session: an Access token must belong to the user the
+// page's HTTP requests already put into the session.
+export async function authorizeSocketUser(req, {
+  settings = getAuthSettings(),
+  verifyToken = verifyCloudflareAccessToken,
+  loadUser = loadUserById,
+  findUser = findUserByEmail,
+} = {}) {
+  const sessionUserId = req.session?.userId;
+  if (!sessionUserId) return null;
+  if (settings.mode !== 'google') return sessionUserId;
+
+  const token = settings.cloudflare ? req.headers[CF_ACCESS_HEADER] : undefined;
+  let user;
+  if (token) {
+    if (req.session.authMethod !== 'cloudflare') return null;
+    const email = await verifyToken(token, settings.cloudflare);
+    user = email ? await findUser(email) : null;
+    if (!user || user.id !== sessionUserId) return null;
+  } else {
+    if (req.session.authMethod !== 'google') return null;
+    user = await loadUser(sessionUserId);
+  }
+  return user && user.email && !user.disabled_at ? user.id : null;
+}
+
+// Close every live socket of a user whose access just ended.
+export function closeUserSockets(wss, userId) {
+  for (const ws of wss.clients) {
+    if (ws.userId === userId && ws.readyState === 1) ws.close(1008, 'Session ended');
+  }
+}
+
+export function setupWebSocket(wss, sessionMiddleware, imapManager, { authorize = authorizeSocketUser } = {}) {
   wss.on('connection', (ws, req) => {
     // Transport errors can arrive during session lookup, before authentication.
     ws.on('error', err => {
       console.warn('WebSocket transport error:', err.message);
       ws.terminate();
     });
-    // Reject cross-origin WebSocket connections when APP_URL is configured.
+    // Reject cross-origin WebSocket connections when public origins are configured.
     // Browsers always send Origin on WS upgrades; absence means a non-browser client.
     const origin = req.headers.origin;
-    if (ALLOWED_ORIGIN && origin && origin !== ALLOWED_ORIGIN) {
+    if (ALLOWED_ORIGINS.length && origin && !ALLOWED_ORIGINS.includes(origin)) {
       ws.close(1008, 'Forbidden');
       return;
     }
     // In production without APP_URL, reject browser connections (non-browser clients omit Origin)
-    if (!ALLOWED_ORIGIN && process.env.NODE_ENV === 'production' && origin) {
+    if (!ALLOWED_ORIGINS.length && process.env.NODE_ENV === 'production' && origin) {
       ws.close(1008, 'Forbidden');
       return;
     }
@@ -48,26 +84,34 @@ export function setupWebSocket(wss, sessionMiddleware, imapManager) {
         ws.close(1011, 'Session unavailable');
         return;
       }
-      const userId = req.session?.userId;
-      if (!userId) {
-        ws.close(1008, 'Unauthorized');
-        return;
-      }
-      if (req.session.locked) {
-        // Screen lock (#235) is server-enforced: don't stream live mail to a locked
-        // session. The client closes its own socket on lock; this blocks a new one.
-        ws.close(1008, 'Locked');
-        return;
-      }
-      ws.userId = userId;
-      recordWsConnect();
-      ws._diagCounted = true;
-      console.log(`WebSocket connected for user ${userId}`);
-      ws.send(JSON.stringify({ type: 'connected' }));
-      // Re-establish IMAP connections if the server restarted (skips already-connected accounts)
-      imapManager.connectAllForUser(userId).catch(err => {
-        console.error('WebSocket account reconnect failed:', err.message);
-      });
+      authorize(req)
+        .then((userId) => {
+          if (ws.readyState !== 1) return;
+          if (!userId) {
+            ws.close(1008, 'Unauthorized');
+            return;
+          }
+          if (req.session.locked) {
+            // Screen lock (#235) is server-enforced: don't stream live mail to a locked
+            // session. The client closes its own socket on lock; this blocks a new one.
+            ws.close(1008, 'Locked');
+            return;
+          }
+          ws.userId = userId;
+          recordWsConnect();
+          ws._diagCounted = true;
+          console.log(`WebSocket connected for user ${userId}`);
+          ws.send(JSON.stringify({ type: 'connected' }));
+          // Re-establish IMAP connections if the server restarted (skips already-connected accounts)
+          imapManager.connectAllForUser(userId).catch(reconnectErr => {
+            console.error('WebSocket account reconnect failed:', reconnectErr.message);
+          });
+        })
+        .catch((authErr) => {
+          // Only the error class: a lookup failure must not end in a message with details.
+          console.error(`WebSocket authorization failed: ${authErr?.name || 'Error'}`);
+          if (ws.readyState === 1) ws.close(1011, 'Session unavailable');
+        });
     });
 
     ws.on('message', async (data) => {

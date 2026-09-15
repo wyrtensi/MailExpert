@@ -118,6 +118,15 @@ describe('resolveGoogleConfig', () => {
     expect(query.mock.calls[0][1]).toEqual(['app-2']);
   });
 
+  it('sends a browser that came through another public origin back to that origin', async () => {
+    process.env.GOOGLE_REDIRECT_URI = REDIRECT_URI;
+    query.mockResolvedValue({ rows: [APP] });
+    expect(await resolveGoogleConfig({ origin: 'https://direct.example.com' })).toMatchObject({
+      redirectUri: 'https://direct.example.com/oauth/google/callback',
+    });
+    expect(await resolveGoogleConfig({ origin: null })).toMatchObject({ redirectUri: REDIRECT_URI });
+  });
+
   it('is null without a callback URL, without an app, for a disabled app or an undecryptable secret', async () => {
     query.mockResolvedValue({ rows: [APP] });
     expect(await resolveGoogleConfig()).toBeNull();

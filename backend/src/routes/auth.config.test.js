@@ -1,14 +1,7 @@
 import { describe, it, expect, vi, beforeAll, afterAll, beforeEach, afterEach } from 'vitest';
 
 vi.mock('../services/db.js', () => ({ query: vi.fn(), pool: {} }));
-vi.mock('../index.js', () => ({
-  imapManager: {
-    connectAllForUser: vi.fn(),
-    disconnectUser: vi.fn(),
-    updateSyncIntervalForUser: vi.fn(),
-    updateFolderSyncIntervalForUser: vi.fn(),
-  },
-}));
+vi.mock('../index.js', () => ({ imapManager: {} }));
 vi.mock('../services/encryption.js', () => ({ decrypt: (v) => v, encrypt: (v) => v }));
 vi.mock('../services/pushNotifications.js', () => ({ pushConfigured: false }));
 vi.mock('../services/hostValidation.js', () => ({ validateHost: vi.fn(), resolveForConnection: vi.fn() }));

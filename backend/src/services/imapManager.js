@@ -1,6 +1,7 @@
 import { FolderStatusMonitor, checkpointFolderStatus } from './folderStatus.js';
 import { ImapFlow } from 'imapflow';
 import { query } from './db.js';
+import { DEFAULT_FOLDER_SYNC_INTERVAL_SEC, DEFAULT_SYNC_INTERVAL_SEC, SYNC_INTERVAL_CHOICES_SEC } from './syncSettings.js';
 import { parseMessage, snippetFromBody, detectBulkFromParsedHeaders, parseHeadersInput, headersToRawString, decodeMimeWords, enrichParsedMetadata } from './messageParser.js';
 import { classifyMessage, loadSocialDomains, getGlobalCategorizationEnabled } from './categorizer.js';
 import { pluginRegistry } from '../plugins/registry.js';
@@ -391,12 +392,12 @@ const DEFAULT_PLUGIN_SYNC_INTERVAL_MS = 120000;
 
 // Default folder-structure sync cadence (LIST + folders-table upsert). Folders
 // created/renamed in other clients otherwise only appear when a connection is
-// re-established. User-configurable via the folderSyncInterval preference
-// (seconds; 0 = never).
-const DEFAULT_FOLDER_SYNC_INTERVAL_MS = 30 * 60 * 1000;
+// re-established. Admins change it through the folder_sync_interval_sec system
+// setting (seconds; 0 = never).
+const DEFAULT_FOLDER_SYNC_INTERVAL_MS = DEFAULT_FOLDER_SYNC_INTERVAL_SEC * 1000;
 
 // Whether a periodic folder-structure sync is due. Time-based rather than
-// tick-based because the sync-tick cadence is itself user-configurable.
+// tick-based because the sync-tick cadence is itself configurable.
 // intervalMs 0 = never; a missing lastAt means the account has never synced
 // its folder list on this timer, so it is due immediately.
 export function folderSyncDue(intervalMs, lastAt, now = Date.now()) {
@@ -419,10 +420,9 @@ const SNIPPET_BACKOFF_MAX_MS = 2 * 60 * 60 * 1000;
 // deliberately deferred until the mechanism is confirmed from these logs.
 const STALE_SYNC_WARN_MS = 5 * 60 * 1000;
 
-// The fastest sync interval the settings UI offers (AdminPanel's 15s/30s/60s/2min selector)
-// and the floor connectAllForUser accepts from user preferences. Anything that must not
+// The fastest interval the sync_interval_sec system setting offers. Anything that must not
 // collide with a sync tick is defined against this.
-export const MIN_SYNC_INTERVAL_MS = 15 * 1000;
+export const MIN_SYNC_INTERVAL_MS = Math.min(...SYNC_INTERVAL_CHOICES_SEC) * 1000;
 
 // How long ImapFlow waits for a quiet connection before starting IDLE. Its own default is
 // 15000ms, which exactly equals MIN_SYNC_INTERVAL_MS — a tick every 15s cleared the arming
@@ -1747,8 +1747,8 @@ export class ImapManager {
     this.syncThrottleSkips = new Map(); // accountId -> remaining ticks to skip when throttled
     this.connectingAccounts = new Set(); // prevent concurrent connectAccount calls for same account
     this._startupQueued = new Set(); // accountId — waiting for its turn in connectAllEnabled's queue
-    this.userSyncIntervalMs = new Map(); // userId -> interval ms (user-configurable)
-    this.userFolderSyncIntervalMs = new Map(); // userId -> folder-structure sync ms (0 = never)
+    this.syncIntervalMs = DEFAULT_SYNC_INTERVAL_SEC * 1000; // install-wide message sync cadence, see applySyncSettings
+    this.folderSyncIntervalMs = DEFAULT_FOLDER_SYNC_INTERVAL_MS; // install-wide folder-structure cadence, 0 = never
     this.lastFolderSyncAt = new Map(); // accountId -> last folder-structure sync timestamp
     this._pollOnlyAccounts = new Set(); // accountId — demoted to poll-only (no persistent IDLE) by the per-host connection budget (#379)
     this._idleMissStreak = new Map(); // accountId -> consecutive health checks seen NOT idling despite IDLE being enabled
@@ -2352,8 +2352,7 @@ export class ImapManager {
         logger.debug(`Backfill deferred on connect for ${logAccount(account)} — account already has cached mail`);
       }
 
-      const intervalMs = this.userSyncIntervalMs.get(account.user_id) || 60000;
-      this._startSyncInterval(account, intervalMs);
+      this._startSyncInterval(account, this.syncIntervalMs);
       // Arm any plugin-declared background sync ticks whose isActive gate accepts this account
       // (e.g. GTD's label-folder tick when gtd_enabled). A plugin with no active tick for this
       // account starts no timer at all, so ticks stay inert when nobody uses the feature.
@@ -2447,7 +2446,13 @@ export class ImapManager {
     // Initial poll now, then on the interval. Stagger the first tick so many demoted accounts on one
     // host don't all open at the same instant (mirrors _startSyncInterval's jitter).
     this._pollOnlyTick(account).catch(err => console.warn(`Poll-only initial sync failed for ${logAccount(account)}: ${err.message}`));
-    const ms = effectiveSyncIntervalMs(account, this.userSyncIntervalMs.get(account.user_id) || 60000);
+    this._armPollOnlyTimer(account);
+  }
+
+  // The poll-only timer on the install-wide interval, with a jittered first tick. Also used to
+  // re-arm it when the interval changes. The timer lives in syncIntervals like a sync interval.
+  _armPollOnlyTimer(account) {
+    const ms = effectiveSyncIntervalMs(account, this.syncIntervalMs);
     const jitter = Math.floor(Math.random() * Math.min(ms, 30000));
     const t = setTimeout(() => {
       if (!this._pollOnlyAccounts.has(account.id)) return; // disconnected/promoted during the jitter window
@@ -2479,10 +2484,7 @@ export class ImapManager {
       const { resolved, policy } = await raceTimeout(resolveAccountHost(fresh), 15000, 'Poll-only host resolve');
       client = await connectImapClient(fresh, resolved, { enableIdle: false, policy }, 30000, 'Poll-only connect');
 
-      const folderMs = this.userFolderSyncIntervalMs.has(account.user_id)
-        ? this.userFolderSyncIntervalMs.get(account.user_id)
-        : DEFAULT_FOLDER_SYNC_INTERVAL_MS;
-      if (folderSyncDue(folderMs, this.lastFolderSyncAt.get(account.id))) {
+      if (folderSyncDue(this.folderSyncIntervalMs, this.lastFolderSyncAt.get(account.id))) {
         this.lastFolderSyncAt.set(account.id, Date.now());
         await raceTimeout(this.syncFolders(fresh, client), 20000, 'Poll-only folder sync')
           .then(() => this.broadcast({ type: 'folders_synced', accountId: account.id }, account.user_id))
@@ -2827,10 +2829,7 @@ export class ImapManager {
 
       // Periodic folder-structure refresh (LIST + upsert). Without this, folders
       // created/renamed in other clients only appear on reconnect.
-      const folderMs = this.userFolderSyncIntervalMs.has(syncAccount.user_id)
-        ? this.userFolderSyncIntervalMs.get(syncAccount.user_id)
-        : DEFAULT_FOLDER_SYNC_INTERVAL_MS;
-      if (folderSyncDue(folderMs, this.lastFolderSyncAt.get(account.id))) {
+      if (folderSyncDue(this.folderSyncIntervalMs, this.lastFolderSyncAt.get(account.id))) {
         this.lastFolderSyncAt.set(account.id, Date.now());
         try {
           // Timeboxed like the initial connect sync — a hung LIST on a flaky
@@ -3098,28 +3097,27 @@ export class ImapManager {
       this.syncMessages(account, client, folder, 100, false, true));
   }
 
-  // Called when a user changes their sync interval preference — replaces running
-  // intervals for all their active accounts without disconnecting.
-  async updateSyncIntervalForUser(userId, newMs) {
-    this.userSyncIntervalMs.set(userId, newMs);
-    const result = await query(
-      "SELECT * FROM email_accounts WHERE user_id = $1 AND enabled = true AND protocol = 'imap'",
-      [userId]
+  // Applies the install-wide sync cadence. Running message-sync and poll-only timers are re-armed
+  // without disconnecting; the folder-structure sync reads folderSyncIntervalMs on its next tick,
+  // so it has no timers to re-arm.
+  async applySyncSettings({ syncIntervalSec, folderSyncIntervalSec }) {
+    const syncIntervalMs = syncIntervalSec * 1000;
+    const changed = syncIntervalMs !== this.syncIntervalMs;
+    this.syncIntervalMs = syncIntervalMs;
+    this.folderSyncIntervalMs = folderSyncIntervalSec * 1000;
+    if (!changed || !this.syncIntervals.size) return;
+    const { rows } = await query(
+      "SELECT * FROM email_accounts WHERE id = ANY($1::uuid[]) AND enabled = true AND protocol = 'imap'",
+      [[...this.syncIntervals.keys()]]
     );
-    for (const acc of result.rows) {
-      if (this.syncIntervals.has(acc.id)) {
-        clearTimeout(this.syncIntervals.get(acc.id));
-        this.syncIntervals.delete(acc.id);
-        this._startSyncInterval(acc, newMs);
-      }
+    for (const account of rows) {
+      const timer = this.syncIntervals.get(account.id);
+      if (!timer) continue;
+      clearTimeout(timer);
+      this.syncIntervals.delete(account.id);
+      if (this._pollOnlyAccounts.has(account.id)) this._armPollOnlyTimer(account);
+      else this._startSyncInterval(account, this.syncIntervalMs);
     }
-  }
-
-  // Called when a user changes their folder-structure sync preference. Purely a
-  // map update — the folder sync piggybacks on _syncTick behind a time gate, so
-  // there are no timers to re-arm. 0 disables the periodic folder sync.
-  updateFolderSyncIntervalForUser(userId, newMs) {
-    this.userFolderSyncIntervalMs.set(userId, newMs);
   }
 
   scheduleCountRefresh(accountId) {

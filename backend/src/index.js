@@ -41,6 +41,7 @@ import { parseVCard } from './utils/vcard.js';
 import { reloadAuthSettings } from './services/authLimiter.js';
 import { setupWebSocket } from './services/websocket.js';
 import { ImapManager } from './services/imapManager.js';
+import { loadSyncSettings } from './services/syncSettings.js';
 import { getUpdateStatus } from './services/updateCheck.js';
 import { recordHttp } from './services/performanceMetrics.js';
 import { defaultEmptyBody } from './middleware/defaultEmptyBody.js';
@@ -292,8 +293,14 @@ imapManager.startSnoozeWatcher();
 // Schedule periodic CardDAV contact sync for any connected accounts.
 startCardavScheduler();
 
-// Mailboxes are serviced by the server: every enabled IMAP mailbox connects through a bounded
-// queue (IMAP_CONNECT_CONCURRENCY). Signing in, signing out and sockets never connect them.
+// Mailboxes are serviced by the server: apply the install-wide sync cadence, then connect every
+// enabled IMAP mailbox through a bounded queue (IMAP_CONNECT_CONCURRENCY). Signing in, signing
+// out and sockets never connect them.
+try {
+  await imapManager.applySyncSettings(await loadSyncSettings());
+} catch (err) {
+  console.error('Loading mailbox sync intervals failed, using the defaults:', err.message);
+}
 imapManager.connectAllEnabled()
   .catch(err => console.error('Startup mailbox connection error:', err.message));
 

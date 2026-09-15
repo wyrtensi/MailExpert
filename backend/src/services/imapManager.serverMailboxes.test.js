@@ -17,7 +17,8 @@ vi.mock('./hostValidation.js', () => ({ resolveForConnection: vi.fn(), createPin
 vi.mock('./connectionPolicy.js', () => ({ getConnectionPolicy: vi.fn() }));
 
 import { query } from './db.js';
-import { ImapManager, parseConnectConcurrency } from './imapManager.js';
+import { ImapManager, MIN_SYNC_INTERVAL_MS, parseConnectConcurrency } from './imapManager.js';
+import { SYNC_INTERVAL_CHOICES_SEC } from './syncSettings.js';
 
 // Mailboxes are serviced by the server: they connect at startup and stay connected no matter
 // who signs in or out.
@@ -189,4 +190,54 @@ describe('mailboxes do not follow sign-in', () => {
       expect(source).not.toMatch(/connectAllForUser|disconnectUser|imapManager\.(connect|disconnect)/);
     },
   );
+});
+
+describe('install-wide sync intervals', () => {
+  it('keeps the fastest tick in step with the sync setting choices', () => {
+    expect(MIN_SYNC_INTERVAL_MS).toBe(Math.min(...SYNC_INTERVAL_CHOICES_SEC) * 1000);
+  });
+
+  it('starts with the defaults', () => {
+    const mgr = newManager();
+    expect(mgr.syncIntervalMs).toBe(60_000);
+    expect(mgr.folderSyncIntervalMs).toBe(30 * 60_000);
+  });
+
+  it('has no per-user interval methods', () => {
+    expect(ImapManager.prototype.updateSyncIntervalForUser).toBeUndefined();
+    expect(ImapManager.prototype.updateFolderSyncIntervalForUser).toBeUndefined();
+  });
+
+  it('re-arms running timers with the new interval, poll-only mailboxes included', async () => {
+    const mgr = newManager();
+    rows.set('mailbox-1', mailbox(1));
+    rows.set('mailbox-2', mailbox(2));
+    mgr.syncIntervals.set('mailbox-1', setTimeout(() => {}, 60_000));
+    mgr.syncIntervals.set('mailbox-2', setTimeout(() => {}, 60_000));
+    mgr._pollOnlyAccounts.add('mailbox-2');
+    const startSync = vi.spyOn(mgr, '_startSyncInterval').mockImplementation(() => {});
+    const armPoll = vi.spyOn(mgr, '_armPollOnlyTimer').mockImplementation(() => {});
+
+    await mgr.applySyncSettings({ syncIntervalSec: 30, folderSyncIntervalSec: 0 });
+
+    expect(mgr.syncIntervalMs).toBe(30_000);
+    expect(mgr.folderSyncIntervalMs).toBe(0);
+    expect(startSync).toHaveBeenCalledWith(expect.objectContaining({ id: 'mailbox-1' }), 30_000);
+    expect(startSync).toHaveBeenCalledTimes(1);
+    expect(armPoll).toHaveBeenCalledWith(expect.objectContaining({ id: 'mailbox-2' }));
+    expect(mgr.syncIntervals.size).toBe(0);
+  });
+
+  it('leaves timers alone when only the folder interval changes', async () => {
+    const mgr = newManager();
+    mgr.syncIntervals.set('mailbox-1', setTimeout(() => {}, 60_000));
+    const startSync = vi.spyOn(mgr, '_startSyncInterval');
+
+    await mgr.applySyncSettings({ syncIntervalSec: 60, folderSyncIntervalSec: 900 });
+
+    expect(mgr.folderSyncIntervalMs).toBe(900_000);
+    expect(startSync).not.toHaveBeenCalled();
+    expect(query).not.toHaveBeenCalled();
+    clearTimeout(mgr.syncIntervals.get('mailbox-1'));
+  });
 });

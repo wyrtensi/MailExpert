@@ -3,7 +3,7 @@ import bcrypt from 'bcryptjs';
 import crypto from 'crypto';
 import QRCode from 'qrcode';
 import { query, pool } from '../services/db.js';
-import { imapManager } from '../index.js';
+import { loadSyncSettings } from '../services/syncSettings.js';
 import { decrypt, encrypt } from '../services/encryption.js';
 import { pushConfigured } from '../services/pushNotifications.js';
 import { validateHost, resolveForConnection } from '../services/hostValidation.js';
@@ -753,27 +753,33 @@ router.get('/invite/:token', async (req, res) => {
   res.json({ valid: true, email: result.rows[0].email });
 });
 
-router.get('/preferences', async (req, res) => {
+export async function getPreferences(req, res) {
   if (!req.session.userId) return res.status(401).json({ error: 'Not authenticated' });
-  const [userResult, cssResult] = await Promise.all([
+  const [userResult, cssResult, syncSettings] = await Promise.all([
     query('SELECT preferences FROM users WHERE id = $1', [req.session.userId]),
     query("SELECT value FROM system_settings WHERE key = 'custom_css'"),
+    loadSyncSettings(),
   ]);
   const prefs = userResult.rows[0]?.preferences || {};
   const customCss = cssResult.rows[0]?.value;
   if (customCss) prefs.customCss = customCss;
+  // Install-wide and read-only here: the client uses it only to refresh the list while the
+  // WebSocket is down. Admins change it through PATCH /api/admin/settings.
+  prefs.syncInterval = syncSettings.syncIntervalSec;
   res.json(prefs);
-});
+}
+
+router.get('/preferences', getPreferences);
 
 export async function patchPreferences(req, res) {
   if (!req.session.userId) return res.status(401).json({ error: 'Not authenticated' });
-  const { theme, font, layout, notificationSound, pageSize, scrollMode, syncInterval,
+  const { theme, font, layout, notificationSound, pageSize, scrollMode,
           blockRemoteImages, imageWhitelist, shortcuts, hiddenFolders, language,
           threadedView, plaintextEmail, hoverQuickActions, swipeActions,
           expandedAccounts, collapsedFolders, favoriteFolders, recentFolders, fontSize,
           showAppBadge, showFaviconBadge, replyDefault, sidebarWidth,
           categorizationEnabled, markReadBehavior, markReadDelay, aiActions,
-          autoLockMinutes, showMobileAvatars, gravatarAvatars, folderSyncInterval,
+          autoLockMinutes, showMobileAvatars, gravatarAvatars,
           folderOrder, senderFavicons, showMessagePreviews, defaultSender } = req.body;
   // GTD content and generic right-sidebar layout preferences are independent flat
   // top-level keys with separate allow-lists. gtdEnabled is intentionally NOT a user
@@ -797,8 +803,6 @@ export async function patchPreferences(req, res) {
   const markReadBehaviorVal   = ['immediate', 'delay', 'manual'].includes(markReadBehavior) ? markReadBehavior : null;
   const markReadDelayVal      = (() => { const n = parseInt(markReadDelay); return (n >= 1 && n <= 10) ? String(n) : null; })();
   const autoLockMinutesVal    = [0, 1, 5, 15, 30].includes(Number(autoLockMinutes)) ? String(Number(autoLockMinutes)) : null;
-  // Folder-structure sync cadence in seconds; 0 = never.
-  const folderSyncIntervalVal = folderSyncInterval != null && [0, 900, 1800, 3600].includes(Number(folderSyncInterval)) ? String(Number(folderSyncInterval)) : null;
   // User-defined AI actions: bound the array and each field so the JSONB can't grow unbounded.
   const aiActionsJson = (() => {
     if (!Array.isArray(aiActions)) return null;
@@ -840,62 +844,51 @@ export async function patchPreferences(req, res) {
       || CASE WHEN $5::text IS NOT NULL THEN jsonb_build_object('notificationSound', $5::text) ELSE '{}'::jsonb END
       || CASE WHEN $6::text IS NOT NULL THEN jsonb_build_object('pageSize', $6::text) ELSE '{}'::jsonb END
       || CASE WHEN $7::text IS NOT NULL THEN jsonb_build_object('scrollMode', $7::text) ELSE '{}'::jsonb END
-      || CASE WHEN $8::text IS NOT NULL THEN jsonb_build_object('syncInterval', $8::text) ELSE '{}'::jsonb END
-      || CASE WHEN $9::boolean IS NOT NULL THEN jsonb_build_object('blockRemoteImages', $9::boolean) ELSE '{}'::jsonb END
-      || CASE WHEN $10::jsonb IS NOT NULL THEN jsonb_build_object('imageWhitelist', $10::jsonb) ELSE '{}'::jsonb END
-      || CASE WHEN $11::jsonb IS NOT NULL THEN jsonb_build_object('shortcuts', $11::jsonb) ELSE '{}'::jsonb END
-      || CASE WHEN $12::jsonb IS NOT NULL THEN jsonb_build_object('hiddenFolders', $12::jsonb) ELSE '{}'::jsonb END
-      || CASE WHEN $13::text IS NOT NULL THEN jsonb_build_object('language', $13::text) ELSE '{}'::jsonb END
-      || CASE WHEN $14::boolean IS NOT NULL THEN jsonb_build_object('threadedView', $14::boolean) ELSE '{}'::jsonb END
-      || CASE WHEN $15::boolean IS NOT NULL THEN jsonb_build_object('plaintextEmail', $15::boolean) ELSE '{}'::jsonb END
-      || CASE WHEN $16::boolean IS NOT NULL THEN jsonb_build_object('hoverQuickActions', $16::boolean) ELSE '{}'::jsonb END
-      || CASE WHEN $17::jsonb IS NOT NULL THEN jsonb_build_object('swipeActions', $17::jsonb) ELSE '{}'::jsonb END
-      || CASE WHEN $18::jsonb IS NOT NULL THEN jsonb_build_object('expandedAccounts', $18::jsonb) ELSE '{}'::jsonb END
-      || CASE WHEN $19::jsonb IS NOT NULL THEN jsonb_build_object('collapsedFolders', $19::jsonb) ELSE '{}'::jsonb END
-      || CASE WHEN $20::jsonb IS NOT NULL THEN jsonb_build_object('favoriteFolders', $20::jsonb) ELSE '{}'::jsonb END
-      || CASE WHEN $21::jsonb IS NOT NULL THEN jsonb_build_object('recentFolders', $21::jsonb) ELSE '{}'::jsonb END
-      || CASE WHEN $22::text IS NOT NULL THEN jsonb_build_object('fontSize', $22::text) ELSE '{}'::jsonb END
-      || CASE WHEN $23::boolean IS NOT NULL THEN jsonb_build_object('showAppBadge', $23::boolean) ELSE '{}'::jsonb END
-      || CASE WHEN $24::boolean IS NOT NULL THEN jsonb_build_object('showFaviconBadge', $24::boolean) ELSE '{}'::jsonb END
-      || CASE WHEN $25::text IS NOT NULL THEN jsonb_build_object('replyDefault', $25::text) ELSE '{}'::jsonb END
-      || CASE WHEN $26::text IS NOT NULL THEN jsonb_build_object('sidebarWidth', $26::text) ELSE '{}'::jsonb END
-      || CASE WHEN $27::boolean IS NOT NULL THEN jsonb_build_object('categorizationEnabled', $27::boolean) ELSE '{}'::jsonb END
-      || CASE WHEN $28::text IS NOT NULL THEN jsonb_build_object('markReadBehavior', $28::text) ELSE '{}'::jsonb END
-      || CASE WHEN $29::text IS NOT NULL THEN jsonb_build_object('markReadDelay', $29::text) ELSE '{}'::jsonb END
-      || CASE WHEN $30::jsonb IS NOT NULL THEN jsonb_build_object('aiActions', $30::jsonb) ELSE '{}'::jsonb END
-      || CASE WHEN $31::int IS NOT NULL THEN jsonb_build_object('rightSidebarWidth', $31::int) ELSE '{}'::jsonb END
-      || CASE WHEN $32::boolean IS NOT NULL THEN jsonb_build_object('rightSidebarHidden', $32::boolean) ELSE '{}'::jsonb END
-      || CASE WHEN $33::jsonb IS NOT NULL THEN jsonb_build_object('gtdCollapsedSections', $33::jsonb) ELSE '{}'::jsonb END
-      || CASE WHEN $34::text IS NOT NULL THEN jsonb_build_object('gtdPetSlug', $34::text) ELSE '{}'::jsonb END
-      || CASE WHEN $35::text IS NOT NULL THEN jsonb_build_object('autoLockMinutes', $35::text) ELSE '{}'::jsonb END
-      || CASE WHEN $36::boolean IS NOT NULL THEN jsonb_build_object('showMobileAvatars', $36::boolean) ELSE '{}'::jsonb END
-      || CASE WHEN $37::boolean IS NOT NULL THEN jsonb_build_object('gravatarAvatars', $37::boolean) ELSE '{}'::jsonb END
-      || CASE WHEN $38::text IS NOT NULL THEN jsonb_build_object('folderSyncInterval', $38::text) ELSE '{}'::jsonb END
-      || CASE WHEN $39::jsonb IS NOT NULL THEN jsonb_build_object('folderOrder', $39::jsonb) ELSE '{}'::jsonb END
-      || CASE WHEN $40::boolean IS NOT NULL THEN jsonb_build_object('senderFavicons', $40::boolean) ELSE '{}'::jsonb END
-      || CASE WHEN $41::boolean IS NOT NULL THEN jsonb_build_object('showMessagePreviews', $41::boolean) ELSE '{}'::jsonb END
-      || CASE WHEN $42::text IS NOT NULL THEN jsonb_build_object('defaultSender', $42::text) ELSE '{}'::jsonb END
+      || CASE WHEN $8::boolean IS NOT NULL THEN jsonb_build_object('blockRemoteImages', $8::boolean) ELSE '{}'::jsonb END
+      || CASE WHEN $9::jsonb IS NOT NULL THEN jsonb_build_object('imageWhitelist', $9::jsonb) ELSE '{}'::jsonb END
+      || CASE WHEN $10::jsonb IS NOT NULL THEN jsonb_build_object('shortcuts', $10::jsonb) ELSE '{}'::jsonb END
+      || CASE WHEN $11::jsonb IS NOT NULL THEN jsonb_build_object('hiddenFolders', $11::jsonb) ELSE '{}'::jsonb END
+      || CASE WHEN $12::text IS NOT NULL THEN jsonb_build_object('language', $12::text) ELSE '{}'::jsonb END
+      || CASE WHEN $13::boolean IS NOT NULL THEN jsonb_build_object('threadedView', $13::boolean) ELSE '{}'::jsonb END
+      || CASE WHEN $14::boolean IS NOT NULL THEN jsonb_build_object('plaintextEmail', $14::boolean) ELSE '{}'::jsonb END
+      || CASE WHEN $15::boolean IS NOT NULL THEN jsonb_build_object('hoverQuickActions', $15::boolean) ELSE '{}'::jsonb END
+      || CASE WHEN $16::jsonb IS NOT NULL THEN jsonb_build_object('swipeActions', $16::jsonb) ELSE '{}'::jsonb END
+      || CASE WHEN $17::jsonb IS NOT NULL THEN jsonb_build_object('expandedAccounts', $17::jsonb) ELSE '{}'::jsonb END
+      || CASE WHEN $18::jsonb IS NOT NULL THEN jsonb_build_object('collapsedFolders', $18::jsonb) ELSE '{}'::jsonb END
+      || CASE WHEN $19::jsonb IS NOT NULL THEN jsonb_build_object('favoriteFolders', $19::jsonb) ELSE '{}'::jsonb END
+      || CASE WHEN $20::jsonb IS NOT NULL THEN jsonb_build_object('recentFolders', $20::jsonb) ELSE '{}'::jsonb END
+      || CASE WHEN $21::text IS NOT NULL THEN jsonb_build_object('fontSize', $21::text) ELSE '{}'::jsonb END
+      || CASE WHEN $22::boolean IS NOT NULL THEN jsonb_build_object('showAppBadge', $22::boolean) ELSE '{}'::jsonb END
+      || CASE WHEN $23::boolean IS NOT NULL THEN jsonb_build_object('showFaviconBadge', $23::boolean) ELSE '{}'::jsonb END
+      || CASE WHEN $24::text IS NOT NULL THEN jsonb_build_object('replyDefault', $24::text) ELSE '{}'::jsonb END
+      || CASE WHEN $25::text IS NOT NULL THEN jsonb_build_object('sidebarWidth', $25::text) ELSE '{}'::jsonb END
+      || CASE WHEN $26::boolean IS NOT NULL THEN jsonb_build_object('categorizationEnabled', $26::boolean) ELSE '{}'::jsonb END
+      || CASE WHEN $27::text IS NOT NULL THEN jsonb_build_object('markReadBehavior', $27::text) ELSE '{}'::jsonb END
+      || CASE WHEN $28::text IS NOT NULL THEN jsonb_build_object('markReadDelay', $28::text) ELSE '{}'::jsonb END
+      || CASE WHEN $29::jsonb IS NOT NULL THEN jsonb_build_object('aiActions', $29::jsonb) ELSE '{}'::jsonb END
+      || CASE WHEN $30::int IS NOT NULL THEN jsonb_build_object('rightSidebarWidth', $30::int) ELSE '{}'::jsonb END
+      || CASE WHEN $31::boolean IS NOT NULL THEN jsonb_build_object('rightSidebarHidden', $31::boolean) ELSE '{}'::jsonb END
+      || CASE WHEN $32::jsonb IS NOT NULL THEN jsonb_build_object('gtdCollapsedSections', $32::jsonb) ELSE '{}'::jsonb END
+      || CASE WHEN $33::text IS NOT NULL THEN jsonb_build_object('gtdPetSlug', $33::text) ELSE '{}'::jsonb END
+      || CASE WHEN $34::text IS NOT NULL THEN jsonb_build_object('autoLockMinutes', $34::text) ELSE '{}'::jsonb END
+      || CASE WHEN $35::boolean IS NOT NULL THEN jsonb_build_object('showMobileAvatars', $35::boolean) ELSE '{}'::jsonb END
+      || CASE WHEN $36::boolean IS NOT NULL THEN jsonb_build_object('gravatarAvatars', $36::boolean) ELSE '{}'::jsonb END
+      || CASE WHEN $37::jsonb IS NOT NULL THEN jsonb_build_object('folderOrder', $37::jsonb) ELSE '{}'::jsonb END
+      || CASE WHEN $38::boolean IS NOT NULL THEN jsonb_build_object('senderFavicons', $38::boolean) ELSE '{}'::jsonb END
+      || CASE WHEN $39::boolean IS NOT NULL THEN jsonb_build_object('showMessagePreviews', $39::boolean) ELSE '{}'::jsonb END
+      || CASE WHEN $40::text IS NOT NULL THEN jsonb_build_object('defaultSender', $40::text) ELSE '{}'::jsonb END
     WHERE id = $1
   `, [req.session.userId, theme ?? null, font ?? null, layout ?? null, notificationSound ?? null,
-      pageSize ?? null, scrollMode ?? null, syncInterval ?? null,
+      pageSize ?? null, scrollMode ?? null,
       blockRemoteImages ?? null, imageWhitelistJson, shortcutsJson, hiddenFoldersJson,
       language ?? null, threadedView ?? null, plaintextEmail ?? null, hoverQuickActions ?? null,
       swipeActionsJson, expandedAccountsJson, collapsedFoldersJson, favoriteFoldersJson, recentFoldersJson, fontSizeVal,
       showAppBadge ?? null, showFaviconBadge ?? null, replyDefaultVal, sidebarWidthVal,
       categorizationEnabled ?? null, markReadBehaviorVal, markReadDelayVal, aiActionsJson,
       rightSidebarWidth, rightSidebarHidden, gtdCollapsedSectionsJson, gtdPetSlug, autoLockMinutesVal,
-      showMobileAvatars ?? null, gravatarAvatars ?? null, folderSyncIntervalVal, folderOrderJson, senderFaviconsVal,
+      showMobileAvatars ?? null, gravatarAvatars ?? null, folderOrderJson, senderFaviconsVal,
       showMessagePreviews ?? null, defaultSenderVal]);
 
-  if (syncInterval != null) {
-    const ms = parseInt(syncInterval) * 1000;
-    if (ms >= 15000 && ms <= 120000) {
-      imapManager.updateSyncIntervalForUser(req.session.userId, ms).catch(console.error);
-    }
-  }
-  if (folderSyncIntervalVal != null) {
-    imapManager.updateFolderSyncIntervalForUser(req.session.userId, parseInt(folderSyncIntervalVal) * 1000);
-  }
   if (categorizationEnabled != null) {
     invalidateGlobalCategorizationCache(req.session.userId);
   }

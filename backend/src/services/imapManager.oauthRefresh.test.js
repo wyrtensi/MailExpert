@@ -273,15 +273,14 @@ describe('oauth_reconnect_required', () => {
     query.mockImplementation(async (sql, params = []) => {
       const visible = [...rows.values()].filter(r => !/oauth_reconnect_required\s*=\s*false|NOT oauth_reconnect_required/.test(sql) || !r.oauth_reconnect_required);
       if (sql.includes('SELECT id, email_address')) return { rows: visible };
-      if (sql.startsWith('SELECT preferences')) return { rows: [] };
-      if (sql.startsWith('SELECT * FROM email_accounts WHERE user_id')) return { rows: visible };
+      if (/^\s*SELECT \* FROM email_accounts\s+WHERE enabled = true/.test(sql)) return { rows: visible };
       if (sql.startsWith('SELECT * FROM email_accounts WHERE id')) return { rows: [rows.get(params[0])].filter(Boolean) };
       return { rows: [] };
     });
     vi.useFakeTimers();
 
     await healthCheck();
-    await mgr.connectAllForUser('u1');
+    await mgr.connectAllEnabled();
     await vi.runOnlyPendingTimersAsync();
 
     expect(connectSpy).not.toHaveBeenCalled();

@@ -7,6 +7,7 @@ import { senderColor } from '../themes.js';
 import { useMobile } from '../hooks/useMobile.js';
 import { isAccountInUnifiedInbox } from '../utils/unifiedInbox.js';
 import { shouldSyncFolder, folderSyncKey } from '../utils/folderSync.js';
+import { manualSyncAccountIds, noSyncStarted } from '../utils/mailboxSync.js';
 import { resolveThreadMessages } from '../utils/threadActions.js';
 import { useSwipeRow } from '../hooks/useSwipeRow.js';
 import ContextMenu from './ContextMenu.jsx';
@@ -681,7 +682,10 @@ export default function MessageList() {
     if (syncing) return;
     setSyncing(true);
     try {
-      await api.syncNow(selectedAccountId || undefined);
+      // Sync is per mailbox: the unified inbox asks for each enabled IMAP mailbox.
+      const results = await Promise.all(
+        manualSyncAccountIds(accounts, selectedAccountId).map((accountId) => api.syncNow(accountId)),
+      );
       // syncNow only covers INBOX. Without this, pressing sync while looking at Sent or any
       // other folder appeared to do nothing to that folder at all, which is the more
       // surprising half of the same gap. Forced: the user asked, so the interval does not
@@ -691,10 +695,12 @@ export default function MessageList() {
         api.syncFolder(selectedAccountId, selectedFolder)
           .catch(err => console.error('syncFolder failed:', err.message));
       }
-      // The server will send sync_complete via WebSocket when done, which triggers
+      // A skipped request (a sync is running or has just finished) sends no sync_complete, so the
+      // spinner stops here. Otherwise the server sends sync_complete via WebSocket, which triggers
       // mailexpert:refresh (list reload) and mailexpert:sync_done (spinner off).
       // Safety fallback: stop spinner after 15s in case WS event never arrives.
-      setTimeout(() => setSyncing(false), 15000);
+      if (noSyncStarted(results)) setSyncing(false);
+      else setTimeout(() => setSyncing(false), 15000);
     } catch (err) {
       console.error('Sync failed:', err);
       setSyncing(false);

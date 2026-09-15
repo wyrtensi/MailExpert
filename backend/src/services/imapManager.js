@@ -1,6 +1,7 @@
 import { FolderStatusMonitor, checkpointFolderStatus } from './folderStatus.js';
 import { ImapFlow } from 'imapflow';
 import { query } from './db.js';
+import { DEFAULT_FOLDER_SYNC_INTERVAL_SEC, DEFAULT_SYNC_INTERVAL_SEC, SYNC_INTERVAL_CHOICES_SEC } from './syncSettings.js';
 import { parseMessage, snippetFromBody, detectBulkFromParsedHeaders, parseHeadersInput, headersToRawString, decodeMimeWords, enrichParsedMetadata } from './messageParser.js';
 import { classifyMessage, loadSocialDomains, getGlobalCategorizationEnabled } from './categorizer.js';
 import { pluginRegistry } from '../plugins/registry.js';
@@ -317,6 +318,15 @@ export function persistentEligible(orderedHostAccountIds, accountId, cap) {
 // `maxPersistentPerHost` (none do by default, so no provider is capped unless an operator opts in).
 const PERSISTENT_CAP_ENV = parsePersistentCap(process.env.IMAP_MAX_PERSISTENT_PER_HOST);
 
+// How many mailboxes the startup queue connects at the same time. Not a cap on mailboxes: every
+// enabled one connects, the queue only spreads the logins out. Empty or invalid = 3.
+export const DEFAULT_CONNECT_CONCURRENCY = 3;
+export function parseConnectConcurrency(raw) {
+  const n = Number.parseInt(raw, 10);
+  return Number.isInteger(n) && n > 0 ? n : DEFAULT_CONNECT_CONCURRENCY;
+}
+const IMAP_CONNECT_CONCURRENCY = parseConnectConcurrency(process.env.IMAP_CONNECT_CONCURRENCY);
+
 // Decide a folder's sync fetch strategy from its CONDSTORE modseq state. Pure and total so
 // it can be exhaustively unit-tested — it is the load-bearing correctness decision for delta
 // sync. A nonempty server mailbox with no local UID is an incomplete cache whose modseq
@@ -382,16 +392,24 @@ const DEFAULT_PLUGIN_SYNC_INTERVAL_MS = 120000;
 
 // Default folder-structure sync cadence (LIST + folders-table upsert). Folders
 // created/renamed in other clients otherwise only appear when a connection is
-// re-established. User-configurable via the folderSyncInterval preference
-// (seconds; 0 = never).
-const DEFAULT_FOLDER_SYNC_INTERVAL_MS = 30 * 60 * 1000;
+// re-established. Admins change it through the folder_sync_interval_sec system
+// setting (seconds; 0 = never).
+const DEFAULT_FOLDER_SYNC_INTERVAL_MS = DEFAULT_FOLDER_SYNC_INTERVAL_SEC * 1000;
 
 // Whether a periodic folder-structure sync is due. Time-based rather than
-// tick-based because the sync-tick cadence is itself user-configurable.
+// tick-based because the sync-tick cadence is itself configurable.
 // intervalMs 0 = never; a missing lastAt means the account has never synced
 // its folder list on this timer, so it is due immediately.
 export function folderSyncDue(intervalMs, lastAt, now = Date.now()) {
   return intervalMs > 0 && now - (lastAt || 0) >= intervalMs;
+}
+
+// A manual "sync now" within this long of the mailbox's last sync starts nothing: the mail is
+// already that fresh, and several people pressing the button must not stack syncs.
+export const MANUAL_SYNC_MIN_GAP_MS = 15 * 1000;
+
+export function manualSyncDue(lastAt, now = Date.now()) {
+  return !Number.isFinite(lastAt) || now - lastAt >= MANUAL_SYNC_MIN_GAP_MS;
 }
 
 // Circuit-breaker backoff for the snippet indexer. When a run indexes nothing because
@@ -410,10 +428,9 @@ const SNIPPET_BACKOFF_MAX_MS = 2 * 60 * 60 * 1000;
 // deliberately deferred until the mechanism is confirmed from these logs.
 const STALE_SYNC_WARN_MS = 5 * 60 * 1000;
 
-// The fastest sync interval the settings UI offers (AdminPanel's 15s/30s/60s/2min selector)
-// and the floor connectAllForUser accepts from user preferences. Anything that must not
+// The fastest interval the sync_interval_sec system setting offers. Anything that must not
 // collide with a sync tick is defined against this.
-export const MIN_SYNC_INTERVAL_MS = 15 * 1000;
+export const MIN_SYNC_INTERVAL_MS = Math.min(...SYNC_INTERVAL_CHOICES_SEC) * 1000;
 
 // How long ImapFlow waits for a quiet connection before starting IDLE. Its own default is
 // 15000ms, which exactly equals MIN_SYNC_INTERVAL_MS — a tick every 15s cleared the arming
@@ -1730,6 +1747,8 @@ export class ImapManager {
     this._syncErrorState = new Map();
     this._accountErrorStreak = new Map(); // accountId -> consecutive recoverable failures not yet surfaced
     this.onDemandSyncing = new Set(); // `${accountId}:${folder}` — prevent duplicate on-demand syncs
+    this._manualSyncs = new Set();       // accountId — manual INBOX sync requested and still running
+    this._manualFolderSyncs = new Set(); // accountId — manual folder-structure sync requested and still running
     // Bounded engine facade handed to plugin hooks instead of `this` — plugins get only the reviewed
     // sync/label primitives (see mailEngineFacade), never the raw engine, its connections, or locks.
     this.pluginFacade = createPluginMailFacade(this);
@@ -1737,8 +1756,9 @@ export class ImapManager {
     this.syncStartedAt = new Map();   // accountId -> ms when the current sync tick began (hung-sync detection)
     this.syncThrottleSkips = new Map(); // accountId -> remaining ticks to skip when throttled
     this.connectingAccounts = new Set(); // prevent concurrent connectAccount calls for same account
-    this.userSyncIntervalMs = new Map(); // userId -> interval ms (user-configurable)
-    this.userFolderSyncIntervalMs = new Map(); // userId -> folder-structure sync ms (0 = never)
+    this._startupQueued = new Set(); // accountId — waiting for its turn in connectAllEnabled's queue
+    this.syncIntervalMs = DEFAULT_SYNC_INTERVAL_SEC * 1000; // install-wide message sync cadence, see applySyncSettings
+    this.folderSyncIntervalMs = DEFAULT_FOLDER_SYNC_INTERVAL_MS; // install-wide folder-structure cadence, 0 = never
     this.lastFolderSyncAt = new Map(); // accountId -> last folder-structure sync timestamp
     this._pollOnlyAccounts = new Set(); // accountId — demoted to poll-only (no persistent IDLE) by the per-host connection budget (#379)
     this._idleMissStreak = new Map(); // accountId -> consecutive health checks seen NOT idling despite IDLE being enabled
@@ -1773,6 +1793,8 @@ export class ImapManager {
           "SELECT id, email_address, imap_host, oauth_provider FROM email_accounts WHERE enabled = true AND protocol = 'imap' AND oauth_reconnect_required = false"
         );
         for (const row of result.rows) {
+          // The startup queue will connect it; reconnecting here would bypass the queue's limit.
+          if (this._startupQueued.has(row.id)) continue;
           // A poll-only account (per-host budget) holds no persistent connection by design; while
           // its poll timer is live it is healthy, so don't treat it as "not connected" and try to
           // reconnect it into an always-on connection. If its timer somehow died it falls through
@@ -2228,9 +2250,9 @@ export class ImapManager {
     }
 
     // Guard against concurrent connect calls for the same account.
-    // This happens when startup and a WebSocket connection both call connectAllForUser
-    // before the first connectAccount completes — without this, both would connect the
-    // same account in parallel, leaving one interval/client permanently orphaned.
+    // This happens when the startup queue, the health check or a manual reconnect reach the
+    // same account before the first connectAccount completes — without this, both would connect
+    // the same account in parallel, leaving one interval/client permanently orphaned.
     if (this.connectingAccounts.has(account.id)) {
       console.log(`Already connecting ${logAccount(account)}, skipping duplicate`);
       return false;
@@ -2340,8 +2362,7 @@ export class ImapManager {
         logger.debug(`Backfill deferred on connect for ${logAccount(account)} — account already has cached mail`);
       }
 
-      const intervalMs = this.userSyncIntervalMs.get(account.user_id) || 60000;
-      this._startSyncInterval(account, intervalMs);
+      this._startSyncInterval(account, this.syncIntervalMs);
       // Arm any plugin-declared background sync ticks whose isActive gate accepts this account
       // (e.g. GTD's label-folder tick when gtd_enabled). A plugin with no active tick for this
       // account starts no timer at all, so ticks stay inert when nobody uses the feature.
@@ -2435,7 +2456,13 @@ export class ImapManager {
     // Initial poll now, then on the interval. Stagger the first tick so many demoted accounts on one
     // host don't all open at the same instant (mirrors _startSyncInterval's jitter).
     this._pollOnlyTick(account).catch(err => console.warn(`Poll-only initial sync failed for ${logAccount(account)}: ${err.message}`));
-    const ms = effectiveSyncIntervalMs(account, this.userSyncIntervalMs.get(account.user_id) || 60000);
+    this._armPollOnlyTimer(account);
+  }
+
+  // The poll-only timer on the install-wide interval, with a jittered first tick. Also used to
+  // re-arm it when the interval changes. The timer lives in syncIntervals like a sync interval.
+  _armPollOnlyTimer(account) {
+    const ms = effectiveSyncIntervalMs(account, this.syncIntervalMs);
     const jitter = Math.floor(Math.random() * Math.min(ms, 30000));
     const t = setTimeout(() => {
       if (!this._pollOnlyAccounts.has(account.id)) return; // disconnected/promoted during the jitter window
@@ -2467,10 +2494,7 @@ export class ImapManager {
       const { resolved, policy } = await raceTimeout(resolveAccountHost(fresh), 15000, 'Poll-only host resolve');
       client = await connectImapClient(fresh, resolved, { enableIdle: false, policy }, 30000, 'Poll-only connect');
 
-      const folderMs = this.userFolderSyncIntervalMs.has(account.user_id)
-        ? this.userFolderSyncIntervalMs.get(account.user_id)
-        : DEFAULT_FOLDER_SYNC_INTERVAL_MS;
-      if (folderSyncDue(folderMs, this.lastFolderSyncAt.get(account.id))) {
+      if (folderSyncDue(this.folderSyncIntervalMs, this.lastFolderSyncAt.get(account.id))) {
         this.lastFolderSyncAt.set(account.id, Date.now());
         await raceTimeout(this.syncFolders(fresh, client), 20000, 'Poll-only folder sync')
           .then(() => this.broadcast({ type: 'folders_synced', accountId: account.id }, account.user_id))
@@ -2507,18 +2531,6 @@ export class ImapManager {
       if (client) { try { await client.logout(); } catch { /* already closed */ } }
       if (slotHeld) this._bgConnSem.release(host);
       this.syncingAccounts.delete(account.id);
-    }
-  }
-
-  async disconnectUser(userId) {
-    try {
-      const result = await query(
-        "SELECT id FROM email_accounts WHERE user_id = $1 AND protocol = 'imap'",
-        [userId]
-      );
-      await Promise.all(result.rows.map(a => this.disconnectAccount(a.id)));
-    } catch (err) {
-      console.error(`disconnectUser error for user ${userId}:`, err.message);
     }
   }
 
@@ -2827,10 +2839,7 @@ export class ImapManager {
 
       // Periodic folder-structure refresh (LIST + upsert). Without this, folders
       // created/renamed in other clients only appear on reconnect.
-      const folderMs = this.userFolderSyncIntervalMs.has(syncAccount.user_id)
-        ? this.userFolderSyncIntervalMs.get(syncAccount.user_id)
-        : DEFAULT_FOLDER_SYNC_INTERVAL_MS;
-      if (folderSyncDue(folderMs, this.lastFolderSyncAt.get(account.id))) {
+      if (folderSyncDue(this.folderSyncIntervalMs, this.lastFolderSyncAt.get(account.id))) {
         this.lastFolderSyncAt.set(account.id, Date.now());
         try {
           // Timeboxed like the initial connect sync — a hung LIST on a flaky
@@ -3098,28 +3107,27 @@ export class ImapManager {
       this.syncMessages(account, client, folder, 100, false, true));
   }
 
-  // Called when a user changes their sync interval preference — replaces running
-  // intervals for all their active accounts without disconnecting.
-  async updateSyncIntervalForUser(userId, newMs) {
-    this.userSyncIntervalMs.set(userId, newMs);
-    const result = await query(
-      "SELECT * FROM email_accounts WHERE user_id = $1 AND enabled = true AND protocol = 'imap'",
-      [userId]
+  // Applies the install-wide sync cadence. Running message-sync and poll-only timers are re-armed
+  // without disconnecting; the folder-structure sync reads folderSyncIntervalMs on its next tick,
+  // so it has no timers to re-arm.
+  async applySyncSettings({ syncIntervalSec, folderSyncIntervalSec }) {
+    const syncIntervalMs = syncIntervalSec * 1000;
+    const changed = syncIntervalMs !== this.syncIntervalMs;
+    this.syncIntervalMs = syncIntervalMs;
+    this.folderSyncIntervalMs = folderSyncIntervalSec * 1000;
+    if (!changed || !this.syncIntervals.size) return;
+    const { rows } = await query(
+      "SELECT * FROM email_accounts WHERE id = ANY($1::uuid[]) AND enabled = true AND protocol = 'imap'",
+      [[...this.syncIntervals.keys()]]
     );
-    for (const acc of result.rows) {
-      if (this.syncIntervals.has(acc.id)) {
-        clearTimeout(this.syncIntervals.get(acc.id));
-        this.syncIntervals.delete(acc.id);
-        this._startSyncInterval(acc, newMs);
-      }
+    for (const account of rows) {
+      const timer = this.syncIntervals.get(account.id);
+      if (!timer) continue;
+      clearTimeout(timer);
+      this.syncIntervals.delete(account.id);
+      if (this._pollOnlyAccounts.has(account.id)) this._armPollOnlyTimer(account);
+      else this._startSyncInterval(account, this.syncIntervalMs);
     }
-  }
-
-  // Called when a user changes their folder-structure sync preference. Purely a
-  // map update — the folder sync piggybacks on _syncTick behind a time gate, so
-  // there are no timers to re-arm. 0 disables the periodic folder sync.
-  updateFolderSyncIntervalForUser(userId, newMs) {
-    this.userFolderSyncIntervalMs.set(userId, newMs);
   }
 
   scheduleCountRefresh(accountId) {
@@ -5858,17 +5866,49 @@ export class ImapManager {
     }
   }
 
-  async syncNow(userId, accountId = null) {
-    const result = await query(
-      'SELECT * FROM email_accounts WHERE user_id = $1 AND enabled = true AND protocol = $2',
-      [userId, 'imap']
-    );
-    const accounts = accountId
-      ? result.rows.filter(a => a.id === accountId)
-      : result.rows;
+  isConnecting(accountId) {
+    return this.connectingAccounts.has(accountId);
+  }
 
-    await Promise.all(accounts.map(async (account) => {
-      // Guard against overlapping syncs — interval sync may already be running
+  // Manual "sync now" of one mailbox. Decides synchronously, so the route can report a repeat:
+  // nothing starts while a sync or connect of the mailbox runs, or within MANUAL_SYNC_MIN_GAP_MS
+  // of its last successful INBOX sync. The sync itself runs in the background.
+  requestSync(accountId, now = Date.now()) {
+    if (this._manualSyncs.has(accountId) || this.syncingAccounts.has(accountId)
+      || this.connectingAccounts.has(accountId) || !manualSyncDue(this.lastSyncOkAt.get(accountId), now)) {
+      return { started: false };
+    }
+    this._manualSyncs.add(accountId);
+    this.syncNow(accountId)
+      .catch(err => console.error(`syncNow error for account ${accountId}:`, err.message))
+      .finally(() => this._manualSyncs.delete(accountId));
+    return { started: true };
+  }
+
+  // Manual folder-structure resync of one mailbox, gated like requestSync against the last
+  // folder-structure sync.
+  requestFolderSync(accountId, now = Date.now()) {
+    if (this._manualFolderSyncs.has(accountId) || this.connectingAccounts.has(accountId)
+      || !manualSyncDue(this.lastFolderSyncAt.get(accountId), now)) {
+      return { started: false };
+    }
+    this._manualFolderSyncs.add(accountId);
+    this.syncFoldersNow(accountId)
+      .catch(err => console.error(`syncFoldersNow error for account ${accountId}:`, err.message))
+      .finally(() => this._manualFolderSyncs.delete(accountId));
+    return { started: true };
+  }
+
+  // INBOX sync of one mailbox for requestSync. The syncingAccounts check still covers an interval
+  // tick that started after the request was accepted. Ends with sync_complete so the client stops
+  // its spinner.
+  async syncNow(accountId) {
+    const { rows: [account] } = await query(
+      "SELECT * FROM email_accounts WHERE id = $1 AND enabled = true AND protocol = 'imap'",
+      [accountId]
+    );
+    if (!account) return;
+    try {
       if (this.syncingAccounts.has(account.id)) {
         console.log(`syncNow: ${logAccount(account)} already syncing, skipping`);
         return;
@@ -5894,6 +5934,7 @@ export class ImapManager {
         } else {
           await this.syncMessages(account, client, 'INBOX', 20, false, true);
         }
+        this.lastSyncOkAt.set(account.id, Date.now());
         console.log(`syncNow complete: ${logAccount(account)}`);
       } catch (err) {
         console.error(`syncNow error for ${logAccount(account)}:`, err.message);
@@ -5912,41 +5953,36 @@ export class ImapManager {
         this.syncingAccounts.delete(account.id);
         this.syncStartedAt.delete(account.id);
       }
-    }));
-
-    this.broadcast({ type: 'sync_complete', accountId: accountId || null }, userId);
+    } finally {
+      this.broadcast({ type: 'sync_complete', accountId: account.id }, account.user_id);
+    }
   }
 
-  // Manual folder-structure resync (sidebar "Sync folders now" / accounts page).
-  // Metadata-only LIST + upsert, so it skips the syncingAccounts lock — safe to
-  // run alongside a message sync. Disconnected accounts reconnect instead, which
-  // runs syncFolders as part of connectAccount's startup sequence.
-  async syncFoldersNow(userId, accountId = null) {
-    const result = await query(
-      'SELECT * FROM email_accounts WHERE user_id = $1 AND enabled = true AND protocol = $2',
-      [userId, 'imap']
+  // Folder-structure resync of one mailbox for requestFolderSync (sidebar "Sync folders now" /
+  // accounts page). Metadata-only LIST + upsert, so it skips the syncingAccounts lock — safe to run
+  // alongside a message sync. A disconnected mailbox reconnects instead, which runs syncFolders as
+  // part of connectAccount's startup sequence.
+  async syncFoldersNow(accountId) {
+    const { rows: [account] } = await query(
+      "SELECT * FROM email_accounts WHERE id = $1 AND enabled = true AND protocol = 'imap'",
+      [accountId]
     );
-    const accounts = accountId
-      ? result.rows.filter(a => a.id === accountId)
-      : result.rows;
-
-    await Promise.all(accounts.map(async (account) => {
-      try {
-        const client = this.connections.get(account.id);
-        if (!client) {
-          console.log(`syncFoldersNow: ${logAccount(account)} not connected, reconnecting`);
-          await this.connectAccount(account);
-        } else {
-          // Timeboxed like the initial connect sync (see connectAccount) so a
-          // hung LIST can't wedge the manual-resync request.
-          await raceTimeout(this.syncFolders(account, client), 20000, 'Manual folder sync');
-        }
-        this.lastFolderSyncAt.set(account.id, Date.now());
-        this.broadcast({ type: 'folders_synced', accountId: account.id }, account.user_id);
-      } catch (err) {
-        console.error(`syncFoldersNow error for ${logAccount(account)}:`, err.message);
+    if (!account) return;
+    try {
+      const client = this.connections.get(account.id);
+      if (!client) {
+        console.log(`syncFoldersNow: ${logAccount(account)} not connected, reconnecting`);
+        await this.connectAccount(account);
+      } else {
+        // Timeboxed like the initial connect sync (see connectAccount) so a
+        // hung LIST can't wedge the manual resync.
+        await raceTimeout(this.syncFolders(account, client), 20000, 'Manual folder sync');
       }
-    }));
+      this.lastFolderSyncAt.set(account.id, Date.now());
+      this.broadcast({ type: 'folders_synced', accountId: account.id }, account.user_id);
+    } catch (err) {
+      console.error(`syncFoldersNow error for ${logAccount(account)}:`, err.message);
+    }
   }
 
   startSnoozeWatcher() {
@@ -6212,58 +6248,49 @@ export class ImapManager {
     }
   }
 
-  async connectAllForUser(userId) {
-    // Load the user's preferred sync interval before starting any account intervals.
-    // Without this, a user who set e.g. 30 s would silently revert to 60 s after
-    // a container restart until they next change the setting.
-    try {
-      const prefResult = await query('SELECT preferences FROM users WHERE id = $1', [userId]);
-      const prefs = prefResult.rows[0]?.preferences || {};
-      const sec = parseInt(prefs.syncInterval);
-      // Bounded by MIN_SYNC_INTERVAL_MS rather than a bare 15 so the floor stays tied to the
-      // constant AUTO_IDLE_DELAY_MS is checked against — raising one without the other is what
-      // would silently disable IDLE again.
-      if (sec * 1000 >= MIN_SYNC_INTERVAL_MS && sec <= 120) {
-        this.userSyncIntervalMs.set(userId, sec * 1000);
-      }
-      const folderSec = parseInt(prefs.folderSyncInterval);
-      if ([0, 900, 1800, 3600].includes(folderSec)) {
-        this.userFolderSyncIntervalMs.set(userId, folderSec * 1000);
-      }
-    } catch (err) {
-      console.warn(`Failed to load sync preference for user ${userId}:`, err.message);
-    }
-
-    const result = await query(
-      'SELECT * FROM email_accounts WHERE user_id = $1 AND enabled = true AND protocol = $2',
-      [userId, 'imap']
+  // Connects every enabled IMAP mailbox; called once at startup. At most `concurrency` connects run
+  // at the same time and successive launches keep each provider's spacing (#218), so a large
+  // install storms neither its mail servers nor the DB pool. The health check leaves queued
+  // mailboxes alone, and each row is re-read at its turn so a change made while it waited counts.
+  async connectAllEnabled({ concurrency = IMAP_CONNECT_CONCURRENCY } = {}) {
+    const { rows } = await query(
+      `SELECT * FROM email_accounts
+        WHERE enabled = true AND protocol = 'imap' AND oauth_reconnect_required = false
+        ORDER BY created_at ASC NULLS FIRST, id ASC`
     );
-    // Space out initial connects to stay under per-IP connection rate limits — wider for strict
-    // providers (PurelyMail) and scaled by account count, so a large fleet doesn't storm the
-    // server and trip an IP ban / account lock. (#218)
-    // Skip accounts already connected OR mid-connect (e.g. via the health check), and OAuth
-    // accounts whose grant was revoked: they wait for reconsent, which connects them itself.
-    const eligible = result.rows.filter(a =>
-      !this.connections.has(a.id) && !this.connectingAccounts.has(a.id) && !a.oauth_reconnect_required);
-    if (eligible.length) {
-      const staggers = eligible.map(a => connectStaggerFor(providerProfile(a), eligible.length));
-      const min = Math.min(...staggers), max = Math.max(...staggers);
-      const totalMs = staggers.reduce((sum, v) => sum + v, 0);
-      const range = min === max ? `${min}ms` : `${min}-${max}ms`;
-      // Soak diagnostic (#218): shows the pacing at a glance so you don't have to infer it
-      // from the gaps between the per-account "Connecting …" lines.
-      console.log(`Auto-connecting ${eligible.length} account(s): connect stagger ${range}, ~${Math.round(totalMs / 1000)}s total spread`);
-      let delay = 0;
-      for (let i = 0; i < eligible.length; i++) {
-        const account = eligible[i];
-        setTimeout(
-          () => this.connectAccount(account).catch(err =>
-            console.error(`Auto-connect failed for ${logAccount(account)}:`, err.message)
-          ),
-          delay,
-        );
-        delay += staggers[i];
+    const queue = rows.filter(account => this._needsConnect(account.id));
+    if (!queue.length) return;
+    const total = queue.length;
+    for (const account of queue) this._startupQueued.add(account.id);
+    const workers = Math.min(Math.max(1, concurrency), total);
+    console.log(`Connecting ${total} mailbox(es) on startup, ${workers} at a time`);
+
+    let nextLaunchAt = Date.now();
+    const work = async () => {
+      while (queue.length) {
+        const queued = queue.shift();
+        const launchAt = Math.max(nextLaunchAt, Date.now());
+        nextLaunchAt = launchAt + connectStaggerFor(providerProfile(queued), total);
+        const wait = launchAt - Date.now();
+        if (wait > 0) await new Promise(resolve => setTimeout(resolve, wait));
+        this._startupQueued.delete(queued.id);
+        try {
+          if (!this._needsConnect(queued.id)) continue;
+          const { rows: [account] } = await query('SELECT * FROM email_accounts WHERE id = $1', [queued.id]);
+          if (!account?.enabled || account.protocol !== 'imap' || account.oauth_reconnect_required) continue;
+          await this.connectAccount(account);
+        } catch (err) {
+          console.error(`Startup connect failed for ${logAccount(queued)}:`, err.message);
+        }
       }
-    }
+    };
+    await Promise.all(Array.from({ length: workers }, work));
+  }
+
+  // Whether nothing holds or is opening this mailbox's connection. A poll-only mailbox with a live
+  // timer holds no connection by design and counts as connected.
+  _needsConnect(accountId) {
+    if (this.connections.has(accountId) || this.connectingAccounts.has(accountId)) return false;
+    return !(this._pollOnlyAccounts.has(accountId) && this.syncIntervals.has(accountId));
   }
 }

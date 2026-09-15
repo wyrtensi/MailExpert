@@ -10,6 +10,7 @@ vi.mock('../middleware/auth.js', () => ({
 vi.mock('../index.js', () => ({
   imapManager: {
     clearConnectCooldown: vi.fn(),
+    isConnecting: vi.fn(() => false),
     connectAccount: vi.fn(() => Promise.resolve(true)),
     disconnectAccount: vi.fn(() => Promise.resolve()),
   },
@@ -64,6 +65,15 @@ describe('account routes lift the connect cooldown before reconnecting', () => {
     expect(imapManager.connectAccount).toHaveBeenCalledTimes(1);
     expect(imapManager.clearConnectCooldown.mock.invocationCallOrder[0])
       .toBeLessThan(imapManager.connectAccount.mock.invocationCallOrder[0]);
+  });
+
+  it('POST /:id/reconnect while the mailbox is still connecting starts nothing', async () => {
+    imapManager.isConnecting.mockReturnValueOnce(true);
+    const res = await fetch(`${base}/api/accounts/${ID}/reconnect`, { method: 'POST' });
+    expect(await res.json()).toEqual({ ok: true, skipped: true });
+    expect(imapManager.isConnecting).toHaveBeenCalledWith(ID);
+    expect(imapManager.clearConnectCooldown).not.toHaveBeenCalled();
+    expect(imapManager.connectAccount).not.toHaveBeenCalled();
   });
 
   it('PUT /:id with new credentials clears the cooldown, then connects', async () => {

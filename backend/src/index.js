@@ -41,6 +41,7 @@ import { parseVCard } from './utils/vcard.js';
 import { reloadAuthSettings } from './services/authLimiter.js';
 import { setupWebSocket } from './services/websocket.js';
 import { ImapManager } from './services/imapManager.js';
+import { loadSyncSettings } from './services/syncSettings.js';
 import { getUpdateStatus } from './services/updateCheck.js';
 import { recordHttp } from './services/performanceMetrics.js';
 import { defaultEmptyBody } from './middleware/defaultEmptyBody.js';
@@ -253,7 +254,7 @@ app.use((err, req, res, _next) => {
 });
 
 // WebSocket
-setupWebSocket(wss, sessionMiddleware, imapManager);
+setupWebSocket(wss, sessionMiddleware);
 
 // Run pending schema migrations then start
 await runMigrations();
@@ -292,28 +293,16 @@ imapManager.startSnoozeWatcher();
 // Schedule periodic CardDAV contact sync for any connected accounts.
 startCardavScheduler();
 
-// Re-connect all enabled IMAP accounts on startup with bounded concurrency so a
-// large user base doesn't hammer IMAP servers and the DB connection pool at once.
+// Mailboxes are serviced by the server: apply the install-wide sync cadence, then connect every
+// enabled IMAP mailbox through a bounded queue (IMAP_CONNECT_CONCURRENCY). Signing in, signing
+// out and sockets never connect them.
 try {
-  const startupResult = await query(
-    "SELECT DISTINCT user_id FROM email_accounts WHERE enabled = true AND protocol = 'imap'"
-  );
-  if (startupResult.rows.length) {
-    console.log(`Reconnecting accounts for ${startupResult.rows.length} user(s) on startup`);
-    const MAX_CONCURRENT = 3;
-    const queue = [...startupResult.rows];
-    function connectNext() {
-      if (!queue.length) return;
-      const { user_id } = queue.shift();
-      imapManager.connectAllForUser(user_id)
-        .catch(err => console.error(`Startup connect failed for user ${user_id}:`, err.message))
-        .finally(connectNext);
-    }
-    for (let i = 0; i < Math.min(MAX_CONCURRENT, queue.length); i++) connectNext();
-  }
+  await imapManager.applySyncSettings(await loadSyncSettings());
 } catch (err) {
-  console.error('Startup account connection error:', err.message);
+  console.error('Loading mailbox sync intervals failed, using the defaults:', err.message);
 }
+imapManager.connectAllEnabled()
+  .catch(err => console.error('Startup mailbox connection error:', err.message));
 
 const PORT = process.env.PORT || 3000;
 httpServer.listen(PORT, () => {

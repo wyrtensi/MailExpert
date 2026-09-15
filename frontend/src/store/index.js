@@ -432,23 +432,9 @@ export const useStore = create((set, get) => ({
     schedulePrefSave({ swipeActions: next });
     return { swipeActions: next };
   }),
-  syncInterval: parseInt(localStorage.getItem('mailexpert_sync_interval')) || 60,
-  setSyncInterval: (seconds) => {
-    localStorage.setItem('mailexpert_sync_interval', String(seconds));
-    set({ syncInterval: seconds });
-    schedulePrefSave({ syncInterval: String(seconds) });
-  },
-  // Folder-structure sync cadence in seconds; 0 = never. Explicit Number.isFinite
-  // check because 0 is a valid stored value that `|| default` would clobber.
-  folderSyncInterval: (() => {
-    const v = parseInt(localStorage.getItem('mailexpert_folder_sync_interval'));
-    return Number.isFinite(v) ? v : 1800;
-  })(),
-  setFolderSyncInterval: (seconds) => {
-    localStorage.setItem('mailexpert_folder_sync_interval', String(seconds));
-    set({ folderSyncInterval: seconds });
-    schedulePrefSave({ folderSyncInterval: String(seconds) });
-  },
+  // Install-wide message sync interval in seconds, from GET /auth/preferences. Only MailApp's
+  // refresh fallback while the WebSocket is down reads it; admins change it in security settings.
+  syncInterval: 60,
   notificationSound: localStorage.getItem('mailexpert_notification_sound') || 'tritone',
   setNotificationSound: (sound) => {
     localStorage.setItem('mailexpert_notification_sound', sound);
@@ -1093,18 +1079,7 @@ export const useStore = create((set, get) => ({
         localStorage.setItem('mailexpert_swipe_actions', JSON.stringify(swipeActions));
         set({ swipeActions });
       }
-      if (prefs.syncInterval) {
-        const n = parseInt(prefs.syncInterval) || 60;
-        localStorage.setItem('mailexpert_sync_interval', String(n));
-        set({ syncInterval: n });
-      }
-      if (prefs.folderSyncInterval != null) {
-        const n = parseInt(prefs.folderSyncInterval);
-        if ([0, 900, 1800, 3600].includes(n)) {
-          localStorage.setItem('mailexpert_folder_sync_interval', String(n));
-          set({ folderSyncInterval: n });
-        }
-      }
+      if (prefs.syncInterval) set({ syncInterval: parseInt(prefs.syncInterval) || 60 });
       // blockRemoteImages: explicit false disables blocking; anything else keeps the default (true)
       if (prefs.blockRemoteImages === false) set({ blockRemoteImages: false });
       else if (prefs.blockRemoteImages === true) set({ blockRemoteImages: true });

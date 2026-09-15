@@ -31,6 +31,7 @@ import SignatureEditor from './SignatureEditor.jsx';
 import DiagnosticsReportModal from './DiagnosticsReportModal.jsx';
 import ConfirmOverlay from './ConfirmOverlay.jsx';
 import GoogleUsersPanel from './GoogleUsersPanel.jsx';
+import MailboxSyncSettings from './MailboxSyncSettings.jsx';
 import { isGoogleAuthMode } from '../utils/authMode.js';
 import GoogleIntegrationSection, { openGoogleOAuth } from './GoogleIntegrationSection.jsx';
 import { openOAuthWindow } from '../utils/oauthWindow.js';
@@ -1530,7 +1531,7 @@ function SwipeActionIcon({ action, size = 17 }) {
 function LayoutsTab() {
   const { t } = useTranslation();
   const isMobile = useMobile();
-  const { layout, setLayout, pageSize, setPageSize, scrollMode, setScrollMode, swipeActions, setSwipeAction, syncInterval, setSyncInterval, folderSyncInterval, setFolderSyncInterval, threadedView, setThreadedView, plaintextEmail, setPlaintextEmail, hoverQuickActions, setHoverQuickActions, showMobileAvatars, setShowMobileAvatars, gravatarAvatars, setGravatarAvatars, replyDefault, setReplyDefault, markReadBehavior, setMarkReadBehavior, markReadDelay, setMarkReadDelay, senderFavicons, senderFaviconsSaving, setSenderFavicons, showMessagePreviews, setShowMessagePreviews, accounts, defaultSender, setDefaultSender } = useStore();
+  const { layout, setLayout, pageSize, setPageSize, scrollMode, setScrollMode, swipeActions, setSwipeAction, threadedView, setThreadedView, plaintextEmail, setPlaintextEmail, hoverQuickActions, setHoverQuickActions, showMobileAvatars, setShowMobileAvatars, gravatarAvatars, setGravatarAvatars, replyDefault, setReplyDefault, markReadBehavior, setMarkReadBehavior, markReadDelay, setMarkReadDelay, senderFavicons, senderFaviconsSaving, setSenderFavicons, showMessagePreviews, setShowMessagePreviews, accounts, defaultSender, setDefaultSender } = useStore();
   const [senderFaviconsError, setSenderFaviconsError] = useState('');
 
   // "Set MailExpert as your default email app": registerProtocolHandler is the
@@ -1907,80 +1908,6 @@ function LayoutsTab() {
             </div>
           </div>
         )}
-      </div>
-
-      {/* Sync interval */}
-      <div style={{ marginTop: 28, paddingTop: 22, borderTop: '1px solid var(--border-subtle)' }}>
-        <div style={{ fontSize: 13, fontWeight: 600, color: 'var(--text-primary)', marginBottom: 4 }}>
-          {t('admin.messageList.syncFrequency')}
-        </div>
-        <div style={{ fontSize: 12, color: 'var(--text-secondary)', marginBottom: 12 }}>
-          {t('admin.messageList.syncFrequencyDesc')}
-        </div>
-        <div style={{ display: 'flex', gap: 6 }}>
-          {[
-            { value: 15,  label: '15s' },
-            { value: 30,  label: '30s' },
-            { value: 60,  label: '60s' },
-            { value: 120, label: '2 min' },
-          ].map(({ value, label }) => {
-            const active = syncInterval === value;
-            return (
-              <button
-                key={value}
-                onClick={() => setSyncInterval(value)}
-                style={{
-                  flex: 1, padding: '7px 4px', fontSize: 13, fontWeight: 500,
-                  background: active ? 'var(--bg-hover)' : 'var(--bg-tertiary)',
-                  border: `2px solid ${active ? 'var(--accent)' : 'var(--border-subtle)'}`,
-                  borderRadius: 7, cursor: 'pointer', transition: 'all 0.15s', outline: 'none',
-                  color: active ? 'var(--accent)' : 'var(--text-secondary)',
-                }}
-                onMouseEnter={e => { if (!active) e.currentTarget.style.borderColor = 'var(--border)'; }}
-                onMouseLeave={e => { if (!active) e.currentTarget.style.borderColor = 'var(--border-subtle)'; }}
-              >
-                {label}
-              </button>
-            );
-          })}
-        </div>
-      </div>
-
-      {/* Folder-structure sync interval */}
-      <div style={{ marginTop: 28, paddingTop: 22, borderTop: '1px solid var(--border-subtle)' }}>
-        <div style={{ fontSize: 13, fontWeight: 600, color: 'var(--text-primary)', marginBottom: 4 }}>
-          {t('admin.messageList.folderSyncFrequency')}
-        </div>
-        <div style={{ fontSize: 12, color: 'var(--text-secondary)', marginBottom: 12 }}>
-          {t('admin.messageList.folderSyncFrequencyDesc')}
-        </div>
-        <div style={{ display: 'flex', gap: 6 }}>
-          {[
-            { value: 900,  label: '15 min' },
-            { value: 1800, label: '30 min' },
-            { value: 3600, label: '1 hour' },
-            { value: 0,    label: t('common.never') },
-          ].map(({ value, label }) => {
-            const active = folderSyncInterval === value;
-            return (
-              <button
-                key={value}
-                onClick={() => setFolderSyncInterval(value)}
-                style={{
-                  flex: 1, padding: '7px 4px', fontSize: 13, fontWeight: 500,
-                  background: active ? 'var(--bg-hover)' : 'var(--bg-tertiary)',
-                  border: `2px solid ${active ? 'var(--accent)' : 'var(--border-subtle)'}`,
-                  borderRadius: 7, cursor: 'pointer', transition: 'all 0.15s', outline: 'none',
-                  color: active ? 'var(--accent)' : 'var(--text-secondary)',
-                }}
-                onMouseEnter={e => { if (!active) e.currentTarget.style.borderColor = 'var(--border)'; }}
-                onMouseLeave={e => { if (!active) e.currentTarget.style.borderColor = 'var(--border-subtle)'; }}
-              >
-                {label}
-              </button>
-            );
-          })}
-        </div>
       </div>
 
       {/* Threading mode */}
@@ -7602,6 +7529,9 @@ function SecurityTab() {
         </div>
       )}
 
+      {/* Mailbox sync intervals — admin only */}
+      {user?.isAdmin && <MailboxSyncSettings />}
+
       {/* Status card */}
       {!googleAuth && (
       <div style={{
@@ -8186,8 +8116,6 @@ function makeSearchIndex(t) {
       tab: 'appearance', subtab: 'layout', breadcrumb: layoutCrumb,
     },
     { label: t('admin.messageList.swipeActions'), keywords: ['swipe', 'gesture', 'mobile', 'swipe left', 'swipe right', 'touch'], tab: 'appearance', subtab: 'layout', breadcrumb: layoutCrumb },
-    { label: t('admin.messageList.syncFrequency'), keywords: ['sync', 'interval', 'frequency', 'refresh', 'poll', 'check mail', '15s', '30s', '60s'], tab: 'appearance', subtab: 'layout', breadcrumb: layoutCrumb },
-    { label: t('admin.messageList.folderSyncFrequency'), keywords: ['folder', 'sync', 'structure', 'list', 'refresh', 'mailbox', '15 min', '30 min', '1 hour', 'never'], tab: 'appearance', subtab: 'layout', breadcrumb: layoutCrumb },
     { label: t('admin.messageList.threadingMode'), keywords: ['thread', 'conversation', 'grouping', 'threading', 'group'], tab: 'appearance', subtab: 'layout', breadcrumb: layoutCrumb },
     { label: t('admin.messageList.composeFormat'), keywords: ['compose', 'format', 'rich text', 'plain text', 'html', 'editor'], tab: 'appearance', subtab: 'layout', breadcrumb: layoutCrumb },
     { label: t('admin.messageList.defaultReplyAction'), keywords: ['reply', 'reply all', 'default reply'], tab: 'appearance', subtab: 'layout', breadcrumb: layoutCrumb },
@@ -8208,6 +8136,7 @@ function makeSearchIndex(t) {
     { label: t('admin.security.ssoTitle'), localAuthOnly: true, keywords: ['sso', 'linked', 'identity', 'provider', 'link', 'unlink', 'oidc', 'connect identity'], tab: 'security', subtab: 'security', breadcrumb: secCrumb },
     { label: t('admin.security.loginProtectionTitle'), keywords: ['login', 'attempts', 'brute force', 'lockout', 'max attempts', 'rate limit'], tab: 'security', subtab: 'security', adminOnly: true, breadcrumb: secCrumb },
     { label: t('admin.security.mailPolicyTitle'), keywords: ['server', 'tls', 'insecure', 'private ip', 'port', 'mail server', 'ssl'], tab: 'security', subtab: 'security', adminOnly: true, breadcrumb: secCrumb },
+    { label: t('admin.security.mailboxSyncTitle'), keywords: ['sync', 'interval', 'frequency', 'refresh', 'poll', 'check mail', 'folder', 'structure', '15s', '30s', '60s', '15 min', '30 min', '1 hour', 'never'], tab: 'security', subtab: 'security', adminOnly: true, breadcrumb: secCrumb },
     { label: t('admin.security.activityTitle'), keywords: ['log', 'activity', 'auth events', 'history', 'login history', 'audit'], tab: 'security', subtab: 'security', adminOnly: true, breadcrumb: secCrumb },
     { label: t('admin.privacy.blockImages'), keywords: ['images', 'remote', 'block', 'privacy', 'tracking pixel', 'spy pixel', 'block images'], tab: 'security', subtab: 'privacy', breadcrumb: privCrumb },
     { label: t('admin.privacy.allowedSenders'), keywords: ['whitelist', 'allow', 'sender', 'trusted', 'safe', 'allowed domain', 'image whitelist'], tab: 'security', subtab: 'privacy', breadcrumb: privCrumb },

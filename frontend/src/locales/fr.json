@@ -1050,6 +1050,8 @@
       "qrCodeAlt": "code QR",
       "mailPolicyTitle": "Politique de connexion au serveur de messagerie",
       "mailPolicyDesc": "Contrôle les types de connexion que les utilisateurs peuvent configurer. Désactiver pour les déploiements exposés à Internet.",
+      "mailboxSyncTitle": "Synchronisation des boîtes mail",
+      "mailboxSyncDesc": "Fréquence à laquelle le serveur synchronise toutes les boîtes mail. Ce réglage s'applique à toute l'installation.",
       "allowPrivateHosts": "Autoriser les hôtes privés / locaux",
       "allowPrivateHostsDesc": "Permet de se connecter aux serveurs de messagerie IMAP/SMTP, aux serveurs CardDAV et aux fournisseurs d'IA sur des adresses privées ou locales (p. ex. 127.0.0.1, 192.168.x.x). Nécessaire pour protonmail-bridge, un serveur CardDAV/Nextcloud auto-hébergé ou un modèle d'IA local.",
       "allowInsecureTls": "Autoriser le TLS non sécurisé",

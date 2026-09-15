@@ -3,12 +3,7 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 // Password reset revokes sessions by scanning the Redis session store.
 
 vi.mock('../services/db.js', () => ({ query: vi.fn(), pool: {} }));
-vi.mock('../index.js', () => ({
-  imapManager: {
-    updateSyncIntervalForUser: vi.fn(),
-    updateFolderSyncIntervalForUser: vi.fn(),
-  },
-}));
+vi.mock('../index.js', () => ({ imapManager: {} }));
 vi.mock('../services/encryption.js', () => ({
   decrypt: value => value,
   encrypt: value => value,

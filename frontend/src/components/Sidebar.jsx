@@ -497,7 +497,7 @@ export default function Sidebar() {
     // accounts or folders, so they are cleared on sign-out.
     [
       'mailexpert_notification_sound', 'mailexpert_custom_sound', 'mailexpert_custom_sound_name',
-      'mailexpert_page_size', 'mailexpert_scroll_mode', 'mailexpert_sync_interval',
+      'mailexpert_page_size', 'mailexpert_scroll_mode',
       'mailexpert_threaded_view', 'mailexpert_plaintext_email',
       'mailexpert_hover_quick_actions', 'mailexpert_swipe_actions',
       'mailexpert_expanded_accounts', 'mailexpert_collapsed_folders',

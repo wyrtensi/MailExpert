@@ -15,6 +15,9 @@ import { getAuthSettings } from '../services/auth/authSettings.js';
 import { UserIdentityError, claimOrCreateUserByEmail, normalizeEmail } from '../services/auth/userIdentity.js';
 import { closeUserSockets } from '../services/websocket.js';
 import { destroyUserSessions } from './auth.js';
+import {
+  FOLDER_SYNC_INTERVAL_KEY, SYNC_INTERVAL_KEY, loadSyncSettings, parseFolderSyncIntervalSec, parseSyncIntervalSec,
+} from '../services/syncSettings.js';
 
 const router = Router();
 router.use(requireAdmin);
@@ -234,12 +237,16 @@ router.delete('/users/:id', async (req, res) => {
     return sendAdminUserError(res, err);
   }
 
-  // Stop live per-user workers BEFORE the delete — disconnectUser looks up the
-  // user's accounts, which the cascade delete would remove.
-  await imapManager.disconnectUser(id).catch(err => console.warn('disconnectUser on delete:', err.message));
+  // While mailboxes still belong to one user, the FK cascade deletes this user's mailboxes too:
+  // stop their live connections after the delete, as DELETE /api/accounts/:id does.
+  const { rows: ownedMailboxes } = await query('SELECT id FROM email_accounts WHERE user_id = $1', [id]);
   stopCardavUser(id);
   await signOutEverywhere(id);
   await query('DELETE FROM users WHERE id = $1', [id]);
+  for (const mailbox of ownedMailboxes) {
+    imapManager.disconnectAccount(mailbox.id)
+      .catch(err => console.warn(`Disconnect after user delete for ${mailbox.id}:`, err.message));
+  }
   // Let plugins clean up any user-scoped data the FK cascade can't reach (GTD removes the
   // imported pet, stored under a slug derived from the user id rather than an FK). Best-effort
   // and after the delete: the user row is already gone, so a hook failure must not misreport a
@@ -275,7 +282,17 @@ router.get('/auth-events', async (req, res) => {
 router.patch('/settings', async (req, res) => {
   const { registration_open, internal_auth_disabled, auth_max_attempts, auth_window_minutes,
     allow_private_hosts, allow_insecure_tls, allow_nonstandard_ports,
-    mfa_enforcement, mfa_device_trust, custom_css } = req.body;
+    mfa_enforcement, mfa_device_trust, custom_css,
+    sync_interval_sec, folder_sync_interval_sec } = req.body;
+  // Checked before anything is written, so a bad interval never leaves a half-applied update.
+  const syncIntervalSec = sync_interval_sec === undefined ? null : parseSyncIntervalSec(sync_interval_sec);
+  if (sync_interval_sec !== undefined && syncIntervalSec === null) {
+    return res.status(400).json({ error: 'sync_interval_sec must be 15, 30, 60 or 120', code: 'invalid_field' });
+  }
+  const folderSyncIntervalSec = folder_sync_interval_sec === undefined ? null : parseFolderSyncIntervalSec(folder_sync_interval_sec);
+  if (folder_sync_interval_sec !== undefined && folderSyncIntervalSec === null) {
+    return res.status(400).json({ error: 'folder_sync_interval_sec must be 0, 900, 1800 or 3600', code: 'invalid_field' });
+  }
   if (typeof registration_open === 'boolean') {
     await query(
       `INSERT INTO system_settings (key, value, updated_at)
@@ -385,6 +402,23 @@ router.patch('/settings', async (req, res) => {
       [sanitized]
     );
     console.log(`[admin] ${req.session.username} updated custom_css (${sanitized.length} chars)`);
+  }
+  if (syncIntervalSec !== null || folderSyncIntervalSec !== null) {
+    for (const [key, seconds] of [[SYNC_INTERVAL_KEY, syncIntervalSec], [FOLDER_SYNC_INTERVAL_KEY, folderSyncIntervalSec]]) {
+      if (seconds === null) continue;
+      await query(
+        `INSERT INTO system_settings (key, value, updated_at) VALUES ($1, $2, NOW())
+         ON CONFLICT (key) DO UPDATE SET value = $2, updated_at = NOW()`,
+        [key, String(seconds)]
+      );
+    }
+    // Running mailboxes pick the new cadence up without reconnecting.
+    try {
+      await imapManager.applySyncSettings(await loadSyncSettings());
+    } catch (err) {
+      console.error('Applying mailbox sync intervals failed:', err.message);
+    }
+    console.log(`[admin] ${req.session.userId} changed mailbox sync intervals`);
   }
   invalidateConnectionPolicyCache();
   res.json({ ok: true });

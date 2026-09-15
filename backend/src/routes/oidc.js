@@ -6,7 +6,6 @@ import { createRemoteJWKSet, jwtVerify, customFetch } from 'jose';
 import { query, pool } from '../services/db.js';
 import { requireAuth } from '../middleware/auth.js';
 import { decrypt, isEncrypted } from '../services/encryption.js';
-import { imapManager } from '../index.js';
 import { validateHost } from '../services/hostValidation.js';
 import { logAuthEvent } from '../services/authEvents.js';
 
@@ -485,7 +484,6 @@ oidcBrowserRouter.get('/:slug/callback', async (req, res) => {
       req.session.isAdmin = user.is_admin;
       rememberOidcSession(req, provider.id, tokenData.id_token);
       await new Promise((resolve, reject) => req.session.save(err => err ? reject(err) : resolve()));
-      imapManager.connectAllForUser(user.id);
       logAuthEvent('sso_login', { username: user.username, userId: user.id, ip: req.ip, success: true });
       return res.redirect('/?oidc_success=login');
     }
@@ -540,7 +538,6 @@ oidcBrowserRouter.get('/:slug/callback', async (req, res) => {
       req.session.isAdmin = user.is_admin;
       rememberOidcSession(req, provider.id, tokenData.id_token);
       await new Promise((resolve, reject) => req.session.save(err => err ? reject(err) : resolve()));
-      imapManager.connectAllForUser(user.id);
       logAuthEvent('sso_login', { username: user.username, userId: user.id, ip: req.ip, success: true });
       return res.redirect('/?oidc_success=login');
     }
@@ -604,7 +601,6 @@ oidcBrowserRouter.get('/:slug/callback', async (req, res) => {
         req.session.isAdmin = user.is_admin;
         rememberOidcSession(req, provider.id, tokenData.id_token);
         await new Promise((resolve, reject) => req.session.save(err => err ? reject(err) : resolve()));
-        imapManager.connectAllForUser(user.id);
         logAuthEvent('sso_login', { username: user.username, userId: user.id, ip: req.ip, success: true });
         return res.redirect('/?oidc_success=login');
       } catch (err) {

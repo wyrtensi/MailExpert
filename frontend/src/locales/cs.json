@@ -1303,6 +1303,8 @@
       "qrCodeAlt": "QR kód",
       "mailPolicyTitle": "Zásady připojení k poštovním serverům",
       "mailPolicyDesc": "Určuje, jaké typy připojení mohou uživatelé nastavovat. U instalací dostupných z internetu tyto možnosti vypněte.",
+      "mailboxSyncTitle": "Synchronizace schránek",
+      "mailboxSyncDesc": "Jak často server synchronizuje všechny schránky. Nastavení platí pro celou instalaci.",
       "allowPrivateHosts": "Povolit soukromé / místní servery",
       "allowPrivateHostsDesc": "Umožňuje připojení k poštovním serverům IMAP/SMTP, serverům CardDAV a poskytovatelům AI na soukromých nebo místních adresách (např. 127.0.0.1, 192.168.x.x). Je vyžadováno pro protonmail-bridge, vlastní server CardDAV/Nextcloud nebo místní model AI.",
       "allowInsecureTls": "Povolit nezabezpečené TLS",

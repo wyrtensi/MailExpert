@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from 'react';
 import { useStore } from '../store/index.js';
 import { api } from '../utils/api.js';
+import { manualSyncAccountIds } from '../utils/mailboxSync.js';
 import { installCapacitorNativeBridge } from '../utils/capacitorNativeBridge.js';
 import { createBoundedActionIdTracker, isTrustedNativeMessage } from '../utils/nativeActionSecurity.js';
 import { copyInstallCommandAndQuitOrWarn } from '../utils/updateInstall.js';
@@ -281,7 +282,9 @@ export default function ElectronNotificationBridge() {
               title: 'Sync started',
               body: 'MailExpert is checking for new mail.',
             });
-            await api.syncNow();
+            // Sync is per mailbox: ask for every enabled IMAP mailbox.
+            const { accounts } = useStore.getState();
+            await Promise.all(manualSyncAccountIds(accounts).map((accountId) => api.syncNow(accountId)));
           } catch (error) {
             addNotification({
               type: 'error',

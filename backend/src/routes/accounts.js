@@ -344,6 +344,8 @@ router.post('/:id/reconnect', async (req, res) => {
   const result = await query('SELECT * FROM email_accounts WHERE id = $1 AND user_id = $2', [id, req.session.userId]);
   if (!result.rows.length) return res.status(404).json({ error: 'Account not found' });
 
+  // A second press while this mailbox is still connecting starts nothing.
+  if (imapManager.isConnecting(id)) return res.json({ ok: true, skipped: true });
   // An explicit user request overrides any refusal/auth cooldown for one attempt.
   imapManager.clearConnectCooldown(id);
   imapManager.connectAccount(result.rows[0]).catch(console.error);

@@ -1096,6 +1096,14 @@
       "footer": "Premi ? ovunque nell'app per vedere le scorciatoie attuali."
     },
     "users": {
+      "googleDesc": "Le persone elencate qui possono accedere con Google. Ogni utente che accede lavora con tutte le caselle di posta.",
+      "addPh": "Indirizzo email da approvare",
+      "add": "Approva",
+      "disabledBadge": "Disattivato",
+      "bootstrapBadge": "Da BOOTSTRAP_ADMIN_EMAILS",
+      "noEmail": "Nessuna email: accesso impossibile",
+      "disable": "Disattiva",
+      "enable": "Attiva",
       "title": "Utenti",
       "description": "Gestisci account utente e privilegi di amministratore",
       "joined": "Registrato il {{date}}",

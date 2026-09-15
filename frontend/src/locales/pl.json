@@ -1115,6 +1115,14 @@
       "footer": "Naciśnij ? w dowolnym miejscu aplikacji, aby wyświetlić listę skrótów."
     },
     "users": {
+      "googleDesc": "Osoby z tej listy mogą logować się przez Google. Każdy zalogowany użytkownik pracuje ze wszystkimi skrzynkami.",
+      "addPh": "Adres e-mail do zatwierdzenia",
+      "add": "Zatwierdź",
+      "disabledBadge": "Wyłączony",
+      "bootstrapBadge": "Z listy BOOTSTRAP_ADMIN_EMAILS",
+      "noEmail": "Brak e-maila — logowanie niemożliwe",
+      "disable": "Wyłącz",
+      "enable": "Włącz",
       "title": "Użytkownicy",
       "description": "Zarządzaj kontami użytkowników i uprawnieniami administratorów",
       "joined": "Dołączono {{date}}",

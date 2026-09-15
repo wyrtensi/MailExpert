@@ -1025,6 +1025,14 @@
       "footer": "Überall in der App ? drücken, um die aktuelle Kürzelbeschreibung zu sehen."
     },
     "users": {
+      "googleDesc": "Die hier aufgeführten Personen können sich mit Google anmelden. Jeder angemeldete Benutzer arbeitet mit allen Postfächern.",
+      "addPh": "Freizugebende E-Mail-Adresse",
+      "add": "Freigeben",
+      "disabledBadge": "Deaktiviert",
+      "bootstrapBadge": "Aus BOOTSTRAP_ADMIN_EMAILS",
+      "noEmail": "Keine E-Mail – Anmeldung nicht möglich",
+      "disable": "Deaktivieren",
+      "enable": "Aktivieren",
       "title": "Benutzer",
       "description": "Benutzerkonten und Administratorrechte verwalten",
       "joined": "Beigetreten {{date}}",

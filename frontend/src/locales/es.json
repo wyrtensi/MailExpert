@@ -1096,6 +1096,14 @@
       "footer": "Pulsa ? en cualquier lugar de la aplicación para ver la referencia de atajos."
     },
     "users": {
+      "googleDesc": "Las personas de esta lista pueden iniciar sesión con Google. Cada usuario que inicia sesión trabaja con todos los buzones.",
+      "addPh": "Correo electrónico que aprobar",
+      "add": "Aprobar",
+      "disabledBadge": "Desactivado",
+      "bootstrapBadge": "Desde BOOTSTRAP_ADMIN_EMAILS",
+      "noEmail": "Sin correo: no puede iniciar sesión",
+      "disable": "Desactivar",
+      "enable": "Activar",
       "title": "Usuarios",
       "description": "Gestiona las cuentas de usuario y los privilegios de administrador",
       "joined": "Se unió el {{date}}",

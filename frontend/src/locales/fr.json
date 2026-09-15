@@ -1096,6 +1096,14 @@
       "footer": "Appuyez sur ? n'importe où dans l'application pour voir la référence des raccourcis."
     },
     "users": {
+      "googleDesc": "Les personnes listées ici peuvent se connecter avec Google. Chaque utilisateur connecté travaille avec toutes les boîtes aux lettres.",
+      "addPh": "Adresse e-mail à approuver",
+      "add": "Approuver",
+      "disabledBadge": "Désactivé",
+      "bootstrapBadge": "Issu de BOOTSTRAP_ADMIN_EMAILS",
+      "noEmail": "Pas d'e-mail — connexion impossible",
+      "disable": "Désactiver",
+      "enable": "Activer",
       "title": "Utilisateurs",
       "description": "Gérez les comptes utilisateurs et les privilèges administrateur",
       "joined": "Inscrit le {{date}}",

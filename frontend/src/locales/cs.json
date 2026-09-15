@@ -1345,6 +1345,14 @@
       "removed": "Nastavení systémového e-mailu bylo odstraněno"
     },
     "users": {
+      "googleDesc": "Lidé v tomto seznamu se mohou přihlásit přes Google. Každý přihlášený uživatel pracuje se všemi schránkami.",
+      "addPh": "E-mailová adresa ke schválení",
+      "add": "Schválit",
+      "disabledBadge": "Vypnutý",
+      "bootstrapBadge": "Ze seznamu BOOTSTRAP_ADMIN_EMAILS",
+      "noEmail": "Bez e-mailu — přihlášení není možné",
+      "disable": "Vypnout",
+      "enable": "Zapnout",
       "title": "Uživatelé",
       "description": "Spravujte uživatelské účty a oprávnění správce",
       "joined": "Připojení: {{date}}",

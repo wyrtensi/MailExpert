@@ -1096,6 +1096,14 @@
       "footer": "Press ? anywhere in the app to see the current shortcut reference."
     },
     "users": {
+      "googleDesc": "People listed here can sign in with Google. Every signed-in user works with all mailboxes.",
+      "addPh": "Email address to approve",
+      "add": "Approve",
+      "disabledBadge": "Disabled",
+      "bootstrapBadge": "From BOOTSTRAP_ADMIN_EMAILS",
+      "noEmail": "No email — cannot sign in",
+      "disable": "Disable",
+      "enable": "Enable",
       "title": "Users",
       "description": "Manage user accounts and admin privileges",
       "joined": "Joined {{date}}",

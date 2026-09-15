@@ -87,16 +87,23 @@
 
 ### Пользователи
 
-Миграция: `users.email VARCHAR(255)` с уникальным индексом по `lower(email)`, `users.disabled_at TIMESTAMPTZ`, `users.disabled_by UUID REFERENCES users(id) ON DELETE SET NULL`. У существующих пользователей `email` пустой; для входа администратор заполняет его в панели.
+Миграция добавляет:
+- `users.email VARCHAR(255)` с уникальным индексом по `lower(email)`;
+- `users.disabled_at TIMESTAMPTZ`;
+- `users.disabled_by UUID REFERENCES users(id) ON DELETE SET NULL`.
+
+Колонки email у пользователей раньше не было: OIDC и сброс пароля сравнивают email с `username`. Миграция копирует `username` в `email`, если `username` похож на адрес и среди пользователей нет другого `username` с тем же адресом без учёта регистра. Остальным, например служебным `system-admin` и `team-mail`, администратор заполняет email в панели. Без email такой пользователь в режиме `google` войти не может.
 
 Администратор в панели:
 
-- добавляет пользователя по email (`username` = email, пароль пустой);
+- добавляет пользователя по email. Если уже есть пользователь с пустым `email` и `username`, равным этому адресу, email записывается ему. Иначе создаётся строка с `username` = email и пустым паролем;
 - отключает и включает пользователя;
 - назначает и снимает права администратора;
 - удаляет пользователя. Ящики и записи журнала при этом остаются.
 
-Нельзя отключить, удалить или лишить прав последнего активного администратора и любой email из `BOOTSTRAP_ADMIN_EMAILS`.
+Нельзя отключить, удалить или лишить прав последнего активного администратора и любой email из `BOOTSTRAP_ADMIN_EMAILS`. В режиме `google` активным администратором считается пользователь с `is_admin`, `disabled_at IS NULL` и заполненным `email`: служебный админ без email войти не может, поэтому защиту не выполняет.
+
+До PR 6 одобрение живёт в двух местах. Для входа через Cloudflare администратор добавляет email в MailExpert и вручную в политику Access. Прямой вход работает сразу после добавления в MailExpert. Отключение в MailExpert действует на обоих входах сразу. PR 6 делает MailExpert единственным местом одобрения.
 
 ## Сервер обслуживает ящики
 
@@ -113,7 +120,7 @@
 
 | Данные | Было | Стало |
 | --- | --- | --- |
-| Ящики `email_accounts` | `user_id NOT NULL`, каскадное удаление с пользователем | `added_by UUID REFERENCES users(id) ON DELETE SET NULL`, заполняется из `user_id`; `user_id` удаляется |
+| Ящики `email_accounts` | `user_id NOT NULL`, каскадное удаление с пользователем | `added_by UUID REFERENCES users(id) ON DELETE SET NULL`, заполняется из `user_id`, у текущих ящиков MVP это `team-mail`; `user_id` удаляется |
 | Правила `inbox_rules` | `user_id`, `account_id` может быть NULL («все мои ящики») | `account_id NOT NULL`, `created_by ... ON DELETE SET NULL`. Правило с `account_id IS NULL` копируется на каждый ящик своего владельца вместе со строками `inbox_rule_forwards`; исходная строка удаляется |
 | Блок-лист `block_list` | `(user_id, email_address)` | `(account_id, email_address)`, уникальность по паре. Каждая запись копируется на каждый ящик своего владельца, дубли отбрасываются |
 | Адресные книги и контакты | `address_books.user_id`, `contacts.user_id` | Колонки удаляются. Уникальность книг — по `name`: при совпадении имён книга переименовывается в `<name> (<username>)`. Миграция создаёт общую книгу «Контакты» для автоконтактов |

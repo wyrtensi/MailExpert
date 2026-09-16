@@ -16,7 +16,9 @@ import MessageList from './MessageList.jsx';
 import MessagePane from './MessagePane.jsx';
 import NotificationToasts from './NotificationToasts.jsx';
 import CommandPalette from './CommandPalette.jsx';
+import DemoBadge from './DemoBadge.jsx';
 import { usePluginSlot, PluginRuntime } from '../plugins/PluginSlot.jsx';
+import { isDemoMode } from '../demo/mode.js';
 
 const ContactsPage = lazy(() => import('./ContactsPage.jsx'));
 const WindowLayer  = lazy(() => import('./WindowLayer.jsx'));
@@ -928,6 +930,7 @@ export default function MailApp() {
       <NotificationToasts />
       <PluginRuntime />
       <CommandPalette open={paletteOpen} onClose={() => setPaletteOpen(false)} />
+      {isDemoMode && <DemoBadge enabled={isDemoMode} />}
 
       {/* Keyboard shortcut help overlay — toggled by the '?' key */}
       {showShortcutHelp && (

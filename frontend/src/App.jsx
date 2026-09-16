@@ -8,8 +8,19 @@ import { applyLayout } from './layouts.js';
 import LoginPage from './components/LoginPage.jsx';
 import GoogleLoginPage from './components/GoogleLoginPage.jsx';
 import { isGoogleAuthMode } from './utils/authMode.js';
+import { isDemoMode } from './demo/mode.js';
 import MailApp from './components/MailApp.jsx';
 import LockScreen from './components/LockScreen.jsx';
+
+const demoUser = {
+  id: 'demo-user',
+  email: 'demo@mailexpert.local',
+  username: 'Demo Administrator',
+  isAdmin: true,
+  hasLockPin: false,
+  locked: false,
+  totpEnabled: false,
+};
 
 export default function App() {
   const { user, setUser, loadPreferences, isLocked, setLocked } = useStore();
@@ -44,6 +55,13 @@ export default function App() {
     applyFontSet(effectiveFontSet(bootTheme, localStorage.getItem('mailexpert_font') || 'default'));
     const savedListWidth = Number(localStorage.getItem('mailexpert_list_width')) || undefined;
     applyLayout(localStorage.getItem('mailexpert_layout') || 'comfortable', savedListWidth);
+
+    if (isDemoMode) {
+      setUser(demoUser);
+      setLocked(false);
+      loadPreferences().finally(() => setChecking(false));
+      return;
+    }
 
     // Handle OAuth popup callback. Google adds oauth_result on success and
     // oauth_provider on error; Microsoft sends neither, so both stay undefined.

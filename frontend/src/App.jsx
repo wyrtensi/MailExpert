@@ -59,7 +59,9 @@ export default function App() {
     if (isDemoMode) {
       setUser(demoUser);
       setLocked(false);
-      loadPreferences().finally(() => setChecking(false));
+      // Theme, font, and layout were applied above from localStorage. Do not use
+      // loadPreferences here: demo mode must not call an API before the adapter is ready.
+      setChecking(false);
       return;
     }
 

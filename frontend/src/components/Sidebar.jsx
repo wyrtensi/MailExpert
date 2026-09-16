@@ -477,8 +477,7 @@ export default function Sidebar() {
   const [updateInfo, setUpdateInfo] = useState(null);
   useEffect(() => {
     let cancelled = false;
-    fetch('/api/update')
-      .then(r => (r.ok ? r.json() : null))
+    api.get('/update')
       .then(d => { if (!cancelled && d) setUpdateInfo(d); })
       .catch(() => {});
     return () => { cancelled = true; };

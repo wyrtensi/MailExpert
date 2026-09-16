@@ -40,72 +40,185 @@ async function request(method, path, body, extraHeaders) {
   return res.json();
 }
 
-export async function streamAiChat(messages, { signal, onDelta } = {}) {
-  const response = await fetch(`${BASE}/ai/chat`, {
-    method: 'POST',
-    credentials: 'include',
-    headers: { 'Content-Type': 'application/json', [CSRF_HEADER]: CSRF_VALUE },
-    body: JSON.stringify({ messages }),
-    signal,
-  });
-  if (!response.ok) {
-    const error = await response.json().catch(() => ({ error: 'AI request failed' }));
-    throw new Error(error.error || 'AI request failed');
-  }
-  if (!response.body) throw new Error('AI response body is unavailable');
+const EMPTY_ZIP_DATA_URL = 'data:application/zip;base64,UEsFBgAAAAAAAAAAAAAAAAAAAAAAAA==';
+const TRANSPARENT_GIF_DATA_URL = 'data:image/gif;base64,R0lGODlhAQABAAD/ACwAAAAAAQABAAACADs=';
 
-  const reader = response.body.getReader();
-  const decoder = new TextDecoder();
-  let buffer = '';
-  let fullText = '';
-  let completed = false;
+export function createDirectApi({
+  demoMode = isDemoMode,
+  demoRequestImpl = demoRequest,
+  fetchImpl = (...args) => globalThis.fetch(...args),
+} = {}) {
+  return {
+    async streamAiChat(messages, { signal, onDelta } = {}) {
+      if (demoMode) {
+        await demoRequestImpl('POST', '/ai/chat', { messages });
+        return '';
+      }
+      const response = await fetchImpl(`${BASE}/ai/chat`, {
+        method: 'POST',
+        credentials: 'include',
+        headers: { 'Content-Type': 'application/json', [CSRF_HEADER]: CSRF_VALUE },
+        body: JSON.stringify({ messages }),
+        signal,
+      });
+      if (!response.ok) {
+        const error = await response.json().catch(() => ({ error: 'AI request failed' }));
+        throw new Error(error.error || 'AI request failed');
+      }
+      if (!response.body) throw new Error('AI response body is unavailable');
 
-  function consumeLine(line) {
-    if (!line.startsWith('data:')) return;
-    const data = line.slice(5).trim();
-    if (!data) return;
-    if (data === '[DONE]') {
-      completed = true;
-      return;
-    }
-    try {
-      const parsed = JSON.parse(data);
-      if (parsed?.error) {
-        const message = typeof parsed.error === 'string' ? parsed.error : parsed.error.message;
-        throw new Error(message || 'AI request failed');
-      }
-      const delta = parsed?.choices?.[0]?.delta?.content;
-      if (typeof delta === 'string' && delta) {
-        fullText += delta;
-        onDelta?.(fullText, delta);
-      }
-    } catch (error) {
-      if (error instanceof SyntaxError) return;
-      throw error;
-    }
-  }
+      const reader = response.body.getReader();
+      const decoder = new TextDecoder();
+      let buffer = '';
+      let fullText = '';
+      let completed = false;
 
-  try {
-    while (!completed) {
-      const { done, value } = await reader.read();
-      if (done) {
-        buffer += decoder.decode();
-        break;
+      function consumeLine(line) {
+        if (!line.startsWith('data:')) return;
+        const data = line.slice(5).trim();
+        if (!data) return;
+        if (data === '[DONE]') {
+          completed = true;
+          return;
+        }
+        try {
+          const parsed = JSON.parse(data);
+          if (parsed?.error) {
+            const message = typeof parsed.error === 'string' ? parsed.error : parsed.error.message;
+            throw new Error(message || 'AI request failed');
+          }
+          const delta = parsed?.choices?.[0]?.delta?.content;
+          if (typeof delta === 'string' && delta) {
+            fullText += delta;
+            onDelta?.(fullText, delta);
+          }
+        } catch (error) {
+          if (error instanceof SyntaxError) return;
+          throw error;
+        }
       }
-      buffer += decoder.decode(value, { stream: true });
-      const lines = buffer.split('\n');
-      buffer = lines.pop() ?? '';
-      for (const line of lines) {
-        consumeLine(line);
-        if (completed) break;
+
+      try {
+        while (!completed) {
+          const { done, value } = await reader.read();
+          if (done) {
+            buffer += decoder.decode();
+            break;
+          }
+          buffer += decoder.decode(value, { stream: true });
+          const lines = buffer.split('\n');
+          buffer = lines.pop() ?? '';
+          for (const line of lines) {
+            consumeLine(line);
+            if (completed) break;
+          }
+        }
+        if (!completed && buffer) consumeLine(buffer);
+        if (!completed) throw new Error('AI response ended before completion');
+        return fullText;
+      } finally {
+        await reader.cancel().catch(() => {});
       }
-    }
-    if (!completed && buffer) consumeLine(buffer);
-    if (!completed) throw new Error('AI response ended before completion');
-    return fullText;
-  } finally {
-    await reader.cancel().catch(() => {});
-  }
+    },
+
+    async unlock(pin) {
+      if (demoMode) return demoRequestImpl('POST', '/auth/unlock', { pin });
+      const res = await fetchImpl(BASE + '/auth/unlock', {
+        method: 'POST', credentials: 'include',
+        headers: { [CSRF_HEADER]: CSRF_VALUE, 'Content-Type': 'application/json' },
+        body: JSON.stringify({ pin }),
+      });
+      const data = await res.json().catch(() => ({}));
+      if (res.ok) return data;
+      if (data.signedOut) {
+        window.dispatchEvent(new CustomEvent('mailexpert:session_expired'));
+        const error = new Error('signed_out');
+        error.signedOut = true;
+        throw error;
+      }
+      throw new Error(data.error || 'Incorrect PIN');
+    },
+
+    savePreferencesOnExit(prefs) {
+      if (demoMode) return demoRequestImpl('PATCH', '/auth/preferences', prefs);
+      return fetchImpl(BASE + '/auth/preferences', {
+        method: 'PATCH',
+        credentials: 'include',
+        keepalive: true,
+        headers: { 'Content-Type': 'application/json', [CSRF_HEADER]: CSRF_VALUE },
+        body: JSON.stringify(prefs),
+      });
+    },
+
+    async startMsDeviceFlow() {
+      if (demoMode) return demoRequestImpl('POST', '/oauth/microsoft/device');
+      const res = await fetchImpl('/oauth/microsoft/device', { method: 'POST', credentials: 'include' });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.error || 'Failed to start device code flow');
+      return data;
+    },
+
+    async pollMsDeviceFlow() {
+      if (demoMode) return demoRequestImpl('GET', '/oauth/microsoft/device/poll');
+      const res = await fetchImpl('/oauth/microsoft/device/poll', { credentials: 'include' });
+      return res.json();
+    },
+
+    deleteMessagesOnExit(ids) {
+      const deleteIds = Array.isArray(ids) ? ids : [];
+      if (deleteIds.length === 0) return Promise.resolve({ ok: true, deleted: [] });
+      if (demoMode) {
+        return deleteIds.length > 1
+          ? demoRequestImpl('POST', '/mail/messages/bulk-delete', { ids: deleteIds })
+          : demoRequestImpl('DELETE', `/mail/messages/${deleteIds[0]}`)
+            .then(result => ({ ...result, deleted: deleteIds }));
+      }
+      if (deleteIds.length > 1) {
+        return fetchImpl(BASE + '/mail/messages/bulk-delete', {
+          method: 'POST',
+          credentials: 'include',
+          headers: { 'Content-Type': 'application/json', [CSRF_HEADER]: CSRF_VALUE },
+          body: JSON.stringify({ ids: deleteIds }),
+          keepalive: true,
+        });
+      }
+      return fetchImpl(`${BASE}/mail/messages/${deleteIds[0]}`, {
+        method: 'DELETE',
+        credentials: 'include',
+        headers: { [CSRF_HEADER]: CSRF_VALUE },
+        keepalive: true,
+      });
+    },
+
+    async downloadAttachment(messageId, part) {
+      if (demoMode) {
+        const attachment = await demoRequestImpl(
+          'GET',
+          `/mail/messages/${messageId}/attachments/${encodeURIComponent(part)}`,
+        );
+        return new Blob([attachment.content || ''], { type: attachment.type || 'application/octet-stream' });
+      }
+      const res = await fetchImpl(`/api/mail/messages/${messageId}/attachments/${encodeURIComponent(part)}`, {
+        credentials: 'include',
+      });
+      if (!res.ok) throw new Error('Download failed');
+      return res.blob();
+    },
+
+    attachmentArchiveUrl(messageId) {
+      return demoMode ? EMPTY_ZIP_DATA_URL : `/api/mail/messages/${messageId}/attachments.zip`;
+    },
+
+    gtdPetSheetUrl(slug) {
+      return demoMode ? TRANSPARENT_GIF_DATA_URL : `${BASE}/gtd/pet/${encodeURIComponent(slug)}/sheet`;
+    },
+  };
+}
+
+const directApi = createDirectApi();
+
+export function streamAiChat(messages, options) {
+  return directApi.streamAiChat(messages, options);
 }
 
 function getMessageBody(id, remoteImages = false) {
@@ -130,23 +243,9 @@ export const api = {
   register: (username, password, inviteToken) => request('POST', '/auth/register', { username, password, inviteToken }),
   logout: () => request('POST', '/auth/logout'),
   lock: () => request('POST', '/auth/lock'),
-  unlock: async (pin) => {
-    // Custom (not request()) so we can read the lockout flag on failure: after too many
-    // attempts the server destroys the session and returns { signedOut: true }; route to
-    // login via session_expired rather than showing an error.
-    const res = await fetch(BASE + '/auth/unlock', {
-      method: 'POST', credentials: 'include',
-      headers: { [CSRF_HEADER]: CSRF_VALUE, 'Content-Type': 'application/json' },
-      body: JSON.stringify({ pin }),
-    });
-    const data = await res.json().catch(() => ({}));
-    if (res.ok) return data;
-    if (data.signedOut) {
-      window.dispatchEvent(new CustomEvent('mailexpert:session_expired'));
-      const e = new Error('signed_out'); e.signedOut = true; throw e;
-    }
-    throw new Error(data.error || 'Incorrect PIN');
-  },
+  // Custom response handling is kept inside the direct transport so lockout state is
+  // preserved in production while demo mode remains entirely local.
+  unlock: (pin) => directApi.unlock(pin),
   setLockPin: (pin, currentPin) => request('POST', '/auth/lock-pin', { pin, currentPin }),
   removeLockPin: (currentPin) => request('DELETE', '/auth/lock-pin', { currentPin }),
   me: () => request('GET', '/auth/me'),
@@ -160,13 +259,7 @@ export const api = {
   // setting is lost, then overwritten by the older server value on the next load. Bypasses
   // request() deliberately: there is no point parsing a response nobody will see, and the
   // 401/423 events it dispatches cannot be acted on during unload.
-  savePreferencesOnExit: (prefs) => fetch(BASE + '/auth/preferences', {
-    method: 'PATCH',
-    credentials: 'include',
-    keepalive: true,
-    headers: { 'Content-Type': 'application/json', [CSRF_HEADER]: CSRF_VALUE },
-    body: JSON.stringify(prefs),
-  }),
+  savePreferencesOnExit: (prefs) => directApi.savePreferencesOnExit(prefs),
   updateProfile: (data) => request('PATCH', '/auth/profile', data),
   uploadAvatar: (avatar) => request('POST', '/auth/avatar', { avatar }),
   deleteAvatar: () => request('DELETE', '/auth/avatar'),
@@ -261,6 +354,7 @@ export const api = {
   markAllRead: (accountId, folder) => request('POST', '/mail/mark-all-read', { accountId, folder }),
   deleteMessage: (id) => request('DELETE', `/mail/messages/${id}`),
   bulkDelete: (ids) => request('POST', '/mail/messages/bulk-delete', { ids }),
+  deleteMessagesOnExit: (ids) => directApi.deleteMessagesOnExit(ids),
   bulkMove: (ids, folder) => request('POST', '/mail/messages/bulk-move', { ids, folder }),
   bulkArchive: (ids) => request('POST', '/mail/messages/bulk-archive', { ids }),
   getUnreadCounts: () => request('GET', '/mail/unread-counts'),
@@ -278,6 +372,8 @@ export const api = {
   markHam:  (id) => request('POST', `/mail/messages/${id}/ham`),
 
   getMessageHeaders: (id) => request('GET', `/mail/messages/${id}/headers`),
+  downloadAttachment: (messageId, part) => directApi.downloadAttachment(messageId, part),
+  attachmentArchiveUrl: (messageId) => directApi.attachmentArchiveUrl(messageId),
   snoozeMessage: (id, until) => request('POST', `/mail/messages/${id}/snooze`, { until }),
 
   // Sanitized diagnostics report (server-owned sections; scoped to the user).
@@ -288,16 +384,8 @@ export const api = {
   getIntegrationsStatus: () => request('GET', '/integrations/status'),
   saveIntegration: (provider, config) => request('POST', `/integrations/${provider}`, config),
   deleteIntegration: (provider) => request('DELETE', `/integrations/${provider}`),
-  startMsDeviceFlow: async () => {
-    const res = await fetch('/oauth/microsoft/device', { method: 'POST', credentials: 'include' });
-    const data = await res.json();
-    if (!res.ok) throw new Error(data.error || 'Failed to start device code flow');
-    return data;
-  },
-  pollMsDeviceFlow: async () => {
-    const res = await fetch('/oauth/microsoft/device/poll', { credentials: 'include' });
-    return res.json();
-  },
+  startMsDeviceFlow: () => directApi.startMsDeviceFlow(),
+  pollMsDeviceFlow: () => directApi.pollMsDeviceFlow(),
 
   // Sync
   // Manual sync is per mailbox: the server answers { ok, skipped } and rejects a request without one.
@@ -425,7 +513,7 @@ export const api = {
   // directly as an <img>/background src (authenticated same-origin, cookies ride along).
   importGtdPet: (payload) => request('POST', '/gtd/pet/import', payload),
   getGtdPetMeta: (slug) => request('GET', `/gtd/pet/${encodeURIComponent(slug)}/meta`),
-  gtdPetSheetUrl: (slug) => `${BASE}/gtd/pet/${encodeURIComponent(slug)}/sheet`,
+  gtdPetSheetUrl: (slug) => directApi.gtdPetSheetUrl(slug),
 
   // Plugins — registered plugins for this build plus the user's per-user activation. Activation is
   // independent of a plugin's own per-account config (e.g. GTD's gtd_enabled).

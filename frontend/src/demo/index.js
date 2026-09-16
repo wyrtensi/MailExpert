@@ -279,6 +279,20 @@ function moveMessages(ids, folder) {
   return updateMessages(ids, item => { item.folder = folder; });
 }
 
+function deleteMessages(ids) {
+  const deleted = [];
+  const remove = new Set();
+  for (const id of ids || []) {
+    const item = messageById(id);
+    if (!item) continue;
+    deleted.push(id);
+    if (item.folder === 'Trash' || item.folder === 'Drafts') remove.add(id);
+    else item.folder = 'Trash';
+  }
+  if (remove.size) messages = messages.filter(item => !remove.has(item.id));
+  return deleted;
+}
+
 function createDraft(body) {
   const account = accountFor(body.accountId) || ACCOUNT_FIXTURES[0];
   const existing = body.existingUid == null
@@ -376,11 +390,27 @@ export async function demoRequest(method, path, body = {}) {
     return item ? clone({
       html: item.body_html,
       text: item.body_text,
-      attachments: item.has_attachments ? [{ filename: 'demo-attachment.pdf', contentType: 'application/pdf', size: 24576 }] : [],
+      attachments: item.has_attachments ? [{
+        part: '1',
+        filename: 'renewal-order-form.txt',
+        type: 'text/plain',
+        size: 45,
+      }] : [],
       hasBlockedRemoteImages: false,
       senderEmail: item.from_email,
       senderName: item.from_name,
     }) : {};
+  }
+
+  const attachmentMatch = pathname.match(/^\/mail\/messages\/([^/]+)\/attachments\/([^/]+)$/);
+  if (verb === 'GET' && attachmentMatch) {
+    const item = messageById(decodeURIComponent(attachmentMatch[1]));
+    if (!item?.has_attachments || decodeURIComponent(attachmentMatch[2]) !== '1') return {};
+    return {
+      filename: 'renewal-order-form.txt',
+      type: 'text/plain',
+      content: 'Demo attachment: renewal order form preview.\n',
+    };
   }
 
   const starMatch = pathname.match(/^\/mail\/messages\/([^/]+)\/star$/);
@@ -443,7 +473,7 @@ export async function demoRequest(method, path, body = {}) {
     return { ok: true, updated };
   }
   if (verb === 'POST' && pathname === '/mail/messages/bulk-delete') {
-    return { ok: true, deleted: moveMessages(body.ids, 'Trash') };
+    return { ok: true, deleted: deleteMessages(body.ids) };
   }
   if (verb === 'POST' && pathname === '/mail/messages/bulk-move') {
     return { ok: true, moved: moveMessages(body.ids, body.folder) };
@@ -502,6 +532,12 @@ export async function demoRequest(method, path, body = {}) {
 
   if (verb === 'GET' && pathname === '/integrations') return {};
   if (verb === 'GET' && pathname === '/integrations/status') return { google: { configured: false }, microsoft: { configured: false } };
+  if (verb === 'GET' && pathname === '/update') return { updateAvailable: false };
+  if (verb === 'GET' && pathname === '/version') return { version: '3.3.0-demo', sha: 'demo' };
+  if ((verb === 'POST' && pathname === '/oauth/microsoft/device')
+    || (verb === 'GET' && pathname === '/oauth/microsoft/device/poll')) {
+    return { disabled: true, configured: false };
+  }
   if (verb === 'GET' && pathname === '/ai/status') return { enabled: false, configured: false };
   if (verb === 'GET' && pathname === '/admin/ai') return { enabled: false, provider: null };
   if (verb === 'GET' && pathname === '/todoist/status') return { connected: false };

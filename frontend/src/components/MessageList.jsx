@@ -1160,22 +1160,7 @@ export default function MessageList() {
         clearTimeout(timer);
         const deleteIds = ids?.length ? ids : [message.id];
         try {
-          if (deleteIds.length > 1) {
-            fetch('/api/mail/messages/bulk-delete', {
-              method: 'POST',
-              credentials: 'include',
-              headers: { 'Content-Type': 'application/json', 'X-Requested-With': 'MailExpert' },
-              body: JSON.stringify({ ids: deleteIds }),
-              keepalive: true,
-            });
-          } else {
-            fetch(`/api/mail/messages/${deleteIds[0]}`, {
-              method: 'DELETE',
-              credentials: 'include',
-              headers: { 'X-Requested-With': 'MailExpert' },
-              keepalive: true,
-            });
-          }
+          api.deleteMessagesOnExit(deleteIds).catch(() => {});
         } catch { /* keepalive not supported — best effort */ }
       });
       pendingDeleteTimers.current.clear();

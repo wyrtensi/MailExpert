@@ -1,3 +1,5 @@
+import { isDemoMode } from '../demo/mode.js';
+
 export function senderDomainFromEmail(email) {
   if (typeof email !== 'string') return null;
   const value = email.trim();
@@ -15,7 +17,8 @@ export function senderDomainFromEmail(email) {
   return domain;
 }
 
-export function avatarImageCandidates({ email, hasContactPhoto, gravatarAvatars, senderFavicons }) {
+export function avatarImageCandidates({ email, hasContactPhoto, gravatarAvatars, senderFavicons, demoMode = isDemoMode }) {
+  if (demoMode) return [];
   const trimmed = typeof email === 'string' ? email.trim() : '';
   if (!trimmed) return [];
   const candidates = [];

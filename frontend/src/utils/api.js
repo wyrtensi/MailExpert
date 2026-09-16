@@ -1,3 +1,6 @@
+import { demoRequest } from '../demo/index.js';
+import { isDemoMode } from '../demo/mode.js';
+
 const BASE = '/api';
 
 // Sent on every /api request so the backend CSRF guard accepts it. A cross-site
@@ -9,6 +12,7 @@ export const CSRF_VALUE = 'MailExpert';
 const messageBodyRequests = new Map();
 
 async function request(method, path, body, extraHeaders) {
+  if (isDemoMode) return demoRequest(method, path, body);
   const opts = {
     method,
     credentials: 'include',

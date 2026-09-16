@@ -212,6 +212,9 @@ const DYNAMIC_KEYS = new Set([
   // appear as literals; the other three do via the tab pills).
   'gtd.state.watch',
   'gtd.state.delegated',
+  // Attachment risk badges (MessagePane): t(`message.attachmentRisk.${risk.level}`),
+  // where the level comes from classifyAttachmentRisk.
+  'message.attachmentRisk.block', 'message.attachmentRisk.warn', 'message.attachmentRisk.notice',
 ]);
 
 // JSX attribute names whose values must never be plain strings — always t().

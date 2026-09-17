@@ -677,7 +677,8 @@
       "groupDisplay": "Отображение",
       "groupSecurityIntegrations": "Безопасность и интеграции",
       "groupAdmin": "Администрирование",
-      "plugins": "Плагины"
+      "plugins": "Плагины",
+      "audit": "Журнал"
     },
     "rules": {
       "title": "Правила входящих",
@@ -811,7 +812,9 @@
       "categorizationEnabledDesc": "Сортирует входящие письма по вкладкам категорий. По умолчанию отключено.",
       "enabledGlobally": "Включено глобально",
       "reconnectGmail": "Переподключить Gmail",
-      "oauthReconnectRequired": "Авторизация Google истекла или отозвана. Переподключите Gmail, чтобы возобновить синхронизацию."
+      "oauthReconnectRequired": "Авторизация Google истекла или отозвана. Переподключите Gmail, чтобы возобновить синхронизацию.",
+      "deleteTitle": "Удалить ящик?",
+      "deleteMessage": "Ящик и все его синхронизированные письма пропадут у всех пользователей. Это нельзя отменить."
     },
     "folderMappings": {
       "title": "Сопоставление папок",
@@ -1504,6 +1507,41 @@
       "empty": "В этой сборке нет доступных плагинов.",
       "error": "Не удалось обновить плагин. Попробуйте ещё раз.",
       "configureIn": "Настроить параметры в разделе «{{location}}»"
+    },
+    "audit": {
+      "description": "Что пользователи делали с ящиками, письмами и пользователями, сначала новые.",
+      "mailbox": "Ящик",
+      "action": "Действие",
+      "details": "Подробности",
+      "fromDate": "С даты",
+      "toDate": "По дату",
+      "allMailboxes": "Все ящики",
+      "allUsers": "Все пользователи",
+      "allActions": "Все действия",
+      "empty": "Нет записей по этим фильтрам.",
+      "deletedUser": "Удалённый пользователь",
+      "loadFailed": "Не удалось загрузить журнал: {{message}}",
+      "invalidFilter": "Проверьте фильтры: дата или значение указаны неверно.",
+      "detailProvider": "Вход через {{provider}}",
+      "detailFields": "Поля: {{fields}}",
+      "detailRecipients": "Кому: {{recipients}}",
+      "detailMovedToTrash": "От {{from}}, {{folder}}, перемещено в корзину",
+      "detailDeletedForever": "От {{from}}, {{folder}}, удалено навсегда",
+      "detailAdminGranted": "{{email}} теперь администратор",
+      "detailAdminRevoked": "{{email}} больше не администратор",
+      "actionMailboxAdded": "Ящик добавлен",
+      "actionMailboxReconnected": "Ящик переподключён",
+      "actionMailboxDeleted": "Ящик удалён",
+      "actionMailboxConnectionChanged": "Изменены настройки подключения",
+      "actionMailboxEnabled": "Ящик включён",
+      "actionMailboxDisabled": "Ящик выключен",
+      "actionMessageSent": "Письмо отправлено",
+      "actionMessageDeleted": "Письмо удалено",
+      "actionUserAdded": "Пользователь добавлен",
+      "actionUserDeleted": "Пользователь удалён",
+      "actionUserEnabled": "Пользователь включён",
+      "actionUserDisabled": "Пользователь отключён",
+      "actionUserAdminChanged": "Изменены права администратора"
     }
   },
   "blockList": {

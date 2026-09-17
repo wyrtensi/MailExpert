@@ -677,7 +677,8 @@
       "groupDisplay": "Visualización",
       "groupSecurityIntegrations": "Seguridad e integraciones",
       "groupAdmin": "Administración",
-      "plugins": "Complementos"
+      "plugins": "Complementos",
+      "audit": "Registro de auditoría"
     },
     "rules": {
       "title": "Reglas de bandeja de entrada",
@@ -811,7 +812,9 @@
       "categorizationEnabledDesc": "Clasifica los correos entrantes en pestañas de categorías. Desactivado por defecto.",
       "enabledGlobally": "Activado globalmente",
       "reconnectGmail": "Reconectar Gmail",
-      "oauthReconnectRequired": "La autorización de Google ha caducado o se ha revocado. Reconecta Gmail para reanudar la sincronización."
+      "oauthReconnectRequired": "La autorización de Google ha caducado o se ha revocado. Reconecta Gmail para reanudar la sincronización.",
+      "deleteTitle": "¿Quitar el buzón?",
+      "deleteMessage": "El buzón y todos sus mensajes sincronizados se quitarán para todos los usuarios. No se puede deshacer."
     },
     "folderMappings": {
       "title": "Asignación de carpetas",
@@ -1504,6 +1507,41 @@
       "empty": "No hay complementos disponibles en esta versión.",
       "error": "No se pudo actualizar el complemento. Inténtalo de nuevo.",
       "configureIn": "Configura las opciones en {{location}}"
+    },
+    "audit": {
+      "description": "Lo que los usuarios hicieron con buzones, mensajes y usuarios, primero lo más reciente.",
+      "mailbox": "Buzón",
+      "action": "Acción",
+      "details": "Detalles",
+      "fromDate": "Desde",
+      "toDate": "Hasta",
+      "allMailboxes": "Todos los buzones",
+      "allUsers": "Todos los usuarios",
+      "allActions": "Todas las acciones",
+      "empty": "No hay entradas con estos filtros.",
+      "deletedUser": "Usuario eliminado",
+      "loadFailed": "No se pudo cargar el registro: {{message}}",
+      "invalidFilter": "Revisa los filtros: una fecha o un valor no es válido.",
+      "detailProvider": "Conectado con {{provider}}",
+      "detailFields": "Campos: {{fields}}",
+      "detailRecipients": "Para: {{recipients}}",
+      "detailMovedToTrash": "De {{from}}, {{folder}}, movido a la papelera",
+      "detailDeletedForever": "De {{from}}, {{folder}}, eliminado definitivamente",
+      "detailAdminGranted": "{{email}} ahora es administrador",
+      "detailAdminRevoked": "{{email}} ya no es administrador",
+      "actionMailboxAdded": "Buzón añadido",
+      "actionMailboxReconnected": "Buzón reconectado",
+      "actionMailboxDeleted": "Buzón eliminado",
+      "actionMailboxConnectionChanged": "Ajustes de conexión cambiados",
+      "actionMailboxEnabled": "Buzón activado",
+      "actionMailboxDisabled": "Buzón desactivado",
+      "actionMessageSent": "Mensaje enviado",
+      "actionMessageDeleted": "Mensaje eliminado",
+      "actionUserAdded": "Usuario añadido",
+      "actionUserDeleted": "Usuario eliminado",
+      "actionUserEnabled": "Usuario activado",
+      "actionUserDisabled": "Usuario desactivado",
+      "actionUserAdminChanged": "Permisos de administrador cambiados"
     }
   },
   "blockList": {

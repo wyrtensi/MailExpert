@@ -677,7 +677,8 @@
       "groupDisplay": "Anzeige",
       "groupSecurityIntegrations": "Sicherheit und Integrationen",
       "groupAdmin": "Administration",
-      "plugins": "Plugins"
+      "plugins": "Plugins",
+      "audit": "Protokoll"
     },
     "accounts": {
       "title": "E-Mail-Konten",
@@ -741,7 +742,9 @@
       "categorizationEnabledDesc": "Eingehende E-Mails in Kategorie-Tabs einteilen. Standardmäßig deaktiviert.",
       "enabledGlobally": "Global aktiviert",
       "reconnectGmail": "Gmail neu verbinden",
-      "oauthReconnectRequired": "Die Google-Autorisierung ist abgelaufen oder wurde widerrufen. Gmail neu verbinden, um die Synchronisierung fortzusetzen."
+      "oauthReconnectRequired": "Die Google-Autorisierung ist abgelaufen oder wurde widerrufen. Gmail neu verbinden, um die Synchronisierung fortzusetzen.",
+      "deleteTitle": "Postfach entfernen?",
+      "deleteMessage": "Das Postfach und alle synchronisierten Nachrichten werden für alle Benutzer entfernt. Das lässt sich nicht rückgängig machen."
     },
     "folderMappings": {
       "title": "Ordnerzuordnungen",
@@ -1504,6 +1507,41 @@
       "empty": "In dieser Version sind keine Plugins verfügbar.",
       "error": "Das Plugin konnte nicht aktualisiert werden. Bitte versuchen Sie es erneut.",
       "configureIn": "Optionen in {{location}} konfigurieren"
+    },
+    "audit": {
+      "description": "Was Benutzer mit Postfächern, Nachrichten und Benutzern getan haben, neueste zuerst.",
+      "mailbox": "Postfach",
+      "action": "Aktion",
+      "details": "Einzelheiten",
+      "fromDate": "Ab Datum",
+      "toDate": "Bis Datum",
+      "allMailboxes": "Alle Postfächer",
+      "allUsers": "Alle Benutzer",
+      "allActions": "Alle Aktionen",
+      "empty": "Keine Einträge für diese Filter.",
+      "deletedUser": "Gelöschter Benutzer",
+      "loadFailed": "Protokoll konnte nicht geladen werden: {{message}}",
+      "invalidFilter": "Filter prüfen: Ein Datum oder Wert ist ungültig.",
+      "detailProvider": "Angemeldet über {{provider}}",
+      "detailFields": "Felder: {{fields}}",
+      "detailRecipients": "An: {{recipients}}",
+      "detailMovedToTrash": "Von {{from}}, {{folder}}, in den Papierkorb verschoben",
+      "detailDeletedForever": "Von {{from}}, {{folder}}, endgültig gelöscht",
+      "detailAdminGranted": "{{email}} ist jetzt Administrator",
+      "detailAdminRevoked": "{{email}} ist kein Administrator mehr",
+      "actionMailboxAdded": "Postfach hinzugefügt",
+      "actionMailboxReconnected": "Postfach neu verbunden",
+      "actionMailboxDeleted": "Postfach gelöscht",
+      "actionMailboxConnectionChanged": "Verbindungseinstellungen geändert",
+      "actionMailboxEnabled": "Postfach aktiviert",
+      "actionMailboxDisabled": "Postfach deaktiviert",
+      "actionMessageSent": "Nachricht gesendet",
+      "actionMessageDeleted": "Nachricht gelöscht",
+      "actionUserAdded": "Benutzer hinzugefügt",
+      "actionUserDeleted": "Benutzer gelöscht",
+      "actionUserEnabled": "Benutzer aktiviert",
+      "actionUserDisabled": "Benutzer deaktiviert",
+      "actionUserAdminChanged": "Administratorrechte geändert"
     }
   },
   "blockList": {

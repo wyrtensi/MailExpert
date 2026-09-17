@@ -399,6 +399,7 @@ const DYNAMIC_KEYS = new Set([
   'admin.tabs.shortcuts',
   'admin.tabs.about',
   'admin.tabs.categories',
+  'admin.tabs.audit',
   // t(group.labelKey) — labelKey is a string property set in the TAB_GROUPS array
   'admin.tabs.groupAccountMail',
   'admin.tabs.groupDisplay',

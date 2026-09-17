@@ -677,7 +677,8 @@
       "groupDisplay": "显示",
       "groupSecurityIntegrations": "安全与集成",
       "groupAdmin": "管理",
-      "plugins": "插件"
+      "plugins": "插件",
+      "audit": "审计日志"
     },
     "rules": {
       "title": "收件箱规则",
@@ -811,7 +812,9 @@
       "categorizationEnabledDesc": "将收到的邮件按类别选项卡分类。默认禁用。",
       "enabledGlobally": "已全局启用",
       "reconnectGmail": "重新连接 Gmail",
-      "oauthReconnectRequired": "Google 授权已过期或已被撤销。请重新连接 Gmail 以恢复同步。"
+      "oauthReconnectRequired": "Google 授权已过期或已被撤销。请重新连接 Gmail 以恢复同步。",
+      "deleteTitle": "移除邮箱？",
+      "deleteMessage": "该邮箱及其所有已同步的邮件将对所有用户移除，且无法撤销。"
     },
     "folderMappings": {
       "title": "文件夹映射",
@@ -1504,6 +1507,41 @@
       "empty": "此版本中没有可用的插件。",
       "error": "无法更新插件，请重试。",
       "configureIn": "在「{{location}}」中配置选项"
+    },
+    "audit": {
+      "description": "用户对邮箱、邮件和用户执行的操作，按时间从新到旧排列。",
+      "mailbox": "邮箱",
+      "action": "操作",
+      "details": "详情",
+      "fromDate": "开始日期",
+      "toDate": "结束日期",
+      "allMailboxes": "全部邮箱",
+      "allUsers": "全部用户",
+      "allActions": "全部操作",
+      "empty": "没有符合这些筛选条件的记录。",
+      "deletedUser": "已删除的用户",
+      "loadFailed": "无法加载审计日志：{{message}}",
+      "invalidFilter": "请检查筛选条件：日期或数值无效。",
+      "detailProvider": "通过 {{provider}} 登录",
+      "detailFields": "字段：{{fields}}",
+      "detailRecipients": "收件人：{{recipients}}",
+      "detailMovedToTrash": "发件人 {{from}}，{{folder}}，已移至回收站",
+      "detailDeletedForever": "发件人 {{from}}，{{folder}}，已永久删除",
+      "detailAdminGranted": "{{email}} 现在是管理员",
+      "detailAdminRevoked": "{{email}} 不再是管理员",
+      "actionMailboxAdded": "已添加邮箱",
+      "actionMailboxReconnected": "已重新连接邮箱",
+      "actionMailboxDeleted": "已删除邮箱",
+      "actionMailboxConnectionChanged": "已更改连接设置",
+      "actionMailboxEnabled": "已启用邮箱",
+      "actionMailboxDisabled": "已停用邮箱",
+      "actionMessageSent": "已发送邮件",
+      "actionMessageDeleted": "已删除邮件",
+      "actionUserAdded": "已添加用户",
+      "actionUserDeleted": "已删除用户",
+      "actionUserEnabled": "已启用用户",
+      "actionUserDisabled": "已停用用户",
+      "actionUserAdminChanged": "已更改管理员权限"
     }
   },
   "blockList": {

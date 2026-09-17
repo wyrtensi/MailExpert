@@ -693,7 +693,8 @@
       "groupDisplay": "Wyświetlanie",
       "groupSecurityIntegrations": "Bezpieczeństwo i integracje",
       "groupAdmin": "Administracja",
-      "plugins": "Wtyczki"
+      "plugins": "Wtyczki",
+      "audit": "Dziennik zdarzeń"
     },
     "rules": {
       "title": "Reguły skrzynki odbiorczej",
@@ -827,7 +828,9 @@
       "categorizationEnabledDesc": "Sortuj przychodzące wiadomości do kart kategorii. Domyślnie wyłączone.",
       "enabledGlobally": "Włączone globalnie",
       "reconnectGmail": "Połącz ponownie Gmail",
-      "oauthReconnectRequired": "Autoryzacja Google wygasła lub została cofnięta. Połącz ponownie Gmail, aby wznowić synchronizację."
+      "oauthReconnectRequired": "Autoryzacja Google wygasła lub została cofnięta. Połącz ponownie Gmail, aby wznowić synchronizację.",
+      "deleteTitle": "Usunąć skrzynkę?",
+      "deleteMessage": "Skrzynka i wszystkie jej zsynchronizowane wiadomości znikną u wszystkich użytkowników. Tej operacji nie można cofnąć."
     },
     "folderMappings": {
       "title": "Mapowania folderów",
@@ -1523,6 +1526,41 @@
       "empty": "Brak wtyczek w tej wersji.",
       "error": "Nie udało się zaktualizować wtyczki. Spróbuj ponownie.",
       "configureIn": "Skonfiguruj opcje w {{location}}"
+    },
+    "audit": {
+      "description": "Co użytkownicy robili ze skrzynkami, wiadomościami i użytkownikami, od najnowszych.",
+      "mailbox": "Skrzynka",
+      "action": "Działanie",
+      "details": "Szczegóły",
+      "fromDate": "Od dnia",
+      "toDate": "Do dnia",
+      "allMailboxes": "Wszystkie skrzynki",
+      "allUsers": "Wszyscy użytkownicy",
+      "allActions": "Wszystkie działania",
+      "empty": "Brak wpisów dla tych filtrów.",
+      "deletedUser": "Usunięty użytkownik",
+      "loadFailed": "Nie udało się wczytać dziennika: {{message}}",
+      "invalidFilter": "Sprawdź filtry: data lub wartość jest nieprawidłowa.",
+      "detailProvider": "Zalogowano przez {{provider}}",
+      "detailFields": "Pola: {{fields}}",
+      "detailRecipients": "Do: {{recipients}}",
+      "detailMovedToTrash": "Od {{from}}, {{folder}}, przeniesiono do kosza",
+      "detailDeletedForever": "Od {{from}}, {{folder}}, usunięto trwale",
+      "detailAdminGranted": "{{email}} jest teraz administratorem",
+      "detailAdminRevoked": "{{email}} nie jest już administratorem",
+      "actionMailboxAdded": "Dodano skrzynkę",
+      "actionMailboxReconnected": "Ponownie połączono skrzynkę",
+      "actionMailboxDeleted": "Usunięto skrzynkę",
+      "actionMailboxConnectionChanged": "Zmieniono ustawienia połączenia",
+      "actionMailboxEnabled": "Włączono skrzynkę",
+      "actionMailboxDisabled": "Wyłączono skrzynkę",
+      "actionMessageSent": "Wysłano wiadomość",
+      "actionMessageDeleted": "Usunięto wiadomość",
+      "actionUserAdded": "Dodano użytkownika",
+      "actionUserDeleted": "Usunięto użytkownika",
+      "actionUserEnabled": "Włączono użytkownika",
+      "actionUserDisabled": "Wyłączono użytkownika",
+      "actionUserAdminChanged": "Zmieniono uprawnienia administratora"
     }
   },
   "blockList": {

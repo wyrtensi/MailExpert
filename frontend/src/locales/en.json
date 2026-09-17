@@ -677,7 +677,8 @@
       "groupDisplay": "Display",
       "groupSecurityIntegrations": "Security & Integrations",
       "groupAdmin": "Administration",
-      "plugins": "Plugins"
+      "plugins": "Plugins",
+      "audit": "Audit log"
     },
     "rules": {
       "title": "Inbox rules",
@@ -811,7 +812,9 @@
       "categorizationEnabledDesc": "Sort incoming emails into category tabs. Disabled by default.",
       "enabledGlobally": "Enabled globally",
       "reconnectGmail": "Reconnect Gmail",
-      "oauthReconnectRequired": "Google authorization expired or was revoked. Reconnect Gmail to resume syncing."
+      "oauthReconnectRequired": "Google authorization expired or was revoked. Reconnect Gmail to resume syncing.",
+      "deleteTitle": "Remove mailbox?",
+      "deleteMessage": "The mailbox and all its synced messages will be removed for every user. This cannot be undone."
     },
     "folderMappings": {
       "title": "Folder mappings",
@@ -1504,6 +1507,41 @@
       "empty": "No plugins are available in this build.",
       "error": "Couldn't update the plugin. Please try again.",
       "configureIn": "Configure options in {{location}}"
+    },
+    "audit": {
+      "description": "What users did with mailboxes, messages and users, newest first.",
+      "mailbox": "Mailbox",
+      "action": "Action",
+      "details": "Details",
+      "fromDate": "From date",
+      "toDate": "To date",
+      "allMailboxes": "All mailboxes",
+      "allUsers": "All users",
+      "allActions": "All actions",
+      "empty": "No entries match these filters.",
+      "deletedUser": "Deleted user",
+      "loadFailed": "Could not load the audit log: {{message}}",
+      "invalidFilter": "Check the filters: a date or value is not valid.",
+      "detailProvider": "Signed in with {{provider}}",
+      "detailFields": "Fields: {{fields}}",
+      "detailRecipients": "To: {{recipients}}",
+      "detailMovedToTrash": "From {{from}}, {{folder}}, moved to Trash",
+      "detailDeletedForever": "From {{from}}, {{folder}}, deleted permanently",
+      "detailAdminGranted": "{{email}} is now an admin",
+      "detailAdminRevoked": "{{email}} is no longer an admin",
+      "actionMailboxAdded": "Mailbox added",
+      "actionMailboxReconnected": "Mailbox reconnected",
+      "actionMailboxDeleted": "Mailbox deleted",
+      "actionMailboxConnectionChanged": "Connection settings changed",
+      "actionMailboxEnabled": "Mailbox enabled",
+      "actionMailboxDisabled": "Mailbox disabled",
+      "actionMessageSent": "Message sent",
+      "actionMessageDeleted": "Message deleted",
+      "actionUserAdded": "User added",
+      "actionUserDeleted": "User deleted",
+      "actionUserEnabled": "User enabled",
+      "actionUserDisabled": "User disabled",
+      "actionUserAdminChanged": "Admin rights changed"
     }
   },
   "blockList": {

@@ -3,7 +3,7 @@ const ERROR_MAX_LENGTH = 500;
 
 export async function loadProviderIdBackfill(query, accountId) {
   const { rows } = await query(
-    'SELECT account_id, cursors, finished_at, error, updated_at FROM provider_id_backfill WHERE account_id = $1',
+    'SELECT account_id, cursors, finished_at, error, pending_since, updated_at FROM provider_id_backfill WHERE account_id = $1',
     [accountId],
   );
   return rows[0] || null;
@@ -19,12 +19,28 @@ export async function saveProviderIdCursor(query, accountId, folder, cursor) {
   );
 }
 
-export async function markProviderIdBackfillFinished(query, accountId) {
+// A local write that stored a row without ids. The latest write time is kept (not the first), so
+// a write during a run is told apart from the one the run started with. node-postgres reads
+// timestamptz into a millisecond Date, so the value is stored at that precision: the run hands it
+// back to markProviderIdBackfillFinished, and a microsecond value would never compare equal.
+export async function markProviderIdBackfillPending(query, accountId) {
+  await query(
+    `INSERT INTO provider_id_backfill (account_id, pending_since, updated_at)
+     VALUES ($1, date_trunc('milliseconds', now()), now())
+     ON CONFLICT (account_id) DO UPDATE SET pending_since = EXCLUDED.pending_since, updated_at = now()`,
+    [accountId],
+  );
+}
+
+// pendingAtStart is pending_since as the run read it before planning. The mark is cleared only
+// when no write replaced it during the run; otherwise it stays and triggers the next run.
+export async function markProviderIdBackfillFinished(query, accountId, pendingAtStart = null) {
   await query(
     `INSERT INTO provider_id_backfill (account_id, finished_at, error, updated_at)
      VALUES ($1, now(), NULL, now())
-     ON CONFLICT (account_id) DO UPDATE SET finished_at = now(), error = NULL, updated_at = now()`,
-    [accountId],
+     ON CONFLICT (account_id) DO UPDATE SET finished_at = now(), error = NULL, updated_at = now(),
+       pending_since = CASE WHEN provider_id_backfill.pending_since IS NOT DISTINCT FROM $2::timestamptz THEN NULL ELSE provider_id_backfill.pending_since END`,
+    [accountId, pendingAtStart],
   );
 }
 
@@ -49,6 +65,8 @@ export function providerIdBackfillState({ row = null, running = false, progress 
     return { status: 'running', percent, error: null };
   }
   if (!row) return { status: 'not_started', percent: null, error: null };
+  // error before finished_at on purpose: a failure after an earlier complete run must show.
+  // pending_since does not change a done row: the few new rows load within a minute.
   if (row.error) return { status: 'error', percent: null, error: row.error };
   if (row.finished_at) return { status: 'done', percent: 100, error: null };
   return { status: 'paused', percent: null, error: null };

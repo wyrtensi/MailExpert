@@ -66,20 +66,32 @@ export async function planProviderIdBackfill(query, accountId) {
       if (b.path === 'INBOX') return 1;
       return a.path.localeCompare(b.path);
     });
-  return { folders, total: folders.reduce((sum, f) => sum + f.remaining, 0) };
+  return {
+    folders,
+    total: folders.reduce((sum, f) => sum + f.remaining, 0),
+    // Read before any batch, so a local write during the run keeps its pending mark.
+    pendingSince: state?.pending_since ?? null,
+  };
 }
+
+// A tagged NO/BAD answer to SELECT or FETCH concerns that folder only (deleted label, server-side
+// problem with one mailbox); the connection is still usable for the next folder.
+const isFolderError = (err) => err?.responseStatus === 'NO' || err?.responseStatus === 'BAD';
 
 export async function runProviderIdBackfill({
   query, accountId, getClient, shouldContinue, onProgress = () => {}, pause = async () => {},
 }) {
   const plan = await planProviderIdBackfill(query, accountId);
   let processed = 0;
+  const failedFolders = []; // { path, error }: the server refused SELECT or FETCH for the folder
+  const skippedFolders = []; // paths whose server UIDVALIDITY differs from the cached rows
+  const result = (outcome) => ({ outcome, processed, total: plan.total, failedFolders, skippedFolders });
   onProgress({ processed, total: plan.total });
 
-  for (const folder of plan.folders) {
+  folders: for (const folder of plan.folders) {
     let lastUid = folder.lastUid;
     for (;;) {
-      if (!(await shouldContinue())) return { outcome: 'stopped', processed, total: plan.total };
+      if (!(await shouldContinue())) return result('stopped');
 
       const { rows } = await query(
         `SELECT uid FROM messages
@@ -96,22 +108,33 @@ export async function runProviderIdBackfill({
       const found = [];
       const client = await getClient();
       let renumbered;
-      const lock = await client.getMailboxLock(folder.path);
       try {
-        // The cached rows belong to the stored UIDVALIDITY; if the server moved on, the sync
-        // purges and refetches this folder with ids, so its UIDs must not be matched here.
-        renumbered = validityText(client.mailbox?.uidValidity) !== folder.uidValidity;
-        if (!renumbered) {
-          for await (const msg of client.fetch(uidSet(uids), { uid: true, threadId: true }, { uid: true })) {
-            const uid = Number(msg.uid);
-            const ids = gmailProviderIds(msg);
-            if (wanted.has(uid) && ids.providerMessageId) found.push({ uid, ...ids });
+        const lock = await client.getMailboxLock(folder.path);
+        try {
+          // The cached rows belong to the stored UIDVALIDITY; if the server moved on, the sync
+          // purges and refetches this folder with ids, so its UIDs must not be matched here.
+          // Only a known stored value can mismatch: rows of a folder stored without one are filled.
+          renumbered = folder.uidValidity !== null && validityText(client.mailbox?.uidValidity) !== folder.uidValidity;
+          if (!renumbered) {
+            for await (const msg of client.fetch(uidSet(uids), { uid: true, threadId: true }, { uid: true })) {
+              const uid = Number(msg.uid);
+              const ids = gmailProviderIds(msg);
+              if (wanted.has(uid) && ids.providerMessageId) found.push({ uid, ...ids });
+            }
           }
+        } finally {
+          lock.release();
         }
-      } finally {
-        lock.release();
+      } catch (err) {
+        if (!isFolderError(err)) throw err;
+        // The cursor stays at the last completed batch; the next run retries from there.
+        failedFolders.push({ path: folder.path, error: err.responseText || err.message });
+        continue folders;
       }
-      if (renumbered) break;
+      if (renumbered) {
+        skippedFolders.push(folder.path);
+        break;
+      }
 
       if (found.length) {
         await query(
@@ -131,6 +154,8 @@ export async function runProviderIdBackfill({
     }
   }
 
-  await markProviderIdBackfillFinished(query, accountId);
-  return { outcome: 'done', processed, total: plan.total };
+  // A folder that failed or was skipped still has rows without ids: not finished, try again later.
+  if (failedFolders.length || skippedFolders.length) return result('incomplete');
+  await markProviderIdBackfillFinished(query, accountId, plan.pendingSince);
+  return result('done');
 }

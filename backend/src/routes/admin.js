@@ -11,7 +11,7 @@ import { invalidateGlobalCategorizationCache } from '../services/categorizer.js'
 import { imapManager } from '../index.js';
 import { pluginRegistry } from '../plugins/registry.js';
 import { UUID_RE, uuidParam } from '../utils/uuid.js';
-import { AUDIT_ACTIONS } from '../services/auditLog.js';
+import { AUDIT_ACTIONS, recordAudit } from '../services/auditLog.js';
 import { getAuthSettings } from '../services/auth/authSettings.js';
 import { UserIdentityError, claimOrCreateUserByEmail, normalizeEmail } from '../services/auth/userIdentity.js';
 import { closeUserSockets } from '../services/websocket.js';
@@ -87,6 +87,14 @@ async function signOutEverywhere(userId) {
   closeUserSockets(imapManager.wss, userId);
 }
 
+// Journal entry for an admin action on a user. The id is kept because service users may have no
+// email to name them by.
+const userAuditEntry = (req, action, user) => ({
+  actorUserId: req.session.userId,
+  action,
+  details: { userId: user.id, email: user.email ?? null, isAdmin: !!user.is_admin },
+});
+
 router.get('/users', async (req, res) => {
   const limit  = Math.min(parseInt(req.query.limit)  || 100, 200);
   const offset = Math.max(parseInt(req.query.offset) || 0,   0);
@@ -113,6 +121,7 @@ router.post('/users', async (req, res) => {
     if (!created && !claimed) {
       return res.status(409).json({ error: 'A user with this email already exists', code: 'user_exists' });
     }
+    recordAudit([userAuditEntry(req, 'user.added', user)]);
     console.log(`[admin] ${req.session.userId} approved user ${user.id}`);
     return res.status(created ? 201 : 200).json({ user: publicUser(user) });
   } catch (err) {
@@ -165,7 +174,7 @@ router.patch('/users/:id', async (req, res) => {
   const settings = getAuthSettings();
   const googleMode = settings.mode === 'google';
   try {
-    const { row, lostAccess } = await withTransaction(async (client) => {
+    const { row, lostAccess, previous } = await withTransaction(async (client) => {
       await lockAdminGuard(client);
       const current = await lockTargetUser(client, id);
       const after = {
@@ -197,10 +206,16 @@ router.patch('/users/:id', async (req, res) => {
       );
       // Losing the way in: turned off, or in google mode left without an email to sign in with.
       const lost = (!current.disabled_at && !!after.disabled_at) || (googleMode && !!current.email && !after.email);
-      return { row: updated, lostAccess: lost };
+      return { row: updated, lostAccess: lost, previous: current };
     });
 
     if (lostAccess) await signOutEverywhere(id);
+    const auditEntries = [];
+    if (!!previous.disabled_at !== !!row.disabled_at) {
+      auditEntries.push(userAuditEntry(req, row.disabled_at ? 'user.disabled' : 'user.enabled', row));
+    }
+    if (!!previous.is_admin !== !!row.is_admin) auditEntries.push(userAuditEntry(req, 'user.admin_changed', row));
+    if (auditEntries.length) recordAudit(auditEntries);
     console.log(`[admin] ${req.session.userId} updated user ${id}`);
     return res.json({ ok: true, user: publicUser(row, settings.bootstrapAdminEmails) });
   } catch (err) {
@@ -215,8 +230,9 @@ router.delete('/users/:id', async (req, res) => {
   }
   const settings = getAuthSettings();
   const googleMode = settings.mode === 'google';
+  let deleted;
   try {
-    await withTransaction(async (client) => {
+    deleted = await withTransaction(async (client) => {
       await lockAdminGuard(client);
       const current = await lockTargetUser(client, id);
       if (isBootstrapEmail(settings, current.email)) {
@@ -225,6 +241,7 @@ router.delete('/users/:id', async (req, res) => {
       if (countsAsActiveAdmin(current, googleMode) && !(await otherActiveAdminExists(client, id, googleMode))) {
         throw new AdminUserError(409, 'last_admin', 'At least one active admin must remain');
       }
+      return current;
     });
   } catch (err) {
     return sendAdminUserError(res, err);
@@ -232,6 +249,7 @@ router.delete('/users/:id', async (req, res) => {
 
   await signOutEverywhere(id);
   await query('DELETE FROM users WHERE id = $1', [id]);
+  recordAudit([userAuditEntry(req, 'user.deleted', deleted)]);
   // Let plugins clean up any user-scoped data the FK cascade can't reach (GTD removes the
   // imported pet, stored under a slug derived from the user id rather than an FK). Best-effort
   // and after the delete: the user row is already gone, so a hook failure must not misreport a

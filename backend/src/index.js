@@ -45,6 +45,7 @@ import { defaultEmptyBody } from './middleware/defaultEmptyBody.js';
 import { authSettingsError, getAuthSettings } from './services/auth/authSettings.js';
 import { startAccessSync } from './services/accessSync/index.js';
 import { identityGate } from './middleware/identityGate.js';
+import { providerThreadIndexState } from './services/threading/providerThreadIndex.js';
 
 const packageMeta = JSON.parse(readFileSync(new URL('../package.json', import.meta.url), 'utf-8'));
 let buildMeta = {};
@@ -249,6 +250,15 @@ setupWebSocket(wss, sessionMiddleware);
 
 // Run pending schema migrations then start
 await runMigrations();
+
+// A failed concurrent build (migration 0061) leaves an unusable index that no later migration repairs.
+providerThreadIndexState(query)
+  .then(state => {
+    if (state !== 'valid') {
+      console.warn(`Index idx_messages_provider_thread is ${state}: drop it and rerun the CREATE INDEX CONCURRENTLY from migration 0061`);
+    }
+  })
+  .catch(err => console.warn('Provider thread index check failed:', err.message));
 
 // One-time backfill: populate photo_data from the stored vcard for contacts saved
 // before photo_data was persisted.

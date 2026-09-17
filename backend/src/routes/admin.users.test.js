@@ -18,6 +18,9 @@ vi.mock('../plugins/registry.js', () => ({ pluginRegistry: { runHook: vi.fn(asyn
 vi.mock('./auth.js', () => ({ destroyUserSessions: vi.fn(async () => {}) }));
 vi.mock('../services/websocket.js', () => ({ closeUserSockets: vi.fn() }));
 vi.mock('../services/auditLog.js', () => ({ AUDIT_ACTIONS: [], recordAudit: vi.fn(async () => {}) }));
+vi.mock('../services/accessSync/index.js', () => ({
+  requestAccessSync: vi.fn(), runAccessSyncNow: vi.fn(), withAccessSyncLock: vi.fn((op) => op()),
+}));
 
 import express from 'express';
 import adminRoutes from './admin.js';
@@ -26,6 +29,7 @@ import { imapManager } from '../index.js';
 import { destroyUserSessions } from './auth.js';
 import { closeUserSockets } from '../services/websocket.js';
 import { recordAudit } from '../services/auditLog.js';
+import { requestAccessSync } from '../services/accessSync/index.js';
 
 const ADMIN_ID = '00000000-0000-0000-0000-00000000000a';
 const USER_ID = '00000000-0000-0000-0000-00000000000b';
@@ -80,6 +84,7 @@ beforeEach(() => {
   closeUserSockets.mockClear();
   imapManager.disconnectAccount.mockClear();
   recordAudit.mockClear();
+  requestAccessSync.mockClear();
 });
 afterEach(() => {
   vi.unstubAllEnvs();
@@ -284,6 +289,46 @@ describe('user administration is journaled', () => {
     installTransaction([lock, target({ ...USER_ROW, is_admin: true }), otherAdmins(0)]);
     await send('PATCH', `/users/${USER_ID}`, { isAdmin: false });
     expect(recordAudit).not.toHaveBeenCalled();
+  });
+});
+
+describe('user changes request an Access sync', () => {
+  const emailLookup = (row) => [/^\s*SELECT .* FROM users WHERE lower\(email\) = \$1/, { rows: row ? [row] : [] }];
+  const update = (row) => [/^\s*UPDATE users\s+SET is_admin = \$2/, (params) => ({
+    rows: [{ ...row, is_admin: params[1], email: params[2], disabled_at: params[3] }],
+  })];
+
+  it('requests a sync when a user is approved, disabled, enabled, readdressed or deleted', async () => {
+    installTransaction([lock, emailLookup(null), [/^\s*UPDATE users SET email = \$1/, { rows: [] }], [/^\s*INSERT INTO users/, { rows: [USER_ROW] }]]);
+    await send('POST', '/users', { email: 'user@example.com' });
+
+    installTransaction([lock, target(USER_ROW), update(USER_ROW)]);
+    await send('PATCH', `/users/${USER_ID}`, { disabled: true });
+
+    const disabledRow = { ...USER_ROW, disabled_at: '2026-09-16T00:00:00.000Z' };
+    installTransaction([lock, target(disabledRow), update(disabledRow)]);
+    await send('PATCH', `/users/${USER_ID}`, { disabled: false });
+
+    installTransaction([lock, target(USER_ROW), update(USER_ROW), [/SELECT id FROM users WHERE lower\(email\) = \$1 AND id <> \$2/, { rows: [] }]]);
+    await send('PATCH', `/users/${USER_ID}`, { email: 'new@example.com' });
+
+    installTransaction([lock, target(USER_ROW)]);
+    query.mockResolvedValue({ rows: [] });
+    await send('DELETE', `/users/${USER_ID}`);
+
+    expect(requestAccessSync.mock.calls).toEqual([
+      ['user_added'], ['user_changed'], ['user_changed'], ['user_changed'], ['user_deleted'],
+    ]);
+  });
+
+  it('does not request a sync for an admin flag change or a refused change', async () => {
+    installTransaction([lock, target(USER_ROW), update(USER_ROW)]);
+    await send('PATCH', `/users/${USER_ID}`, { isAdmin: true });
+    installTransaction([lock, emailLookup(USER_ROW)]);
+    await send('POST', '/users', { email: 'user@example.com' });
+    installTransaction([lock, target({ ...USER_ROW, is_admin: true }), otherAdmins(0)]);
+    await send('DELETE', `/users/${USER_ID}`);
+    expect(requestAccessSync).not.toHaveBeenCalled();
   });
 });
 

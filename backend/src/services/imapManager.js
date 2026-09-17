@@ -1195,7 +1195,10 @@ export async function* fetchBackfillBatch(client, uids, fetchQuery) {
   const missing = uids.filter(uid => !received.has(uid));
   if (!missing.length) return;
   const retry = new Set(missing);
-  for await (const msg of client.fetch(missing.join(','), { uid: true, flags: true, envelope: true }, { uid: true })) {
+  // Keep threadId when the original query asked for it — otherwise a retried row (e.g. a
+  // Gmail message the first FETCH omitted) silently loses its provider_thread_id.
+  const retryQuery = { uid: true, flags: true, envelope: true, ...(fetchQuery.threadId ? { threadId: true } : {}) };
+  for await (const msg of client.fetch(missing.join(','), retryQuery, { uid: true })) {
     if (!retry.has(msg.uid) || received.has(msg.uid)) continue;
     received.add(msg.uid);
     yield msg;

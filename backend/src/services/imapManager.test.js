@@ -2440,8 +2440,10 @@ describe('Gmail label memberships (#418)', () => {
       expect(client.fetch.mock.calls.some(([, q]) => q?.threadId === true)).toBe(true);
       const insert = inserts.find(i => i.params[1] === 1);
       expect(insert.sql).toMatch(/provider_thread_id, provider_message_id/);
-      expect(insert.params).toContain('90001');
-      expect(insert.params).toContain('80001');
+      // Column list order is `provider_thread_id, provider_message_id`, so the thread id is
+      // the second-to-last bound parameter and the message id is the last one.
+      expect(insert.params.at(-2)).toBe('90001');
+      expect(insert.params.at(-1)).toBe('80001');
       expect(insert.sql).toMatch(/provider_thread_id = COALESCE\(EXCLUDED\.provider_thread_id, messages\.provider_thread_id\)/);
     });
 
@@ -2459,8 +2461,8 @@ describe('Gmail label memberships (#418)', () => {
       }
       expect(client.fetch.mock.calls.every(([, q]) => q?.threadId !== true)).toBe(true);
       const insert = inserts.find(i => i.params[1] === 1);
-      expect(insert.params).not.toContain('90001');
-      expect(insert.params).not.toContain('80001');
+      expect(insert.params.at(-2)).toBeNull();
+      expect(insert.params.at(-1)).toBeNull();
     });
   }
 });
@@ -2617,6 +2619,25 @@ describe('backfill optional metadata fallback', () => {
     const client = { fetch: vi.fn(async function* () { yield {uid:1}; throw new Error('Disconnected'); }) };
     await expect(collect(fetchBackfillBatch(client,[1,2],query))).rejects.toThrow('Disconnected');
     expect(client.fetch).toHaveBeenCalledTimes(1);
+  });
+  it('keeps threadId on the retry fetch when the original query requested it', async () => {
+    const gmailQuery = { ...query, threadId: true };
+    let drained=false;
+    const client = { fetch: vi.fn((range) => (async function* () {
+      if (range==='1,2,3') { yield {uid:1}; drained=true; }
+      else { expect(drained).toBe(true); yield {uid:2}; yield {uid:3}; }
+    })()) };
+    expect(await collect(fetchBackfillBatch(client,[1,2,3],gmailQuery))).toEqual([1,2,3]);
+    expect(client.fetch.mock.calls[1]).toEqual(['2,3',{uid:true,flags:true,envelope:true,threadId:true},{uid:true}]);
+  });
+  it('omits threadId on the retry fetch when the original query did not request it', async () => {
+    let drained=false;
+    const client = { fetch: vi.fn((range) => (async function* () {
+      if (range==='1,2,3') { yield {uid:1}; drained=true; }
+      else { expect(drained).toBe(true); yield {uid:2}; yield {uid:3}; }
+    })()) };
+    expect(await collect(fetchBackfillBatch(client,[1,2,3],query))).toEqual([1,2,3]);
+    expect(client.fetch.mock.calls[1]).toEqual(['2,3',{uid:true,flags:true,envelope:true},{uid:true}]);
   });
 });
 

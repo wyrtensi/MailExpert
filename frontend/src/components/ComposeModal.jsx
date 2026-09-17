@@ -728,11 +728,17 @@ export default function ComposeModal() {
     setAiPanel(null);
   };
 
+  // Any recipient field is enough: a message addressed only in Cc or Bcc can be sent.
+  const hasRecipients = [
+    toChips.length, ccChips.length, bccChips.length,
+    toInput.trim(), ccInput.trim(), bccInput.trim(),
+  ].some(Boolean);
+
   const handleSend = async ({ skipSubjectWarn = false, skipAttachWarn = false } = {}) => {
     if (sending) return; // guard against a rapid double-submit (e.g. double Ctrl/Cmd+Enter)
     const { accountId, aliasId } = resolveFrom(fromValue);
     const toFinal = [...toChips, ...(toInput.trim() ? [toInput.trim()] : [])];
-    if (!toFinal.length || !accountId) return;
+    if (!hasRecipients || !accountId) return;
 
     if (!skipSubjectWarn && subject.trim() === '') {
       setShowEmptySubjectWarn(true);
@@ -830,7 +836,7 @@ export default function ComposeModal() {
         setTimeout(refreshThread, 10000);
       }
     } catch (err) {
-      setError(err.message);
+      setError(err.code === 'send_uncertain' ? t('compose.sendUncertain') : err.message);
       setSending(false);
     }
   };
@@ -1177,12 +1183,12 @@ export default function ComposeModal() {
             </button>
             <button
               onClick={handleSend}
-              disabled={sending || (toChips.length === 0 && !toInput.trim())}
+              disabled={sending || !hasRecipients}
               style={{
                 background: 'none', border: 'none',
-                color: sending || (toChips.length === 0 && !toInput.trim()) ? 'var(--text-tertiary)' : 'var(--accent)',
+                color: sending || !hasRecipients ? 'var(--text-tertiary)' : 'var(--accent)',
                 fontSize: 16, fontWeight: 600,
-                cursor: sending || (toChips.length === 0 && !toInput.trim()) ? 'default' : 'pointer',
+                cursor: sending || !hasRecipients ? 'default' : 'pointer',
                 padding: '4px 0',
                 WebkitTapHighlightColor: 'transparent',
                 transition: 'color 0.15s',
@@ -2118,14 +2124,14 @@ export default function ComposeModal() {
       }}>
         <button
           onClick={handleSend}
-          disabled={sending || (toChips.length === 0 && !toInput.trim())}
+          disabled={sending || !hasRecipients}
           title={sending ? undefined : t('compose.sendTooltip')}
           style={{
             padding: '8px 20px', background: 'var(--accent)',
             border: 'none', borderRadius: 7, color: 'var(--accent-text)',
             fontSize: 13, fontWeight: 500,
-            cursor: sending || (toChips.length === 0 && !toInput.trim()) ? 'not-allowed' : 'pointer',
-            opacity: sending || (toChips.length === 0 && !toInput.trim()) ? 0.6 : 1,
+            cursor: sending || !hasRecipients ? 'not-allowed' : 'pointer',
+            opacity: sending || !hasRecipients ? 0.6 : 1,
             display: 'flex', alignItems: 'center', gap: 6,
             transition: 'opacity 0.15s',
           }}

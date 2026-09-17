@@ -152,6 +152,7 @@
       "noCopy": "Sent, but not saved to your Sent folder",
       "action": "View"
     },
+    "sendUncertain": "The connection to the mail server broke while sending. The message may have been delivered: check Sent before sending it again.",
     "toolbar": {
       "removeTable": "Remove table",
       "textColor": "Text color",

@@ -66,11 +66,20 @@ export function auditDetail(entry) {
         ? { key: 'admin.audit.detailRecipients', values: { recipients: recipients.join(', ') } }
         : null;
     }
-    case 'message.deleted':
+    case 'message.deleted': {
+      const folder = details.folder ?? '';
+      // The backend stores `from: null` when a message had no sender address.
+      if (!details.from) {
+        return {
+          key: details.permanent ? 'admin.audit.detailDeletedForeverNoSender' : 'admin.audit.detailMovedToTrashNoSender',
+          values: { folder },
+        };
+      }
       return {
         key: details.permanent ? 'admin.audit.detailDeletedForever' : 'admin.audit.detailMovedToTrash',
-        values: { from: details.from ?? '', folder: details.folder ?? '' },
+        values: { from: details.from, folder },
       };
+    }
     case 'user.admin_changed':
       return {
         key: details.isAdmin ? 'admin.audit.detailAdminGranted' : 'admin.audit.detailAdminRevoked',

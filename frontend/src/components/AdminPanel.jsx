@@ -8011,7 +8011,7 @@ function makeSearchIndex(t) {
     { label: t('admin.security.loginProtectionTitle'), keywords: ['login', 'attempts', 'brute force', 'lockout', 'max attempts', 'rate limit'], tab: 'security', subtab: 'security', adminOnly: true, breadcrumb: secCrumb },
     { label: t('admin.security.mailPolicyTitle'), keywords: ['server', 'tls', 'insecure', 'private ip', 'port', 'mail server', 'ssl'], tab: 'security', subtab: 'security', adminOnly: true, breadcrumb: secCrumb },
     { label: t('admin.security.mailboxSyncTitle'), keywords: ['sync', 'interval', 'frequency', 'refresh', 'poll', 'check mail', 'folder', 'structure', '15s', '30s', '60s', '15 min', '30 min', '1 hour', 'never'], tab: 'security', subtab: 'security', adminOnly: true, breadcrumb: secCrumb },
-    { label: t('admin.security.activityTitle'), keywords: ['log', 'activity', 'auth events', 'history', 'login history', 'audit'], tab: 'security', subtab: 'security', adminOnly: true, breadcrumb: secCrumb },
+    { label: t('admin.security.activityTitle'), keywords: ['log', 'activity', 'auth events', 'history', 'login history'], tab: 'security', subtab: 'security', adminOnly: true, breadcrumb: secCrumb },
     { label: t('admin.privacy.blockImages'), keywords: ['images', 'remote', 'block', 'privacy', 'tracking pixel', 'spy pixel', 'block images'], tab: 'security', subtab: 'privacy', breadcrumb: privCrumb },
     { label: t('admin.privacy.allowedSenders'), keywords: ['whitelist', 'allow', 'sender', 'trusted', 'safe', 'allowed domain', 'image whitelist'], tab: 'security', subtab: 'privacy', breadcrumb: privCrumb },
     // Notifications
@@ -8024,6 +8024,7 @@ function makeSearchIndex(t) {
     // Admin-only
     { label: t('admin.systemEmail.tabUsers'), keywords: ['user', 'invite', 'admin', 'role', 'manage users', 'add user'], tab: 'users', adminOnly: true, breadcrumb: tabLabel('users') },
     { label: t('admin.systemEmail.tabEmail'), keywords: ['system email', 'smtp', 'admin email', 'invite email', 'outgoing email'], tab: 'users', adminOnly: true, breadcrumb: tabLabel('users') },
+    { label: tabLabel('audit'), keywords: ['audit', 'audit log', 'journal', 'history', 'who did', 'deleted', 'sent', 'mailbox changes'], tab: 'audit', adminOnly: true, breadcrumb: tabLabel('audit') },
     { label: t('admin.sso.title'), localAuthOnly: true, keywords: ['sso', 'oidc', 'single sign on', 'oauth', 'provider', 'identity provider'], tab: 'sso', adminOnly: true, breadcrumb: tabLabel('sso') },
   ];
 }

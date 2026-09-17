@@ -77,7 +77,14 @@ describe('auditDetail', () => {
     );
     assert.deepEqual(
       auditDetail({ action: 'message.deleted', details: { folder: 'Trash', from: null, permanent: true } }),
-      { key: 'admin.audit.detailDeletedForever', values: { from: '', folder: 'Trash' } },
+      { key: 'admin.audit.detailDeletedForeverNoSender', values: { folder: 'Trash' } },
+    );
+  });
+
+  it('drops the sender clause when a deleted message has no sender address', () => {
+    assert.deepEqual(
+      auditDetail({ action: 'message.deleted', details: { folder: 'INBOX', permanent: false } }),
+      { key: 'admin.audit.detailMovedToTrashNoSender', values: { folder: 'INBOX' } },
     );
   });
 

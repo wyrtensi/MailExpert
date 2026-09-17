@@ -119,7 +119,7 @@ export default function AuditLogTab() {
         </button>
       </div>
 
-      <div style={{ display: 'flex', flexWrap: 'wrap', gap: 8, marginBottom: 16 }}>
+      <div style={{ display: 'flex', flexWrap: 'wrap', gap: 8, marginBottom: 16, alignItems: 'flex-end' }}>
         <select aria-label={t('admin.audit.mailbox')} value={filters.account} onChange={setFilter('account')} style={{ ...controlStyle, flex: '1 1 180px' }}>
           <option value="">{t('admin.audit.allMailboxes')}</option>
           {(accounts || []).map((account) => (
@@ -138,8 +138,14 @@ export default function AuditLogTab() {
             <option key={action} value={action}>{actionText(action)}</option>
           ))}
         </select>
-        <input type="date" aria-label={t('admin.audit.fromDate')} title={t('admin.audit.fromDate')} value={filters.fromDate} onChange={setFilter('fromDate')} style={{ ...controlStyle, flex: '0 1 150px' }} />
-        <input type="date" aria-label={t('admin.audit.toDate')} title={t('admin.audit.toDate')} value={filters.toDate} onChange={setFilter('toDate')} style={{ ...controlStyle, flex: '0 1 150px' }} />
+        <label style={{ display: 'flex', flexDirection: 'column', gap: 4, flex: '0 1 150px', minWidth: 0, fontSize: 11, color: 'var(--text-tertiary)' }}>
+          {t('admin.audit.fromDate')}
+          <input type="date" value={filters.fromDate} onChange={setFilter('fromDate')} style={controlStyle} />
+        </label>
+        <label style={{ display: 'flex', flexDirection: 'column', gap: 4, flex: '0 1 150px', minWidth: 0, fontSize: 11, color: 'var(--text-tertiary)' }}>
+          {t('admin.audit.toDate')}
+          <input type="date" value={filters.toDate} onChange={setFilter('toDate')} style={controlStyle} />
+        </label>
       </div>
 
       {error && <div style={{ marginBottom: 12, fontSize: 12, color: 'var(--red)' }}>{error}</div>}
@@ -164,7 +170,7 @@ export default function AuditLogTab() {
               {entries.map((entry) => (
                 <tr key={entry.id}>
                   <td style={{ ...cellStyle, whiteSpace: 'nowrap' }}>{new Date(entry.occurredAt).toLocaleString()}</td>
-                  <td style={cellStyle}>{entry.actorEmail || t('admin.audit.deletedUser')}</td>
+                  <td style={cellStyle}>{entry.actorEmail || t('admin.audit.unknownUser')}</td>
                   <td style={cellStyle}>{entry.accountEmail || ''}</td>
                   <td style={{ ...cellStyle, color: 'var(--text-primary)' }}>{actionText(entry.action)}</td>
                   <td style={cellStyle}>{detailText(entry)}</td>

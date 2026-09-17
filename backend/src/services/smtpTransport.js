@@ -167,6 +167,9 @@ export async function createAccountSmtpTransport(inputAccount) {
     port: account.smtp_port,
     secure,
     ...(account.smtp_tls === 'none' ? { ignoreTLS: true } : {}),
+    // Without requireTLS nodemailer sends in plaintext when the server does not offer STARTTLS,
+    // so anyone able to strip that capability from the greeting would read the credentials.
+    ...(account.smtp_tls === 'STARTTLS' && !secure ? { requireTLS: true } : {}),
     auth,
     tls,
   };

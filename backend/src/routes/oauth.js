@@ -173,10 +173,16 @@ async function processMicrosoftTokens(userId, tokens, { tenantId, clientId, publ
       accountId = existing.rows[0].id;
       // A fresh consent clears a reconnect flag set by the token manager on invalid_grant;
       // otherwise the flag would refuse every later refresh of the new refresh token.
+      // The mailbox may have been added with a password: switch it to Microsoft OAuth and its
+      // servers, as the Google callback does, or it keeps signing in with the old password.
       await client.query(`
         UPDATE email_accounts SET
           oauth_access_token = $1, oauth_refresh_token = $2, oauth_token_expiry = $3,
-          name = $4, oauth_public_client = $5, oauth_reconnect_required = false, sync_error = NULL
+          name = $4, oauth_public_client = $5,
+          oauth_provider = 'microsoft', auth_user = email_address,
+          imap_host = 'outlook.office365.com', imap_port = 993, imap_tls = true,
+          smtp_host = 'smtp.office365.com', smtp_port = 587, smtp_tls = 'STARTTLS',
+          oauth_reconnect_required = false, sync_error = NULL
         WHERE id = $6
       `, [encrypt(access_token), encrypt(refresh_token), expiry, displayName || email, publicClient, accountId]);
     } else {

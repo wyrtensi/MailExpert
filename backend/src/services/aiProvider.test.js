@@ -1,3 +1,4 @@
+import { createServer } from 'node:http';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import {
   AI_PROVIDER_API_KEY,
@@ -350,6 +351,47 @@ describe('API-key provider regression', () => {
     expect(error.message).not.toMatch(/secret-tail|api-secret/);
     expect(cancelled).toBe(true);
   });
+});
+
+describe('API-key provider connection policy on every request', () => {
+  // The base URL is checked when it is saved. The policy can change afterwards, and a hostname
+  // can start resolving to an internal address, so each request is checked again.
+  async function localProvider(allowPrivateHosts) {
+    let hits = 0;
+    const server = createServer((req, res) => {
+      hits++;
+      res.writeHead(200, { 'content-type': 'application/json' });
+      res.end(JSON.stringify({ choices: [{ message: { content: 'local answer' } }] }));
+    });
+    await new Promise(resolve => server.listen(0, '127.0.0.1', resolve));
+    const { provider } = factory({
+      initial: { enabled: true, baseUrl: `http://127.0.0.1:${server.address().port}/v1`, apiKey: null, model: 'm' },
+      getConnectionPolicyFn: vi.fn().mockResolvedValue({ allowPrivateHosts }),
+      fetchFn: undefined,
+    });
+    return { provider, hits: () => hits, close: () => new Promise(resolve => server.close(resolve)) };
+  }
+
+  it('refuses a private address once private hosts are not allowed', async () => {
+    const local = await localProvider(false);
+    try {
+      await expect(local.provider.completeText([{ role: 'user', content: 'Hi' }])).rejects.toThrow();
+      expect(local.hits()).toBe(0);
+    } finally {
+      await local.close();
+    }
+  });
+
+  it('reaches a private address while private hosts are allowed', async () => {
+    const local = await localProvider(true);
+    try {
+      await expect(local.provider.completeText([{ role: 'user', content: 'Hi' }])).resolves.toBe('local answer');
+      expect(local.hits()).toBe(1);
+    } finally {
+      await local.close();
+    }
+  });
+
 });
 
 describe('ChatGPT provider dispatch', () => {

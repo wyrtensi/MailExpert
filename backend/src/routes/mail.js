@@ -291,14 +291,22 @@ function shouldBlockImages(prefs, message) {
 router.get('/thread/:threadId', async (req, res) => {
   const { threadId } = req.params;
   if (!threadId) return res.status(400).json({ error: 'threadId required' });
+  // The same conversation sent to two mailboxes has one thread key in both. A thread opened in
+  // one mailbox names it, so reading, moving or deleting that thread never reaches the other.
+  const scopedAccountId = typeof req.query.accountId === 'string' ? req.query.accountId : null;
+  if (scopedAccountId !== null && !UUID_RE.test(scopedAccountId)) {
+    return res.status(400).json({ error: 'Invalid accountId' });
+  }
 
   try {
     const accountsResult = await query(
       'SELECT id, include_in_unified_inbox FROM email_accounts WHERE enabled = true'
     );
-    const accountIds = req.query.unified === 'true'
-      ? resolveAccountScope(accountsResult.rows).accountIds
-      : accountsResult.rows.map(row => row.id);
+    const accountIds = scopedAccountId !== null
+      ? accountsResult.rows.filter(row => row.id === scopedAccountId).map(row => row.id)
+      : req.query.unified === 'true'
+        ? resolveAccountScope(accountsResult.rows).accountIds
+        : accountsResult.rows.map(row => row.id);
     if (!accountIds.length) return res.json({ messages: [] });
 
     // Show all non-deleted messages in the thread regardless of folder. This includes

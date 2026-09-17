@@ -8,6 +8,7 @@ import { sanitizeEmail, stripEmailHead, hasRemoteImages, blockRemoteImages, rewr
 import { snippetFromBody, decodeMimeWords, parseRawHeaders, buildHeadersFromMessage } from '../services/messageParser.js';
 import { resolveTrashFolder, resolveAllTrashPaths, resolveAllDraftsPaths, resolveArchiveFolder, isAllMailFolder, resolveSpamFolder, resolveAllSpamPaths, getDeleteStrategy, adjustFolderCounts, fanOutReadToSiblings, fanOutStarToSiblings, fanOutBulkReadToSiblings } from '../utils/mailUtils.js';
 import { pluginRegistry } from '../plugins/registry.js';
+import { recordAudit } from '../services/auditLog.js';
 import { listMessages } from '../services/messageService.js';
 import { recordSyncSignal } from '../services/diagnosticsRing.js';
 import { resolveAccountScope } from '../services/unifiedInbox.js';
@@ -115,6 +116,17 @@ function snippetIsGarbled(s) {
 // no post-mutation sibling to find). Rows are the pre-mutation message rows so their message_id
 // and folder are captured before a move/delete can drop them; the hook swallows per-plugin
 // errors, so a completed mutation is never turned into a 500.
+// Journal entries for messages a user deleted. Rows are the pre-delete message rows; only the
+// Message-ID, folder and sender are recorded, never the subject or body.
+function deletedMessageEntries(userId, rows, permanent) {
+  return rows.map((m) => ({
+    actorUserId: userId,
+    accountId: m.account_id,
+    action: 'message.deleted',
+    details: { messageId: m.message_id ?? null, folder: m.folder, from: m.from_email ?? null, permanent },
+  }));
+}
+
 function notifyMailMutation(rows) {
   for (const accountId of new Set(rows.map(m => m.account_id).filter(Boolean))) {
     imapManager.scheduleCountRefresh?.(accountId);
@@ -1034,7 +1046,16 @@ router.post('/folders/empty', async (req, res) => {
   (async () => {
     try {
       await imapManager.emptyFolder(account, path);
-      await query('DELETE FROM messages WHERE account_id = $1 AND folder = $2', [accountId, path]);
+      // Every row removed here is a message the user deleted for good; journal each one.
+      const removed = await query(
+        'DELETE FROM messages WHERE account_id = $1 AND folder = $2 RETURNING message_id, from_email',
+        [accountId, path],
+      );
+      recordAudit(deletedMessageEntries(
+        req.session.userId,
+        (removed.rows ?? []).map((m) => ({ ...m, account_id: accountId, folder: path })),
+        true,
+      ));
       await query(
         'UPDATE folders SET total_count = 0, unread_count = 0 WHERE account_id = $1 AND path = $2',
         [accountId, path]
@@ -1330,6 +1351,11 @@ router.post('/messages/bulk-delete', async (req, res) => {
         imapManager.broadcast({ type: 'folder_updated', folder: path, accountId });
       }
     }
+
+    recordAudit([
+      ...deletedMessageEntries(req.session.userId, expungeSucceeded, true),
+      ...deletedMessageEntries(req.session.userId, trashMoveSucceeded.map((u) => u.msg), false),
+    ]);
 
     // Refresh GTD section data for any deleted thread that still carries a GTD label sibling.
     notifyMailMutation(owned);
@@ -1933,6 +1959,7 @@ router.delete('/messages/:id', async (req, res) => {
     }
     await query('DELETE FROM messages WHERE id = $1', [id]);
     adjustFolderCounts(message.account_id, message.folder, -1, -wasUnread);
+    recordAudit(deletedMessageEntries(req.session.userId, [message], true));
     imapManager.broadcast({ type: 'folder_updated', folder: message.folder, accountId: message.account_id });
     return res.json({ ok: true });
   }
@@ -1986,6 +2013,7 @@ router.delete('/messages/:id', async (req, res) => {
     await query('DELETE FROM messages WHERE id = $1', [id]);
     adjustFolderCounts(message.account_id, message.folder, -1, -wasUnread);
   }
+  recordAudit(deletedMessageEntries(req.session.userId, [message], strategy.action === 'expunge'));
   imapManager.broadcast({ type: 'folder_updated', folder: message.folder, accountId: message.account_id });
   // Refresh GTD section data if this thread still carries a GTD label sibling (same staleness the
   // bulk-delete route addresses, reached via the single-message delete button).

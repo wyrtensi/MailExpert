@@ -1,0 +1,126 @@
+import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
+
+vi.mock('../services/db.js', () => ({ query: vi.fn() }));
+vi.mock('../middleware/auth.js', () => ({ requireAuth: (req, _res, next) => { req.session = { userId: 'u1' }; next(); } }));
+vi.mock('../index.js', () => ({
+  imapManager: {
+    broadcast: vi.fn(),
+    moveMessage: vi.fn(async () => 900),
+    permanentDeleteMessage: vi.fn(async () => {}),
+    bulkMoveMessages: vi.fn(),
+    bulkPermanentDelete: vi.fn(),
+    syncFolderOnDemand: vi.fn(async () => {}),
+    _guardMoveUid: vi.fn(),
+    _unguardMoveUid: vi.fn(),
+    scheduleCountRefresh: vi.fn(),
+  },
+}));
+vi.mock('../plugins/registry.js', () => ({ pluginRegistry: { runHook: vi.fn(async () => {}), collectHook: vi.fn(async () => []) } }));
+vi.mock('../utils/mailUtils.js', async (importOriginal) => ({
+  ...(await importOriginal()),
+  resolveTrashFolder: vi.fn(async () => 'Trash'),
+  resolveAllTrashPaths: vi.fn(async () => new Set(['Trash'])),
+  resolveAllDraftsPaths: vi.fn(async () => new Set(['Drafts'])),
+  adjustFolderCounts: vi.fn(),
+}));
+
+import express from 'express';
+import mailRoutes from './mail.js';
+import { query } from '../services/db.js';
+import { imapManager } from '../index.js';
+
+const ACCOUNT_ID = 'c3c3c3c3-3333-4333-8333-c3c3c3c3c3c3';
+const MSG = (id, folder, uid) => ({
+  id, account_id: ACCOUNT_ID, uid, folder, is_read: true, message_id: `<${uid}@example.com>`,
+  subject: 'Board minutes', from_name: 'Sender', from_email: 'sender@example.com', folder_mappings: null,
+});
+const INBOX_ID = 'a1a1a1a1-1111-4111-8111-a1a1a1a1a1a1';
+const TRASH_ID = 'b2b2b2b2-2222-4222-8222-b2b2b2b2b2b2';
+const DRAFT_ID = 'd4d4d4d4-4444-4444-8444-d4d4d4d4d4d4';
+const rows = { [INBOX_ID]: MSG(INBOX_ID, 'INBOX', 11), [TRASH_ID]: MSG(TRASH_ID, 'Trash', 22), [DRAFT_ID]: MSG(DRAFT_ID, 'Drafts', 33) };
+
+let server;
+let base;
+let errorSpy;
+let failJournal;
+beforeAll(async () => {
+  const app = express();
+  app.use(express.json());
+  app.use('/api/mail', mailRoutes);
+  await new Promise((resolve) => { server = app.listen(0, resolve); });
+  base = `http://127.0.0.1:${server.address().port}`;
+});
+afterAll(async () => { await new Promise((resolve) => server.close(resolve)); });
+beforeEach(() => {
+  vi.clearAllMocks();
+  failJournal = false;
+  errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+  query.mockReset().mockImplementation(async (sql, params) => {
+    if (sql.includes('INSERT INTO mailbox_audit_log')) {
+      if (failJournal) throw Object.assign(new Error('journal down'), { code: '57P01' });
+      return { rowCount: 1 };
+    }
+    if (/FROM messages m\s+WHERE m\.id = \$1/.test(sql)) return { rows: rows[params[0]] ? [rows[params[0]]] : [] };
+    if (/FROM messages m\s+JOIN email_accounts a/.test(sql)) return { rows: params[0].map((id) => rows[id]) };
+    if (sql.includes('FROM email_accounts WHERE id = $1')) return { rows: [{ id: ACCOUNT_ID, folder_mappings: null }] };
+    return { rows: [] };
+  });
+});
+afterEach(() => { errorSpy.mockRestore(); });
+
+const journaled = () => query.mock.calls
+  .filter(([sql]) => sql.includes('INSERT INTO mailbox_audit_log'))
+  .flatMap(([, [payload]]) => JSON.parse(payload));
+const deleted = (messageId, folder, permanent) => ({
+  actor_user_id: 'u1', account_id: ACCOUNT_ID, account_email: null, action: 'message.deleted',
+  details: { messageId, folder, from: 'sender@example.com', permanent },
+});
+
+describe('deleting messages is journaled', () => {
+  it('records a move to Trash, a delete from Trash and a draft delete without the subject', async () => {
+    for (const id of [INBOX_ID, TRASH_ID, DRAFT_ID]) {
+      expect((await fetch(`${base}/api/mail/messages/${id}`, { method: 'DELETE' })).status).toBe(200);
+    }
+    await vi.waitFor(() => expect(journaled()).toHaveLength(3));
+    expect(journaled()).toEqual([
+      deleted('<11@example.com>', 'INBOX', false),
+      deleted('<22@example.com>', 'Trash', true),
+      deleted('<33@example.com>', 'Drafts', true),
+    ]);
+    expect(JSON.stringify(journaled())).not.toContain('Board minutes');
+  });
+
+  it('records nothing when the server refuses the delete', async () => {
+    imapManager.moveMessage.mockRejectedValueOnce(new Error('NO'));
+    expect((await fetch(`${base}/api/mail/messages/${INBOX_ID}`, { method: 'DELETE' })).status).toBe(500);
+    expect(journaled()).toEqual([]);
+  });
+
+  it('records one entry per message that bulk delete removed', async () => {
+    imapManager.bulkPermanentDelete.mockResolvedValue({ succeeded: [22], failed: [] });
+    imapManager.bulkMoveMessages.mockResolvedValue({ uidMap: new Map([[11, 901]]), succeeded: [11], failed: [] });
+    const res = await fetch(`${base}/api/mail/messages/bulk-delete`, {
+      method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ ids: [INBOX_ID, TRASH_ID] }),
+    });
+    expect(res.status).toBe(200);
+    await vi.waitFor(() => expect(journaled()).toHaveLength(2));
+    expect(journaled()).toEqual([
+      deleted('<22@example.com>', 'Trash', true),
+      deleted('<11@example.com>', 'INBOX', false),
+    ]);
+  });
+
+  it('skips messages the server failed to delete and keeps the delete successful when the journal fails', async () => {
+    failJournal = true;
+    imapManager.bulkPermanentDelete.mockResolvedValue({ succeeded: [], failed: [22] });
+    imapManager.bulkMoveMessages.mockResolvedValue({ uidMap: new Map([[11, 901]]), succeeded: [11], failed: [] });
+    const res = await fetch(`${base}/api/mail/messages/bulk-delete`, {
+      method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ ids: [INBOX_ID, TRASH_ID] }),
+    });
+    expect(res.status).toBe(200);
+    expect((await res.json()).deleted).toEqual([INBOX_ID]);
+    await vi.waitFor(() => expect(errorSpy).toHaveBeenCalledWith('[audit] Failed to record entries:', '57P01'));
+    expect(JSON.parse(query.mock.calls.find(([sql]) => sql.includes('INSERT INTO mailbox_audit_log'))[1][0]))
+      .toEqual([deleted('<11@example.com>', 'INBOX', false)]);
+  });
+});

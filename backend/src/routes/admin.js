@@ -10,7 +10,8 @@ import { reloadAuthSettings } from '../services/authLimiter.js';
 import { invalidateGlobalCategorizationCache } from '../services/categorizer.js';
 import { imapManager } from '../index.js';
 import { pluginRegistry } from '../plugins/registry.js';
-import { uuidParam } from '../utils/uuid.js';
+import { UUID_RE, uuidParam } from '../utils/uuid.js';
+import { AUDIT_ACTIONS, recordAudit } from '../services/auditLog.js';
 import { getAuthSettings } from '../services/auth/authSettings.js';
 import { UserIdentityError, claimOrCreateUserByEmail, normalizeEmail } from '../services/auth/userIdentity.js';
 import { closeUserSockets } from '../services/websocket.js';
@@ -86,6 +87,14 @@ async function signOutEverywhere(userId) {
   closeUserSockets(imapManager.wss, userId);
 }
 
+// Journal entry for an admin action on a user. The id is kept because service users may have no
+// email to name them by.
+const userAuditEntry = (req, action, user) => ({
+  actorUserId: req.session.userId,
+  action,
+  details: { userId: user.id, email: user.email ?? null, isAdmin: !!user.is_admin },
+});
+
 router.get('/users', async (req, res) => {
   const limit  = Math.min(parseInt(req.query.limit)  || 100, 200);
   const offset = Math.max(parseInt(req.query.offset) || 0,   0);
@@ -112,6 +121,7 @@ router.post('/users', async (req, res) => {
     if (!created && !claimed) {
       return res.status(409).json({ error: 'A user with this email already exists', code: 'user_exists' });
     }
+    recordAudit([userAuditEntry(req, 'user.added', user)]);
     console.log(`[admin] ${req.session.userId} approved user ${user.id}`);
     return res.status(created ? 201 : 200).json({ user: publicUser(user) });
   } catch (err) {
@@ -164,7 +174,7 @@ router.patch('/users/:id', async (req, res) => {
   const settings = getAuthSettings();
   const googleMode = settings.mode === 'google';
   try {
-    const { row, lostAccess } = await withTransaction(async (client) => {
+    const { row, lostAccess, previous } = await withTransaction(async (client) => {
       await lockAdminGuard(client);
       const current = await lockTargetUser(client, id);
       const after = {
@@ -196,10 +206,16 @@ router.patch('/users/:id', async (req, res) => {
       );
       // Losing the way in: turned off, or in google mode left without an email to sign in with.
       const lost = (!current.disabled_at && !!after.disabled_at) || (googleMode && !!current.email && !after.email);
-      return { row: updated, lostAccess: lost };
+      return { row: updated, lostAccess: lost, previous: current };
     });
 
     if (lostAccess) await signOutEverywhere(id);
+    const auditEntries = [];
+    if (!!previous.disabled_at !== !!row.disabled_at) {
+      auditEntries.push(userAuditEntry(req, row.disabled_at ? 'user.disabled' : 'user.enabled', row));
+    }
+    if (!!previous.is_admin !== !!row.is_admin) auditEntries.push(userAuditEntry(req, 'user.admin_changed', row));
+    if (auditEntries.length) recordAudit(auditEntries);
     console.log(`[admin] ${req.session.userId} updated user ${id}`);
     return res.json({ ok: true, user: publicUser(row, settings.bootstrapAdminEmails) });
   } catch (err) {
@@ -214,8 +230,9 @@ router.delete('/users/:id', async (req, res) => {
   }
   const settings = getAuthSettings();
   const googleMode = settings.mode === 'google';
+  let deleted;
   try {
-    await withTransaction(async (client) => {
+    deleted = await withTransaction(async (client) => {
       await lockAdminGuard(client);
       const current = await lockTargetUser(client, id);
       if (isBootstrapEmail(settings, current.email)) {
@@ -224,6 +241,7 @@ router.delete('/users/:id', async (req, res) => {
       if (countsAsActiveAdmin(current, googleMode) && !(await otherActiveAdminExists(client, id, googleMode))) {
         throw new AdminUserError(409, 'last_admin', 'At least one active admin must remain');
       }
+      return current;
     });
   } catch (err) {
     return sendAdminUserError(res, err);
@@ -231,6 +249,7 @@ router.delete('/users/:id', async (req, res) => {
 
   await signOutEverywhere(id);
   await query('DELETE FROM users WHERE id = $1', [id]);
+  recordAudit([userAuditEntry(req, 'user.deleted', deleted)]);
   // Let plugins clean up any user-scoped data the FK cascade can't reach (GTD removes the
   // imported pet, stored under a slug derived from the user id rather than an FK). Best-effort
   // and after the delete: the user row is already gone, so a hook failure must not misreport a
@@ -261,6 +280,86 @@ router.get('/auth-events', async (req, res) => {
     query('SELECT COUNT(*) AS total FROM auth_events'),
   ]);
   res.json({ events: eventsResult.rows, total: parseInt(countResult.rows[0].total) });
+});
+
+// ── Audit log ─────────────────────────────────────────────────────────────────
+
+const AUDIT_PAGE_SIZE = 100;
+const AUDIT_ACTION_SET = new Set(AUDIT_ACTIONS);
+// The cursor is produced by the database with microsecond precision, which a JS Date would lose.
+const AUDIT_CURSOR_RE = /^(\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{6}Z)_(\d{1,19})$/;
+
+class AuditFilterError extends Error {}
+
+function parseAuditTime(value) {
+  const date = new Date(value);
+  if (typeof value !== 'string' || Number.isNaN(date.getTime())) throw new AuditFilterError();
+  return date.toISOString();
+}
+
+// Newest first, 100 per page. `from` is inclusive, `to` exclusive; `before` is the nextCursor
+// of the previous page.
+router.get('/audit', async (req, res) => {
+  const { account, user, action, from, to, before } = req.query;
+  const where = [];
+  const params = [];
+  const add = (clause, ...values) => {
+    const placeholders = values.map((value) => { params.push(value); return `$${params.length}`; });
+    where.push(clause(...placeholders));
+  };
+
+  try {
+    if (account !== undefined) {
+      if (typeof account !== 'string' || !UUID_RE.test(account)) throw new AuditFilterError();
+      add((p) => `account_id = ${p}`, account);
+    }
+    if (user !== undefined) {
+      if (typeof user !== 'string' || !UUID_RE.test(user)) throw new AuditFilterError();
+      add((p) => `actor_user_id = ${p}`, user);
+    }
+    if (action !== undefined) {
+      if (!AUDIT_ACTION_SET.has(action)) throw new AuditFilterError();
+      add((p) => `action = ${p}`, action);
+    }
+    if (from !== undefined) add((p) => `occurred_at >= ${p}`, parseAuditTime(from));
+    if (to !== undefined) add((p) => `occurred_at < ${p}`, parseAuditTime(to));
+    if (before !== undefined) {
+      const match = typeof before === 'string' ? AUDIT_CURSOR_RE.exec(before) : null;
+      if (!match) throw new AuditFilterError();
+      add((at, id) => `(occurred_at, id) < (${at}::timestamptz, ${id}::bigint)`, match[1], match[2]);
+    }
+  } catch (err) {
+    if (!(err instanceof AuditFilterError)) throw err;
+    return res.status(400).json({ error: 'Invalid audit filter', code: 'invalid_filter' });
+  }
+
+  params.push(AUDIT_PAGE_SIZE + 1);
+  const { rows } = await query(
+    `SELECT id::text AS id, occurred_at,
+            to_char(occurred_at AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.US"Z"') AS cursor_at,
+            actor_user_id, actor_email, account_id, account_email, action, details
+       FROM mailbox_audit_log
+       ${where.length ? `WHERE ${where.join(' AND ')}` : ''}
+      ORDER BY occurred_at DESC, id DESC
+      LIMIT $${params.length}`,
+    params,
+  );
+
+  const page = rows.slice(0, AUDIT_PAGE_SIZE);
+  const last = page[page.length - 1];
+  res.json({
+    entries: page.map((r) => ({
+      id: r.id,
+      occurredAt: r.occurred_at,
+      actorUserId: r.actor_user_id,
+      actorEmail: r.actor_email,
+      accountId: r.account_id,
+      accountEmail: r.account_email,
+      action: r.action,
+      details: r.details,
+    })),
+    nextCursor: rows.length > AUDIT_PAGE_SIZE ? `${last.cursor_at}_${last.id}` : null,
+  });
 });
 
 router.patch('/settings', async (req, res) => {

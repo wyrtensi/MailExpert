@@ -1,5 +1,6 @@
 import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 
+vi.mock('../services/auditLog.js', () => ({ recordAudit: vi.fn(async () => {}) }));
 vi.mock('../services/db.js', () => ({ query: vi.fn() }));
 vi.mock('../middleware/auth.js', () => ({
   requireAuth: (req, _res, next) => { req.session = { userId: 'user-2' }; next(); },
@@ -68,7 +69,7 @@ describe('mailboxes are shared by every user', () => {
   it('deletes a mailbox someone else added', async () => {
     const res = await fetch(`${base}/api/accounts/${ID}`, { method: 'DELETE' });
     expect(res.status).toBe(200);
-    expect(query).toHaveBeenCalledWith('SELECT id FROM email_accounts WHERE id = $1', [ID]);
+    expect(query).toHaveBeenCalledWith('SELECT id, email_address FROM email_accounts WHERE id = $1', [ID]);
     expect(query).toHaveBeenCalledWith('DELETE FROM email_accounts WHERE id = $1', [ID]);
     expect(imapManager.disconnectAccount).toHaveBeenCalledWith(ID);
     expect(ownerFilters()).toEqual([]);

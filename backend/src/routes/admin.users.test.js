@@ -17,6 +17,7 @@ vi.mock('../services/categorizer.js', () => ({ invalidateGlobalCategorizationCac
 vi.mock('../plugins/registry.js', () => ({ pluginRegistry: { runHook: vi.fn(async () => {}) } }));
 vi.mock('./auth.js', () => ({ destroyUserSessions: vi.fn(async () => {}) }));
 vi.mock('../services/websocket.js', () => ({ closeUserSockets: vi.fn() }));
+vi.mock('../services/auditLog.js', () => ({ AUDIT_ACTIONS: [], recordAudit: vi.fn(async () => {}) }));
 
 import express from 'express';
 import adminRoutes from './admin.js';
@@ -24,6 +25,7 @@ import { query, withTransaction } from '../services/db.js';
 import { imapManager } from '../index.js';
 import { destroyUserSessions } from './auth.js';
 import { closeUserSockets } from '../services/websocket.js';
+import { recordAudit } from '../services/auditLog.js';
 
 const ADMIN_ID = '00000000-0000-0000-0000-00000000000a';
 const USER_ID = '00000000-0000-0000-0000-00000000000b';
@@ -77,6 +79,7 @@ beforeEach(() => {
   destroyUserSessions.mockClear();
   closeUserSockets.mockClear();
   imapManager.disconnectAccount.mockClear();
+  recordAudit.mockClear();
 });
 afterEach(() => {
   vi.unstubAllEnvs();
@@ -224,6 +227,63 @@ describe('DELETE /api/admin/users/:id', () => {
     expect(closeUserSockets).toHaveBeenCalledWith(imapManager.wss, USER_ID);
     expect(query).toHaveBeenCalledWith('DELETE FROM users WHERE id = $1', [USER_ID]);
     expect(imapManager.disconnectAccount).not.toHaveBeenCalled();
+  });
+});
+
+describe('user administration is journaled', () => {
+  const emailLookup = [/^\s*SELECT .* FROM users WHERE lower\(email\) = \$1/, { rows: [] }];
+  const claim = (row) => [/^\s*UPDATE users SET email = \$1/, { rows: row ? [row] : [] }];
+  const update = (row) => [/^\s*UPDATE users\s+SET is_admin = \$2/, (params) => ({
+    rows: [{ ...row, is_admin: params[1], email: params[2], disabled_at: params[3] }],
+  })];
+  const entry = (action, isAdmin = false) => ({
+    actorUserId: ADMIN_ID, action, details: { userId: USER_ID, email: 'user@example.com', isAdmin },
+  });
+
+  it('records an approved user whether created or claimed', async () => {
+    installTransaction([lock, emailLookup, claim(null), [/^\s*INSERT INTO users/, { rows: [USER_ROW] }]]);
+    await send('POST', '/users', { email: 'user@example.com' });
+    installTransaction([lock, emailLookup, claim(USER_ROW)]);
+    await send('POST', '/users', { email: 'user@example.com' });
+    expect(recordAudit.mock.calls).toEqual([[[entry('user.added')]], [[entry('user.added')]]]);
+  });
+
+  it('records nothing for an address that is already approved', async () => {
+    installTransaction([lock, [/^\s*SELECT .* FROM users WHERE lower\(email\) = \$1/, { rows: [USER_ROW] }]]);
+    await send('POST', '/users', { email: 'user@example.com' });
+    expect(recordAudit).not.toHaveBeenCalled();
+  });
+
+  it('records only the flags that changed', async () => {
+    installTransaction([lock, target(USER_ROW), update(USER_ROW)]);
+    await send('PATCH', `/users/${USER_ID}`, { disabled: true, isAdmin: true });
+    expect(recordAudit).toHaveBeenCalledWith([entry('user.disabled', true), entry('user.admin_changed', true)]);
+
+    recordAudit.mockClear();
+    const disabledRow = { ...USER_ROW, disabled_at: '2026-09-16T00:00:00.000Z' };
+    installTransaction([lock, target(disabledRow), update(disabledRow)]);
+    await send('PATCH', `/users/${USER_ID}`, { disabled: false, isAdmin: false });
+    expect(recordAudit).toHaveBeenCalledWith([entry('user.enabled')]);
+
+    recordAudit.mockClear();
+    installTransaction([lock, target(USER_ROW), update(USER_ROW), [/SELECT id FROM users WHERE lower\(email\) = \$1 AND id <> \$2/, { rows: [] }]]);
+    await send('PATCH', `/users/${USER_ID}`, { email: 'new@example.com' });
+    expect(recordAudit).not.toHaveBeenCalled();
+  });
+
+  it('records a deleted user with the email and role it had', async () => {
+    installTransaction([lock, target(USER_ROW)]);
+    query.mockResolvedValue({ rows: [] });
+    await send('DELETE', `/users/${USER_ID}`);
+    expect(recordAudit).toHaveBeenCalledWith([entry('user.deleted')]);
+  });
+
+  it('records nothing when a guard refuses the change', async () => {
+    installTransaction([lock, target({ ...USER_ROW, is_admin: true }), otherAdmins(0)]);
+    await send('DELETE', `/users/${USER_ID}`);
+    installTransaction([lock, target({ ...USER_ROW, is_admin: true }), otherAdmins(0)]);
+    await send('PATCH', `/users/${USER_ID}`, { isAdmin: false });
+    expect(recordAudit).not.toHaveBeenCalled();
   });
 });
 

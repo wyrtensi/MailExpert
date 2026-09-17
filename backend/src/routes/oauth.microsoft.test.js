@@ -13,6 +13,7 @@ vi.mock('../services/encryption.js', () => ({
   decrypt: (v) => v,
 }));
 vi.mock('../services/redis.js', () => ({ redisClient: {} }));
+vi.mock('../services/auditLog.js', () => ({ recordAudit: vi.fn(async () => {}) }));
 // ID-token signature checks are out of scope here; the route only needs the claims.
 vi.mock('jose', () => ({
   createRemoteJWKSet: vi.fn(() => ({})),
@@ -23,6 +24,7 @@ import express from 'express';
 import oauthRoutes from './oauth.js';
 import { imapManager } from '../index.js';
 import { withTransaction } from '../services/db.js';
+import { recordAudit } from '../services/auditLog.js';
 
 const USER_ID = '22222222-2222-2222-2222-222222222222';
 const TENANT_ID = 'contoso-tenant';
@@ -53,16 +55,17 @@ afterAll(async () => {
   await new Promise((resolve) => server.close(resolve));
 });
 
-// Transaction client for an account row that already exists (reconsent).
+// Transaction client for the mailbox the consent names; it already exists unless told otherwise.
 let dbCalls;
-function installDb() {
+function installDb({ existing = true } = {}) {
   dbCalls = [];
   const client = {
     query: vi.fn(async (sql, params) => {
       dbCalls.push([sql, params]);
       if (/pg_advisory_xact_lock/.test(sql)) return { rows: [] };
-      if (/^\s*SELECT id FROM email_accounts/.test(sql)) return { rows: [{ id: 'ms-acc' }] };
+      if (/^\s*SELECT id FROM email_accounts/.test(sql)) return { rows: existing ? [{ id: 'ms-acc' }] : [] };
       if (/^\s*UPDATE email_accounts/.test(sql)) return { rows: [], rowCount: 1 };
+      if (/^\s*INSERT INTO email_accounts/.test(sql)) return { rows: [{ id: 'ms-new' }] };
       if (/^\s*SELECT \* FROM email_accounts WHERE id = \$1/.test(sql)) {
         return { rows: [{ id: params[0], email_address: 'user@contoso.com', oauth_provider: 'microsoft' }] };
       }
@@ -100,6 +103,7 @@ beforeEach(() => {
   withTransaction.mockReset();
   imapManager.connectAccount.mockClear();
   imapManager.clearConnectCooldown.mockClear();
+  recordAudit.mockClear();
   installDb();
   logSpies = ['log', 'warn', 'error', 'info'].map((m) => vi.spyOn(console, m).mockImplementation(() => {}));
 });
@@ -144,6 +148,35 @@ describe('Microsoft reconsent clears the reconnect flag and connect cooldown', (
     expect(sql).toMatch(/oauth_reconnect_required\s*=\s*false/);
     expect(sql).toMatch(/sync_error\s*=\s*NULL/);
     expectCooldownClearedBeforeConnect();
+  });
+});
+
+describe('Microsoft consent is journaled', () => {
+  const callback = () => fetch(`${base}/oauth/microsoft/callback?code=auth-code&state=${NONCE}`, {
+    redirect: 'manual', headers: { 'x-test-user': USER_ID },
+  });
+
+  it('records a reconsent of an existing mailbox as a reconnect', async () => {
+    stubMicrosoft(() => json(true, TOKENS));
+    await callback();
+    expect(recordAudit).toHaveBeenCalledWith({
+      actorUserId: USER_ID, accountId: 'ms-acc', action: 'mailbox.reconnected', details: { oauthProvider: 'microsoft' },
+    });
+  });
+
+  it('records a new mailbox as added', async () => {
+    installDb({ existing: false });
+    stubMicrosoft(() => json(true, TOKENS));
+    await callback();
+    expect(recordAudit).toHaveBeenCalledWith({
+      actorUserId: USER_ID, accountId: 'ms-new', action: 'mailbox.added', details: { protocol: 'imap', oauthProvider: 'microsoft' },
+    });
+  });
+
+  it('records nothing when the token exchange fails', async () => {
+    stubMicrosoft(() => json(false, { error: 'invalid_grant' }));
+    await callback();
+    expect(recordAudit).not.toHaveBeenCalled();
   });
 });
 

@@ -5,11 +5,13 @@ vi.mock('../middleware/auth.js', () => ({
   requireAuth: (req, _res, next) => { req.session = { userId: 'user-1' }; next(); },
 }));
 vi.mock('../index.js', () => ({ imapManager: { emptyFolder: vi.fn(), broadcast: vi.fn() } }));
+vi.mock('../services/auditLog.js', () => ({ recordAudit: vi.fn(async () => {}) }));
 
 import express from 'express';
 import mailRoutes from './mail.js';
 import { query } from '../services/db.js';
 import { imapManager } from '../index.js';
+import { recordAudit } from '../services/auditLog.js';
 
 const ACCOUNT_ID = 'c3c3c3c3-3333-4333-8333-c3c3c3c3c3c3';
 const ACCOUNT = { id: ACCOUNT_ID, user_id: 'user-1' };
@@ -30,10 +32,35 @@ describe('POST /api/mail/folders/empty — async background empty', () => {
   afterAll(async () => { await new Promise(r => server.close(r)); });
   beforeEach(() => {
     query.mockReset(); imapManager.emptyFolder.mockReset(); imapManager.broadcast.mockReset();
+    recordAudit.mockClear();
     query.mockImplementation((sql) => {
       if (sql.includes('FROM email_accounts WHERE id = $1')) return Promise.resolve({ rows: [ACCOUNT] });
+      if (sql.startsWith('DELETE FROM messages WHERE account_id = $1 AND folder = $2')) {
+        return Promise.resolve({ rows: [
+          { message_id: '<1@example.com>', from_email: 'a@example.com' },
+          { message_id: '<2@example.com>', from_email: 'b@example.com' },
+        ] });
+      }
       return Promise.resolve({ rows: [] });
     });
+  });
+
+  it('journals every message removed from the emptied folder', async () => {
+    imapManager.emptyFolder.mockResolvedValue(undefined);
+    await empty('Trash');
+    await tick();
+    const entry = (messageId, from) => ({
+      actorUserId: 'user-1', accountId: ACCOUNT_ID, action: 'message.deleted',
+      details: { messageId, folder: 'Trash', from, permanent: true },
+    });
+    expect(recordAudit).toHaveBeenCalledWith([entry('<1@example.com>', 'a@example.com'), entry('<2@example.com>', 'b@example.com')]);
+  });
+
+  it('journals nothing when the server empty fails', async () => {
+    imapManager.emptyFolder.mockRejectedValue(new Error('throttled'));
+    await empty('Trash');
+    await tick();
+    expect(recordAudit).not.toHaveBeenCalled();
   });
 
   const empty = (path) => fetch(`${base}/api/mail/folders/empty`, {

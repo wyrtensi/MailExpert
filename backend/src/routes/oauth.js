@@ -4,6 +4,7 @@ import { createRemoteJWKSet, jwtVerify } from 'jose';
 import { withTransaction } from '../services/db.js';
 import { imapManager } from '../index.js';
 import { encrypt } from '../services/encryption.js';
+import { recordAudit } from '../services/auditLog.js';
 import { MICROSOFT_AUTH_URL, getMsConfig, refreshMicrosoftToken } from '../services/oauth/microsoftOAuth.js';
 import { redactEmail } from '../utils/redact.js';
 import googleOAuthRoutes from './oauthGoogle.js';
@@ -157,7 +158,7 @@ async function processMicrosoftTokens(userId, tokens, { tenantId, clientId, publ
   // lock. Two OAuth callbacks racing for the same mailbox would otherwise both miss the SELECT
   // and each INSERT, producing duplicate account rows. The second waiter blocks until the first
   // commits, then sees the row and updates it. Mailboxes are shared, so the address alone names one.
-  const account = await withTransaction(async (client) => {
+  const { account, created } = await withTransaction(async (client) => {
     await client.query('SELECT pg_advisory_xact_lock(hashtext($1))',
       [`oauth-account:${email.toLowerCase()}`]);
 
@@ -167,6 +168,7 @@ async function processMicrosoftTokens(userId, tokens, { tenantId, clientId, publ
     );
 
     let accountId;
+    let created = false;
     if (existing.rows.length) {
       accountId = existing.rows[0].id;
       // A fresh consent clears a reconnect flag set by the token manager on invalid_grant;
@@ -197,10 +199,18 @@ async function processMicrosoftTokens(userId, tokens, { tenantId, clientId, publ
         RETURNING *
       `, [userId, displayName, email, color, encrypt(access_token), encrypt(refresh_token), expiry, publicClient]);
       accountId = result.rows[0].id;
+      created = true;
     }
 
     const accountResult = await client.query('SELECT * FROM email_accounts WHERE id = $1', [accountId]);
-    return accountResult.rows[0];
+    return { account: accountResult.rows[0], created };
+  });
+
+  recordAudit({
+    actorUserId: userId,
+    accountId: account.id,
+    action: created ? 'mailbox.added' : 'mailbox.reconnected',
+    details: created ? { protocol: 'imap', oauthProvider: 'microsoft' } : { oauthProvider: 'microsoft' },
   });
 
   // Fresh tokens from a (re)consent: lift any auth cooldown left by the old, rejected grant.

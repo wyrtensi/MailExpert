@@ -2,6 +2,7 @@ import { Router } from 'express';
 import { withTransaction } from '../services/db.js';
 import { imapManager } from '../index.js';
 import { encrypt } from '../services/encryption.js';
+import { recordAudit } from '../services/auditLog.js';
 import { redactEmail } from '../utils/redact.js';
 import {
   buildGoogleAuthorizationUrl,
@@ -97,7 +98,8 @@ router.get('/callback', async (req, res) => {
     await recordGoogleGrant({ appId: config.appId, email: identity.email, sub: identity.sub });
     if (!hasGoogleMailScope(tokens.scope)) throw new CallbackError('scope_missing');
 
-    const { account, result } = await upsertGoogleAccount(pending.userId, identity, tokens, config.appId);
+    const { account, result, previousAppId } = await upsertGoogleAccount(pending.userId, identity, tokens, config.appId);
+    recordGoogleConsent({ userId: pending.userId, account, result, previousAppId, appId: config.appId });
 
     reconnectAccount(account, result);
     res.redirect(`/?oauth_success=${PROVIDER}&oauth_result=${result}`);
@@ -132,8 +134,10 @@ async function upsertGoogleAccount(userId, identity, tokens, appId) {
 
     let accountId;
     let result;
+    let previousAppId = null;
     if (existing.rows.length) {
       const row = existing.rows[0];
+      previousAppId = row.oauth_app_id;
       // A stored refresh token only works with the app that issued it, so it can be kept
       // only when the account stays on the same app.
       const canKeepStoredRefresh = !!row.oauth_refresh_token && row.oauth_app_id === appId;
@@ -178,8 +182,23 @@ async function upsertGoogleAccount(userId, identity, tokens, appId) {
     }
 
     const accountResult = await client.query('SELECT * FROM email_accounts WHERE id = $1', [accountId]);
-    return { account: accountResult.rows[0], result };
+    return { account: accountResult.rows[0], result, previousAppId };
   });
+}
+
+// Journal the consent: a new mailbox is an addition, an existing one a reconnect, and moving the
+// mailbox to another Google app also changes its connection.
+function recordGoogleConsent({ userId, account, result, previousAppId, appId }) {
+  const entry = { actorUserId: userId, accountId: account.id };
+  if (result === 'created') {
+    recordAudit([{ ...entry, action: 'mailbox.added', details: { protocol: 'imap', oauthProvider: PROVIDER } }]);
+    return;
+  }
+  const entries = [{ ...entry, action: 'mailbox.reconnected', details: { oauthProvider: PROVIDER } }];
+  if (previousAppId !== appId) {
+    entries.push({ ...entry, action: 'mailbox.connection_changed', details: { fields: ['oauth_app_id'] } });
+  }
+  recordAudit(entries);
 }
 
 // Bring the mailbox online with the new tokens. An updated account may still hold a

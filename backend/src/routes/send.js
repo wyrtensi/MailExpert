@@ -12,6 +12,7 @@ import { redactEmail } from '../utils/redact.js';
 import { resolveSentFolder } from '../utils/mailUtils.js';
 import { generateVCard } from '../utils/vcard.js';
 import { defaultAddressBookId } from '../services/addressBooks.js';
+import { recordAudit } from '../services/auditLog.js';
 import { createAccountSmtpTransport } from '../services/smtpTransport.js';
 import { imapManager } from '../index.js';
 import { pluginRegistry } from '../plugins/registry.js';
@@ -382,6 +383,13 @@ router.post('/send', async (req, res) => {
 
     await transport.sendMail(mailOptions);
     delivered = true;
+    // Journal the accepted message by its Message-ID and recipients; never its subject or body.
+    recordAudit({
+      actorUserId: req.session.userId,
+      accountId: account.id,
+      action: 'message.sent',
+      details: { messageId: mailOptions.messageId, to: normalizedTo, cc: normalizedCc, bcc: normalizedBcc },
+    });
 
     // Auto-learn sent recipients so they rank above inbound-only senders in autocomplete.
     // Fire-and-forget — a DB error here must never affect the send response.

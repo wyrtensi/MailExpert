@@ -9,6 +9,7 @@ import { validateHost } from '../services/hostValidation.js';
 import { getConnectionPolicy } from '../services/connectionPolicy.js';
 import { computeAccountHealth } from '../services/accountHealth.js';
 import { pluginRegistry } from '../plugins/registry.js';
+import { recordAudit } from '../services/auditLog.js';
 import { createKeyedSerializer } from '../utils/keyedSerializer.js';
 import { uuidParam } from '../utils/uuid.js';
 
@@ -112,6 +113,23 @@ router.get('/', async (req, res) => {
   res.json(enriched);
 });
 
+// Server and credential settings whose change the audit log records, by name only. The settings
+// form sends every server field on each save, so a field counts only when its value differs.
+const CONNECTION_FIELDS = [
+  'imap_host', 'imap_port', 'imap_tls', 'imap_skip_tls_verify', 'smtp_host', 'smtp_port', 'smtp_tls',
+  'auth_user', 'auth_pass', 'smtp_auth_user', 'smtp_auth_pass',
+];
+const PASSWORD_FIELDS = new Set(['auth_pass', 'smtp_auth_pass']);
+
+function changedConnectionFields(stored, updates) {
+  return CONNECTION_FIELDS.filter((key) => {
+    if (!(key in updates)) return false;
+    // Passwords are stored encrypted and never compared: a new one or a cleared one is a change.
+    if (PASSWORD_FIELDS.has(key)) return !!updates[key] || !!stored[key];
+    return String(stored[key] ?? '') !== String(updates[key] ?? '');
+  });
+}
+
 router.post('/', async (req, res) => {
   const {
     name, sender_name = null, email_address, color = '#6366f1', protocol = 'imap',
@@ -161,6 +179,12 @@ router.post('/', async (req, res) => {
     ]);
 
     const account = result.rows[0];
+    recordAudit({
+      actorUserId: req.session.userId,
+      accountId: account.id,
+      action: 'mailbox.added',
+      details: { protocol: account.protocol, oauthProvider: account.oauth_provider ?? null },
+    });
 
     // Immediately try to connect — needs full credentials from DB row
     if (protocol === 'imap') {
@@ -178,9 +202,10 @@ router.put('/:id', async (req, res) => {
   const { id } = req.params;
   const updates = req.body;
 
-  // The mailbox must exist.
-  const check = await query('SELECT id FROM email_accounts WHERE id = $1', [id]);
-  if (!check.rows.length) return res.status(404).json({ error: 'Account not found' });
+  // The mailbox must exist. The stored row tells the audit log what actually changed.
+  const storedResult = await query('SELECT * FROM email_accounts WHERE id = $1', [id]);
+  if (!storedResult.rows.length) return res.status(404).json({ error: 'Account not found' });
+  const stored = storedResult.rows[0];
 
   if ('name' in updates && hasHeaderInjectionChars(updates.name)) {
     return res.status(400).json({ error: 'Name cannot contain control characters' });
@@ -276,6 +301,18 @@ router.put('/:id', async (req, res) => {
 
   if (!sets.length && !pluginPersisted) return res.status(400).json({ error: 'No valid fields to update' });
 
+  if (sets.length) {
+    const auditEntries = [];
+    const fields = changedConnectionFields(stored, updates);
+    if (fields.length) {
+      auditEntries.push({ actorUserId: req.session.userId, accountId: id, action: 'mailbox.connection_changed', details: { fields } });
+    }
+    if ('enabled' in updates && !!updates.enabled !== !!stored.enabled) {
+      auditEntries.push({ actorUserId: req.session.userId, accountId: id, action: updates.enabled ? 'mailbox.enabled' : 'mailbox.disabled', details: {} });
+    }
+    if (auditEntries.length) recordAudit(auditEntries);
+  }
+
   const payload = { ...safeAccount(updated), ...pluginPatch };
   // Surface any plugin-rejected field sub-values (e.g. GTD folder paths reset to defaults) so the
   // settings form can flag them. Keyed by field name as the client expects.
@@ -322,13 +359,20 @@ router.put('/:id', async (req, res) => {
 router.delete('/:id', async (req, res) => {
   try {
     const { id } = req.params;
-    const check = await query('SELECT id FROM email_accounts WHERE id = $1', [id]);
+    const check = await query('SELECT id, email_address FROM email_accounts WHERE id = $1', [id]);
     if (!check.rows.length) return res.status(404).json({ error: 'Account not found' });
 
     // Delete from DB first (cascades to messages and folders immediately).
     // Disconnect IMAP afterward — fire-and-forget so a slow server logout
     // doesn't block the response.
     await query('DELETE FROM email_accounts WHERE id = $1', [id]);
+    // The row is gone, so the entry names the mailbox by the address read above.
+    recordAudit({
+      actorUserId: req.session.userId,
+      accountEmail: check.rows[0].email_address,
+      action: 'mailbox.deleted',
+      details: {},
+    });
     imapManager.disconnectAccount(id).catch(err =>
       console.error(`Disconnect error after delete for ${id}:`, err.message)
     );

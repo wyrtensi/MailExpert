@@ -1591,6 +1591,7 @@
       "outcomeFailed": "Błąd: {{error}}",
       "errorTokenUnreadable": "zapisanego tokenu nie da się odszyfrować, wpisz go ponownie",
       "errorPolicyNotAllow": "zasada nie jest typu Allow",
+      "errorNotAttached": "zasada nie jest przypisana do tej aplikacji",
       "errorInternal": "błąd wewnętrzny, zobacz dziennik serwera",
       "errorInvalidId": "ID konta ma 32 znaki szesnastkowe; ID aplikacji i zasady to identyfikatory UUID.",
       "errorIncomplete": "Aby włączyć synchronizację, uzupełnij wszystkie ID i token interfejsu API.",

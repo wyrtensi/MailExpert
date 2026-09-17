@@ -1572,6 +1572,7 @@
       "outcomeFailed": "Fehlgeschlagen: {{error}}",
       "errorTokenUnreadable": "das gespeicherte Token lässt sich nicht entschlüsseln, bitte neu eingeben",
       "errorPolicyNotAllow": "die Richtlinie ist keine Allow-Richtlinie",
+      "errorNotAttached": "die Richtlinie ist nicht mit dieser Anwendung verknüpft",
       "errorInternal": "interner Fehler, siehe Serverprotokoll",
       "errorInvalidId": "Die Konto-ID besteht aus 32 Hexadezimalzeichen, Anwendungs- und Richtlinien-ID sind UUIDs.",
       "errorIncomplete": "Um den Abgleich einzuschalten, alle IDs und das API-Token ausfüllen.",

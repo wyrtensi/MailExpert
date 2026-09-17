@@ -16,6 +16,7 @@ export const ACCESS_SYNC_OUTCOME_KEYS = Object.freeze({
 export const ACCESS_SYNC_ERROR_KEYS = Object.freeze({
   token_unreadable: 'admin.accessSync.errorTokenUnreadable',
   policy_not_allow: 'admin.accessSync.errorPolicyNotAllow',
+  policy_not_attached: 'admin.accessSync.errorNotAttached',
   internal_error: 'admin.accessSync.errorInternal',
 });
 

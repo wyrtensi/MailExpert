@@ -1572,6 +1572,7 @@
       "outcomeFailed": "Error: {{error}}",
       "errorTokenUnreadable": "el token guardado no se puede descifrar, vuelve a introducirlo",
       "errorPolicyNotAllow": "la política no es de tipo Allow",
+      "errorNotAttached": "la política no está asociada a esta aplicación",
       "errorInternal": "error interno, consulta el registro del servidor",
       "errorInvalidId": "El ID de cuenta tiene 32 caracteres hexadecimales; los ID de aplicación y de política son UUID.",
       "errorIncomplete": "Para activar la sincronización, rellena todos los ID y el token de API.",

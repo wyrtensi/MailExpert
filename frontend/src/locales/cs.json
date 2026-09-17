@@ -1701,6 +1701,7 @@
       "outcomeFailed": "Chyba: {{error}}",
       "errorTokenUnreadable": "uložený token nelze dešifrovat, zadejte ho znovu",
       "errorPolicyNotAllow": "zásada není typu Allow",
+      "errorNotAttached": "zásada není přiřazena k této aplikaci",
       "errorInternal": "interní chyba, viz protokol serveru",
       "errorInvalidId": "ID účtu má 32 šestnáctkových znaků; ID aplikace a zásady jsou UUID.",
       "errorIncomplete": "Chcete-li synchronizaci zapnout, vyplňte všechna ID a token pro API.",

@@ -1572,6 +1572,7 @@
       "outcomeFailed": "Failed: {{error}}",
       "errorTokenUnreadable": "the stored token cannot be decrypted, enter it again",
       "errorPolicyNotAllow": "the policy is not an Allow policy",
+      "errorNotAttached": "the policy is not attached to this application",
       "errorInternal": "internal error, see the server log",
       "errorInvalidId": "The account ID is 32 hexadecimal characters; the application and policy IDs are UUIDs.",
       "errorIncomplete": "To turn the sync on, fill in every ID and the API token.",

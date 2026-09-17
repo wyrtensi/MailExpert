@@ -1572,6 +1572,7 @@
       "outcomeFailed": "失败：{{error}}",
       "errorTokenUnreadable": "无法解密已保存的令牌，请重新输入",
       "errorPolicyNotAllow": "该策略不是 Allow 策略",
+      "errorNotAttached": "该策略未关联到此应用",
       "errorInternal": "内部错误，请查看服务器日志",
       "errorInvalidId": "账户 ID 为 32 个十六进制字符；应用 ID 和策略 ID 为 UUID。",
       "errorIncomplete": "要开启同步，请填写所有 ID 和 API 令牌。",

@@ -74,6 +74,7 @@ describe('accessSyncRunSummary', () => {
   it('translates the errors the server names and passes Cloudflare status text through', () => {
     assert.equal(accessSyncRunSummary({ ...run, outcome: 'failed', error: 'token_unreadable' }, 10).errorKey, 'admin.accessSync.errorTokenUnreadable');
     assert.equal(accessSyncRunSummary({ ...run, outcome: 'failed', error: 'policy_not_allow' }, 10).errorKey, 'admin.accessSync.errorPolicyNotAllow');
+    assert.equal(accessSyncRunSummary({ ...run, outcome: 'failed', error: 'policy_not_attached' }, 10).errorKey, 'admin.accessSync.errorNotAttached');
     assert.equal(accessSyncRunSummary({ ...run, outcome: 'failed', error: 'internal_error' }, 10).errorKey, 'admin.accessSync.errorInternal');
     const cloudflare = accessSyncRunSummary({ ...run, outcome: 'failed', error: 'Cloudflare getPolicy failed (403): error 10000' }, 10);
     assert.equal(cloudflare.key, 'admin.accessSync.outcomeFailed');

@@ -363,6 +363,18 @@ describe('insertCopiedSibling', () => {
     expect(ins[0]).toContain('delivery_addresses');
   });
 
+  it('copies the provider ids and draft Bcc recipients with the row', async () => {
+    query.mockResolvedValueOnce({ rows: [{ id: 'row-new', is_read: true }] });
+    query.mockResolvedValue({ rows: [] });
+    await insertCopiedSibling('acct-1', 100, 'INBOX', 'Todo', 5001);
+    const ins = findCall('INSERT INTO messages');
+    const [insertList, selectList] = ins[0].split('SELECT');
+    for (const col of ['provider_thread_id', 'provider_message_id', 'bcc_addresses']) {
+      expect(insertList).toContain(col);
+      expect(selectList).toContain(col);
+    }
+  });
+
   it('increments destination unread only when the copied message is unread', async () => {
     query.mockResolvedValueOnce({ rows: [{ id: 'row-new', is_read: false }] });
     query.mockResolvedValue({ rows: [] });

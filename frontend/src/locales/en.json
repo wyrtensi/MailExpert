@@ -1623,12 +1623,17 @@
     "deleteConfirm": "Permanently delete this contact?",
     "addEmail": "Add email",
     "addPhone": "Add phone",
+    "addWebsite": "Add website",
+    "websitePh": "https://example.com",
+    "write": "Write",
+    "openContact": "Open contact",
     "fields": {
       "displayName": "Display name",
       "firstName": "First name",
       "lastName": "Last name",
       "email": "Email",
       "phone": "Phone",
+      "website": "Website",
       "organization": "Organization",
       "notes": "Notes",
       "emailsSent": "Emails sent",
@@ -1641,6 +1646,11 @@
     },
     "phoneTypes": {
       "mobile": "Mobile",
+      "work": "Work",
+      "home": "Home",
+      "other": "Other"
+    },
+    "urlTypes": {
       "work": "Work",
       "home": "Home",
       "other": "Other"

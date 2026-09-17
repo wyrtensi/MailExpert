@@ -1934,9 +1934,12 @@ export default function Sidebar() {
               onClick={() => { setShowContacts(!showContacts); if (isMobile) setMobileSidebarOpen(false); }}
               title={t('contacts.title')}
               style={{
-                width: 28, height: 28, borderRadius: 7,
+                ...(sidebarCollapsed
+                  ? { width: 28, height: 28, justifyContent: 'center' }
+                  : { width: '100%', height: 30, padding: '0 10px', gap: 10, justifyContent: 'flex-start' }),
+                borderRadius: 7,
                 border: 'none', cursor: 'pointer',
-                display: 'flex', alignItems: 'center', justifyContent: 'center',
+                display: 'flex', alignItems: 'center',
                 background: showContacts ? 'var(--bg-hover)' : 'transparent',
                 color: showContacts ? 'var(--accent)' : 'var(--text-tertiary)',
                 transition: 'background 0.1s, color 0.1s',
@@ -1945,6 +1948,11 @@ export default function Sidebar() {
               onMouseLeave={e => { if (!showContacts) { e.currentTarget.style.background = 'transparent'; e.currentTarget.style.color = 'var(--text-tertiary)'; } }}
             >
               {ICONS.contacts}
+              {!sidebarCollapsed && (
+                <span style={{ fontSize: 13, color: showContacts ? 'var(--accent)' : 'var(--text-secondary)' }}>
+                  {t('contacts.title')}
+                </span>
+              )}
             </button>
           </div>
           <div style={{ padding: '8px', borderTop: '1px solid var(--border-subtle)' }}>

@@ -153,6 +153,7 @@ const SAME_VALUE_ALLOWED = {
   'compose.bccPh': [['en', 'ru']],
   'compose.ccPh': [['en', 'ru']],
   'compose.toPh': [['en', 'ru']],
+  'contacts.websitePh': [['en', 'ru']],
 };
 
 // Locale-specific plural forms are allowed per locale. A locale may add forms

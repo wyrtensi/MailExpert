@@ -2505,8 +2505,8 @@ ${bodyContent}
             <div style={{ flex: 1, minWidth: 0 }}>
               {isMobile ? (
                 <>
-                  <div style={{ fontSize: 14, fontWeight: 600, color: 'var(--text-primary)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
-                    {message.from_name || message.from_email}
+                  <div style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                    <SenderContactLink message={message} style={{ fontSize: 14, fontWeight: 600 }} />
                   </div>
                   {message.from_name && (
                     <div style={{ fontSize: 12, color: 'var(--text-tertiary)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
@@ -2543,9 +2543,7 @@ ${bodyContent}
               ) : (
                 <>
                   <div style={{ display: 'flex', alignItems: 'baseline', gap: 8, flexWrap: 'wrap' }}>
-                    <span style={{ fontSize: 14, fontWeight: 600, color: 'var(--text-primary)' }}>
-                      {message.from_name || message.from_email}
-                    </span>
+                    <SenderContactLink message={message} style={{ fontSize: 14, fontWeight: 600 }} />
                     {message.from_name && (
                       <span style={{ fontSize: 12, color: 'var(--text-tertiary)' }}>
                         &lt;{message.from_email}&gt;
@@ -3443,5 +3441,30 @@ function AiResultBox({ result, canRegen, onRegen, onDismiss }) {
         />
       )}
     </div>
+  );
+}
+
+// The sender's name opens their contact, or a new contact prefilled from the message.
+function SenderContactLink({ message, style }) {
+  const { t } = useTranslation();
+  const openContactFor = useStore(state => state.openContactFor);
+  const label = message.from_name || message.from_email;
+  if (!message.from_email) return <span style={{ color: 'var(--text-primary)', ...style }}>{label}</span>;
+  return (
+    <button
+      type="button"
+      onClick={() => openContactFor({ email: message.from_email, name: message.from_name })}
+      title={t('contacts.openContact')}
+      style={{
+        background: 'none', border: 'none', padding: 0, margin: 0, cursor: 'pointer',
+        color: 'var(--text-primary)', font: 'inherit', textAlign: 'left', maxWidth: '100%',
+        overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap',
+        ...style,
+      }}
+      onMouseEnter={e => { e.currentTarget.style.textDecoration = 'underline'; }}
+      onMouseLeave={e => { e.currentTarget.style.textDecoration = 'none'; }}
+    >
+      {label}
+    </button>
   );
 }

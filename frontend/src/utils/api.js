@@ -301,6 +301,9 @@ export const api = {
     deleteSystemEmail: () => request('DELETE', '/admin/system-email'),
     getAuthEvents: (params) => request('GET', '/admin/auth-events?' + new URLSearchParams(params)),
     getAuditLog: (params) => request('GET', '/admin/audit' + (params && Object.keys(params).length ? '?' + new URLSearchParams(params) : '')),
+    getAccessSync: () => request('GET', '/admin/access-sync'),
+    saveAccessSync: (data) => request('PUT', '/admin/access-sync', data),
+    runAccessSync: () => request('POST', '/admin/access-sync/run'),
     oidc: {
       getProviders: () => request('GET', '/admin/oidc'),
       createProvider: (data) => request('POST', '/admin/oidc', data),

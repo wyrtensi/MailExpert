@@ -8,9 +8,11 @@ describe('AUDIT_ACTIONS', () => {
       'mailbox.added', 'mailbox.reconnected', 'mailbox.deleted', 'mailbox.connection_changed',
       'mailbox.enabled', 'mailbox.disabled', 'message.sent', 'message.deleted',
       'user.added', 'user.deleted', 'user.enabled', 'user.disabled', 'user.admin_changed',
+      'access.sync_aborted',
     ]);
     assert.equal(auditActionLabelKey('message.sent'), 'admin.audit.actionMessageSent');
     assert.equal(auditActionLabelKey('user.admin_changed'), 'admin.audit.actionUserAdminChanged');
+    assert.equal(auditActionLabelKey('access.sync_aborted'), 'admin.audit.actionAccessSyncAborted');
     assert.equal(auditActionLabelKey('message.read'), null);
   });
 });
@@ -99,6 +101,17 @@ describe('auditDetail', () => {
     );
     assert.deepEqual(auditDetail({ action: 'user.disabled', details: { userId: 'u', email: 'u@example.com', isAdmin: false } }), { text: 'u@example.com' });
     assert.equal(auditDetail({ action: 'user.deleted', details: { userId: 'u', email: null, isAdmin: false } }), null);
+  });
+
+  it('lists the users a stopped Access sync would have disabled', () => {
+    assert.deepEqual(
+      auditDetail({ action: 'access.sync_aborted', details: { candidates: ['a@example.com', 'b@example.com'], activeUsers: 3, maxDisables: 1 } }),
+      { key: 'admin.audit.detailAccessSyncAborted', values: { wouldDisable: 2, emails: 'a@example.com, b@example.com' } },
+    );
+    assert.deepEqual(
+      auditDetail({ action: 'access.sync_aborted', details: {} }),
+      { key: 'admin.audit.detailAccessSyncAborted', values: { wouldDisable: 0, emails: '' } },
+    );
   });
 
   it('shows nothing for actions without details or unknown entries', () => {

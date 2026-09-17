@@ -2,6 +2,7 @@ import { decrypt, encrypt } from './encryption.js';
 import { query } from './db.js';
 import { getConnectionPolicy } from './connectionPolicy.js';
 import { validateHost } from './hostValidation.js';
+import { safeFetch } from './safeFetch.js';
 import { createRequestSignal, parseJson, readLimited, readSseData, sanitizeText } from './aiHttp.js';
 import { completeCodexText, streamCodexResponses } from './openaiCodexResponses.js';
 import { getCodexAccess, getCodexStatus } from './openaiCodexAuth.js';
@@ -141,7 +142,12 @@ export function createAiProvider({
   decryptFn = decrypt,
   validateHostFn = validateHost,
   getConnectionPolicyFn = getConnectionPolicy,
-  fetchFn = (...args) => fetch(...args),
+  // The base URL was validated when saved, but the policy can change and a hostname can start
+  // resolving to an internal address. Check and pin the target again on every request.
+  fetchFn = async (url, init) => {
+    const policy = await getConnectionPolicyFn();
+    return safeFetch(url, init, { allowPrivate: policy.allowPrivateHosts, requireHttps: false });
+  },
   getCodexAccessFn = getCodexAccess,
   getCodexStatusFn = getCodexStatus,
   streamCodexResponsesFn = streamCodexResponses,

@@ -11,9 +11,9 @@
 // plaintext HTTP on a trusted network. Redirect downgrades to http are refused too.
 //
 // Use for outbound fetches to attacker-influenced or user-configured URLs
-// (one-click unsubscribe, category list sources). Admin-configured
-// provider URLs that intentionally point at internal hosts (the AI base URL)
-// deliberately keep using plain fetch.
+// (one-click unsubscribe, category list sources) and for the admin-configured AI base URL,
+// which passes the current connection policy so an internal host works only while private
+// hosts are allowed.
 
 import net from 'node:net';
 import dns from 'node:dns';

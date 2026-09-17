@@ -34,9 +34,9 @@ beforeEach(() => {
   sendMail.mockResolvedValue({});
   resolveSentFolder.mockResolvedValue(null);
 });
-const post = () => fetch(`${base}/api/mail/send`, {
+const post = (recipients = { to: ['you@example.com'] }) => fetch(`${base}/api/mail/send`, {
   method: 'POST', headers: { 'Content-Type': 'application/json', 'X-Idempotency-Key': 'send1' },
-  body: JSON.stringify({ accountId: 'a1', to: ['you@example.com'], subject: 'Test', body: 'Hello' }),
+  body: JSON.stringify({ accountId: 'a1', ...recipients, subject: 'Test', body: 'Hello' }),
 });
 describe('send failure semantics', () => {
   it('does not deliver when idempotency lookup fails', async () => {
@@ -65,9 +65,29 @@ describe('send failure semantics', () => {
     expect(redisClient.del).not.toHaveBeenCalled();
   });
   it('releases its own reservation after an SMTP rejection', async () => {
-    sendMail.mockRejectedValueOnce(new Error('550 rejected'));
+    // nodemailer puts the server's reply code on the error; a reply means DATA was not accepted.
+    sendMail.mockRejectedValueOnce(Object.assign(new Error('Message failed: 550 rejected'), { code: 'EMESSAGE', responseCode: 550, command: 'DATA' }));
     expect((await post()).status).toBe(500);
     expect(redisClient.del).toHaveBeenCalledWith('send_idem:u1:send1');
+  });
+  it('releases its own reservation when the server could not be reached', async () => {
+    sendMail.mockRejectedValueOnce(Object.assign(new Error('connect ECONNREFUSED 127.0.0.1:587'), { code: 'ESOCKET', command: 'CONN' }));
+    expect((await post()).status).toBe(500);
+    expect(redisClient.del).toHaveBeenCalledWith('send_idem:u1:send1');
+  });
+  it('releases its own reservation when connecting times out', async () => {
+    sendMail.mockRejectedValueOnce(Object.assign(new Error('Connection timeout'), { code: 'ETIMEDOUT', command: 'CONN' }));
+    expect((await post()).status).toBe(500);
+    expect(redisClient.del).toHaveBeenCalledWith('send_idem:u1:send1');
+  });
+  it('keeps the reservation when the connection breaks with no server reply', async () => {
+    // nodemailer tags a mid-session close as CONN too, so it may come after DATA was accepted.
+    // Releasing the lock would let the retry deliver the message a second time.
+    sendMail.mockRejectedValueOnce(Object.assign(new Error('Connection closed unexpectedly'), { code: 'ECONNECTION', command: 'CONN' }));
+    const res = await post();
+    expect(res.status).toBe(502);
+    expect((await res.json()).code).toBe('send_uncertain');
+    expect(redisClient.del).not.toHaveBeenCalled();
   });
   it('blocks a concurrent submission', async () => {
     redisClient.set.mockResolvedValueOnce(null);
@@ -83,6 +103,21 @@ describe('send failure semantics', () => {
     expect(res.status).toBe(409);
     expect(await res.json()).toEqual({ error: 'This message is already being sent.', code: 'send_in_progress' });
     expect(createAccountSmtpTransport).not.toHaveBeenCalled();
+    expect(sendMail).not.toHaveBeenCalled();
+  });
+});
+describe('recipients', () => {
+  it('sends a message addressed only in Bcc without an empty To header', async () => {
+    const res = await post({ to: [], bcc: ['hidden@example.com'] });
+    expect(res.status).toBe(200);
+    expect(sendMail).toHaveBeenCalledOnce();
+    const options = sendMail.mock.calls[0][0];
+    expect(options.to).toBeUndefined();
+    expect(options.bcc).toContain('hidden@example.com');
+  });
+  it('rejects a message with no recipient in any field', async () => {
+    const res = await post({ to: [], cc: [], bcc: [] });
+    expect(res.status).toBe(400);
     expect(sendMail).not.toHaveBeenCalled();
   });
 });

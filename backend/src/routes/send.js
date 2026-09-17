@@ -25,6 +25,18 @@ function escapeHtml(str) {
 }
 
 // Map SMTP/connection errors to user-friendly messages that don't expose server internals.
+// Whether a failed sendMail certainly delivered nothing, so the idempotency reservation can be
+// released for a retry. A server reply (4xx/5xx) is an explicit rejection, and an unreachable or
+// refusing server never got the message. nodemailer tags a connection that closes mid-session as
+// CONN as well, so a bare connection error may come after DATA was accepted: that one is unknown.
+export function smtpFailureIsDefinite(err) {
+  const responseCode = Number(err?.responseCode);
+  if (Number.isInteger(responseCode) && responseCode >= 400 && responseCode < 600) return true;
+  if (['EAUTH', 'EDNS'].includes(err?.code)) return true;
+  // Connecting and waiting for the greeting both happen before any message data is sent.
+  return /ECONNREFUSED|ENOTFOUND|EHOSTUNREACH|Connection timeout|Greeting never received/.test(String(err?.message || ''));
+}
+
 function sanitizeSmtpError(err) {
   const msg = err.message || '';
   if (/ECONNREFUSED|ENOTFOUND|ETIMEDOUT|ECONNRESET|EHOSTUNREACH/i.test(msg)) {
@@ -135,7 +147,11 @@ router.post('/send', async (req, res) => {
   const { accountId, aliasId, to, cc = [], bcc = [], subject, body, bodyIsHtml = false, quotedBody, quotedBodyHtml, inReplyTo, references, attachments, editedSignature, forwardedAttachments, priority } = req.body;
   const VALID_PRIORITIES = new Set(['high', 'normal', 'low']);
   const emailPriority = VALID_PRIORITIES.has(priority) ? priority : 'normal';
-  if (!accountId || !to?.length) return res.status(400).json({ error: 'accountId and to required' });
+  if (!accountId) return res.status(400).json({ error: 'accountId required' });
+  // Any one field may carry the recipients: a message addressed only in Bcc is valid.
+  if (![to, cc, bcc].some(list => Array.isArray(list) && list.length)) {
+    return res.status(400).json({ error: 'At least one recipient is required' });
+  }
 
   // Idempotency guard. The client sends a stable X-Idempotency-Key per logical send: a
   // sequential retry after a lost success response returns the cached result, and a
@@ -175,7 +191,7 @@ router.post('/send', async (req, res) => {
 
   let normalizedTo, normalizedCc, normalizedBcc;
   try {
-    normalizedTo  = normalizeRecipients(to,  'to');
+    normalizedTo  = normalizeRecipients(to ?? [],  'to');
     normalizedCc  = normalizeRecipients(cc,  'cc');
     normalizedBcc = normalizeRecipients(bcc, 'bcc');
   } catch (err) {
@@ -303,7 +319,7 @@ router.post('/send', async (req, res) => {
       messageId: `<${randomBytes(16).toString('hex')}@${domain}>`,
       from: `${fromName} <${fromEmail}>`,
       ...(fromReplyTo ? { replyTo: fromReplyTo } : {}),
-      to: normalizedTo.join(', '),
+      to: normalizedTo.join(', ') || undefined,
       cc: normalizedCc.join(', ') || undefined,
       bcc: normalizedBcc.join(', ') || undefined,
       subject: normalizedSubject,
@@ -539,11 +555,19 @@ router.post('/send', async (req, res) => {
       return res.json(sendResult);
     }
     console.error('Send failed:', err.message);
-    // A failure before reservation must not delete a concurrent request's lock.
-    if (idemKeyRedis && reservationAcquired) redisClient.del(idemKeyRedis).catch(() => {});
     // The transport's forced token refresh after an SMTP AUTH rejection failed. AUTH precedes
     // MAIL FROM, so nothing was delivered; answer with the token manager's stable code only.
     const oauthFailure = Object.hasOwn(OAUTH_SEND_FAILURES, err?.code) ? OAUTH_SEND_FAILURES[err.code] : null;
+    if (reservationAcquired && !oauthFailure && !smtpFailureIsDefinite(err)) {
+      // The server may already have accepted the message. Keep the reservation, so a retry with
+      // the same key is refused while it lasts instead of delivering a second copy.
+      return res.status(502).json({
+        error: 'The connection to the mail server broke while sending. The message may have been delivered: check Sent before sending it again.',
+        code: 'send_uncertain',
+      });
+    }
+    // A failure before reservation must not delete a concurrent request's lock.
+    if (idemKeyRedis && reservationAcquired) redisClient.del(idemKeyRedis).catch(() => {});
     if (oauthFailure) return res.status(oauthFailure.status).json({ error: oauthFailure.error, code: err.code });
     res.status(500).json({ error: sanitizeSmtpError(err) });
   }

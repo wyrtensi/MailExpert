@@ -172,6 +172,10 @@ describe('PATCH /api/admin/users/:id', () => {
     expect(params[4]).toBe(ADMIN_ID);
     expect(destroyUserSessions).toHaveBeenCalledWith(USER_ID);
     expect(closeUserSockets).toHaveBeenCalledWith(imapManager.wss, USER_ID);
+    // Disabling a user must never touch the mailboxes they added.
+    expect(calls.every(([sql]) => !/email_accounts/.test(sql))).toBe(true);
+    expect(query.mock.calls.every(([sql]) => !/email_accounts/.test(sql))).toBe(true);
+    expect(imapManager.disconnectAccount).not.toHaveBeenCalled();
   });
 
   it('enables a user without touching sessions', async () => {

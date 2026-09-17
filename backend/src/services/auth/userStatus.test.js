@@ -51,6 +51,8 @@ describe('disableUsersByEmail', () => {
       keptLastAdmin: [],
     });
     expect(users.map((u) => !!u.disabled_at)).toEqual([true, true, false]);
+    // Disabling a user must never touch the mailboxes they added.
+    expect(client.calls.every((sql) => !/email_accounts/.test(sql))).toBe(true);
   });
 
   it('never touches a bootstrap admin and skips unknown or already disabled users', async () => {

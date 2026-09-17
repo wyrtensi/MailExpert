@@ -345,7 +345,10 @@ export default function Sidebar() {
         threadMsgs = await resolveThreadMessages({
           message: row,
           isThreadRow: true,
-          fetchThread: () => api.getThread(payload.threadId, payload.threadFolder, payload.threadUnified),
+          fetchThread: () => api.getThread(
+            payload.threadId, payload.threadFolder, payload.threadUnified,
+            payload.threadUnified ? null : row.account_id,
+          ),
         });
       } catch (err) {
         console.error('Failed to load thread for move:', err.message);

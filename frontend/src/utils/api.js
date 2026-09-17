@@ -346,10 +346,13 @@ export const api = {
     return request('GET', `/mail/resolve-message?${qs}`);
   },
   getMessageBody,
-  getThread: (threadId, folder, unified = false) => {
+  // accountId limits the thread to one mailbox: the same conversation sent to two mailboxes has
+  // one thread key in both, and an action in one mailbox must not reach the other.
+  getThread: (threadId, folder, unified = false, accountId = null) => {
     const qs = new URLSearchParams();
     if (folder) qs.set('folder', folder);
     if (unified) qs.set('unified', 'true');
+    if (accountId) qs.set('accountId', accountId);
     const query = qs.size ? `?${qs}` : '';
     return request('GET', `/mail/thread/${encodeURIComponent(threadId)}${query}`);
   },

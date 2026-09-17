@@ -802,7 +802,7 @@ export default function MessageList() {
       isThreadRow: isThreadListRow(message),
       cached: threadMessages[tid],
       allowCache,
-      fetchThread: () => api.getThread(tid, effectiveFolder, isUnified),
+      fetchThread: () => api.getThread(tid, effectiveFolder, isUnified, isUnified ? null : message.account_id),
     });
   }, [isThreadListRow, threadMessages, selectedAccountId, selectedFolder, isUnified]);
 
@@ -2425,7 +2425,7 @@ export default function MessageList() {
       setLoadingThread(tid);
       try {
         const effectiveFolder = selectedAccountId ? selectedFolder : 'INBOX';
-        const data = await api.getThread(tid, effectiveFolder, isUnified);
+        const data = await api.getThread(tid, effectiveFolder, isUnified, isUnified ? null : message.account_id);
         const msgs = data.messages || [];
         if (isCurrentThreadLoad(threadLoadVersionsRef.current, tid, loadVersion)) {
           setThreadMessages(tid, msgs);

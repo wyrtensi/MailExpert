@@ -61,13 +61,15 @@ export async function runAccessSync({
     const { disabled } = candidates.length
       ? await withTransaction((tx) => disableUsersByEmail(tx, candidates, { googleMode: true, bootstrapAdminEmails: pinned }))
       : { disabled: [] };
-    for (const user of disabled) await signOutUser(user.id);
+    // Journal the disables right after they are committed, before signing anyone out: a throwing
+    // signOutUser must not lose audit entries for disables that already happened.
     if (disabled.length) {
       recordAudit(disabled.map((user) => ({
         actorEmail: ACCESS_SYNC_ACTOR, action: 'user.disabled',
         details: { userId: user.id, email: user.email, isAdmin: !!user.is_admin, source: 'cloudflare_access' },
       })));
     }
+    for (const user of disabled) await signOutUser(user.id);
 
     const turnedOff = new Set(disabled.map((user) => user.email.toLowerCase()));
     const desired = [...new Set([...activeEmails.filter((address) => !turnedOff.has(address)), ...pinned])].sort();
@@ -81,7 +83,10 @@ export async function runAccessSync({
       { baseline: desired, abortedCandidates: null },
     );
   } catch (err) {
-    if (err instanceof CloudflareAccessError) return finish({ outcome: 'failed', error: err.message });
+    if (err instanceof CloudflareAccessError) {
+      const error = err.status === 'not_attached' ? 'policy_not_attached' : err.message;
+      return finish({ outcome: 'failed', error });
+    }
     console.error('[access-sync] Run failed:', err?.code || err?.name || 'Error');
     return finish({ outcome: 'failed', error: 'internal_error' });
   }

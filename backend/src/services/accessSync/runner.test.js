@@ -101,6 +101,27 @@ describe('runAccessSync', () => {
     expect(saved().baseline).toEqual(['a@example.com']);
   });
 
+  it('journals a disable before signing the user out, so a throwing signOutUser cannot lose it', async () => {
+    const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+    cloudflare(policyWith([email('a@example.com')]));
+    state(['a@example.com', 'b@example.com', 'c@example.com']);
+    activeUsers('a@example.com', 'b@example.com', 'c@example.com', 'd@example.com');
+    disableUsersByEmail.mockResolvedValue({
+      disabled: [
+        { id: 'u-b', email: 'b@example.com', is_admin: false },
+        { id: 'u-c', email: 'c@example.com', is_admin: false },
+      ],
+      keptLastAdmin: [],
+    });
+    signOutUser = vi.fn(async (id) => { if (id === 'u-b') throw new Error('socket close failed'); });
+    expect(await run()).toEqual(lastRun({ outcome: 'failed', error: 'internal_error' }));
+    expect(recordAudit).toHaveBeenCalledWith([
+      { actorEmail: 'Cloudflare Access', action: 'user.disabled', details: { userId: 'u-b', email: 'b@example.com', isAdmin: false, source: 'cloudflare_access' } },
+      { actorEmail: 'Cloudflare Access', action: 'user.disabled', details: { userId: 'u-c', email: 'c@example.com', isAdmin: false, source: 'cloudflare_access' } },
+    ]);
+    errorSpy.mockRestore();
+  });
+
   it('puts back the last admin that Cloudflare removed', async () => {
     cloudflare(policyWith([email('a@example.com')]));
     state(['a@example.com', 'admin@example.com']);
@@ -169,6 +190,14 @@ describe('runAccessSync', () => {
     cf.getPolicy.mockRejectedValue(new CloudflareAccessError('getPolicy', 403, [10000]));
     state(['a@example.com']);
     expect(await run()).toEqual(lastRun({ outcome: 'failed', error: 'Cloudflare getPolicy failed (403): error 10000' }));
+    expect(saved().baseline).toEqual(['a@example.com']);
+  });
+
+  it('translates a not-attached policy to a named error', async () => {
+    cloudflare(policyWith([]));
+    cf.getPolicy.mockRejectedValue(new CloudflareAccessError('getPolicy', 'not_attached'));
+    state(['a@example.com']);
+    expect(await run()).toEqual(lastRun({ outcome: 'failed', error: 'policy_not_attached' }));
     expect(saved().baseline).toEqual(['a@example.com']);
   });
 

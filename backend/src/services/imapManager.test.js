@@ -1332,6 +1332,18 @@ describe('walkStructure attachment classification', () => {
     return results;
   };
 
+  it('strips each bidi control character from an attachment name, not only the whole sequence', () => {
+    // RLO turns "invoice<RLO>fdp.exe" into "invoiceexe.pdf" on screen. Each control
+    // character must be removed on its own wherever it appears.
+    const named = (filename) => walk({
+      part: '2', type: 'application/octet-stream', encoding: 'base64',
+      disposition: 'attachment', dispositionParameters: { filename }, size: 10,
+    }).attachments[0].filename;
+    expect(named('invoice‮fdp.exe')).toBe('invoicefdp.exe');
+    expect(named('⁧report⁩.pdf‏')).toBe('report.pdf');
+    expect(named('؜‪‫‬‭⁦⁨')).toBe('attachment');
+  });
+
   it('treats an attached HTML file as an attachment, not body text', () => {
     const results = walk({
       type: 'multipart/mixed',

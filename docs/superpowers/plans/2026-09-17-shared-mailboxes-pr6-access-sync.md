@@ -39,6 +39,7 @@
 - Весь текст интерфейса — через `t()`, ключи есть во всех 9 локалях (`en`, `ru`, `de`, `es`, `fr`, `it`, `cs`, `pl`, `zhCN`), переводы различаются между локалями (`frontend/src/locales/i18n.test.js`). Локали хранятся с CRLF; правка — через разбор JSON и запись `JSON.stringify(..., null, 2)` с CRLF.
 - Монки-патчинг запрещён.
 - Новые исходники бэкенда не содержат слова `user_id` (`backend/src/sharedData.guard.test.js`).
+- Отключение пользователя — ни из админки, ни синхронизацией — не удаляет, не отключает и не переподключает ящики, которые он добавил. Код синхронизации не обращается к `email_accounts`.
 - Пользовательские контейнеры `mailexpert-frontend`, `mailexpert-backend`, `mailexpert-postgres`, `mailexpert-redis` не пересобираются и не перезапускаются.
 - Работа идёт в ветке `feat/access-policy-sync` от `main`. Первый коммит ветки — этот план.
 
@@ -58,7 +59,7 @@ Task 13 вносит их в спецификацию.
    - порог «больше половины активных» — `кандидаты × 2 > активные`; `ACCESS_SYNC_MAX_DISABLES=0` останавливает любой прогон с отключениями;
    - остановленный прогон ничего не отключает и не пишет политику, baseline не меняется; событие журнала пишется, только если набор кандидатов отличается от прошлой остановки;
    - политика, у которой `decision` не `allow`, не записывается: прогон завершается ошибкой `policy_not_allow`.
-4. **Отключение из Cloudflare** не оставляет установку без администратора: активный администратор, у которого нет другого активного администратора, не отключается и остаётся в политике. Отключённый пользователь теряет сессии и WebSocket, как при отключении в админке.
+4. **Отключение из Cloudflare** не оставляет установку без администратора: активный администратор, у которого нет другого активного администратора, не отключается и остаётся в политике. Отключённый пользователь теряет сессии и WebSocket, как при отключении в админке. Ящики, которые он добавил, остаются подключёнными и продолжают синхронизироваться: отключение меняет только строку `users`, а `email_accounts.added_by` — справочное поле.
 5. **Журнал.**
    - Новое действие `access.sync_aborted`, `details: { candidates, activeUsers, maxDisables }`.
    - Отключение из Cloudflare пишет `user.disabled` с `details.source = 'cloudflare_access'`.
@@ -2912,6 +2913,12 @@ const adminToken = await new SignJWT({ email: 'admin@example.com' })
   .setIssuer(ISSUER).setAudience('smoke-aud').setIssuedAt().setExpirationTime('1h')
   .sign(privateKey);
 writeFileSync('/tmp/cf-admin-token', adminToken);
+// two@ adds a mailbox before Cloudflare removes them.
+const twoToken = await new SignJWT({ email: 'two@example.com' })
+  .setProtectedHeader({ alg: 'RS256', kid: 'smoke' })
+  .setIssuer(ISSUER).setAudience('smoke-aud').setIssuedAt().setExpirationTime('1h')
+  .sign(privateKey);
+writeFileSync('/tmp/cf-two-token', twoToken);
 
 let policy = {
   id: '66666666-7777-4888-9999-000000000000', uid: 'uid-1', name: 'Allow approved', decision: 'allow',
@@ -2968,8 +2975,8 @@ const H = {
   'X-Requested-With': 'XMLHttpRequest', 'Content-Type': 'application/json',
   'cf-access-jwt-assertion': readFileSync('/tmp/cf-admin-token', 'utf8'),
 };
-const call = async (method, path, body) => {
-  const res = await fetch(`${base}${path}`, { method, headers: H, body: body === undefined ? undefined : JSON.stringify(body) });
+const call = async (method, path, body, headers = H) => {
+  const res = await fetch(`${base}${path}`, { method, headers, body: body === undefined ? undefined : JSON.stringify(body) });
   const text = await res.text();
   return { status: res.status, text, body: text ? JSON.parse(text) : null };
 };
@@ -3014,6 +3021,11 @@ const again = await runNow();
 assert.equal(again.result.outcome, 'unchanged');
 assert.equal((await cfState()).puts, state.puts, 'a run in line writes nothing');
 
+// two@ adds a mailbox; it must outlive two@ being disabled.
+const twoHeaders = { ...H, 'cf-access-jwt-assertion': readFileSync('/tmp/cf-two-token', 'utf8') };
+const box = await call('POST', '/api/accounts', { name: 'Two box', email_address: 'two-box@example.com', protocol: 'pop3', smtp_port: 587 }, twoHeaders);
+assert.equal(box.status, 200, box.text);
+
 // two@ is removed in Cloudflare: the user is disabled and the journal names the sync.
 await setInclude(state.policy.include.filter((rule) => rule.email?.email !== 'two@example.com'));
 await runNow();
@@ -3023,6 +3035,10 @@ const disabledEntry = (await call('GET', '/api/admin/audit?action=user.disabled'
 assert.equal(disabledEntry.actorEmail, 'Cloudflare Access');
 assert.equal(disabledEntry.details.email, 'two@example.com');
 assert.equal(disabledEntry.details.source, 'cloudflare_access');
+assert.equal((await call('GET', '/api/auth/me', undefined, twoHeaders)).status, 403, 'two@ is locked out');
+const kept = (await call('GET', '/api/accounts')).body.find((account) => account.id === box.body.id);
+assert.ok(kept, 'the mailbox two@ added is still there');
+assert.equal(kept.enabled, true, 'and still enabled');
 
 // one@ is disabled in MailExpert: its email leaves the policy, the foreign email stays.
 const users = (await call('GET', '/api/admin/users')).body.users;
@@ -3175,6 +3191,7 @@ VITE_DEMO_MODE=true
 - Отключение из Cloudflare пишет `user.disabled` с `details.source = 'cloudflare_access'`, автор записей синхронизации — `Cloudflare Access` (`actorEmail` без пользователя). Последний активный администратор не отключается и остаётся в политике.
 - Запуск: при старте сервера, раз в час, после сохранения включённых настроек и после добавления, отключения, включения, смены email и удаления пользователя; запросы в течение 10 секунд сливаются. Прогоны и сохранение настроек идут по одному в процессе. Воркер запускается только при `AUTH_MODE=google`.
 - Пользователи, созданные первым входом через Cloudflare, попадают в политику отдельным `email`-правилом при следующем прогоне.
+- Отключение пользователя (в админке или синхронизацией) не трогает ящики, которые он добавил: они остаются подключены у всех.
 - `CF_API_BASE` переопределяет адрес API Cloudflare для проверки на тестовом сервере.
 - Вкладка — «Пользователи → Синхронизация с Access», только в режиме `google`.
 ```
@@ -3222,7 +3239,7 @@ PR 6 of the shared mailboxes series: MailExpert becomes the only place where use
   - One runner per process: user changes request a run (debounced 10 s), a full reconcile runs hourly, manual runs and settings changes never overlap. Starts only with `AUTH_MODE=google`.
 - Settings live in `system_settings`; the API token is stored encrypted and never returned.
 - Admin API: `GET`/`PUT /api/admin/access-sync`, `POST /api/admin/access-sync/run`.
-- Users disabled by the sync lose their sessions and sockets and are journaled as `user.disabled` by `Cloudflare Access`. The last active admin is never disabled.
+- Users disabled by the sync lose their sessions and sockets and are journaled as `user.disabled` by `Cloudflare Access`. Mailboxes they added stay connected for everyone. The last active admin is never disabled.
 - Admin guards moved to `services/auth/userStatus.js`.
 - Frontend: "Users → Access policy sync" tab in google mode, demo mode answers, strings in all 9 languages, the new audit action on the audit screen.
 
@@ -3230,7 +3247,7 @@ PR 6 of the shared mailboxes series: MailExpert becomes the only place where use
 
 - Backend: <N> tests, lint clean.
 - Frontend: <M> tests, lint, build.
-- Running server in google mode against a fake Cloudflare API: approved users join the policy with foreign rules kept; a second run writes nothing; removing a user in Cloudflare disables them and journals it; disabling a user in MailExpert removes their email; removing three users is stopped by the limit with one audit entry; the token never appears in responses or logs.
+- Running server in google mode against a fake Cloudflare API: approved users join the policy with foreign rules kept; a second run writes nothing; removing a user in Cloudflare disables them and journals it, while the mailbox they added stays connected; disabling a user in MailExpert removes their email; removing three users is stopped by the limit with one audit entry; the token never appears in responses or logs.
 - Browser (demo mode switched to google mode locally): the tab, validation, manual run, off state, the audit entry, Russian strings, 375 px width.
 - Not checked against a real Cloudflare account.
 ```

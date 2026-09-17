@@ -3,6 +3,7 @@ import { describe, it, expect, vi, beforeEach, afterEach, beforeAll, afterAll } 
 // Alias CRUD is exercised through the mounted accounts router so these tests cover the
 // ownership checks, successful mutations, and the owner-address cache boundary together.
 // The DB, app entrypoint, and auth middleware are stubbed to keep the harness isolated.
+vi.mock('../services/auditLog.js', () => ({ recordAudit: vi.fn(async () => {}) }));
 vi.mock('../services/db.js', () => ({ query: vi.fn() }));
 vi.mock('../middleware/auth.js', () => ({
   requireAuth: (req, _res, next) => { req.session = { userId: 'u1' }; next(); },

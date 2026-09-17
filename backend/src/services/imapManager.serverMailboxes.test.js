@@ -25,7 +25,7 @@ import { SYNC_INTERVAL_CHOICES_SEC } from './syncSettings.js';
 // Mailboxes are serviced by the server: they connect at startup and stay connected no matter
 // who signs in or out.
 
-const TIMERS = ['_healthCheckTimer', '_snippetSchedulerTimer', '_stalenessCheckTimer', '_flagPushReconcilerTimer', '_folderStatusTimer'];
+const TIMERS = ['_healthCheckTimer', '_snippetSchedulerTimer', '_stalenessCheckTimer', '_flagPushReconcilerTimer', '_folderStatusTimer', '_providerIdSchedulerTimer'];
 function newManager() {
   const mgr = new ImapManager(null);
   for (const key of TIMERS) clearInterval(mgr[key]);

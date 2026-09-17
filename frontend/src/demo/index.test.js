@@ -54,3 +54,59 @@ test('bulk delete removes Trash and Drafts messages but moves ordinary mail to T
   assert.deepEqual(await demoRequest('GET', '/mail/messages/demo-009'), {});
   assert.deepEqual(await demoRequest('GET', `/mail/messages/demo-draft-${draft.uid}`), {});
 });
+
+test('demo contacts can enter the edit form and round-trip through create and update', async () => {
+  const fixture = await demoRequest('GET', '/contacts/demo-contact-1');
+
+  assert.deepEqual(fixture.emails, [{
+    value: 'maya.chen@northstar.example',
+    type: 'work',
+    primary: true,
+  }]);
+  assert.deepEqual(fixture.phones, [{
+    value: '+1 555 0142',
+    type: 'work',
+    primary: true,
+  }]);
+
+  const editPayload = {
+    displayName: fixture.display_name,
+    firstName: fixture.first_name,
+    lastName: fixture.last_name,
+    emails: fixture.emails.filter((email) => email.value.trim()),
+    phones: fixture.phones.filter((phone) => phone.value.trim()),
+    organization: fixture.organization,
+    notes: 'Updated in demo mode',
+  };
+  const updated = await demoRequest('PATCH', `/contacts/${fixture.id}`, editPayload);
+
+  assert.equal(updated.display_name, 'Maya Chen');
+  assert.equal(updated.primary_email, 'maya.chen@northstar.example');
+  assert.deepEqual(updated.emails, editPayload.emails);
+  assert.deepEqual(updated.phones, editPayload.phones);
+  assert.equal(updated.notes, 'Updated in demo mode');
+
+  const created = await demoRequest('POST', '/contacts', {
+    ...editPayload,
+    displayName: 'Jordan Lee',
+    firstName: 'Jordan',
+    lastName: 'Lee',
+    emails: [{ value: 'JORDAN.LEE@EXAMPLE.COM', type: 'work' }],
+    phones: [{ value: '+1 555 0199', type: 'mobile' }],
+  });
+
+  assert.equal(created.display_name, 'Jordan Lee');
+  assert.equal(created.first_name, 'Jordan');
+  assert.equal(created.last_name, 'Lee');
+  assert.equal(created.primary_email, 'jordan.lee@example.com');
+  assert.deepEqual(created.emails, [{
+    value: 'JORDAN.LEE@EXAMPLE.COM',
+    type: 'work',
+    primary: true,
+  }]);
+  assert.deepEqual(created.phones, [{
+    value: '+1 555 0199',
+    type: 'mobile',
+    primary: true,
+  }]);
+});

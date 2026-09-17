@@ -145,9 +145,32 @@ const MESSAGE_FIXTURES = [
 ];
 
 const CONTACT_FIXTURES = [
-  { id: 'demo-contact-1', display_name: 'Maya Chen', primary_email: 'maya@northstar.example', emails: ['maya@northstar.example'], organization: 'Northstar', job_title: 'Procurement Lead', phone: '+1 555 0101', notes: 'Enterprise renewal contact', is_auto: false, send_count: 8 },
-  { id: 'demo-contact-2', display_name: 'Priya Shah', primary_email: 'priya@vendor.example', emails: ['priya@vendor.example'], organization: 'Vendor Works', job_title: 'Technical Partner', phone: '+1 555 0102', notes: '', is_auto: false, send_count: 5 },
-  { id: 'demo-contact-3', display_name: 'Lucas Martin', primary_email: 'lucas@demo.mailexpert.local', emails: ['lucas@demo.mailexpert.local'], organization: 'MailExpert', job_title: 'Release Manager', phone: '', notes: '', is_auto: true, send_count: 3 },
+  {
+    id: 'demo-contact-1', uid: 'demo-contact-1', display_name: 'Maya Chen', first_name: 'Maya', last_name: 'Chen',
+    primary_email: 'maya.chen@northstar.example',
+    emails: [{ value: 'maya.chen@northstar.example', type: 'work', primary: true }],
+    phones: [{ value: '+1 555 0142', type: 'work', primary: true }],
+    organization: 'Northstar', notes: 'Enterprise renewal contact', is_auto: false, send_count: 8,
+    last_sent: '2026-09-15T15:42:00.000Z', etag: 'demo-contact-1-v1', created_at: '2026-08-20T09:00:00.000Z',
+    updated_at: '2026-09-15T15:42:00.000Z', has_contact_photo: false,
+  },
+  {
+    id: 'demo-contact-2', uid: 'demo-contact-2', display_name: 'Priya Shah', first_name: 'Priya', last_name: 'Shah',
+    primary_email: 'priya@vendor.example',
+    emails: [{ value: 'priya@vendor.example', type: 'work', primary: true }],
+    phones: [{ value: '+1 555 0102', type: 'work', primary: true }],
+    organization: 'Vendor Works', notes: '', is_auto: false, send_count: 5, last_sent: null,
+    etag: 'demo-contact-2-v1', created_at: '2026-08-25T09:00:00.000Z', updated_at: '2026-09-12T09:00:00.000Z',
+    has_contact_photo: false,
+  },
+  {
+    id: 'demo-contact-3', uid: 'demo-contact-3', display_name: 'Lucas Martin', first_name: 'Lucas', last_name: 'Martin',
+    primary_email: 'lucas@demo.mailexpert.local',
+    emails: [{ value: 'lucas@demo.mailexpert.local', type: 'work', primary: true }], phones: [],
+    organization: 'MailExpert', notes: '', is_auto: true, send_count: 3, last_sent: null,
+    etag: 'demo-contact-3-v1', created_at: '2026-09-01T09:00:00.000Z', updated_at: '2026-09-14T18:25:00.000Z',
+    has_contact_photo: false,
+  },
 ];
 
 const DEMO_USER = {
@@ -360,6 +383,39 @@ function listContacts(url) {
   return { contacts: result.slice(offset, offset + limit), total: result.length };
 }
 
+function contactMethods(values, defaultType) {
+  return (Array.isArray(values) ? values : []).map((method, index) => ({
+    value: String(method?.value ?? ''),
+    type: method?.type || defaultType,
+    primary: method?.primary ?? index === 0,
+  }));
+}
+
+function contactFromPayload(payload, current = {}) {
+  const emails = contactMethods(payload.emails ?? current.emails, 'other');
+  const phones = contactMethods(payload.phones ?? current.phones, 'mobile');
+  const primaryEmail = emails[0]?.value?.trim().toLocaleLowerCase() || null;
+  const now = new Date().toISOString();
+  return {
+    ...current,
+    display_name: payload.displayName ?? current.display_name ?? '',
+    first_name: payload.firstName ?? current.first_name ?? '',
+    last_name: payload.lastName ?? current.last_name ?? '',
+    primary_email: primaryEmail,
+    emails,
+    phones,
+    organization: payload.organization ?? current.organization ?? '',
+    notes: payload.notes ?? current.notes ?? '',
+    is_auto: current.is_auto ?? false,
+    send_count: current.send_count ?? 0,
+    last_sent: current.last_sent ?? null,
+    etag: `demo-contact-${now}`,
+    created_at: current.created_at ?? now,
+    updated_at: now,
+    has_contact_photo: current.has_contact_photo ?? false,
+  };
+}
+
 export async function demoRequest(method, path, body = {}) {
   const verb = method.toUpperCase();
   const url = parsePath(path);
@@ -511,7 +567,8 @@ export async function demoRequest(method, path, body = {}) {
 
   if (verb === 'GET' && pathname === '/contacts') return clone(listContacts(url));
   if (verb === 'POST' && pathname === '/contacts') {
-    const contact = { id: `demo-contact-${contacts.length + 1}`, ...clone(body) };
+    const id = `demo-contact-${contacts.length + 1}`;
+    const contact = contactFromPayload(body, { id, uid: id });
     contacts.push(contact);
     return clone(contact);
   }
@@ -519,7 +576,7 @@ export async function demoRequest(method, path, body = {}) {
   if (verb === 'GET' && contactMatch) return clone(contacts.find(item => item.id === decodeURIComponent(contactMatch[1])) || {});
   if (verb === 'PATCH' && contactMatch) {
     const contact = contacts.find(item => item.id === decodeURIComponent(contactMatch[1]));
-    if (contact) Object.assign(contact, clone(body));
+    if (contact) Object.assign(contact, contactFromPayload(body, contact));
     return clone(contact || {});
   }
   if (verb === 'DELETE' && contactMatch) {

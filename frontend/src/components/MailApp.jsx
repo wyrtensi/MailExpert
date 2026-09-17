@@ -297,7 +297,7 @@ export default function MailApp() {
     return () => window.removeEventListener('popstate', handler);
   }, [isMobile, setSelectedMessage]);
 
-  const wsRef = useWebSocket();
+  const wsRef = useWebSocket(!isDemoMode);
 
   // Open a specific message by id (fetch → cache → select). Shared by the on-load
   // deep-link path and the service-worker notification-tap path so both behave

@@ -1719,6 +1719,7 @@ describe("connectAccount attaches 'error' before connect (#360)", () => {
     const mgr = new ImapManager(null);
     clearInterval(mgr._healthCheckTimer);
     clearInterval(mgr._snippetSchedulerTimer);
+    clearInterval(mgr._providerIdSchedulerTimer);
     // Stub the post-connect fan-out — this test asserts only the listener-ordering
     // invariant, not folder/message sync behavior.
     mgr.disconnectAccount = vi.fn(() => Promise.resolve());
@@ -2080,6 +2081,7 @@ describe('_recordAccountError / _clearAccountError', () => {
     const m = new ImapManager(null);
     clearInterval(m._healthCheckTimer);
     clearInterval(m._snippetSchedulerTimer);
+    clearInterval(m._providerIdSchedulerTimer);
     m.broadcast = vi.fn();
     return m;
   };
@@ -2234,7 +2236,7 @@ describe('hung IMAP transport recovery', () => {
   const acct = { id: 'recovery', user_id: 'u1', imap_host: 'imap.example.com' };
   function setup() {
     const mgr = new ImapManager(null);
-    for (const key of ['_healthCheckTimer', '_snippetSchedulerTimer', '_stalenessCheckTimer', '_flagPushReconcilerTimer']) clearInterval(mgr[key]);
+    for (const key of ['_healthCheckTimer', '_snippetSchedulerTimer', '_stalenessCheckTimer', '_flagPushReconcilerTimer', '_providerIdSchedulerTimer']) clearInterval(mgr[key]);
     const client = { close: vi.fn(), logout: vi.fn(() => new Promise(() => {})) };
     mgr.connections.set(acct.id, client);
     return { mgr, client };
@@ -2872,7 +2874,7 @@ describe('connect paths back off on IMAP authentication failure', () => {
 
   function newManager() {
     const mgr = new ImapManager(null);
-    for (const key of ['_healthCheckTimer', '_snippetSchedulerTimer', '_stalenessCheckTimer', '_flagPushReconcilerTimer', '_folderStatusTimer']) clearInterval(mgr[key]);
+    for (const key of ['_healthCheckTimer', '_snippetSchedulerTimer', '_stalenessCheckTimer', '_flagPushReconcilerTimer', '_folderStatusTimer', '_providerIdSchedulerTimer']) clearInterval(mgr[key]);
     mgr.broadcast = vi.fn();
     return mgr;
   }
@@ -3208,6 +3210,7 @@ describe('backfill stops on a provider refusal (#433)', () => {
         _bgConnSem: createKeyedSemaphore(2),
         refreshBulkFlags: vi.fn().mockResolvedValue(),
         startSnippetIndexer: vi.fn().mockResolvedValue(),
+        startProviderIdBackfill: vi.fn().mockResolvedValue(),
       };
       mgr.backfillMessages = vi.fn(ImapManager.prototype.backfillMessages);
       const p = ImapManager.prototype.backfillAllFolders.call(mgr, acct);
@@ -3236,6 +3239,7 @@ describe('backfill stops on a provider refusal (#433)', () => {
       broadcast: vi.fn(),
       refreshBulkFlags: vi.fn().mockResolvedValue(),
       startSnippetIndexer: vi.fn().mockResolvedValue(),
+      startProviderIdBackfill: vi.fn().mockResolvedValue(),
     };
     mgr.backfillMessages = vi.fn((account, folder) => backfillImpl(mgr, folder));
     return mgr;
@@ -3289,7 +3293,7 @@ describe('Yahoo connection budget (#433)', () => {
 
   function newManager() {
     const mgr = new ImapManager(null);
-    for (const key of ['_healthCheckTimer', '_snippetSchedulerTimer', '_stalenessCheckTimer', '_flagPushReconcilerTimer', '_folderStatusTimer']) clearInterval(mgr[key]);
+    for (const key of ['_healthCheckTimer', '_snippetSchedulerTimer', '_stalenessCheckTimer', '_flagPushReconcilerTimer', '_folderStatusTimer', '_providerIdSchedulerTimer']) clearInterval(mgr[key]);
     mgr.broadcast = vi.fn();
     return mgr;
   }
@@ -3338,7 +3342,7 @@ describe('Yahoo connection budget (#433)', () => {
     const interval = vi.spyOn(globalThis, 'setInterval');
     const mgr = new ImapManager(null);
     const probeCycle = interval.mock.calls.find(([, ms]) => ms === 180000)[0];
-    for (const key of ['_healthCheckTimer', '_snippetSchedulerTimer', '_stalenessCheckTimer', '_flagPushReconcilerTimer', '_folderStatusTimer']) clearInterval(mgr[key]);
+    for (const key of ['_healthCheckTimer', '_snippetSchedulerTimer', '_stalenessCheckTimer', '_flagPushReconcilerTimer', '_folderStatusTimer', '_providerIdSchedulerTimer']) clearInterval(mgr[key]);
     mgr.connections.set(yahoo.id, { close: vi.fn() });
     query.mockImplementation(async sql => ({ rows: sql.includes('MAX(uid)') ? [{ maxuid: 100 }] : [yahoo] }));
     const clients = trackedClients();
@@ -3358,7 +3362,7 @@ describe('Yahoo connection budget (#433)', () => {
     const interval = vi.spyOn(globalThis, 'setInterval');
     const mgr = new ImapManager(null);
     const probeCycle = interval.mock.calls.find(([, ms]) => ms === 180000)[0];
-    for (const key of ['_healthCheckTimer', '_snippetSchedulerTimer', '_stalenessCheckTimer', '_flagPushReconcilerTimer', '_folderStatusTimer']) clearInterval(mgr[key]);
+    for (const key of ['_healthCheckTimer', '_snippetSchedulerTimer', '_stalenessCheckTimer', '_flagPushReconcilerTimer', '_folderStatusTimer', '_providerIdSchedulerTimer']) clearInterval(mgr[key]);
     const generic = { ...yahoo, id: 'generic-probe', imap_host: 'imap.example.com' };
     mgr.connections.set(generic.id, { close: vi.fn() });
     query.mockImplementation(async sql => ({ rows: sql.includes('MAX(uid)') ? [{ maxuid: 100 }] : [generic] }));
@@ -3432,6 +3436,7 @@ describe('backfillAllFolders reuses one connection across folders', () => {
       _handleOAuthRefreshFailure: ImapManager.prototype._handleOAuthRefreshFailure,
       refreshBulkFlags: vi.fn().mockResolvedValue(),
       startSnippetIndexer: vi.fn().mockResolvedValue(),
+      startProviderIdBackfill: vi.fn().mockResolvedValue(),
     };
     mgr.backfillMessages = vi.fn(ImapManager.prototype.backfillMessages);
     return mgr;
@@ -3515,7 +3520,7 @@ describe('rerootThreadChildren', () => {
 });
 describe('Gmail profile for many accounts on one server', () => {
   const gmail = { id: 'gmail-scale', user_id: 'u1', enabled: true, imap_host: 'imap.gmail.com', imap_tls: true };
-  const stopTimers = mgr => { for (const key of ['_healthCheckTimer', '_snippetSchedulerTimer', '_stalenessCheckTimer', '_flagPushReconcilerTimer', '_folderStatusTimer']) clearInterval(mgr[key]); };
+  const stopTimers = mgr => { for (const key of ['_healthCheckTimer', '_snippetSchedulerTimer', '_stalenessCheckTimer', '_flagPushReconcilerTimer', '_folderStatusTimer', '_providerIdSchedulerTimer']) clearInterval(mgr[key]); };
 
   beforeEach(() => {
     vi.clearAllMocks();
@@ -3674,7 +3679,7 @@ describe('health check asserts that IDLE is running', () => {
     const interval = vi.spyOn(globalThis, 'setInterval');
     const mgr = new ImapManager(null);
     const cycle = interval.mock.calls.find(([, ms]) => ms === 90000)[0];
-    for (const key of ['_healthCheckTimer', '_snippetSchedulerTimer', '_stalenessCheckTimer', '_flagPushReconcilerTimer', '_folderStatusTimer']) clearInterval(mgr[key]);
+    for (const key of ['_healthCheckTimer', '_snippetSchedulerTimer', '_stalenessCheckTimer', '_flagPushReconcilerTimer', '_folderStatusTimer', '_providerIdSchedulerTimer']) clearInterval(mgr[key]);
     return { mgr, cycle };
   };
 

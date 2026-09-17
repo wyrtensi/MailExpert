@@ -8,7 +8,7 @@ vi.mock('../middleware/auth.js', () => ({
     next();
   },
 }));
-vi.mock('../index.js', () => ({ imapManager: {} }));
+vi.mock('../index.js', () => ({ imapManager: { providerIdBackfillStates: vi.fn(async () => new Map()) } }));
 vi.mock('../plugins/registry.js', () => ({ pluginRegistry: { collectHook: vi.fn(async () => []) } }));
 
 import express from 'express';
@@ -63,7 +63,7 @@ describe('GET /api/accounts health', () => {
   it('adds only the health code and keeps sync_error as the sole error text', async () => {
     const row = { ...ROW, last_sync: new Date(), sync_error: 'Connection refused' };
     const [account] = await list([row]);
-    expect(Object.keys(account).sort()).toEqual([...Object.keys(row), 'aliases', 'health'].sort());
+    expect(Object.keys(account).sort()).toEqual([...Object.keys(row), 'aliases', 'health', 'provider_ids_backfill'].sort());
     expect(account.sync_error).toBe('Connection refused');
     expect(account.health).toBe('failed');
   });

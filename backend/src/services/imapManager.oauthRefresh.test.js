@@ -125,7 +125,7 @@ function scriptConnects(...outcomes) { connectOutcomes = outcomes; }
 
 function newManager() {
   const mgr = new ImapManager(null);
-  for (const key of ['_healthCheckTimer', '_snippetSchedulerTimer', '_stalenessCheckTimer', '_flagPushReconcilerTimer', '_folderStatusTimer']) clearInterval(mgr[key]);
+  for (const key of ['_healthCheckTimer', '_snippetSchedulerTimer', '_stalenessCheckTimer', '_flagPushReconcilerTimer', '_folderStatusTimer', '_providerIdSchedulerTimer']) clearInterval(mgr[key]);
   mgr.broadcast = vi.fn();
   return mgr;
 }

@@ -44,6 +44,7 @@ import { isValidForwardAddress } from '../utils/ruleActions.js';
 import { folderParentLabel } from '../utils/folderDisplay.js';
 import { accountLabel } from '../utils/accountLabel.js';
 import { LANGUAGES } from '../utils/language.js';
+import { providerIdsBackfillText } from '../utils/providerIdsBackfill.js';
 
 // ─── Shared field component ───────────────────────────────────────────────────
 function Field({ label, required, children }) {
@@ -1075,6 +1076,14 @@ function AccountsTab() {
                 <span style={{ color: 'var(--text-secondary)', fontFamily: 'JetBrains Mono, monospace' }}>{val}</span>
               </div>
             ))}
+            {providerIdsBackfillText(account.provider_ids_backfill, t) && (
+              <div style={{
+                fontSize: 11,
+                color: account.provider_ids_backfill.status === 'error' ? 'var(--red)' : 'var(--text-tertiary)',
+              }}>
+                {providerIdsBackfillText(account.provider_ids_backfill, t)}
+              </div>
+            )}
             {backfillProgress[account.id] && (
               <div style={{ width: '100%', marginTop: 4 }}>
                 <div style={{ fontSize: 11, color: 'var(--text-tertiary)', marginBottom: 4 }}>

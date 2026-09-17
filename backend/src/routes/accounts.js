@@ -91,6 +91,9 @@ router.get('/', async (req, res) => {
     }
   }
 
+  // Gmail id backfill state (threading/providerIdBackfill.js); absent for other providers.
+  const providerIdStates = await imapManager.providerIdBackfillStates(result.rows);
+
   // One clock for the whole list so every account's stale check uses the same instant.
   const now = Date.now();
 
@@ -104,6 +107,7 @@ router.get('/', async (req, res) => {
       signature: a.signature ? sanitizeSignature(a.signature) : a.signature,
       // Stable code only (see services/accountHealth.js); sync_error stays the sole error text.
       health: computeAccountHealth(a, now),
+      provider_ids_backfill: providerIdStates.get(a.id) ?? null,
       aliases: (aliasMap[a.id] || []).map(alias => ({
         ...alias,
         signature: alias.signature ? sanitizeSignature(alias.signature) : alias.signature,

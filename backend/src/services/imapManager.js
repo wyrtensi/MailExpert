@@ -24,6 +24,10 @@ import { applyInboxRules, applyBlockList } from './inboxRules.js';
 import { generateVCard } from '../utils/vcard.js';
 import { computeThreadId } from './threading/threadId.js';
 import { gmailProviderIds, NO_PROVIDER_IDS } from './threading/providerIds.js';
+import { runProviderIdBackfill } from './threading/providerIdBackfill.js';
+import {
+  loadProviderIdBackfill, markProviderIdBackfillPending, providerIdBackfillState, recordProviderIdBackfillError,
+} from './threading/providerIdBackfillStore.js';
 import { randomUUID } from 'crypto';
 
 
@@ -387,6 +391,15 @@ const DELTA_SCAN_UID_WINDOW = 5000;
 // body prefetch) resume after a live body fetch. Keeps click-time fetches snappy by
 // deprioritising background traffic whenever the user is actively reading mail.
 const QUIET_WINDOW_MS = 8000;
+// Gmail id backfill (threading/providerIdBackfill.js): how often connected Gmail mailboxes that
+// may still have rows without ids are retried, and how long after a local Sent/Drafts write the
+// new row's ids are loaded (the sync never refetches a UID the app already stored).
+const PROVIDER_ID_SCHEDULER_MS = 10 * 60 * 1000;
+const PROVIDER_ID_NUDGE_DELAY_MS = 60 * 1000;
+// A mailbox whose run failed or left folders unfinished waits base * 2^(failures-1), capped, before
+// the next attempt, so a folder the server always refuses does not log in to Gmail every tick.
+const PROVIDER_ID_BACKOFF_BASE_MS = 10 * 60 * 1000;
+const PROVIDER_ID_BACKOFF_MAX_MS = 2 * 60 * 60 * 1000;
 
 // Fallback cadence (ms) for a plugin-declared background sync tick that omits its own
 // `sync.intervalMs`. Slower than the INBOX interval on purpose — a plugin's label folders
@@ -1664,6 +1677,12 @@ export class ImapManager {
     this.pluginSyncIntervals = new Map(); // `${accountId}::${pluginId}` -> timer for a plugin's periodic sync tick
     this.backfillRunning = new Set(); // `${accountId}:${folder}` — prevent duplicate folder backfills
     this.backfillAllRunning = new Set(); // accountId — prevent concurrent full backfill sequences
+    this.providerIdBackfillRunning = new Set(); // accountId — Gmail id backfill in progress
+    this.providerIdBackfillClean = new Set(); // accountId — last run finished and no local write since
+    this.providerIdProgress = new Map(); // accountId -> { processed, total } of the running backfill
+    this._providerIdGeneration = new Map(); // accountId -> bumped by every local write that needs ids
+    this._providerIdNudges = new Map(); // accountId -> pending timeout after a local write
+    this.providerIdBackoff = new Map(); // accountId -> { failures, until } after a failed or incomplete run
     // Cap concurrent background IMAP connections (backfill, snippet indexer, folder status, bulk
     // flags) per provider host; a provider profile may set a tighter host limit.
     this._bgConnSem = createKeyedSemaphore(host => backgroundConnectionLimit(host));
@@ -1810,6 +1829,12 @@ export class ImapManager {
         console.error('Snippet scheduler error:', err.message);
       }
     }, 10 * 60 * 1000); // every 10 minutes
+
+    // Resumes Gmail id backfills that stopped early or failed, and catches rows written while a run
+    // was already past their folder. Mailboxes whose last run finished cleanly are skipped.
+    this._providerIdSchedulerTimer = setInterval(() => {
+      this._nudgeProviderIdBackfills().catch(err => console.error('Provider id scheduler error:', err.message));
+    }, PROVIDER_ID_SCHEDULER_MS);
 
     // Active staleness check. A long-lived IDLE connection can go "deaf": commands keep
     // succeeding but the server stops reflecting new mail on it, so sync ticks complete
@@ -2288,6 +2313,10 @@ export class ImapManager {
         );
       } else {
         logger.debug(`Backfill deferred on connect for ${logAccount(account)} — account already has cached mail`);
+        // Established mailboxes skip the full backfill, so start the Gmail id backfill directly.
+        this.startProviderIdBackfill(account).catch(err =>
+          console.warn(`Provider id backfill failed to start for ${logAccount(account)}:`, err.message)
+        );
       }
 
       this._startSyncInterval(account, this.syncIntervalMs);
@@ -4485,6 +4514,9 @@ export class ImapManager {
       this.startSnippetIndexer(account).catch(err =>
         console.error(`Snippet indexer failed for ${logAccount(account)}:`, err.message)
       );
+      this.startProviderIdBackfill(account).catch(err =>
+        console.warn(`Provider id backfill failed to start for ${logAccount(account)}:`, err.message)
+      );
     }
   }
 
@@ -4697,6 +4729,167 @@ export class ImapManager {
     }
   }
 
+  // Loads Gmail thread and message ids for cached rows that lack them. Gmail mailboxes only.
+  // The plan is read from the database first; a background connection is taken only when a batch
+  // needs IMAP. Progress is saved per batch, so any stop resumes on the next trigger.
+  async startProviderIdBackfill(account) {
+    const cfg = providerProfile(account);
+    if (!cfg.gmailThreadIds) return;
+    if (this.providerIdBackfillClean.has(account.id) || this.providerIdBackfillRunning.has(account.id)) return;
+    // backfillAllFolders starts this job from its finally; running both would split the host budget.
+    if (this.backfillAllRunning.has(account.id)) return;
+    const cooldown = this._connectCooldown.get(account.id);
+    if (cooldown && Date.now() < cooldown.until) return;
+    const backoff = this.providerIdBackoff.get(account.id);
+    if (backoff && Date.now() < backoff.until) return;
+
+    this.providerIdBackfillRunning.add(account.id);
+    const generation = this._providerIdGeneration.get(account.id) || 0;
+    const host = (account.imap_host || '').toLowerCase();
+    let client = null;
+    let slotHeld = false;
+    try {
+      // A finished mailbox with no local write since has nothing to load: skip the plan query,
+      // which counts every row of the mailbox. This also holds after a restart.
+      const stored = await loadProviderIdBackfill(query, account.id);
+      if (stored?.finished_at && !stored.error && !stored.pending_since) {
+        if ((this._providerIdGeneration.get(account.id) || 0) === generation) this.providerIdBackfillClean.add(account.id);
+        return;
+      }
+      const result = await runProviderIdBackfill({
+        query,
+        accountId: account.id,
+        getClient: async () => {
+          if (client) return client;
+          if (!slotHeld) {
+            await this._bgConnSem.acquire(host);
+            slotHeld = true;
+          }
+          const row = (await query('SELECT * FROM email_accounts WHERE id = $1', [account.id])).rows[0];
+          if (!row || !row.enabled) throw Object.assign(new Error('Account deleted or disabled'), { accountUnavailable: true });
+          const fresh = await ensureFreshToken(row);
+          const { resolved, policy } = await resolveAccountHost(fresh);
+          client = await connectImapClient(fresh, resolved, { policy }, 30000, 'Provider id backfill connect');
+          return client;
+        },
+        shouldContinue: async () => {
+          const row = (await query('SELECT enabled, oauth_reconnect_required FROM email_accounts WHERE id = $1', [account.id])).rows[0];
+          if (!row || !row.enabled || row.oauth_reconnect_required) return false;
+          // A manual reindex started during the run; backfillAllFolders starts this job again when it ends.
+          if (this.backfillAllRunning.has(account.id)) return false;
+          const cd = this._connectCooldown.get(account.id);
+          return !(cd && Date.now() < cd.until);
+        },
+        onProgress: (progress) => {
+          this.providerIdProgress.set(account.id, progress);
+          this._broadcastProviderIdBackfill(account).catch(() => {});
+        },
+        pause: async () => {
+          // Same courtesy as the snippet indexer: back off while the user is opening messages.
+          const quietFor = Date.now() - (this.lastUserActivity.get(account.id) || 0);
+          const extraDelay = quietFor < QUIET_WINDOW_MS ? QUIET_WINDOW_MS - quietFor : 0;
+          await new Promise(resolve => setTimeout(resolve, cfg.batchDelay + extraDelay));
+        },
+      });
+      if (result.outcome === 'done') {
+        this.providerIdBackoff.delete(account.id);
+        if ((this._providerIdGeneration.get(account.id) || 0) === generation) this.providerIdBackfillClean.add(account.id);
+      } else if (result.outcome === 'incomplete') {
+        // Folders the server refused or renumbered still have rows without ids: retry later, not every tick.
+        this._noteProviderIdBackfillFailure(account);
+        if (result.failedFolders.length) {
+          const detail = result.failedFolders.map(f => `${f.path}: ${f.error}`).join('; ');
+          console.warn(`Provider id backfill left folders unfinished for ${logAccount(account)}: ${detail}`);
+          await recordProviderIdBackfillError(query, account.id, detail).catch(recordErr =>
+            console.warn(`Could not record the provider id backfill error for ${logAccount(account)}:`, recordErr.message)
+          );
+        }
+      }
+      logger.debug(`Provider id backfill ${result.outcome} for ${logAccount(account)}: ${result.processed}/${result.total} rows`);
+    } catch (err) {
+      if (err?.accountUnavailable) return;
+      this._noteProviderIdBackfillFailure(account);
+      if (await this._handleOAuthRefreshFailure(account, err)) return;
+      const detail = extractImapError(err);
+      if (isConnectionRefusal(detail)) this._noteConnectionRefusal(account);
+      else if (isImapAuthFailure(err)) this._noteAuthFailure(account);
+      console.warn(`Provider id backfill failed for ${logAccount(account)}: ${detail}`);
+      await recordProviderIdBackfillError(query, account.id, detail).catch(() => {});
+    } finally {
+      if (client) { try { await client.logout(); } catch { /* already disconnected */ } }
+      if (slotHeld) this._bgConnSem.release(host);
+      this.providerIdBackfillRunning.delete(account.id);
+      this.providerIdProgress.delete(account.id);
+      this._broadcastProviderIdBackfill(account).catch(() => {});
+    }
+  }
+
+  _noteProviderIdBackfillFailure(account) {
+    const failures = (this.providerIdBackoff.get(account.id)?.failures || 0) + 1;
+    const delay = Math.min(PROVIDER_ID_BACKOFF_BASE_MS * 2 ** (failures - 1), PROVIDER_ID_BACKOFF_MAX_MS);
+    this.providerIdBackoff.set(account.id, { failures, until: Date.now() + delay });
+    logger.debug(`Provider id backfill backing off ${logAccount(account)} for ${Math.round(delay / 60000)}m (failure #${failures})`);
+  }
+
+  // Admin state of the Gmail id backfill for the Gmail mailboxes among `accounts`.
+  async providerIdBackfillStates(accounts) {
+    const states = new Map();
+    const gmail = accounts.filter(account => providerProfile(account).gmailThreadIds);
+    if (!gmail.length) return states;
+    const { rows } = await query(
+      'SELECT account_id, cursors, finished_at, error FROM provider_id_backfill WHERE account_id = ANY($1)',
+      [gmail.map(account => account.id)],
+    );
+    const byAccount = new Map(rows.map(row => [row.account_id, row]));
+    for (const account of gmail) {
+      states.set(account.id, providerIdBackfillState({
+        row: byAccount.get(account.id) || null,
+        running: this.providerIdBackfillRunning.has(account.id),
+        progress: this.providerIdProgress.get(account.id) || null,
+      }));
+    }
+    return states;
+  }
+
+  async _broadcastProviderIdBackfill(account) {
+    const state = (await this.providerIdBackfillStates([account])).get(account.id);
+    if (state) this.broadcast({ type: 'provider_ids_backfill', accountId: account.id, state });
+  }
+
+  // A row the app wrote itself after an APPEND has no Gmail ids, and the sync never refetches its
+  // UID. Load them shortly after; a burst of writes collapses into one run.
+  _scheduleProviderIdBackfill(account) {
+    if (!providerProfile(account).gmailThreadIds) return;
+    this._providerIdGeneration.set(account.id, (this._providerIdGeneration.get(account.id) || 0) + 1);
+    this.providerIdBackfillClean.delete(account.id);
+    // Persisted, so a finished mailbox is replanned after a restart only when a write needs it.
+    markProviderIdBackfillPending(query, account.id).catch(err =>
+      console.warn(`Could not mark the provider id backfill pending for ${logAccount(account)}:`, err.message)
+    );
+    clearTimeout(this._providerIdNudges.get(account.id));
+    const timer = setTimeout(() => {
+      this._providerIdNudges.delete(account.id);
+      query('SELECT * FROM email_accounts WHERE id = $1', [account.id])
+        .then(result => result.rows[0] && this.startProviderIdBackfill(result.rows[0]))
+        .catch(err => console.warn(`Provider id backfill after a local write failed for ${logAccount(account)}:`, err.message));
+    }, PROVIDER_ID_NUDGE_DELAY_MS);
+    timer.unref?.();
+    this._providerIdNudges.set(account.id, timer);
+  }
+
+  async _nudgeProviderIdBackfills() {
+    for (const accountId of this.connections.keys()) {
+      if (this.providerIdBackfillClean.has(accountId) || this.providerIdBackfillRunning.has(accountId)) continue;
+      const backoff = this.providerIdBackoff.get(accountId);
+      if (backoff && Date.now() < backoff.until) continue;
+      const result = await query('SELECT * FROM email_accounts WHERE id = $1', [accountId]);
+      if (!result.rows.length) continue;
+      this.startProviderIdBackfill(result.rows[0]).catch(err =>
+        console.warn(`Scheduled provider id backfill failed for account ${accountId}:`, err.message)
+      );
+    }
+  }
+
   async appendToFolder(account, folder, rawMessage, flags = ['\\Seen']) {
     let uid = null;
     await withFreshClient(account, async (client) => {
@@ -4773,6 +4966,7 @@ export class ImapManager {
       JSON.stringify(to), JSON.stringify(cc),
       safeDate(date), sanitizeStr(snippet || ''), threadId,
     ]);
+    this._scheduleProviderIdBackfill(account);
   }
 
   // Persist a local Drafts row immediately after appending a draft to IMAP, so the
@@ -4837,6 +5031,7 @@ export class ImapManager {
       msgId || null,
       JSON.stringify(Array.isArray(bcc) ? bcc : []),
     ]);
+    this._scheduleProviderIdBackfill(account);
   }
 
   async findUidByMessageId(account, folder, messageId) {
@@ -5547,7 +5742,8 @@ export class ImapManager {
 
     if (newUid == null) return null;
 
-    await insertCopiedSibling(accountId, uid, fromFolder, toFolder, newUid);
+    // The sibling copies the source row's Gmail ids, which may still be missing.
+    if (await insertCopiedSibling(accountId, uid, fromFolder, toFolder, newUid)) this._scheduleProviderIdBackfill(account);
     return newUid;
   }
 

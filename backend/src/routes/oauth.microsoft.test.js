@@ -151,6 +151,24 @@ describe('Microsoft reconsent clears the reconnect flag and connect cooldown', (
   });
 });
 
+describe('Microsoft consent on a mailbox added with a password', () => {
+  it('turns the existing mailbox into a Microsoft OAuth mailbox', async () => {
+    // Storing tokens without the provider left the mailbox signing in with its old password,
+    // so the consent had no effect.
+    stubMicrosoft(() => json(true, TOKENS));
+    const res = await fetch(`${base}/oauth/microsoft/callback?code=auth-code&state=${NONCE}`, {
+      redirect: 'manual',
+      headers: { 'x-test-user': USER_ID },
+    });
+    expect(res.status).toBe(302);
+    const sql = updateSql();
+    expect(sql).toMatch(/oauth_provider = 'microsoft'/);
+    expect(sql).toMatch(/auth_user = email_address/);
+    expect(sql).toMatch(/imap_host = 'outlook.office365.com'/);
+    expect(sql).toMatch(/smtp_host = 'smtp.office365.com'/);
+  });
+});
+
 describe('Microsoft consent is journaled', () => {
   const callback = () => fetch(`${base}/oauth/microsoft/callback?code=auth-code&state=${NONCE}`, {
     redirect: 'manual', headers: { 'x-test-user': USER_ID },

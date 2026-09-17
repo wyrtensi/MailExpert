@@ -2669,6 +2669,35 @@ describe('extractImapError', () => {
     vi.restoreAllMocks();
   });
 
+  it('never opens more pooled connections than the pool size under a burst of requests', async () => {
+    // Every caller used to pass the size check before the first connect finished, so a burst
+    // opened one login per request instead of queueing for the pool.
+    getConnectionPolicy.mockResolvedValue({ allowPrivateHosts: true });
+    resolveForConnection.mockResolvedValue({ host: '127.0.0.1', addresses: ['127.0.0.1'] });
+    let created = 0;
+    ImapFlow.mockImplementation(function () {
+      created++;
+      return Object.assign(new EventEmitter(), {
+        connect: vi.fn(() => new Promise(resolve => setTimeout(resolve, 5))),
+        close: vi.fn(),
+        logout: vi.fn().mockResolvedValue(),
+        getMailboxLock: vi.fn().mockResolvedValue({ release: vi.fn() }),
+        fetch: vi.fn(async function* (_uid, q) {
+          if (q.bodyStructure) {
+            yield { uid: 9, bodyStructure: { part: '1', type: 'text/plain', encoding: '7bit', parameters: { charset: 'utf-8' } } };
+            return;
+          }
+          yield { uid: 9, bodyParts: new Map(q.bodyParts.map(part => [part, Buffer.from('hello')])) };
+        }),
+      });
+    });
+    const account = { id: 'pool-burst', user_id: 'u1', imap_host: 'imap.example.com', imap_tls: true };
+    const bodies = await Promise.all(Array.from({ length: 5 }, () =>
+      ImapManager.prototype.fetchMessageBody.call({}, account, 9, 'INBOX')));
+    expect(bodies).toHaveLength(5);
+    expect(created).toBe(poolSizeFor(account));
+  });
+
   it('fetchMessageBody renders a calendar-only message as an invite card (#423)', async () => {
     getConnectionPolicy.mockResolvedValue({ allowPrivateHosts: true });
     resolveForConnection.mockResolvedValue({ host: '127.0.0.1', addresses: ['127.0.0.1'] });

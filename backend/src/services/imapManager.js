@@ -1462,7 +1462,7 @@ function drainWaiters(pool) {
 async function acquirePooledClient(account, { noTemp = false } = {}) {
   const id = account.id;
   if (!connectionPools.has(id)) {
-    connectionPools.set(id, { clients: [], inUse: new Set(), waiters: [] });
+    connectionPools.set(id, { clients: [], inUse: new Set(), waiters: [], connecting: 0 });
   }
   const pool = connectionPools.get(id);
 
@@ -1473,9 +1473,12 @@ async function acquirePooledClient(account, { noTemp = false } = {}) {
     return idle;
   }
 
-  // Grow pool if under limit — refresh token before creating a new connection
-  if (pool.clients.length < poolSizeFor(account)) {
+  // Grow pool if under limit — refresh token before creating a new connection. The slot is
+  // reserved before the first await: otherwise every caller in a burst passes this check while
+  // the first connect is still running, and the pool opens one login per request.
+  if (pool.clients.length + (pool.connecting || 0) < poolSizeFor(account)) {
     let client;
+    pool.connecting = (pool.connecting || 0) + 1;
     try {
       const freshAccount = await ensureFreshToken(account);
       const { resolved, policy } = await resolveAccountHost(freshAccount);
@@ -1483,9 +1486,11 @@ async function acquirePooledClient(account, { noTemp = false } = {}) {
       // listener and recovers from a stalled IPv6 handshake by retrying IPv4-only.
       client = await connectImapClient(freshAccount, resolved, { policy }, 30000, 'IMAP pool connect');
     } catch (err) {
+      pool.connecting--;
       await applyHelperOAuthFailure(account, err);
       throw err;
     }
+    pool.connecting--;
     // Remove from pool immediately when the server closes the socket, then
     // wake any waiters so they can claim another idle connection if one exists.
     client.on('close', () => {

@@ -107,6 +107,7 @@ Frontend не ходит к Gmail напрямую. Он обращается к
 - `redis.js` — клиент Redis и session/runtime state.
 - `db.js`, `migrations.js` — PostgreSQL pool, транзакции и запуск миграций.
 - `authLimiter.js`, `rateLimiter.js`, `authEvents.js` — защита login/API и журнал безопасности.
+- `auditLog.js` — журнал действий пользователей с ящиками, письмами и пользователями (`mailbox_audit_log`); маршруты пишут в него без ожидания, ошибка записи не ломает действие.
 - `emailSanitizer.js` — граница недоверенного HTML письма.
 - `logger.js`, `diagnosticsRing.js`, `diagnosticsReport.js` — журналы и redaction.
 - `websocket.js`, `pushNotifications.js` — обновления UI и Web Push.

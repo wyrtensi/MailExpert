@@ -210,6 +210,23 @@ describe('createAccountSmtpTransport', () => {
     expect(nodemailer.createTransport.mock.calls.every(([opts]) => opts.auth.accessToken !== 'expired-token')).toBe(true);
   });
 
+  it('requires TLS on a STARTTLS account so a stripped STARTTLS cannot fall back to plaintext', async () => {
+    // The transport is built on the first send.
+    const result = await createAccountSmtpTransport({
+      smtp_host: 'smtp.example.com', smtp_port: 587, smtp_tls: 'STARTTLS', auth_user: 'u', auth_pass: 'p',
+    });
+    await result.transport.sendMail({ to: 'user@example.com' });
+    expect(nodemailer.createTransport).toHaveBeenCalledWith(expect.objectContaining({ requireTLS: true, secure: false }));
+  });
+
+  it('does not ask for STARTTLS on an implicit-TLS account', async () => {
+    const result = await createAccountSmtpTransport({
+      smtp_host: 'smtp.example.com', smtp_port: 465, smtp_tls: 'SSL', auth_user: 'u', auth_pass: 'p',
+    });
+    await result.transport.sendMail({ to: 'user@example.com' });
+    expect(nodemailer.createTransport.mock.calls[0][0].requireTLS).toBeUndefined();
+  });
+
   it('never sends password accounts through the token manager', async () => {
     await createAccountSmtpTransport({
       smtp_host: 'smtp.example.com', smtp_port: 587, smtp_tls: 'STARTTLS', auth_user: 'u', auth_pass: 'p',

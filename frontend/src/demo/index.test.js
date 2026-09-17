@@ -110,3 +110,22 @@ test('demo contacts can enter the edit form and round-trip through create and up
     primary: true,
   }]);
 });
+
+test('the demo audit log lists entries newest first and applies the mailbox, user and action filters', async () => {
+  const all = await demoRequest('GET', '/admin/audit');
+  assert.equal(all.nextCursor, null);
+  assert.ok(all.entries.length >= 4);
+  const times = all.entries.map((entry) => entry.occurredAt);
+  assert.deepEqual(times, [...times].sort().reverse());
+
+  const sales = await demoRequest('GET', '/admin/audit?account=demo-sales');
+  assert.ok(sales.entries.length > 0);
+  assert.ok(sales.entries.every((entry) => entry.accountId === 'demo-sales'));
+
+  const sent = await demoRequest('GET', '/admin/audit?action=message.sent');
+  assert.ok(sent.entries.length > 0);
+  assert.ok(sent.entries.every((entry) => entry.action === 'message.sent'));
+
+  const nobody = await demoRequest('GET', '/admin/audit?user=someone-else');
+  assert.deepEqual(nobody.entries, []);
+});

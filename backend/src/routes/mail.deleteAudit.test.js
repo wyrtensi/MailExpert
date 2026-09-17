@@ -12,6 +12,7 @@ vi.mock('../index.js', () => ({
     syncFolderOnDemand: vi.fn(async () => {}),
     _guardMoveUid: vi.fn(),
     _unguardMoveUid: vi.fn(),
+    _scheduleProviderIdBackfill: vi.fn(),
     scheduleCountRefresh: vi.fn(),
   },
 }));

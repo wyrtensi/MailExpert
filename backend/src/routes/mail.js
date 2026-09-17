@@ -90,6 +90,15 @@ const RELOCATE_COPY_COLS = [
 export const RELOCATE_INSERT_COLS = ['account_id', 'uid', 'folder', ...RELOCATE_COPY_COLS].join(', ');
 export const RELOCATE_SELECT_COLS = ['d.account_id', 'u.new_uid', '$4', ...RELOCATE_COPY_COLS.map(c => `d.${c}`)].join(', ');
 
+// A relocated row carries the source row's Gmail ids (provider_thread_id / provider_message_id),
+// which may still be missing; ask for an id backfill run for each account whose rows were copied
+// to a new UID. A no-op for mailboxes not on Gmail.
+function scheduleProviderIdsForRelocated(accounts) {
+  for (const account of new Set(accounts)) {
+    if (account) imapManager._scheduleProviderIdBackfill(account);
+  }
+}
+
 
 // Returns true if a snippet contains content that should never appear in plain-text
 // preview, indicating it was generated from unclean HTML and needs regeneration:
@@ -1310,6 +1319,7 @@ router.post('/messages/bulk-delete', async (req, res) => {
           JOIN uid_map u ON d.id = u.src_id
           ON CONFLICT (account_id, uid, folder) DO NOTHING
         `, [allIds, withUid.map(u => u.msg.id), withUid.map(u => u.newUid), trashPath]);
+        scheduleProviderIdsForRelocated(withUid.map(u => accountsById[u.msg.account_id]));
       }
       // Non-UIDPLUS trash moves were deleted with no reinsert; pull each affected
       // (account, trash folder) now so they reappear promptly instead of via IDLE.
@@ -1531,7 +1541,7 @@ router.post('/messages/bulk-move', async (req, res) => {
           const msg = uidToMsg.get(String(uid));
           movedIds.push(msg.id);
           const newUid = uidMap.get(Number(uid)) || null;
-          if (newUid) uidUpdates.push({ id: msg.id, newUid });
+          if (newUid) uidUpdates.push({ id: msg.id, newUid, account });
           else accountMissingUid = true;
         }
         for (const uid of failed) console.error(`bulk-move IMAP uid ${uid}: IMAP move failed`);
@@ -1562,6 +1572,7 @@ router.post('/messages/bulk-move', async (req, res) => {
         JOIN uid_map u ON d.id = u.src_id
         ON CONFLICT (account_id, uid, folder) DO NOTHING
       `, [movedIds, withNewUid, withNewUid.map(id => uidUpdateMap.get(id)), folder]);
+      scheduleProviderIdsForRelocated(uidUpdates.map(u => u.account));
       // Messages moved on a non-UIDPLUS server were deleted with no reinsert; pull the
       // destination folder now so they reappear promptly instead of waiting for IDLE.
       for (const acct of resyncAccounts) {
@@ -1680,8 +1691,8 @@ router.post('/messages/bulk-archive', async (req, res) => {
     // destination is Gmail's All Mail, where the message just vanishes from our view
     // (see allMailDestFolders above), so a plain DELETE with no reinsert is correct.
     const byFolder = {};
-    for (const { id, folder, newUid } of archivedIds) {
-      (byFolder[folder] = byFolder[folder] || []).push({ id, newUid });
+    for (const { id, accountId, folder, newUid } of archivedIds) {
+      (byFolder[folder] = byFolder[folder] || []).push({ id, accountId, newUid });
     }
     for (const [archiveFolder, entries] of Object.entries(byFolder)) {
       const allIds  = entries.map(e => e.id);
@@ -1703,6 +1714,7 @@ router.post('/messages/bulk-archive', async (req, res) => {
         JOIN uid_map u ON d.id = u.src_id
         ON CONFLICT (account_id, uid, folder) DO NOTHING
       `, [allIds, withUid.map(e => e.id), withUid.map(e => e.newUid), archiveFolder]);
+      scheduleProviderIdsForRelocated(withUid.map(e => accountsById[e.accountId]));
     }
 
     // Non-UIDPLUS archive moves were deleted with no reinsert; pull each affected

@@ -1,3 +1,4 @@
+import { EventEmitter } from 'node:events';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 vi.mock('imapflow', () => ({ ImapFlow: vi.fn() }));
@@ -20,7 +21,10 @@ vi.mock('./threading/providerIdBackfillStore.js', async (importOriginal) => ({
   recordProviderIdBackfillError: vi.fn(async () => {}),
 }));
 
+import { ImapFlow } from 'imapflow';
 import { query } from './db.js';
+import { getConnectionPolicy } from './connectionPolicy.js';
+import { resolveForConnection } from './hostValidation.js';
 import { runProviderIdBackfill } from './threading/providerIdBackfill.js';
 import { recordProviderIdBackfillError } from './threading/providerIdBackfillStore.js';
 import { ImapManager } from './imapManager.js';
@@ -35,23 +39,46 @@ function newManager() {
 
 const gmail = {
   id: 'g1', user_id: 'u1', enabled: true, protocol: 'imap', email_address: 'box@gmail.com',
-  imap_host: 'imap.gmail.com', imap_port: 993, oauth_reconnect_required: false,
+  imap_host: 'imap.gmail.com', imap_port: 993, imap_tls: true, oauth_reconnect_required: false,
 };
 const other = { ...gmail, id: 'o1', email_address: 'box@example.com', imap_host: 'imap.example.com' };
 
 let backfillRows;
+let gmailRow; // what email_accounts holds for the Gmail mailbox; tests change it mid-run
+let imapClients; // every ImapFlow the manager created
+let connectError; // when set, ImapFlow.connect rejects with it
 beforeEach(() => {
   backfillRows = [];
+  gmailRow = gmail;
+  imapClients = [];
+  connectError = null;
   query.mockReset();
   query.mockImplementation(async (sql, params = []) => {
     if (/FROM provider_id_backfill/.test(sql)) return { rows: backfillRows };
-    if (/FROM email_accounts WHERE id = \$1/.test(sql)) return { rows: [params[0] === gmail.id ? gmail : other] };
+    if (/FROM email_accounts WHERE id = \$1/.test(sql)) return { rows: [params[0] === gmail.id ? gmailRow : other] };
     return { rows: [] };
   });
   runProviderIdBackfill.mockReset();
   recordProviderIdBackfillError.mockClear();
+  getConnectionPolicy.mockResolvedValue({ allowPrivateHosts: true, allowInsecureTls: false });
+  resolveForConnection.mockResolvedValue({ host: '127.0.0.1', addresses: ['127.0.0.1'], servername: null });
+  ImapFlow.mockReset();
+  ImapFlow.mockImplementation(function () {
+    const client = Object.assign(new EventEmitter(), {
+      connect: vi.fn(async () => { if (connectError) throw connectError; }),
+      close: vi.fn(),
+      logout: vi.fn(async () => {}),
+    });
+    imapClients.push(client);
+    return client;
+  });
+  vi.spyOn(console, 'warn').mockImplementation(() => {});
+  vi.spyOn(console, 'error').mockImplementation(() => {});
+  vi.spyOn(console, 'log').mockImplementation(() => {});
 });
-afterEach(() => { vi.useRealTimers(); });
+afterEach(() => { vi.useRealTimers(); vi.restoreAllMocks(); });
+
+const HOST = 'imap.gmail.com';
 
 const broadcasts = (mgr) => mgr.broadcast.mock.calls.map(c => c[0]).filter(e => e.type === 'provider_ids_backfill');
 
@@ -127,6 +154,250 @@ describe('startProviderIdBackfill', () => {
     expect(recordProviderIdBackfillError).toHaveBeenCalledWith(query, gmail.id, expect.stringContaining('Connection closed'));
     expect(mgr.providerIdBackfillRunning.has(gmail.id)).toBe(false);
     expect(mgr.providerIdBackfillClean.has(gmail.id)).toBe(false);
+  });
+});
+
+describe('startProviderIdBackfill connection handling', () => {
+  it('frees the background slot, records the error and backs off when the connection fails', async () => {
+    const mgr = newManager();
+    connectError = new Error('Socket closed unexpectedly');
+    runProviderIdBackfill.mockImplementation(async ({ getClient }) => { await getClient(); });
+    const before = Date.now();
+
+    await mgr.startProviderIdBackfill(gmail);
+
+    expect(imapClients).toHaveLength(1);
+    expect(mgr._bgConnSem.activeCount(HOST)).toBe(0);
+    expect(recordProviderIdBackfillError).toHaveBeenCalledWith(query, gmail.id, expect.stringContaining('Socket closed unexpectedly'));
+    const backoff = mgr.providerIdBackoff.get(gmail.id);
+    expect(backoff.failures).toBe(1);
+    expect(backoff.until).toBeGreaterThanOrEqual(before + 10 * 60 * 1000);
+    expect(mgr.providerIdBackfillRunning.has(gmail.id)).toBe(false);
+  });
+
+  it('logs out the client once and frees the slot when the run fails after connecting', async () => {
+    const mgr = newManager();
+    runProviderIdBackfill.mockImplementation(async ({ getClient }) => {
+      await getClient();
+      expect(mgr._bgConnSem.activeCount(HOST)).toBe(1);
+      throw new Error('Database went away');
+    });
+
+    await mgr.startProviderIdBackfill(gmail);
+
+    expect(imapClients).toHaveLength(1);
+    expect(imapClients[0].logout).toHaveBeenCalledTimes(1);
+    expect(mgr._bgConnSem.activeCount(HOST)).toBe(0);
+  });
+
+  it('frees the slot without recording an error when the mailbox was disabled before connecting', async () => {
+    const mgr = newManager();
+    gmailRow = { ...gmail, enabled: false };
+    runProviderIdBackfill.mockImplementation(async ({ getClient }) => { await getClient(); });
+
+    await mgr.startProviderIdBackfill(gmail);
+
+    expect(imapClients).toHaveLength(0);
+    expect(mgr._bgConnSem.activeCount(HOST)).toBe(0);
+    expect(recordProviderIdBackfillError).not.toHaveBeenCalled();
+    expect(mgr.providerIdBackoff.has(gmail.id)).toBe(false);
+  });
+
+  it('arms the auth cooldown when the server rejects the credentials', async () => {
+    const mgr = newManager();
+    const noteAuth = vi.spyOn(mgr, '_noteAuthFailure');
+    const noteRefusal = vi.spyOn(mgr, '_noteConnectionRefusal');
+    connectError = Object.assign(new Error('Command failed'), {
+      authenticationFailed: true, responseStatus: 'NO', serverResponseCode: 'AUTHENTICATIONFAILED',
+    });
+    runProviderIdBackfill.mockImplementation(async ({ getClient }) => { await getClient(); });
+
+    await mgr.startProviderIdBackfill(gmail);
+
+    expect(noteAuth).toHaveBeenCalledWith(gmail);
+    expect(noteRefusal).not.toHaveBeenCalled();
+    expect(recordProviderIdBackfillError).toHaveBeenCalled();
+  });
+
+  it('arms the refusal backoff when the server refuses the connection', async () => {
+    const mgr = newManager();
+    const noteAuth = vi.spyOn(mgr, '_noteAuthFailure');
+    const noteRefusal = vi.spyOn(mgr, '_noteConnectionRefusal');
+    connectError = new Error('Too many simultaneous connections');
+    runProviderIdBackfill.mockImplementation(async ({ getClient }) => { await getClient(); });
+
+    await mgr.startProviderIdBackfill(gmail);
+
+    expect(noteRefusal).toHaveBeenCalledWith(gmail);
+    expect(noteAuth).not.toHaveBeenCalled();
+  });
+});
+
+describe('startProviderIdBackfill shouldContinue', () => {
+  async function continueAnswers(mgr, during = () => {}) {
+    let answer;
+    runProviderIdBackfill.mockImplementation(async ({ shouldContinue }) => {
+      during();
+      answer = await shouldContinue();
+      return { outcome: 'stopped', processed: 0, total: 1, failedFolders: [], skippedFolders: [] };
+    });
+    await mgr.startProviderIdBackfill(gmail);
+    return answer;
+  }
+
+  it('continues for an enabled mailbox', async () => {
+    expect(await continueAnswers(newManager())).toBe(true);
+  });
+
+  it('stops for a disabled mailbox', async () => {
+    expect(await continueAnswers(newManager(), () => { gmailRow = { ...gmail, enabled: false }; })).toBe(false);
+  });
+
+  it('stops for a mailbox that needs an OAuth reconnect', async () => {
+    expect(await continueAnswers(newManager(), () => { gmailRow = { ...gmail, oauth_reconnect_required: true }; })).toBe(false);
+  });
+
+  it('stops while a full backfill of the mailbox runs', async () => {
+    const mgr = newManager();
+    expect(await continueAnswers(mgr, () => { mgr.backfillAllRunning.add(gmail.id); })).toBe(false);
+  });
+});
+
+describe('startProviderIdBackfill backoff and outcomes', () => {
+  it('does not start again until the backoff ends, and a complete run clears it', async () => {
+    const mgr = newManager();
+    runProviderIdBackfill.mockRejectedValueOnce(new Error('Database went away'));
+    await mgr.startProviderIdBackfill(gmail);
+    const { until } = mgr.providerIdBackoff.get(gmail.id);
+
+    await mgr.startProviderIdBackfill(gmail);
+    expect(runProviderIdBackfill).toHaveBeenCalledTimes(1);
+
+    vi.spyOn(Date, 'now').mockReturnValue(until + 1);
+    runProviderIdBackfill.mockResolvedValueOnce({ outcome: 'done', processed: 1, total: 1, failedFolders: [], skippedFolders: [] });
+    await mgr.startProviderIdBackfill(gmail);
+    expect(runProviderIdBackfill).toHaveBeenCalledTimes(2);
+    expect(mgr.providerIdBackoff.has(gmail.id)).toBe(false);
+    expect(mgr.providerIdBackfillClean.has(gmail.id)).toBe(true);
+  });
+
+  it('doubles the delay on each failure up to two hours', async () => {
+    const mgr = newManager();
+    runProviderIdBackfill.mockRejectedValue(new Error('Database went away'));
+    let now = 1_000_000;
+    vi.spyOn(Date, 'now').mockImplementation(() => now);
+    const delays = [];
+    for (let i = 0; i < 6; i++) {
+      await mgr.startProviderIdBackfill(gmail);
+      const { until } = mgr.providerIdBackoff.get(gmail.id);
+      delays.push((until - now) / 60000);
+      now = until + 1;
+    }
+    expect(delays).toEqual([10, 20, 40, 80, 120, 120]);
+  });
+
+  it('records the failed folders of an incomplete run and backs off without marking the mailbox clean', async () => {
+    const mgr = newManager();
+    runProviderIdBackfill.mockResolvedValue({
+      outcome: 'incomplete', processed: 1, total: 3,
+      failedFolders: [{ path: 'INBOX', error: 'Mailbox does not exist' }, { path: 'Label', error: 'Command failed' }],
+      skippedFolders: [],
+    });
+
+    await mgr.startProviderIdBackfill(gmail);
+
+    expect(recordProviderIdBackfillError).toHaveBeenCalledWith(query, gmail.id, 'INBOX: Mailbox does not exist; Label: Command failed');
+    expect(mgr.providerIdBackoff.get(gmail.id).failures).toBe(1);
+    expect(mgr.providerIdBackfillClean.has(gmail.id)).toBe(false);
+  });
+
+  it('records no error when an incomplete run only skipped renumbered folders', async () => {
+    const mgr = newManager();
+    runProviderIdBackfill.mockResolvedValue({ outcome: 'incomplete', processed: 0, total: 1, failedFolders: [], skippedFolders: ['INBOX'] });
+
+    await mgr.startProviderIdBackfill(gmail);
+
+    expect(recordProviderIdBackfillError).not.toHaveBeenCalled();
+    expect(mgr.providerIdBackoff.get(gmail.id).failures).toBe(1);
+    expect(mgr.providerIdBackfillClean.has(gmail.id)).toBe(false);
+  });
+
+  it('the scheduler leaves a mailbox in backoff alone', async () => {
+    const mgr = newManager();
+    mgr.connections.set(gmail.id, {});
+    mgr.providerIdBackoff.set(gmail.id, { failures: 1, until: Date.now() + 60 * 1000 });
+    mgr.startProviderIdBackfill = vi.fn(async () => {});
+    await mgr._nudgeProviderIdBackfills();
+    expect(mgr.startProviderIdBackfill).not.toHaveBeenCalled();
+  });
+});
+
+describe('Gmail id backfill pending mark', () => {
+  it('a finished mailbox without a pending write is marked clean without planning', async () => {
+    const mgr = newManager();
+    backfillRows = [{ account_id: gmail.id, cursors: {}, finished_at: new Date(), error: null, pending_since: null }];
+
+    await mgr.startProviderIdBackfill(gmail);
+
+    expect(runProviderIdBackfill).not.toHaveBeenCalled();
+    expect(mgr.providerIdBackfillClean.has(gmail.id)).toBe(true);
+    expect(mgr.providerIdBackfillRunning.has(gmail.id)).toBe(false);
+  });
+
+  it.each([
+    ['a pending write', { finished_at: new Date(), error: null, pending_since: new Date() }],
+    ['an error', { finished_at: new Date(), error: 'Command failed', pending_since: null }],
+    ['no finished run', { finished_at: null, error: null, pending_since: null }],
+  ])('a mailbox with %s is planned', async (_label, row) => {
+    const mgr = newManager();
+    backfillRows = [{ account_id: gmail.id, cursors: {}, ...row }];
+    runProviderIdBackfill.mockResolvedValue({ outcome: 'done', processed: 0, total: 0, failedFolders: [], skippedFolders: [] });
+
+    await mgr.startProviderIdBackfill(gmail);
+
+    expect(runProviderIdBackfill).toHaveBeenCalledTimes(1);
+  });
+
+  it('a local write stores the pending mark', async () => {
+    vi.useFakeTimers();
+    const mgr = newManager();
+    mgr._scheduleProviderIdBackfill(gmail);
+    const pending = query.mock.calls.filter(([sql]) => /SET pending_since = EXCLUDED\.pending_since/.test(sql));
+    expect(pending).toHaveLength(1);
+    expect(pending[0][1]).toEqual([gmail.id]);
+  });
+
+  it('a local write on another provider stores nothing', async () => {
+    vi.useFakeTimers();
+    newManager()._scheduleProviderIdBackfill(other);
+    expect(query).not.toHaveBeenCalled();
+  });
+
+  it('a label copy on a UIDPLUS server schedules the id backfill for the new row', async () => {
+    const mgr = newManager();
+    const copied = { ...gmail, id: 'g-copy' }; // own id: the IMAP pool is module state
+    query.mockImplementation(async (sql) => {
+      if (/FROM email_accounts WHERE id = \$1/.test(sql)) return { rows: [copied] };
+      if (/INSERT INTO messages/.test(sql)) return { rows: [{ id: 'm2', is_read: true }] };
+      return { rows: [] };
+    });
+    ImapFlow.mockImplementation(function () {
+      const client = Object.assign(new EventEmitter(), {
+        connect: vi.fn(async () => {}),
+        close: vi.fn(),
+        logout: vi.fn(async () => {}),
+        usable: true,
+        getMailboxLock: vi.fn(async () => ({ release: vi.fn() })),
+        messageCopy: vi.fn(async () => ({ uidMap: new Map([[5, 901]]) })),
+      });
+      imapClients.push(client);
+      return client;
+    });
+    const schedule = vi.spyOn(mgr, '_scheduleProviderIdBackfill').mockImplementation(() => {});
+
+    expect(await mgr.copyMessage(copied.id, 5, 'INBOX', 'Label')).toBe(901);
+
+    expect(schedule).toHaveBeenCalledWith(copied);
   });
 });
 

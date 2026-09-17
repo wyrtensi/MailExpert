@@ -810,6 +810,14 @@
       "reindexing": "Indexing messages...",
       "reindexProgress": "{{synced}} / {{total}} messages indexed",
       "reindexError": "Failed to start re-index",
+      "providerIds": {
+        "notStarted": "Gmail thread ids: not loaded yet",
+        "running": "Gmail thread ids: loading",
+        "runningPercent": "Gmail thread ids: loading, {{percent}}%",
+        "paused": "Gmail thread ids: paused, resumes automatically",
+        "done": "Gmail thread ids: loaded",
+        "error": "Gmail thread ids: failed ({{error}}), retries automatically"
+      },
       "syncFolders": "Sync folders",
       "syncFoldersError": "Folder sync failed",
       "unifiedInboxSection": "Unified Inbox",

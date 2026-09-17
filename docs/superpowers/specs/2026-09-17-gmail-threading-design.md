@@ -43,11 +43,10 @@
 
 ### PR A. Номера Gmail при синке
 
-- Миграция: `messages.provider_thread_id TEXT`, `messages.provider_message_id TEXT` (nullable, без default, мгновенно), `messages.threading_reason TEXT`. Индекс `(account_id, provider_thread_id) WHERE provider_thread_id IS NOT NULL` отдельной миграцией `-- no-transaction` через `CONCURRENTLY`.
-- `email_accounts.thread_mode TEXT NOT NULL DEFAULT 'rfc'` (`rfc` | `gmail`) и `email_accounts.thread_backfill` JSONB (прогресс по папкам).
+- Миграции `0060_message_provider_ids.sql` (`messages.provider_thread_id`, `messages.provider_message_id`, nullable без default) и `0061_message_provider_thread_index.sql` (индекс `(account_id, provider_thread_id)` через `CONCURRENTLY`). `threading_reason` и `email_accounts.thread_mode` / `thread_backfill` появятся в PR B и C, где используются.
 - Склейка по теме за 90 дней убирается из `computeThreadId` для всех ящиков (решение 1). Новые письма без `References` и `In-Reply-To` становятся отдельными цепочками; старые склейки разбирает пересчёт из PR C.
 - Для профиля Gmail `fetchQuery` и `bfQuery` получают `threadId: true`. Живой синк, догрузка и `ON CONFLICT` записывают `provider_thread_id` и `provider_message_id`. `thread_id` не меняется.
-- Модуль `services/threading/providerIds.js`: чтение номеров из сообщения imapflow.
+- Модули `services/threading/threadId.js` (`computeThreadId` без склейки по теме, перенесён из `imapManager.js`) и `services/threading/providerIds.js` (`gmailProviderIds`).
 - Для пользователя меняется только одно: новые письма без заголовков цепочки больше не склеиваются по теме.
 
 ### PR B. Догрузка номеров для старых писем

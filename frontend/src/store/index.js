@@ -7,6 +7,7 @@ import { applyTheme, applyCustomCss, getInitialTheme } from '../themes.js';
 import { applyFontSet, applyFontSize, effectiveFontSet, isRetroFont, THEME_FONT } from '../fonts.js';
 import { applyLayout, normalizeLayout } from '../layouts.js';
 import { DEFAULT_AI_ACTIONS } from '../aiActions.js';
+import { normalizeLanguage } from '../utils/language.js';
 import { abortAllRuns } from '../aiRuns.js';
 import {
   removeGtdThreadFromSections,
@@ -550,7 +551,7 @@ export const useStore = create((set, get) => ({
   setMobileSidebarOpen: (v) => set({ mobileSidebarOpen: v }),
 
   // Language
-  language: localStorage.getItem('mailexpert_language') || 'en',
+  language: normalizeLanguage(localStorage.getItem('mailexpert_language')),
   setLanguage: (lng) => {
     localStorage.setItem('mailexpert_language', lng);
     set({ language: lng });
@@ -1126,9 +1127,10 @@ export const useStore = create((set, get) => ({
         set({ recentFolders: prefs.recentFolders });
       }
       if (prefs.language) {
-        localStorage.setItem('mailexpert_language', prefs.language);
-        set({ language: prefs.language });
-        i18n.changeLanguage(prefs.language);
+        const language = normalizeLanguage(prefs.language);
+        localStorage.setItem('mailexpert_language', language);
+        set({ language });
+        i18n.changeLanguage(language);
       }
       if (typeof prefs.threadedView === 'boolean') {
         localStorage.setItem('mailexpert_threaded_view', String(prefs.threadedView));

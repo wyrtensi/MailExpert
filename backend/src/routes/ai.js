@@ -23,12 +23,6 @@ const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/
 const AI_LANGUAGE_NAMES = {
   en: 'English',
   ru: 'Russian',
-  de: 'German',
-  es: 'Spanish',
-  fr: 'French',
-  it: 'Italian',
-  zhCN: 'Simplified Chinese',
-  pl: 'Polish',
 };
 
 export function aiLanguageInstruction(language) {

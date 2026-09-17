@@ -43,6 +43,7 @@ import { getEffectiveShortcuts, getGroupedActions, ACTION_DEFS, SPECIAL_KEY_LABE
 import { isValidForwardAddress } from '../utils/ruleActions.js';
 import { folderParentLabel } from '../utils/folderDisplay.js';
 import { accountLabel } from '../utils/accountLabel.js';
+import { LANGUAGES } from '../utils/language.js';
 
 // ─── Shared field component ───────────────────────────────────────────────────
 function Field({ label, required, children }) {
@@ -5281,18 +5282,6 @@ function NotificationsTab() {
 }
 
 // ─── Language Tab ─────────────────────────────────────────────────────────────
-const LANGUAGES = [
-  { code: 'en', nativeName: 'English' },
-  { code: 'de', nativeName: 'Deutsch' },
-  { code: 'fr', nativeName: 'Français' },
-  { code: 'es', nativeName: 'Español' },
-  { code: 'it', nativeName: 'Italiano' },
-  { code: 'ru', nativeName: 'Русский' },
-  { code: 'zhCN', nativeName: '简体中文'},
-  { code: 'pl', nativeName: 'Polski' },
-  { code: 'cs', nativeName: 'Čeština' },
-];
-
 function LanguageTab() {
   const { t } = useTranslation();
   const { language, setLanguage } = useStore();

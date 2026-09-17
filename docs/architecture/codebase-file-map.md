@@ -183,7 +183,7 @@ Google OAuth — не plugin уровня UI: он является credential p
 
 ### Локализация
 
-`src/locales/{cs,de,en,es,fr,it,pl,ru,zhCN}.json` должны иметь одинаковые ключи. `i18n.test.js` проверяет key coverage, отсутствие неиспользуемых ключей, совпадения значений и hardcoded strings. Любой новый OAuth UI должен обновлять сразу девять локалей.
+`src/locales/{en,ru}.json` должны иметь одинаковые ключи. `i18n.test.js` проверяет key coverage, отсутствие неиспользуемых ключей, совпадения значений и hardcoded strings. Любой новый UI должен обновлять обе локали.
 
 ### Native wrappers
 

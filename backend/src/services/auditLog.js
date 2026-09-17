@@ -1,0 +1,56 @@
+import { query } from './db.js';
+
+// Everything a user can do that the journal records. Sync and inbox rules never write here.
+export const AUDIT_ACTIONS = Object.freeze([
+  'mailbox.added', 'mailbox.reconnected', 'mailbox.deleted', 'mailbox.connection_changed',
+  'mailbox.enabled', 'mailbox.disabled', 'message.sent', 'message.deleted',
+  'user.added', 'user.deleted', 'user.enabled', 'user.disabled', 'user.admin_changed',
+]);
+const KNOWN_ACTIONS = new Set(AUDIT_ACTIONS);
+
+// Rows per INSERT, so emptying a large folder never builds one huge parameter.
+const CHUNK_SIZE = 1000;
+
+// The database fills in both emails: the actor's email (or username when it has none) and the
+// mailbox address, falling back to the address the caller passed for a mailbox already deleted.
+const INSERT_SQL = `
+  INSERT INTO mailbox_audit_log (actor_user_id, actor_email, account_id, account_email, action, details)
+  SELECT u.id, COALESCE(NULLIF(u.email, ''), u.username), a.id, COALESCE(a.email_address, e.account_email),
+         e.action, COALESCE(e.details, '{}'::jsonb)
+    FROM jsonb_to_recordset($1::jsonb)
+         AS e(actor_user_id uuid, account_id uuid, account_email text, action text, details jsonb)
+    LEFT JOIN users u ON u.id = e.actor_user_id
+    LEFT JOIN email_accounts a ON a.id = e.account_id`;
+
+function toRow(entry) {
+  return {
+    actor_user_id: entry.actorUserId ?? null,
+    account_id: entry.accountId ?? null,
+    account_email: entry.accountEmail ?? null,
+    action: entry.action,
+    details: entry.details ?? {},
+  };
+}
+
+// Records journal entries. Callers do not await it: the promise never rejects, so a journal
+// failure can never fail the action it describes. Errors are logged by code only, because a
+// database message can quote the values being inserted.
+export function recordAudit(entries) {
+  const list = (Array.isArray(entries) ? entries : [entries]).filter((entry) => {
+    if (KNOWN_ACTIONS.has(entry?.action)) return true;
+    console.error('[audit] Unknown action:', entry?.action);
+    return false;
+  });
+  if (!list.length) return Promise.resolve();
+
+  const rows = list.map(toRow);
+  return (async () => {
+    for (let i = 0; i < rows.length; i += CHUNK_SIZE) {
+      try {
+        await query(INSERT_SQL, [JSON.stringify(rows.slice(i, i + CHUNK_SIZE))]);
+      } catch (err) {
+        console.error('[audit] Failed to record entries:', err?.code || err?.name || 'Error');
+      }
+    }
+  })();
+}

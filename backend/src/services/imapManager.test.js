@@ -363,6 +363,18 @@ describe('insertCopiedSibling', () => {
     expect(ins[0]).toContain('delivery_addresses');
   });
 
+  it('copies the provider ids and draft Bcc recipients with the row', async () => {
+    query.mockResolvedValueOnce({ rows: [{ id: 'row-new', is_read: true }] });
+    query.mockResolvedValue({ rows: [] });
+    await insertCopiedSibling('acct-1', 100, 'INBOX', 'Todo', 5001);
+    const ins = findCall('INSERT INTO messages');
+    const [insertList, selectList] = ins[0].split('SELECT');
+    for (const col of ['provider_thread_id', 'provider_message_id', 'bcc_addresses']) {
+      expect(insertList).toContain(col);
+      expect(selectList).toContain(col);
+    }
+  });
+
   it('increments destination unread only when the copied message is unread', async () => {
     query.mockResolvedValueOnce({ rows: [{ id: 'row-new', is_read: false }] });
     query.mockResolvedValue({ rows: [] });
@@ -2306,7 +2318,7 @@ describe('staleness probe connection recovery', () => {
 });
 
 describe('Gmail label memberships (#418)', () => {
-  let rows, acct, serverUids;
+  let rows, acct, serverUids, inserts;
   const sent = '[Gmail]/Sent Mail';
   const parsed = uid => ({ uid, messageId: '<self@example.com>', subject: 'Self mail',
     fromEmail: 'me@example.com', to: [], cc: [], replyTo: [], date: new Date('2026-09-01'),
@@ -2319,13 +2331,13 @@ describe('Gmail label memberships (#418)', () => {
       search: vi.fn(async () => serverUids),
       fetch: vi.fn(async function* (range) {
         const uids = range.includes(':') ? serverUids : range.split(',').map(Number);
-        for (const uid of uids) yield { uid, folder };
+        for (const uid of uids) yield { uid, folder, threadId: `9000${uid}`, emailId: `8000${uid}` };
       }),
     });
   }
   beforeEach(() => {
     vi.useFakeTimers();
-    rows = []; serverUids = [1];
+    rows = []; serverUids = [1]; inserts = [];
     acct = { id: 'gmail-418', user_id: 'u418', enabled: true, imap_host: 'imap.gmail.com', imap_tls: true };
     parseMessage.mockImplementation(async m => parsed(m.uid));
     getConnectionPolicy.mockResolvedValue({ allowPrivateHosts: true });
@@ -2350,6 +2362,7 @@ describe('Gmail label memberships (#418)', () => {
         return { rows: [] };
       }
       if (sql.includes('INSERT INTO messages')) {
+        inserts.push({ sql, params });
         const exists = rows.some(r => r.folder === params[2] && r.uid === params[1]);
         if (!exists) rows.push({ folder: params[2], uid: params[1], messageId: params[3] });
         return { rows: [{ id: `row-${rows.length}`, is_new: !exists }] };
@@ -2411,6 +2424,46 @@ describe('Gmail label memberships (#418)', () => {
         expect(rows).toHaveLength(2);
       });
     }
+  }
+  for (const mode of ['sync', 'backfill']) {
+    it(`${mode} asks Gmail for thread ids and stores both ids`, async () => {
+      const mgr = manager();
+      const client = clientFor('INBOX');
+      if (mode === 'sync') {
+        await ImapManager.prototype.syncMessages.call(mgr, acct, client, 'INBOX', 20, false, true);
+      } else {
+        ImapFlow.mockImplementation(function () { return client; });
+        const pending = ImapManager.prototype.backfillMessages.call(mgr, acct, 'INBOX');
+        await vi.runAllTimersAsync();
+        await pending;
+      }
+      expect(client.fetch.mock.calls.some(([, q]) => q?.threadId === true)).toBe(true);
+      const insert = inserts.find(i => i.params[1] === 1);
+      expect(insert.sql).toMatch(/provider_thread_id, provider_message_id/);
+      // Column list order is `provider_thread_id, provider_message_id`, so the thread id is
+      // the second-to-last bound parameter and the message id is the last one.
+      expect(insert.params.at(-2)).toBe('90001');
+      expect(insert.params.at(-1)).toBe('80001');
+      expect(insert.sql).toMatch(/provider_thread_id = COALESCE\(EXCLUDED\.provider_thread_id, messages\.provider_thread_id\)/);
+    });
+
+    it(`${mode} stores no provider ids for a server that is not Gmail`, async () => {
+      acct.imap_host = 'imap.example.com';
+      const mgr = manager();
+      const client = clientFor('INBOX');
+      if (mode === 'sync') {
+        await ImapManager.prototype.syncMessages.call(mgr, acct, client, 'INBOX', 20, false, true);
+      } else {
+        ImapFlow.mockImplementation(function () { return client; });
+        const pending = ImapManager.prototype.backfillMessages.call(mgr, acct, 'INBOX');
+        await vi.runAllTimersAsync();
+        await pending;
+      }
+      expect(client.fetch.mock.calls.every(([, q]) => q?.threadId !== true)).toBe(true);
+      const insert = inserts.find(i => i.params[1] === 1);
+      expect(insert.params.at(-2)).toBeNull();
+      expect(insert.params.at(-1)).toBeNull();
+    });
   }
 });
 
@@ -2566,6 +2619,25 @@ describe('backfill optional metadata fallback', () => {
     const client = { fetch: vi.fn(async function* () { yield {uid:1}; throw new Error('Disconnected'); }) };
     await expect(collect(fetchBackfillBatch(client,[1,2],query))).rejects.toThrow('Disconnected');
     expect(client.fetch).toHaveBeenCalledTimes(1);
+  });
+  it('keeps threadId on the retry fetch when the original query requested it', async () => {
+    const gmailQuery = { ...query, threadId: true };
+    let drained=false;
+    const client = { fetch: vi.fn((range) => (async function* () {
+      if (range==='1,2,3') { yield {uid:1}; drained=true; }
+      else { expect(drained).toBe(true); yield {uid:2}; yield {uid:3}; }
+    })()) };
+    expect(await collect(fetchBackfillBatch(client,[1,2,3],gmailQuery))).toEqual([1,2,3]);
+    expect(client.fetch.mock.calls[1]).toEqual(['2,3',{uid:true,flags:true,envelope:true,threadId:true},{uid:true}]);
+  });
+  it('omits threadId on the retry fetch when the original query did not request it', async () => {
+    let drained=false;
+    const client = { fetch: vi.fn((range) => (async function* () {
+      if (range==='1,2,3') { yield {uid:1}; drained=true; }
+      else { expect(drained).toBe(true); yield {uid:2}; yield {uid:3}; }
+    })()) };
+    expect(await collect(fetchBackfillBatch(client,[1,2,3],query))).toEqual([1,2,3]);
+    expect(client.fetch.mock.calls[1]).toEqual(['2,3',{uid:true,flags:true,envelope:true},{uid:true}]);
   });
 });
 

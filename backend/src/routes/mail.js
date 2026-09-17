@@ -74,7 +74,8 @@ async function runInBatches(items, concurrency, fn) {
 // IMPORTANT: when a migration adds a data column to `messages`, add it to RELOCATE_COPY_COLS
 // or a relocate will silently reset it to its default. This list previously went stale and
 // dropped delivery_addresses (0037), plugin_annotations (0044) and sender_name/sender_email
-// (0050). A unit test (mail.relocate.test.js) guards the four that regression touched.
+// (0050). A unit test (mail.relocate.test.js) guards the four that regression touched. Also
+// covered: bcc_addresses (0058) and provider_thread_id/provider_message_id (0060).
 const RELOCATE_COPY_COLS = [
   'message_id', 'subject', 'from_name', 'from_email', 'to_addresses', 'cc_addresses',
   'reply_to', 'in_reply_to', 'date', 'snippet', 'is_read', 'is_starred', 'has_attachments',
@@ -82,7 +83,7 @@ const RELOCATE_COPY_COLS = [
   'read_changed_at', 'star_changed_at', 'spam_score_sa', 'spam_score_ml', 'spam_verdict',
   'spam_analyzed_at', 'spam_details', 'spam_user_override', 'category', 'list_unsubscribe',
   'list_unsubscribe_post', 'unsubscribed_at', 'delivery_addresses', 'plugin_annotations',
-  'sender_name', 'sender_email', 'bcc_addresses',
+  'sender_name', 'sender_email', 'bcc_addresses', 'provider_thread_id', 'provider_message_id',
 ];
 // INSERT target list and the matching SELECT projection. account_id + the carried columns come
 // from the deleted row; uid is the UIDPLUS-mapped new uid; folder is the destination ($4).
@@ -1775,9 +1776,11 @@ router.post('/messages/bulk-archive', async (req, res) => {
 // message — its thread siblings keep \Inbox and the whole conversation stays in
 // the inbox (#271). MailExpert's own inbox is thread-grouped too. So we snooze the
 // entire conversation, but bounded to the RFC 5322 reply chain (Message-ID /
-// In-Reply-To / References links) rather than thread_id: thread_id falls back to
-// subject grouping and can lump hundreds of unrelated messages together (e.g.
-// identical automated-notification emails), which must never be swept into Snoozed.
+// In-Reply-To / References links) rather than thread_id: new mail is no longer grouped
+// by subject, but rows synced before that change may still carry a subject-grouped
+// thread_id until a later recompute, and that can lump hundreds of unrelated messages
+// together (e.g. identical automated-notification emails), which must never be swept
+// into Snoozed.
 //
 // Returns the messages in `msg`'s source folder reachable from `msg` through
 // header links (always including `msg` itself); excludes already-snoozed messages.
@@ -1789,8 +1792,9 @@ export async function gatherSnoozeConversation(msg) {
   // other party's replies, your own Sent messages, the thread root — frequently
   // live in Sent / All Mail rather than the inbox. They must be present as graph
   // connectors or a genuine thread fragments and only part of it snoozes. The
-  // reply-chain walk below filters out the subject-only collisions that thread_id
-  // also collects (e.g. identical automated-notification emails).
+  // reply-chain walk below filters out the subject-only collisions that a stale,
+  // subject-grouped thread_id may still carry from before the subject fallback was
+  // dropped (e.g. identical automated-notification emails).
   const pool = (await query(
     `SELECT id, uid, account_id, folder, message_id, in_reply_to, thread_references, is_read
      FROM messages

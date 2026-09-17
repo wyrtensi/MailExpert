@@ -26,6 +26,13 @@ describe('relocate reinsert column lists', () => {
     }
   });
 
+  it('carries the provider thread and message ids (migration 0060)', () => {
+    for (const col of ['provider_thread_id', 'provider_message_id', 'bcc_addresses']) {
+      expect(insertCols).toContain(col);
+      expect(selectCols).toContain(`d.${col}`);
+    }
+  });
+
   it('never inserts id, synced_at, or GENERATED columns (would regress id / error)', () => {
     for (const col of ['id', 'synced_at', 'normalized_subject', 'search_vector', 'thread_key']) {
       expect(insertCols).not.toContain(col);

@@ -22,6 +22,8 @@ import { resolveForConnection, createPinnedLookup } from './hostValidation.js';
 import { getConnectionPolicy } from './connectionPolicy.js';
 import { applyInboxRules, applyBlockList } from './inboxRules.js';
 import { generateVCard } from '../utils/vcard.js';
+import { computeThreadId } from './threading/threadId.js';
+import { gmailProviderIds, NO_PROVIDER_IDS } from './threading/providerIds.js';
 import { randomUUID } from 'crypto';
 
 
@@ -928,6 +930,8 @@ const PROVIDERS = {
   google: {
     // Gmail folders are label memberships; matching Message-IDs are not proof of a move.
     labelStore: true,
+    // X-GM-THRID / X-GM-MSGID are fetched and stored per message (Gmail threading).
+    gmailThreadIds: true,
     // Many Gmail accounts on one server. Gmail limits sessions per account (15), not per host,
     // but every fresh login from one IP is a sign-in event, so background work avoids them:
     //   stalenessProbe:false — the probe (one login per account every 3 min) exists for
@@ -1094,7 +1098,8 @@ export async function insertCopiedSibling(accountId, uid, fromFolder, toFolder, 
       thread_references, thread_id, is_bulk,
       read_changed_at, star_changed_at, spam_score_sa, spam_score_ml,
       spam_verdict, spam_analyzed_at, spam_details, spam_user_override,
-      category, list_unsubscribe, list_unsubscribe_post, unsubscribed_at, delivery_addresses, sender_name, sender_email
+      category, list_unsubscribe, list_unsubscribe_post, unsubscribed_at, delivery_addresses, sender_name, sender_email,
+      bcc_addresses, provider_thread_id, provider_message_id
     )
     SELECT
       account_id, $4, $5, message_id, subject,
@@ -1104,7 +1109,8 @@ export async function insertCopiedSibling(accountId, uid, fromFolder, toFolder, 
       thread_references, thread_id, is_bulk,
       read_changed_at, star_changed_at, spam_score_sa, spam_score_ml,
       spam_verdict, spam_analyzed_at, spam_details, spam_user_override,
-      category, list_unsubscribe, list_unsubscribe_post, unsubscribed_at, delivery_addresses, sender_name, sender_email
+      category, list_unsubscribe, list_unsubscribe_post, unsubscribed_at, delivery_addresses, sender_name, sender_email,
+      bcc_addresses, provider_thread_id, provider_message_id
     FROM messages
     WHERE account_id = $1 AND folder = $2 AND uid = $3
     ON CONFLICT (account_id, uid, folder) DO NOTHING
@@ -1189,7 +1195,10 @@ export async function* fetchBackfillBatch(client, uids, fetchQuery) {
   const missing = uids.filter(uid => !received.has(uid));
   if (!missing.length) return;
   const retry = new Set(missing);
-  for await (const msg of client.fetch(missing.join(','), { uid: true, flags: true, envelope: true }, { uid: true })) {
+  // Keep threadId when the original query asked for it — otherwise a retried row (e.g. a
+  // Gmail message the first FETCH omitted) silently loses its provider_thread_id.
+  const retryQuery = { uid: true, flags: true, envelope: true, ...(fetchQuery.threadId ? { threadId: true } : {}) };
+  for await (const msg of client.fetch(missing.join(','), retryQuery, { uid: true })) {
     if (!retry.has(msg.uid) || received.has(msg.uid)) continue;
     received.add(msg.uid);
     yield msg;
@@ -1240,26 +1249,6 @@ function sanitizeStr(str) {
   return str.replace(/\0/g, '');
 }
 
-// Parse RFC 5322 References header into an ordered array of angle-bracketed Message-IDs.
-function parseReferences(refHeader) {
-  if (!refHeader) return [];
-  return refHeader.match(/<[^>]+>/g) || [];
-}
-
-// Strip common reply/forward prefixes (Re:, FW:, AW:, SV:, …) from a subject,
-// handling multiple nested levels, and return the lowercase core.
-const SUBJECT_PREFIX_RE = /^(?:re|fw|fwd|aw|sv|vs|tr|wg|ant|antw|ref|rif|ynt|odp|vb|atb)\s*:\s*/i;
-function normalizeSubject(subject) {
-  if (!subject) return '';
-  let s = subject.trim();
-  let prev;
-  do {
-    prev = s;
-    s = s.replace(SUBJECT_PREFIX_RE, '').trim();
-  } while (s !== prev);
-  return s.toLowerCase();
-}
-
 // Propagate a resolved thread_id to earlier messages that used this message as a provisional
 // thread root (out-of-order delivery, newest-first backfill). The is_deleted predicate lets
 // Postgres use the partial idx_messages_thread_id; without it every call scanned all rows of the
@@ -1271,64 +1260,6 @@ export async function rerootThreadChildren(accountId, threadId, messageId) {
      WHERE account_id = $2 AND thread_id = $3 AND message_id != $3 AND is_deleted = false`,
     [threadId, accountId, messageId]
   );
-}
-
-// Compute the thread_id for an incoming message.
-// Primary: RFC 5322 References / In-Reply-To header chain.
-// Fallback: subject normalization when headers are absent (e.g. Outlook RE: replies).
-async function computeThreadId(accountId, messageId, inReplyTo, references, subject) {
-  if (!messageId) return null;
-
-  const refIds = parseReferences(references);
-  const candidates = [...refIds];
-  if (inReplyTo && !candidates.includes(inReplyTo)) candidates.push(inReplyTo);
-
-  if (candidates.length > 0) {
-    // Fetch all candidates in one query instead of N sequential lookups.
-    // Priority: RFC 5322 root (candidates[0]) > newest ancestor (candidates[last]).
-    const rows = await query(
-      `SELECT message_id, thread_id FROM messages
-       WHERE account_id = $1 AND message_id = ANY($2) AND thread_id IS NOT NULL`,
-      [accountId, candidates]
-    );
-
-    if (rows.rows.length > 0) {
-      const found = new Map(rows.rows.map(r => [r.message_id, r.thread_id]));
-      // Prefer the thread root (first Reference per RFC 5322).
-      if (found.has(candidates[0])) return found.get(candidates[0]);
-      // Otherwise use the most recent ancestor present in the DB (newest→oldest).
-      for (let i = candidates.length - 1; i >= 0; i--) {
-        if (found.has(candidates[i])) return found.get(candidates[i]);
-      }
-    }
-
-    // Ancestor referenced but not yet in DB — use the root as a provisional thread_id.
-    // When it arrives its thread_id will equal its own message_id, so threads converge.
-    // Don't fall through to subject fallback; the header chain takes priority.
-    return candidates[0] || messageId;
-  }
-
-  // No RFC 5322 threading headers — fall back to subject normalization.
-  // Looks for the earliest message in the same account with the same normalized subject
-  // within the past 90 days and joins that thread.
-  const normalized = normalizeSubject(subject);
-  if (normalized) {
-    const subjectRow = await query(
-      `SELECT thread_id FROM messages
-       WHERE account_id = $1
-         AND is_deleted = false
-         AND message_id IS DISTINCT FROM $2
-         AND thread_id IS NOT NULL
-         AND normalized_subject = $3
-         AND date > NOW() - INTERVAL '90 days'
-       ORDER BY date ASC
-       LIMIT 1`,
-      [accountId, messageId, normalized]
-    );
-    if (subjectRow.rows.length > 0) return subjectRow.rows[0].thread_id;
-  }
-
-  return messageId;
 }
 
 // Timeout budget for an OAuth token refresh on an IMAP path, per provider: the capped lock wait
@@ -3444,6 +3375,7 @@ export class ImapManager {
         if (provider.fetchBody && !noBodyParts) {
           fetchQuery.bodyParts = BODY_PREFETCH_PARTS;
         }
+        if (provider.gmailThreadIds) fetchQuery.threadId = true;
 
         // Highest UID we already have in DB for this account/folder — used as the
         // watermark for Phase 1 new-message detection.
@@ -3500,7 +3432,8 @@ export class ImapManager {
             const msgId = sanitizeStr(parsed.messageId);
             const inReplyTo = sanitizeStr(parsed.inReplyTo);
             const refs = sanitizeStr(parsed.references);
-            const threadId = await computeThreadId(account.id, msgId, inReplyTo, refs, sanitizeStr(parsed.subject));
+            const threadId = await computeThreadId(account.id, msgId, inReplyTo, refs);
+            const providerIds = provider.gmailThreadIds ? gmailProviderIds(msg) : NO_PROVIDER_IDS;
 
             // Upsert only this server UID. Shared Message-IDs do not prove a move,
             // including self-mail and duplicate deliveries within one mailbox.
@@ -3523,8 +3456,8 @@ export class ImapManager {
                 body_html, body_text, attachments,
                 thread_references, thread_id, is_bulk, category,
                 list_unsubscribe, list_unsubscribe_post, delivery_addresses,
-                sender_name, sender_email
-              ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24,$25,$26,$27,$28,$29)
+                sender_name, sender_email, provider_thread_id, provider_message_id
+              ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24,$25,$26,$27,$28,$29,$30,$31)
               ON CONFLICT (account_id, uid, folder) DO UPDATE
               SET subject = CASE
                     WHEN EXCLUDED.subject IS NOT NULL
@@ -3582,7 +3515,9 @@ export class ImapManager {
                   list_unsubscribe_post = COALESCE(messages.list_unsubscribe_post, EXCLUDED.list_unsubscribe_post),
                   delivery_addresses = COALESCE(messages.delivery_addresses, EXCLUDED.delivery_addresses),
                   sender_name = COALESCE(EXCLUDED.sender_name, messages.sender_name),
-                  sender_email = COALESCE(EXCLUDED.sender_email, messages.sender_email)
+                  sender_email = COALESCE(EXCLUDED.sender_email, messages.sender_email),
+                  provider_thread_id = COALESCE(EXCLUDED.provider_thread_id, messages.provider_thread_id),
+                  provider_message_id = COALESCE(EXCLUDED.provider_message_id, messages.provider_message_id)
               RETURNING id, (xmax = 0) as is_new
             `, [
               account.id, parsed.uid, folder,
@@ -3599,6 +3534,7 @@ export class ImapManager {
               sanitizeStr(decodeMimeWords(parsed.parsedHeaders?.['list-unsubscribe-post'] ?? null)),
               JSON.stringify(parsed.deliveryAddresses || []),
               sanitizeStr(parsed.senderName), sanitizeStr(parsed.senderEmail),
+              providerIds.providerThreadId, providerIds.providerMessageId,
             ]);
             if (result.rows[0]?.is_new) {
               insertedCount++;
@@ -4143,6 +4079,7 @@ export class ImapManager {
               headers: true,
             };
             if (bodyParts.length > 0) bfQuery.bodyParts = bodyParts;
+            if (cfg.gmailThreadIds) bfQuery.threadId = true;
 
             for await (const msg of fetchBackfillBatch(sess.client, batch, bfQuery)) {
               try {
@@ -4170,7 +4107,8 @@ export class ImapManager {
                 const bfMsgId    = sanitizeStr(parsed.messageId);
                 const bfReplyTo  = sanitizeStr(parsed.inReplyTo);
                 const bfRefs     = sanitizeStr(parsed.references);
-                const bfThreadId = await computeThreadId(account.id, bfMsgId, bfReplyTo, bfRefs, sanitizeStr(parsed.subject));
+                const bfThreadId = await computeThreadId(account.id, bfMsgId, bfReplyTo, bfRefs);
+                const bfProviderIds = cfg.gmailThreadIds ? gmailProviderIds(msg) : NO_PROVIDER_IDS;
 
                 let bfCategory = null;
                 if (account.categorization_enabled || await getGlobalCategorizationEnabled()) {
@@ -4190,8 +4128,8 @@ export class ImapManager {
                     body_html, body_text, attachments,
                     thread_references, thread_id, is_bulk, category,
                     list_unsubscribe, list_unsubscribe_post, delivery_addresses,
-                    sender_name, sender_email
-                  ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24,$25,$26,$27,$28,$29)
+                    sender_name, sender_email, provider_thread_id, provider_message_id
+                  ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24,$25,$26,$27,$28,$29,$30,$31)
                   ON CONFLICT (account_id, uid, folder) DO UPDATE
                   SET subject = CASE
                         WHEN EXCLUDED.subject IS NOT NULL
@@ -4247,7 +4185,9 @@ export class ImapManager {
                       list_unsubscribe_post = COALESCE(messages.list_unsubscribe_post, EXCLUDED.list_unsubscribe_post),
                       delivery_addresses = COALESCE(messages.delivery_addresses, EXCLUDED.delivery_addresses),
                       sender_name = COALESCE(EXCLUDED.sender_name, messages.sender_name),
-                      sender_email = COALESCE(EXCLUDED.sender_email, messages.sender_email)
+                      sender_email = COALESCE(EXCLUDED.sender_email, messages.sender_email),
+                      provider_thread_id = COALESCE(EXCLUDED.provider_thread_id, messages.provider_thread_id),
+                      provider_message_id = COALESCE(EXCLUDED.provider_message_id, messages.provider_message_id)
                 `, [
                   account.id, parsed.uid, folder,
                   bfMsgId, sanitizeStr(parsed.subject),
@@ -4263,6 +4203,7 @@ export class ImapManager {
                   sanitizeStr(decodeMimeWords(parsed.parsedHeaders?.['list-unsubscribe-post'] ?? null)),
                   JSON.stringify(parsed.deliveryAddresses || []),
                   sanitizeStr(parsed.senderName), sanitizeStr(parsed.senderEmail),
+                  bfProviderIds.providerThreadId, bfProviderIds.providerMessageId,
                 ]);
                 backfilledRows++;
                 if (bfThreadId && bfThreadId !== bfMsgId) {
@@ -4793,7 +4734,7 @@ export class ImapManager {
     // Self-rooting orphaned every sent message into its own thread, showing as a duplicate
     // "shadow" separate from the conversation (#378).
     const threadId = msgId
-      ? await computeThreadId(account.id, msgId, sanitizeStr(inReplyTo), sanitizeStr(references), sanitizeStr(subject))
+      ? await computeThreadId(account.id, msgId, sanitizeStr(inReplyTo), sanitizeStr(references))
       : null;
     await query(`
       INSERT INTO messages (

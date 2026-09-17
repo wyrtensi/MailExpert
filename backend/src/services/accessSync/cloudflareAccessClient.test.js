@@ -58,6 +58,15 @@ describe('getPolicy', () => {
     expect(notFound.status).toBe(404);
   });
 
+  it('reports the probe\'s own failure when the probe itself is not a 404', async () => {
+    const fetchImpl = vi.fn()
+      .mockResolvedValueOnce(reply(404, { success: false, errors: [{ code: 12130 }] }))
+      .mockImplementationOnce(async () => { throw new TypeError('fetch failed'); });
+    const err = await client(fetchImpl).getPolicy(POLICY).catch((e) => e);
+    expect(err).toBeInstanceOf(CloudflareAccessError);
+    expect(err.status).toBe('network');
+  });
+
   it('names network failures and timeouts', async () => {
     const network = await client(async () => { throw new TypeError('fetch failed'); }).getPolicy(POLICY).catch((e) => e);
     expect(network.status).toBe('network');

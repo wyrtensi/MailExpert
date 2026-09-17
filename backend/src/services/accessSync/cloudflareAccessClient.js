@@ -52,9 +52,17 @@ export function createCloudflareAccessClient({
       } catch (err) {
         if (err.status !== 404) throw err;
         // Reusable policies are readable through the application they are attached to, so a 404
-        // there with the policy present on the account means it is not attached to this app.
-        const onAccount = await call('getPolicy', 'GET', `${accessUrl}/policies/${policyId}`).then(() => true, () => false);
-        throw onAccount ? new CloudflareAccessError('getPolicy', 'not_attached') : err;
+        // there with the policy present on the account means it is not attached to this app. The
+        // probe's own failure is only meaningful when it is itself a 404 (policy missing
+        // everywhere, so the original error stands): a network error, a timeout or any other
+        // status means the probe could not tell either way, so that failure is reported instead
+        // of guessing "not on account" from it.
+        try {
+          await call('getPolicy', 'GET', `${accessUrl}/policies/${policyId}`);
+        } catch (probeErr) {
+          throw probeErr.status === 404 ? err : probeErr;
+        }
+        throw new CloudflareAccessError('getPolicy', 'not_attached');
       }
     },
 

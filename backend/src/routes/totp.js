@@ -36,7 +36,12 @@ function totpLimiter(req, res, next) {
 
 // GET /api/totp/setup — generate a new TOTP secret and QR code
 router.get('/setup', async (req, res) => {
-  const userResult = await query('SELECT username FROM users WHERE id = $1', [req.session.userId]);
+  const userResult = await query('SELECT username, totp_enabled FROM users WHERE id = $1', [req.session.userId]);
+  // An active second factor is replaced only through disable (which asks for the password),
+  // never by starting setup again from a signed-in session.
+  if (userResult.rows[0]?.totp_enabled) {
+    return res.status(409).json({ error: 'Two-factor authentication is already enabled.' });
+  }
   const username = userResult.rows[0]?.username || 'user';
 
   const secret = generateTotpSecret();
@@ -68,12 +73,16 @@ router.post('/enable', totpLimiter, async (req, res) => {
     return res.status(400).json({ error: 'Invalid code — check your device clock and try again.' });
   }
 
-  await query(
-    'UPDATE users SET totp_secret = $1, totp_enabled = true WHERE id = $2',
+  // Guarded in the same statement: setup may have started before another session enabled 2FA.
+  const updated = await query(
+    'UPDATE users SET totp_secret = $1, totp_enabled = true WHERE id = $2 AND totp_enabled = false',
     [encrypt(secret), req.session.userId]
   );
   delete req.session.pendingTOTPSecret;
   delete req.session.pendingTOTPExpiry;
+  if (updated.rowCount === 0) {
+    return res.status(409).json({ error: 'Two-factor authentication is already enabled.' });
+  }
 
   res.json({ ok: true });
 });

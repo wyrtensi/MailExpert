@@ -104,6 +104,21 @@ function expirePendingCounts() {
   }, Math.max(1, Math.min(...deadlines) - Date.now()));
 }
 
+// Mail state that belongs to whoever is signed in. Dropped when the screen locks and when the
+// identity changes, so neither the lock overlay nor the next user's session can show it.
+function privateMailState() {
+  return {
+    serverUnreadCounts: { total: 0, byAccount: {}, snapshots: {} }, pendingCounts: {},
+    messages: [], searchResults: [], searchQuery: '',
+    accounts: [], accountsReady: false,
+    folders: {}, selectedMessageId: null,
+    unreadCounts: { total: 0, byAccount: {} },
+    notifications: [], threadMessages: {}, expandedThreadId: null,
+    backfillProgress: {},
+    gtdSections: null, categoryCounts: {}, activeGtdTab: null,
+  };
+}
+
 export const useStore = create((set, get) => ({
   // Auth
   user: null,
@@ -122,7 +137,10 @@ export const useStore = create((set, get) => ({
     set(state => ({
       user,
       ...(state.user?.id !== user?.id ? {
-        serverUnreadCounts: { total: 0, byAccount: {}, snapshots: {} }, pendingCounts: {},
+        // An expired session shows the sign-in screen without a page reload, so the next
+        // person to sign in on this tab must not inherit the previous user's mail or draft.
+        ...privateMailState(),
+        composing: false, composeData: null, messageWindows: [], lastViewedMessageId: null,
         unreadCounts: { total: 0, byAccount: {}, snapshots: {}, complete: false },
         senderFaviconsLoaded: false,
         senderFavicons: false,
@@ -166,17 +184,7 @@ export const useStore = create((set, get) => ({
       // Locking is the user stepping away: a background AI run must not finish and
       // land its result in this device's cache behind the lock screen.
       abortAllRuns();
-      set({
-        serverUnreadCounts: { total: 0, byAccount: {}, snapshots: {} }, pendingCounts: {},
-        isLocked: true,
-        messages: [], searchResults: [], searchQuery: '',
-        accounts: [], accountsReady: false,
-        folders: {}, selectedMessageId: null,
-        unreadCounts: { total: 0, byAccount: {} },
-        notifications: [], threadMessages: {}, expandedThreadId: null,
-        backfillProgress: {},
-        gtdSections: null, categoryCounts: {}, activeGtdTab: null,
-      });
+      set({ ...privateMailState(), isLocked: true });
     } else {
       const restoredMessageId = localStorage.getItem('mailexpert_locked_message') || null;
       localStorage.removeItem('mailexpert_locked_message');

@@ -23,6 +23,7 @@ import { getConnectionPolicy } from './connectionPolicy.js';
 import { applyInboxRules, applyBlockList } from './inboxRules.js';
 import { generateVCard } from '../utils/vcard.js';
 import { computeThreadId } from './threading/threadId.js';
+import { gmailProviderIds, NO_PROVIDER_IDS } from './threading/providerIds.js';
 import { randomUUID } from 'crypto';
 
 
@@ -929,6 +930,8 @@ const PROVIDERS = {
   google: {
     // Gmail folders are label memberships; matching Message-IDs are not proof of a move.
     labelStore: true,
+    // X-GM-THRID / X-GM-MSGID are fetched and stored per message (Gmail threading).
+    gmailThreadIds: true,
     // Many Gmail accounts on one server. Gmail limits sessions per account (15), not per host,
     // but every fresh login from one IP is a sign-in event, so background work avoids them:
     //   stalenessProbe:false — the probe (one login per account every 3 min) exists for
@@ -3369,6 +3372,7 @@ export class ImapManager {
         if (provider.fetchBody && !noBodyParts) {
           fetchQuery.bodyParts = BODY_PREFETCH_PARTS;
         }
+        if (provider.gmailThreadIds) fetchQuery.threadId = true;
 
         // Highest UID we already have in DB for this account/folder — used as the
         // watermark for Phase 1 new-message detection.
@@ -3426,6 +3430,7 @@ export class ImapManager {
             const inReplyTo = sanitizeStr(parsed.inReplyTo);
             const refs = sanitizeStr(parsed.references);
             const threadId = await computeThreadId(account.id, msgId, inReplyTo, refs);
+            const providerIds = provider.gmailThreadIds ? gmailProviderIds(msg) : NO_PROVIDER_IDS;
 
             // Upsert only this server UID. Shared Message-IDs do not prove a move,
             // including self-mail and duplicate deliveries within one mailbox.
@@ -3448,8 +3453,8 @@ export class ImapManager {
                 body_html, body_text, attachments,
                 thread_references, thread_id, is_bulk, category,
                 list_unsubscribe, list_unsubscribe_post, delivery_addresses,
-                sender_name, sender_email
-              ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24,$25,$26,$27,$28,$29)
+                sender_name, sender_email, provider_thread_id, provider_message_id
+              ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24,$25,$26,$27,$28,$29,$30,$31)
               ON CONFLICT (account_id, uid, folder) DO UPDATE
               SET subject = CASE
                     WHEN EXCLUDED.subject IS NOT NULL
@@ -3507,7 +3512,9 @@ export class ImapManager {
                   list_unsubscribe_post = COALESCE(messages.list_unsubscribe_post, EXCLUDED.list_unsubscribe_post),
                   delivery_addresses = COALESCE(messages.delivery_addresses, EXCLUDED.delivery_addresses),
                   sender_name = COALESCE(EXCLUDED.sender_name, messages.sender_name),
-                  sender_email = COALESCE(EXCLUDED.sender_email, messages.sender_email)
+                  sender_email = COALESCE(EXCLUDED.sender_email, messages.sender_email),
+                  provider_thread_id = COALESCE(EXCLUDED.provider_thread_id, messages.provider_thread_id),
+                  provider_message_id = COALESCE(EXCLUDED.provider_message_id, messages.provider_message_id)
               RETURNING id, (xmax = 0) as is_new
             `, [
               account.id, parsed.uid, folder,
@@ -3524,6 +3531,7 @@ export class ImapManager {
               sanitizeStr(decodeMimeWords(parsed.parsedHeaders?.['list-unsubscribe-post'] ?? null)),
               JSON.stringify(parsed.deliveryAddresses || []),
               sanitizeStr(parsed.senderName), sanitizeStr(parsed.senderEmail),
+              providerIds.providerThreadId, providerIds.providerMessageId,
             ]);
             if (result.rows[0]?.is_new) {
               insertedCount++;
@@ -4068,6 +4076,7 @@ export class ImapManager {
               headers: true,
             };
             if (bodyParts.length > 0) bfQuery.bodyParts = bodyParts;
+            if (cfg.gmailThreadIds) bfQuery.threadId = true;
 
             for await (const msg of fetchBackfillBatch(sess.client, batch, bfQuery)) {
               try {
@@ -4096,6 +4105,7 @@ export class ImapManager {
                 const bfReplyTo  = sanitizeStr(parsed.inReplyTo);
                 const bfRefs     = sanitizeStr(parsed.references);
                 const bfThreadId = await computeThreadId(account.id, bfMsgId, bfReplyTo, bfRefs);
+                const bfProviderIds = cfg.gmailThreadIds ? gmailProviderIds(msg) : NO_PROVIDER_IDS;
 
                 let bfCategory = null;
                 if (account.categorization_enabled || await getGlobalCategorizationEnabled()) {
@@ -4115,8 +4125,8 @@ export class ImapManager {
                     body_html, body_text, attachments,
                     thread_references, thread_id, is_bulk, category,
                     list_unsubscribe, list_unsubscribe_post, delivery_addresses,
-                    sender_name, sender_email
-                  ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24,$25,$26,$27,$28,$29)
+                    sender_name, sender_email, provider_thread_id, provider_message_id
+                  ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24,$25,$26,$27,$28,$29,$30,$31)
                   ON CONFLICT (account_id, uid, folder) DO UPDATE
                   SET subject = CASE
                         WHEN EXCLUDED.subject IS NOT NULL
@@ -4172,7 +4182,9 @@ export class ImapManager {
                       list_unsubscribe_post = COALESCE(messages.list_unsubscribe_post, EXCLUDED.list_unsubscribe_post),
                       delivery_addresses = COALESCE(messages.delivery_addresses, EXCLUDED.delivery_addresses),
                       sender_name = COALESCE(EXCLUDED.sender_name, messages.sender_name),
-                      sender_email = COALESCE(EXCLUDED.sender_email, messages.sender_email)
+                      sender_email = COALESCE(EXCLUDED.sender_email, messages.sender_email),
+                      provider_thread_id = COALESCE(EXCLUDED.provider_thread_id, messages.provider_thread_id),
+                      provider_message_id = COALESCE(EXCLUDED.provider_message_id, messages.provider_message_id)
                 `, [
                   account.id, parsed.uid, folder,
                   bfMsgId, sanitizeStr(parsed.subject),
@@ -4188,6 +4200,7 @@ export class ImapManager {
                   sanitizeStr(decodeMimeWords(parsed.parsedHeaders?.['list-unsubscribe-post'] ?? null)),
                   JSON.stringify(parsed.deliveryAddresses || []),
                   sanitizeStr(parsed.senderName), sanitizeStr(parsed.senderEmail),
+                  bfProviderIds.providerThreadId, bfProviderIds.providerMessageId,
                 ]);
                 backfilledRows++;
                 if (bfThreadId && bfThreadId !== bfMsgId) {

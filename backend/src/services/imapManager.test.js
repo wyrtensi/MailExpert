@@ -2318,7 +2318,7 @@ describe('staleness probe connection recovery', () => {
 });
 
 describe('Gmail label memberships (#418)', () => {
-  let rows, acct, serverUids;
+  let rows, acct, serverUids, inserts;
   const sent = '[Gmail]/Sent Mail';
   const parsed = uid => ({ uid, messageId: '<self@example.com>', subject: 'Self mail',
     fromEmail: 'me@example.com', to: [], cc: [], replyTo: [], date: new Date('2026-09-01'),
@@ -2331,13 +2331,13 @@ describe('Gmail label memberships (#418)', () => {
       search: vi.fn(async () => serverUids),
       fetch: vi.fn(async function* (range) {
         const uids = range.includes(':') ? serverUids : range.split(',').map(Number);
-        for (const uid of uids) yield { uid, folder };
+        for (const uid of uids) yield { uid, folder, threadId: `9000${uid}`, emailId: `8000${uid}` };
       }),
     });
   }
   beforeEach(() => {
     vi.useFakeTimers();
-    rows = []; serverUids = [1];
+    rows = []; serverUids = [1]; inserts = [];
     acct = { id: 'gmail-418', user_id: 'u418', enabled: true, imap_host: 'imap.gmail.com', imap_tls: true };
     parseMessage.mockImplementation(async m => parsed(m.uid));
     getConnectionPolicy.mockResolvedValue({ allowPrivateHosts: true });
@@ -2362,6 +2362,7 @@ describe('Gmail label memberships (#418)', () => {
         return { rows: [] };
       }
       if (sql.includes('INSERT INTO messages')) {
+        inserts.push({ sql, params });
         const exists = rows.some(r => r.folder === params[2] && r.uid === params[1]);
         if (!exists) rows.push({ folder: params[2], uid: params[1], messageId: params[3] });
         return { rows: [{ id: `row-${rows.length}`, is_new: !exists }] };
@@ -2423,6 +2424,44 @@ describe('Gmail label memberships (#418)', () => {
         expect(rows).toHaveLength(2);
       });
     }
+  }
+  for (const mode of ['sync', 'backfill']) {
+    it(`${mode} asks Gmail for thread ids and stores both ids`, async () => {
+      const mgr = manager();
+      const client = clientFor('INBOX');
+      if (mode === 'sync') {
+        await ImapManager.prototype.syncMessages.call(mgr, acct, client, 'INBOX', 20, false, true);
+      } else {
+        ImapFlow.mockImplementation(function () { return client; });
+        const pending = ImapManager.prototype.backfillMessages.call(mgr, acct, 'INBOX');
+        await vi.runAllTimersAsync();
+        await pending;
+      }
+      expect(client.fetch.mock.calls.some(([, q]) => q?.threadId === true)).toBe(true);
+      const insert = inserts.find(i => i.params[1] === 1);
+      expect(insert.sql).toMatch(/provider_thread_id, provider_message_id/);
+      expect(insert.params).toContain('90001');
+      expect(insert.params).toContain('80001');
+      expect(insert.sql).toMatch(/provider_thread_id = COALESCE\(EXCLUDED\.provider_thread_id, messages\.provider_thread_id\)/);
+    });
+
+    it(`${mode} stores no provider ids for a server that is not Gmail`, async () => {
+      acct.imap_host = 'imap.example.com';
+      const mgr = manager();
+      const client = clientFor('INBOX');
+      if (mode === 'sync') {
+        await ImapManager.prototype.syncMessages.call(mgr, acct, client, 'INBOX', 20, false, true);
+      } else {
+        ImapFlow.mockImplementation(function () { return client; });
+        const pending = ImapManager.prototype.backfillMessages.call(mgr, acct, 'INBOX');
+        await vi.runAllTimersAsync();
+        await pending;
+      }
+      expect(client.fetch.mock.calls.every(([, q]) => q?.threadId !== true)).toBe(true);
+      const insert = inserts.find(i => i.params[1] === 1);
+      expect(insert.params).not.toContain('90001');
+      expect(insert.params).not.toContain('80001');
+    });
   }
 });
 

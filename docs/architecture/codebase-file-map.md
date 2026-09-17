@@ -162,6 +162,8 @@ Google OAuth — не plugin уровня UI: он является credential p
 
 Остальные компоненты отвечают за command palette, diagnostics, window layers, notifications, profile, signature editor, GTD views и native notification bridge.
 
+- `AuditLogTab.jsx` — экран журнала для администратора: фильтры и подгрузка по курсору; логика запроса и подписей в `utils/auditLog.js`.
+
 ### Utilities и тестируемая бизнес-логика
 
 `src/utils/*` содержит account scope, optimistic guards, folder ordering, reply alias selection, message identity/deduplication, draft autosave, diagnostics, security policy native actions и UI helpers. Это наиболее удобное место для чистых функций с быстрыми `node --test` тестами.

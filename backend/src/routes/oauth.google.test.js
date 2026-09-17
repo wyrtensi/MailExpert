@@ -10,6 +10,7 @@ vi.mock('../index.js', () => ({
   },
 }));
 vi.mock('../services/db.js', () => ({ query: vi.fn(), withTransaction: vi.fn() }));
+vi.mock('../services/auditLog.js', () => ({ recordAudit: vi.fn(async () => {}) }));
 vi.mock('../services/encryption.js', () => ({
   encrypt: (v) => (v ? `enc(${v})` : v),
   decrypt: (v) => v,
@@ -46,6 +47,7 @@ import { imapManager } from '../index.js';
 import { withTransaction } from '../services/db.js';
 import { exchangeGoogleCode, verifyGoogleIdToken, GoogleOAuthError } from '../services/oauth/googleOAuth.js';
 import { recordGoogleGrant } from '../services/oauth/googleApps.js';
+import { recordAudit } from '../services/auditLog.js';
 
 const CLIENT_ID = '123456789012-abc123def456.apps.googleusercontent.com';
 const APP_ID = 'aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa';
@@ -386,5 +388,49 @@ describe('GET /oauth/google/callback', () => {
     const res = await callback({ code: 'c', state });
     expect(res.headers.get('location')).toBe(errorLocation('missing_refresh_token'));
     expect(sqlCall(/^\s*UPDATE email_accounts/)).toBeUndefined();
+  });
+});
+
+describe('Google consent is journaled', () => {
+  const OLD_APP_ID = 'bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb';
+  const callback = (params) => get(`/oauth/google/callback?${new URLSearchParams(params)}`);
+  beforeEach(() => { recordAudit.mockClear(); });
+
+  it('records a new mailbox as added by the user who started the flow', async () => {
+    mockSuccessfulGoogle();
+    const { state } = await startFlow();
+    await callback({ code: 'c', state });
+    expect(recordAudit).toHaveBeenCalledTimes(1);
+    expect(recordAudit).toHaveBeenCalledWith([
+      { actorUserId: USER_ID, accountId: 'new-acc', action: 'mailbox.added', details: { protocol: 'imap', oauthProvider: 'google' } },
+    ]);
+  });
+
+  it('records a reconsent through the same app as a reconnect only', async () => {
+    installDb({ existing: { id: 'acc-1', oauth_refresh_token: 'enc(old-refresh)', oauth_app_id: APP_ID } });
+    mockSuccessfulGoogle({ refreshToken: null });
+    const { state } = await startFlow();
+    await callback({ code: 'c', state });
+    expect(recordAudit).toHaveBeenCalledWith([
+      { actorUserId: USER_ID, accountId: 'acc-1', action: 'mailbox.reconnected', details: { oauthProvider: 'google' } },
+    ]);
+  });
+
+  it('records a move to another app as a connection change', async () => {
+    installDb({ existing: { id: 'acc-1', oauth_refresh_token: 'enc(old-refresh)', oauth_app_id: OLD_APP_ID } });
+    mockSuccessfulGoogle();
+    const { state } = await startFlow();
+    await callback({ code: 'c', state });
+    expect(recordAudit).toHaveBeenCalledWith([
+      { actorUserId: USER_ID, accountId: 'acc-1', action: 'mailbox.reconnected', details: { oauthProvider: 'google' } },
+      { actorUserId: USER_ID, accountId: 'acc-1', action: 'mailbox.connection_changed', details: { fields: ['oauth_app_id'] } },
+    ]);
+  });
+
+  it('records nothing when the consent is refused', async () => {
+    mockSuccessfulGoogle({ scope: 'openid email' });
+    const { state } = await startFlow();
+    await callback({ code: 'c', state });
+    expect(recordAudit).not.toHaveBeenCalled();
   });
 });

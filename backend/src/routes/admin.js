@@ -14,6 +14,7 @@ import { UUID_RE, uuidParam } from '../utils/uuid.js';
 import { AUDIT_ACTIONS, recordAudit } from '../services/auditLog.js';
 import { getAuthSettings } from '../services/auth/authSettings.js';
 import { UserIdentityError, claimOrCreateUserByEmail, normalizeEmail } from '../services/auth/userIdentity.js';
+import { countsAsActiveAdmin, lockAdminGuard, otherActiveAdminExists } from '../services/auth/userStatus.js';
 import { closeUserSockets } from '../services/websocket.js';
 import { destroyUserSessions } from './auth.js';
 import {
@@ -49,24 +50,6 @@ function publicUser(row, bootstrapAdminEmails = getAuthSettings().bootstrapAdmin
     isBootstrapAdmin: !!row.email && bootstrapAdminEmails.has(row.email.toLowerCase()),
   };
 }
-
-// Whether the user can still reach the admin panel: an admin, not disabled, and — in google
-// mode, where sign-in is by email — with an email.
-function countsAsActiveAdmin({ is_admin: isAdmin, disabled_at: disabledAt, email }, googleMode) {
-  return !!isAdmin && !disabledAt && (!googleMode || !!email);
-}
-
-async function otherActiveAdminExists(client, userId, googleMode) {
-  const { rows } = await client.query(
-    `SELECT COUNT(*)::int AS count FROM users
-      WHERE is_admin = true AND disabled_at IS NULL AND id <> $1${googleMode ? ' AND email IS NOT NULL' : ''}`,
-    [userId],
-  );
-  return rows[0].count > 0;
-}
-
-// Serializes changes that could leave the install without a reachable admin.
-const lockAdminGuard = (client) => client.query("SELECT pg_advisory_xact_lock(hashtext('users-admin-guard'))");
 
 const lockTargetUser = async (client, id) => {
   const { rows } = await client.query('SELECT id, email, is_admin, disabled_at FROM users WHERE id = $1 FOR UPDATE', [id]);

@@ -18,8 +18,11 @@ import { measureContentHeight, createHeightController, forceEagerImages } from '
 import { copyToClipboard } from '../utils/clipboard.js';
 import { folderMatchesQuery } from '../utils/folderDisplay.js';
 import FolderPathLabel from './FolderPathLabel.jsx';
+import { classifyAttachmentRisk } from '../utils/attachmentRisk.js';
 const USE_DIV_RENDER = import.meta.env.VITE_EMAIL_DIV_RENDER === 'true';
 const MESSAGE_OPENING_EVENT = 'mailexpert:message-opening';
+// riskArmed value for the "Download all" link. Attachment parts are dotted numbers, so it cannot collide.
+const DOWNLOAD_ALL = 'all';
 
 // Module-level regex so the spam-name heuristic isn't recompiled on every
 // render — same heuristic as ContextMenu.jsx, both files read this constant.
@@ -1329,6 +1332,11 @@ ${bodyContent}
     api.ai.status().then(setAiStatus).catch(() => {});
   }, []);
 
+  // riskArmed: a risky attachment needs a second click to download; the first
+  // arms the button and shows why. Holds the attachment's part, or DOWNLOAD_ALL.
+  const [riskArmed, setRiskArmed] = useState(null);
+  useEffect(() => { setRiskArmed(null); }, [selectedMessageId]);
+
   const handleDownload = async (messageId, part, filename) => {
     setDownloadingPart(part);
     try {
@@ -1908,6 +1916,23 @@ ${bodyContent}
   })();
 
   const attachments = body?.attachments || [];
+  // "Download all" hands over every file at once, so it asks first whenever one of them would. While
+  // it does, the link has no href, so a right-click "Save link as", a middle click or a long press has
+  // nothing to fetch; the confirming click starts the download itself.
+  const anyRiskyAttachment = attachments.some(att =>
+    ['block', 'warn'].includes(classifyAttachmentRisk(att.filename, att.type).level));
+  const downloadAllArmed = riskArmed === DOWNLOAD_ALL;
+  const downloadAllUrl = message ? api.attachmentArchiveUrl(message.id) : '';
+  const confirmDownloadAll = () => {
+    if (!downloadAllArmed) { setRiskArmed(DOWNLOAD_ALL); return; }
+    setRiskArmed(null);
+    const a = document.createElement('a');
+    a.href = downloadAllUrl;
+    a.download = '';
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+  };
 
   return (
     <div
@@ -2225,10 +2250,10 @@ ${bodyContent}
                     onMouseEnter={e => e.currentTarget.style.background = 'var(--bg-hover)'}
                     onMouseLeave={e => e.currentTarget.style.background = 'transparent'}
                   >
-                    <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.75" strokeLinecap="round">
-                      <path d="M22,9v9c0,1.1-.9,2-2,2H4c-1.1,0-2-.9-2-2V9"/>
-                      <polyline points="22 9 12 16 2 9"/>
-                      <polyline points="22 9 12 2 22 9"/>
+                    <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.75">
+                      <path style={{strokeLinecap: 'round'}} d="M22,10.91v7.09c0,1.1-.9,2-2,2H4c-1.1,0-2-.9-2-2V6c0-1.1.9-2,2-2h11"/>
+                      <polyline style={{strokeLinecap: 'round'} } points="16.36 9.95 12 13 2 6"/>
+                      <circle style={{strokeMiterlimit: 10, fill: 'currentColor'}} cx="19.96" cy="6" r="3"/>
                     </svg>
                     {t('contextMenu.markUnread')}
                   </div>
@@ -2358,10 +2383,10 @@ ${bodyContent}
             )}
             {message.is_read && (
               <PaneBtn onClick={handleMarkUnread} title={t('contextMenu.markUnread')}>
-                <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.75" strokeLinecap="round">
-                  <path d="M22,9v9c0,1.1-.9,2-2,2H4c-1.1,0-2-.9-2-2V9"/>
-                  <polyline points="22 9 12 16 2 9"/>
-                  <polyline points="22 9 12 2 22 9"/>
+                <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.75">
+                  <path style={{strokeLinecap: 'round'}} d="M22,10.91v7.09c0,1.1-.9,2-2,2H4c-1.1,0-2-.9-2-2V6c0-1.1.9-2,2-2h11"/>
+                  <polyline style={{strokeLinecap: 'round'} } points="16.36 9.95 12 13 2 6"/>
+                  <circle style={{strokeMiterlimit: 10, fill: 'currentColor'}} cx="19.96" cy="6" r="3"/>
                 </svg>
               </PaneBtn>
             )}
@@ -2592,11 +2617,15 @@ ${bodyContent}
               </div>
               {attachments.length > 1 && (
                 <a
-                  href={api.attachmentArchiveUrl(message.id)}
-                  download
+                  {...(anyRiskyAttachment ? {
+                    role: 'button',
+                    tabIndex: 0,
+                    onClick: confirmDownloadAll,
+                    onKeyDown: e => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); confirmDownloadAll(); } },
+                  } : { href: downloadAllUrl, download: true })}
                   style={{
-                    fontSize: 12, color: 'var(--accent)', textDecoration: 'none',
-                    display: 'flex', alignItems: 'center', gap: 4,
+                    fontSize: 12, color: downloadAllArmed ? 'var(--red)' : 'var(--accent)', textDecoration: 'none',
+                    display: 'flex', alignItems: 'center', gap: 4, cursor: 'pointer',
                   }}
                 >
                   <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
@@ -2605,20 +2634,30 @@ ${bodyContent}
                     <line x1="12" y1="15" x2="12" y2="3"/>
                   </svg>
                   {t('message.downloadAll')}
+                  {downloadAllArmed && ` — ${t('message.attachmentRisk.confirm')}`}
                 </a>
               )}
             </div>
             <div style={{ display: 'flex', flexWrap: 'wrap', gap: 8 }}>
-              {attachments.map((att, i) => (
+              {attachments.map((att, i) => {
+                const risk = classifyAttachmentRisk(att.filename, att.type);
+                const risky = risk.level === 'block' || risk.level === 'warn';
+                const riskColor = risk.level === 'block' ? 'var(--red)' : risk.level === 'warn' ? 'var(--amber)' : 'var(--text-tertiary)';
+                const armed = riskArmed === att.part;
+                return (
                 <button
                   key={i}
-                  onClick={() => handleDownload(message.id, att.part, att.filename)}
+                  onClick={() => {
+                    if (risky && !armed) { setRiskArmed(att.part); return; }
+                    setRiskArmed(null);
+                    handleDownload(message.id, att.part, att.filename);
+                  }}
                   disabled={downloadingPart === att.part}
                   style={{
                     display: 'flex', alignItems: 'center', gap: 8,
                     padding: '8px 12px', borderRadius: 8,
                     background: 'var(--bg-secondary)',
-                    border: '1px solid var(--border)',
+                    border: `1px solid ${risky ? riskColor : 'var(--border)'}`,
                     cursor: downloadingPart === att.part ? 'wait' : 'pointer',
                     color: 'var(--text-primary)',
                     transition: 'background 0.1s',
@@ -2638,6 +2677,14 @@ ${bodyContent}
                     <div style={{ fontSize: 11, color: 'var(--text-tertiary)' }}>
                       {downloadingPart === att.part ? t('message.downloading') : formatBytes(att.size)}
                     </div>
+                    {risk.level !== 'ok' && (
+                      <div style={{ fontSize: 11, color: riskColor, fontWeight: risk.level === 'block' ? 600 : 400, whiteSpace: 'normal' }}>
+                        {risk.doubleExt
+                          ? t('message.attachmentRisk.doubleExt', { ext: risk.doubleExt })
+                          : t(`message.attachmentRisk.${risk.level}`, { ext: risk.ext })}
+                        {armed && ` — ${t('message.attachmentRisk.confirm')}`}
+                      </div>
+                    )}
                   </div>
                   <svg width="13" height="13" viewBox="0 0 24 24" fill="none"
                     stroke="var(--text-tertiary)" strokeWidth="2" style={{ flexShrink: 0 }}>
@@ -2646,7 +2693,8 @@ ${bodyContent}
                     <line x1="12" y1="15" x2="12" y2="3"/>
                   </svg>
                 </button>
-              ))}
+                );
+              })}
             </div>
           </div>
         )}

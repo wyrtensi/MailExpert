@@ -300,6 +300,7 @@ export const api = {
     testSystemEmail: () => request('POST', '/admin/system-email/test'),
     deleteSystemEmail: () => request('DELETE', '/admin/system-email'),
     getAuthEvents: (params) => request('GET', '/admin/auth-events?' + new URLSearchParams(params)),
+    getAuditLog: (params) => request('GET', '/admin/audit' + (params && Object.keys(params).length ? '?' + new URLSearchParams(params) : '')),
     oidc: {
       getProviders: () => request('GET', '/admin/oidc'),
       createProvider: (data) => request('POST', '/admin/oidc', data),

@@ -677,7 +677,8 @@
       "groupDisplay": "Schermo",
       "groupSecurityIntegrations": "Sicurezza e integrazioni",
       "groupAdmin": "Amministrazione",
-      "plugins": "Plugin"
+      "plugins": "Plugin",
+      "audit": "Registro attività"
     },
     "rules": {
       "title": "Regole posta in arrivo",
@@ -811,7 +812,9 @@
       "categorizationEnabledDesc": "Ordina le email in arrivo in schede di categoria. Disabilitato per impostazione predefinita.",
       "enabledGlobally": "Abilitato globalmente",
       "reconnectGmail": "Ricollega Gmail",
-      "oauthReconnectRequired": "L'autorizzazione Google è scaduta o è stata revocata. Ricollega Gmail per riprendere la sincronizzazione."
+      "oauthReconnectRequired": "L'autorizzazione Google è scaduta o è stata revocata. Ricollega Gmail per riprendere la sincronizzazione.",
+      "deleteTitle": "Rimuovere la casella?",
+      "deleteMessage": "La casella e tutti i messaggi sincronizzati verranno rimossi per tutti gli utenti. L'operazione non si può annullare."
     },
     "folderMappings": {
       "title": "Mappatura cartelle",
@@ -1504,6 +1507,43 @@
       "empty": "Nessun plugin disponibile in questa versione.",
       "error": "Impossibile aggiornare il plugin. Riprova.",
       "configureIn": "Configura le opzioni in {{location}}"
+    },
+    "audit": {
+      "description": "Cosa hanno fatto gli utenti con caselle, messaggi e utenti, dal più recente.",
+      "mailbox": "Casella",
+      "action": "Azione",
+      "details": "Dettagli",
+      "fromDate": "Data di inizio",
+      "toDate": "Data di fine",
+      "allMailboxes": "Tutte le caselle",
+      "allUsers": "Tutti gli utenti",
+      "allActions": "Tutte le azioni",
+      "empty": "Nessuna voce corrisponde a questi filtri.",
+      "unknownUser": "Utente sconosciuto",
+      "loadFailed": "Impossibile caricare il registro: {{message}}",
+      "invalidFilter": "Controlla i filtri: una data o un valore non è valido.",
+      "detailProvider": "Accesso con {{provider}}",
+      "detailFields": "Campi: {{fields}}",
+      "detailRecipients": "A: {{recipients}}",
+      "detailMovedToTrash": "Da {{from}}, {{folder}}, spostato nel cestino",
+      "detailDeletedForever": "Da {{from}}, {{folder}}, eliminato definitivamente",
+      "detailMovedToTrashNoSender": "{{folder}}, spostato nel cestino",
+      "detailDeletedForeverNoSender": "{{folder}}, eliminato definitivamente",
+      "detailAdminGranted": "{{email}} ora è amministratore",
+      "detailAdminRevoked": "{{email}} non è più amministratore",
+      "actionMailboxAdded": "Casella aggiunta",
+      "actionMailboxReconnected": "Casella riconnessa",
+      "actionMailboxDeleted": "Casella eliminata",
+      "actionMailboxConnectionChanged": "Impostazioni di connessione modificate",
+      "actionMailboxEnabled": "Casella attivata",
+      "actionMailboxDisabled": "Casella disattivata",
+      "actionMessageSent": "Messaggio inviato",
+      "actionMessageDeleted": "Messaggio eliminato",
+      "actionUserAdded": "Utente aggiunto",
+      "actionUserDeleted": "Utente eliminato",
+      "actionUserEnabled": "Utente attivato",
+      "actionUserDisabled": "Utente disattivato",
+      "actionUserAdminChanged": "Diritti di amministratore modificati"
     }
   },
   "blockList": {

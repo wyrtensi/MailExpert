@@ -32,6 +32,7 @@ import DiagnosticsReportModal from './DiagnosticsReportModal.jsx';
 import ConfirmOverlay from './ConfirmOverlay.jsx';
 import GoogleUsersPanel from './GoogleUsersPanel.jsx';
 import MailboxSyncSettings from './MailboxSyncSettings.jsx';
+import AuditLogTab from './AuditLogTab.jsx';
 import { isGoogleAuthMode } from '../utils/authMode.js';
 import GoogleIntegrationSection, { openGoogleOAuth } from './GoogleIntegrationSection.jsx';
 import { openOAuthWindow } from '../utils/oauthWindow.js';
@@ -502,9 +503,9 @@ function AccountsTab() {
 
   const handleDelete = (id) => {
     setConfirmDialog({
-      title: 'Remove account?',
-      message: 'All synced messages for this account will be deleted. This cannot be undone.',
-      confirmLabel: 'Remove',
+      title: t('admin.accounts.deleteTitle'),
+      message: t('admin.accounts.deleteMessage'),
+      confirmLabel: t('common.remove'),
       onConfirm: async () => {
         await api.deleteAccount(id);
         setAccounts(accounts.filter(a => a.id !== id));
@@ -6452,7 +6453,7 @@ const TAB_GROUPS = [
   { id: 'account-mail', labelKey: 'admin.tabs.groupAccountMail', tabIds: ['accounts', 'notifications', 'rules', 'categories', 'cleanup'] },
   { id: 'display', labelKey: 'admin.tabs.groupDisplay', tabIds: ['appearance', 'shortcuts'] },
   { id: 'security-integrations', labelKey: 'admin.tabs.groupSecurityIntegrations', tabIds: ['security', 'integrations', 'ai', 'ai-actions', 'plugins'] },
-  { id: 'admin', labelKey: 'admin.tabs.groupAdmin', tabIds: ['users', 'sso'] },
+  { id: 'admin', labelKey: 'admin.tabs.groupAdmin', tabIds: ['users', 'audit', 'sso'] },
 ];
 
 const TABS = [
@@ -6514,6 +6515,11 @@ const TABS = [
     id: 'users', labelKey: 'admin.tabs.users',
     adminOnly: true,
     icon: <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.75"><path d="M17 21v-2a4 4 0 00-4-4H5a4 4 0 00-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M23 21v-2a4 4 0 00-3-3.87"/><path d="M16 3.13a4 4 0 010 7.75"/></svg>,
+  },
+  {
+    id: 'audit', labelKey: 'admin.tabs.audit',
+    adminOnly: true,
+    icon: <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.75" strokeLinecap="round" strokeLinejoin="round"><path d="M14 2H6a2 2 0 00-2 2v16a2 2 0 002 2h12a2 2 0 002-2V8z"/><polyline points="14 2 14 8 20 8"/><line x1="16" y1="13" x2="8" y2="13"/><line x1="16" y1="17" x2="8" y2="17"/></svg>,
   },
   {
     id: 'sso', labelKey: 'admin.tabs.sso',
@@ -8005,7 +8011,7 @@ function makeSearchIndex(t) {
     { label: t('admin.security.loginProtectionTitle'), keywords: ['login', 'attempts', 'brute force', 'lockout', 'max attempts', 'rate limit'], tab: 'security', subtab: 'security', adminOnly: true, breadcrumb: secCrumb },
     { label: t('admin.security.mailPolicyTitle'), keywords: ['server', 'tls', 'insecure', 'private ip', 'port', 'mail server', 'ssl'], tab: 'security', subtab: 'security', adminOnly: true, breadcrumb: secCrumb },
     { label: t('admin.security.mailboxSyncTitle'), keywords: ['sync', 'interval', 'frequency', 'refresh', 'poll', 'check mail', 'folder', 'structure', '15s', '30s', '60s', '15 min', '30 min', '1 hour', 'never'], tab: 'security', subtab: 'security', adminOnly: true, breadcrumb: secCrumb },
-    { label: t('admin.security.activityTitle'), keywords: ['log', 'activity', 'auth events', 'history', 'login history', 'audit'], tab: 'security', subtab: 'security', adminOnly: true, breadcrumb: secCrumb },
+    { label: t('admin.security.activityTitle'), keywords: ['log', 'activity', 'auth events', 'history', 'login history'], tab: 'security', subtab: 'security', adminOnly: true, breadcrumb: secCrumb },
     { label: t('admin.privacy.blockImages'), keywords: ['images', 'remote', 'block', 'privacy', 'tracking pixel', 'spy pixel', 'block images'], tab: 'security', subtab: 'privacy', breadcrumb: privCrumb },
     { label: t('admin.privacy.allowedSenders'), keywords: ['whitelist', 'allow', 'sender', 'trusted', 'safe', 'allowed domain', 'image whitelist'], tab: 'security', subtab: 'privacy', breadcrumb: privCrumb },
     // Notifications
@@ -8018,6 +8024,7 @@ function makeSearchIndex(t) {
     // Admin-only
     { label: t('admin.systemEmail.tabUsers'), keywords: ['user', 'invite', 'admin', 'role', 'manage users', 'add user'], tab: 'users', adminOnly: true, breadcrumb: tabLabel('users') },
     { label: t('admin.systemEmail.tabEmail'), keywords: ['system email', 'smtp', 'admin email', 'invite email', 'outgoing email'], tab: 'users', adminOnly: true, breadcrumb: tabLabel('users') },
+    { label: tabLabel('audit'), keywords: ['audit', 'audit log', 'journal', 'history', 'who did', 'deleted', 'sent', 'mailbox changes'], tab: 'audit', adminOnly: true, breadcrumb: tabLabel('audit') },
     { label: t('admin.sso.title'), localAuthOnly: true, keywords: ['sso', 'oidc', 'single sign on', 'oauth', 'provider', 'identity provider'], tab: 'sso', adminOnly: true, breadcrumb: tabLabel('sso') },
   ];
 }
@@ -8141,6 +8148,7 @@ export default function AdminPanel() {
       {adminTab === 'appearance' && <AppearanceTab initialSubTab={pendingSubTab} />}
       {adminTab === 'integrations' && <IntegrationsTab />}
       {adminTab === 'users' && <UsersTab />}
+      {adminTab === 'audit' && user?.isAdmin && <AuditLogTab />}
       {adminTab === 'sso' && !isGoogleAuthMode(user) && <SSOTab />}
       {adminTab === 'security' && <SecurityPrivacyTab initialSubTab={pendingSubTab} />}
       {adminTab === 'notifications' && <NotificationsTab />}

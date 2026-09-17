@@ -803,7 +803,8 @@
       "groupDisplay": "Zobrazení",
       "groupSecurityIntegrations": "Zabezpečení a integrace",
       "groupAdmin": "Správa",
-      "plugins": "Pluginy"
+      "plugins": "Pluginy",
+      "audit": "Auditní protokol"
     },
     "categories": {
       "title": "Kategorie e-mailů",
@@ -926,7 +927,9 @@
       "categorizationEnabledDesc": "Třídit příchozí e-maily do karet kategorií. Ve výchozím nastavení je vypnuto.",
       "enabledGlobally": "Globálně zapnuto",
       "reconnectGmail": "Znovu připojit Gmail",
-      "oauthReconnectRequired": "Autorizace Google vypršela nebo byla odvolána. Znovu připojte Gmail, aby synchronizace pokračovala."
+      "oauthReconnectRequired": "Autorizace Google vypršela nebo byla odvolána. Znovu připojte Gmail, aby synchronizace pokračovala.",
+      "deleteTitle": "Odebrat schránku?",
+      "deleteMessage": "Schránka a všechny její synchronizované zprávy zmizí všem uživatelům. Tuto akci nelze vrátit."
     },
     "folderMappings": {
       "title": "Mapování složek",
@@ -1633,6 +1636,43 @@
       "remove": "Odebrat",
       "add": "Přidat akci",
       "count": "Počet akcí: {{n}} z {{max}}"
+    },
+    "audit": {
+      "description": "Co uživatelé dělali se schránkami, zprávami a uživateli, od nejnovějšího.",
+      "mailbox": "Schránka",
+      "action": "Akce",
+      "details": "Podrobnosti",
+      "fromDate": "Od data",
+      "toDate": "Do data",
+      "allMailboxes": "Všechny schránky",
+      "allUsers": "Všichni uživatelé",
+      "allActions": "Všechny akce",
+      "empty": "Těmto filtrům neodpovídají žádné záznamy.",
+      "unknownUser": "Neznámý uživatel",
+      "loadFailed": "Protokol se nepodařilo načíst: {{message}}",
+      "invalidFilter": "Zkontrolujte filtry: datum nebo hodnota je neplatná.",
+      "detailProvider": "Přihlášeno přes {{provider}}",
+      "detailFields": "Pole: {{fields}}",
+      "detailRecipients": "Komu: {{recipients}}",
+      "detailMovedToTrash": "Od {{from}}, {{folder}}, přesunuto do koše",
+      "detailDeletedForever": "Od {{from}}, {{folder}}, trvale smazáno",
+      "detailMovedToTrashNoSender": "{{folder}}, přesunuto do koše",
+      "detailDeletedForeverNoSender": "{{folder}}, trvale smazáno",
+      "detailAdminGranted": "{{email}} je nyní správcem",
+      "detailAdminRevoked": "{{email}} už není správcem",
+      "actionMailboxAdded": "Schránka přidána",
+      "actionMailboxReconnected": "Schránka znovu připojena",
+      "actionMailboxDeleted": "Schránka smazána",
+      "actionMailboxConnectionChanged": "Změněno nastavení připojení",
+      "actionMailboxEnabled": "Schránka zapnuta",
+      "actionMailboxDisabled": "Schránka vypnuta",
+      "actionMessageSent": "Zpráva odeslána",
+      "actionMessageDeleted": "Zpráva smazána",
+      "actionUserAdded": "Uživatel přidán",
+      "actionUserDeleted": "Uživatel smazán",
+      "actionUserEnabled": "Uživatel zapnut",
+      "actionUserDisabled": "Uživatel vypnut",
+      "actionUserAdminChanged": "Změněna práva správce"
     }
   },
   "diagnostics": {

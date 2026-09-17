@@ -677,7 +677,8 @@
       "groupDisplay": "Affichage",
       "groupSecurityIntegrations": "Sécurité et intégrations",
       "groupAdmin": "Administration",
-      "plugins": "Extensions"
+      "plugins": "Extensions",
+      "audit": "Journal d'audit"
     },
     "rules": {
       "title": "Règles de boîte de réception",
@@ -811,7 +812,9 @@
       "categorizationEnabledDesc": "Classe les e-mails entrants dans des onglets de catégories. Désactivé par défaut.",
       "enabledGlobally": "Activé globalement",
       "reconnectGmail": "Reconnecter Gmail",
-      "oauthReconnectRequired": "L'autorisation Google a expiré ou a été révoquée. Reconnectez Gmail pour reprendre la synchronisation."
+      "oauthReconnectRequired": "L'autorisation Google a expiré ou a été révoquée. Reconnectez Gmail pour reprendre la synchronisation.",
+      "deleteTitle": "Retirer la boîte aux lettres ?",
+      "deleteMessage": "La boîte aux lettres et tous ses messages synchronisés seront retirés pour tous les utilisateurs. Cette action est irréversible."
     },
     "folderMappings": {
       "title": "Mappage des dossiers",
@@ -1504,6 +1507,43 @@
       "empty": "Aucune extension n'est disponible dans cette version.",
       "error": "Impossible de mettre à jour l'extension. Veuillez réessayer.",
       "configureIn": "Configurer les options dans {{location}}"
+    },
+    "audit": {
+      "description": "Ce que les utilisateurs ont fait avec les boîtes aux lettres, les messages et les utilisateurs, du plus récent au plus ancien.",
+      "mailbox": "Boîte aux lettres",
+      "action": "Opération",
+      "details": "Détails",
+      "fromDate": "Date de début",
+      "toDate": "Date de fin",
+      "allMailboxes": "Toutes les boîtes aux lettres",
+      "allUsers": "Tous les utilisateurs",
+      "allActions": "Toutes les opérations",
+      "empty": "Aucune entrée ne correspond à ces filtres.",
+      "unknownUser": "Utilisateur inconnu",
+      "loadFailed": "Impossible de charger le journal : {{message}}",
+      "invalidFilter": "Vérifiez les filtres : une date ou une valeur n'est pas valide.",
+      "detailProvider": "Connecté via {{provider}}",
+      "detailFields": "Champs : {{fields}}",
+      "detailRecipients": "À : {{recipients}}",
+      "detailMovedToTrash": "De {{from}}, {{folder}}, déplacé dans la corbeille",
+      "detailDeletedForever": "De {{from}}, {{folder}}, supprimé définitivement",
+      "detailMovedToTrashNoSender": "{{folder}}, déplacé dans la corbeille",
+      "detailDeletedForeverNoSender": "{{folder}}, supprimé définitivement",
+      "detailAdminGranted": "{{email}} est maintenant administrateur",
+      "detailAdminRevoked": "{{email}} n'est plus administrateur",
+      "actionMailboxAdded": "Boîte aux lettres ajoutée",
+      "actionMailboxReconnected": "Boîte aux lettres reconnectée",
+      "actionMailboxDeleted": "Boîte aux lettres supprimée",
+      "actionMailboxConnectionChanged": "Paramètres de connexion modifiés",
+      "actionMailboxEnabled": "Boîte aux lettres activée",
+      "actionMailboxDisabled": "Boîte aux lettres désactivée",
+      "actionMessageSent": "Message envoyé",
+      "actionMessageDeleted": "Message supprimé",
+      "actionUserAdded": "Utilisateur ajouté",
+      "actionUserDeleted": "Utilisateur supprimé",
+      "actionUserEnabled": "Utilisateur activé",
+      "actionUserDisabled": "Utilisateur désactivé",
+      "actionUserAdminChanged": "Droits d'administrateur modifiés"
     }
   },
   "blockList": {

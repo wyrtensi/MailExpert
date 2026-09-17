@@ -187,6 +187,41 @@ const DEMO_USER = {
   locked: false,
 };
 
+// Audit entries for the admin journal screen, newest first. Times are fixed so the demo reads
+// the same on every load.
+const AUDIT_FIXTURES = [
+  {
+    id: '6', occurredAt: '2026-09-17T09:40:00.000Z', actorUserId: 'demo-user', actorEmail: 'demo@mailexpert.local',
+    accountId: 'demo-sales', accountEmail: 'sales@demo.mailexpert.local', action: 'message.deleted',
+    details: { messageId: '<demo-archive@demo.mailexpert.local>', folder: 'INBOX', from: 'newsletter@example.com', permanent: false },
+  },
+  {
+    id: '5', occurredAt: '2026-09-17T09:15:00.000Z', actorUserId: 'demo-user', actorEmail: 'demo@mailexpert.local',
+    accountId: 'demo-sales', accountEmail: 'sales@demo.mailexpert.local', action: 'message.sent',
+    details: { messageId: '<demo-reply@demo.mailexpert.local>', to: ['buyer@example.com'], cc: [], bcc: [] },
+  },
+  {
+    id: '4', occurredAt: '2026-09-16T16:05:00.000Z', actorUserId: 'demo-user', actorEmail: 'demo@mailexpert.local',
+    accountId: 'demo-ops', accountEmail: 'ops@demo.mailexpert.local', action: 'mailbox.connection_changed',
+    details: { fields: ['smtp_port'] },
+  },
+  {
+    id: '3', occurredAt: '2026-09-16T12:30:00.000Z', actorUserId: 'demo-user', actorEmail: 'demo@mailexpert.local',
+    accountId: null, accountEmail: null, action: 'user.added',
+    details: { userId: 'demo-colleague', email: 'colleague@demo.mailexpert.local', isAdmin: false },
+  },
+  {
+    id: '2', occurredAt: '2026-09-15T10:00:00.000Z', actorUserId: 'demo-user', actorEmail: 'demo@mailexpert.local',
+    accountId: 'demo-ops', accountEmail: 'ops@demo.mailexpert.local', action: 'mailbox.added',
+    details: { protocol: 'imap', oauthProvider: 'google' },
+  },
+  {
+    id: '1', occurredAt: '2026-09-15T09:55:00.000Z', actorUserId: 'demo-user', actorEmail: 'demo@mailexpert.local',
+    accountId: 'demo-sales', accountEmail: 'sales@demo.mailexpert.local', action: 'mailbox.added',
+    details: { protocol: 'imap', oauthProvider: 'google' },
+  },
+];
+
 const DEFAULT_PREFERENCES = {
   theme: 'system',
   language: 'en',
@@ -596,6 +631,15 @@ export async function demoRequest(method, path, body = {}) {
     return { disabled: true, configured: false };
   }
   if (verb === 'GET' && pathname === '/ai/status') return { enabled: false, configured: false };
+  if (verb === 'GET' && pathname === '/admin/audit') {
+    const { searchParams } = url;
+    const entries = AUDIT_FIXTURES.filter((entry) => (
+      (!searchParams.get('account') || entry.accountId === searchParams.get('account'))
+      && (!searchParams.get('user') || entry.actorUserId === searchParams.get('user'))
+      && (!searchParams.get('action') || entry.action === searchParams.get('action'))
+    ));
+    return { entries: clone(entries), nextCursor: null };
+  }
   if (verb === 'GET' && pathname === '/admin/ai') return { enabled: false, provider: null };
   if (verb === 'GET' && pathname === '/todoist/status') return { connected: false };
   if (verb === 'GET' && pathname === '/todoist/projects') return { projects: [] };

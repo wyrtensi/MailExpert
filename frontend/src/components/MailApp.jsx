@@ -16,7 +16,9 @@ import MessageList from './MessageList.jsx';
 import MessagePane from './MessagePane.jsx';
 import NotificationToasts from './NotificationToasts.jsx';
 import CommandPalette from './CommandPalette.jsx';
+import DemoBadge from './DemoBadge.jsx';
 import { usePluginSlot, PluginRuntime } from '../plugins/PluginSlot.jsx';
+import { isDemoMode } from '../demo/mode.js';
 
 const ContactsPage = lazy(() => import('./ContactsPage.jsx'));
 const WindowLayer  = lazy(() => import('./WindowLayer.jsx'));
@@ -295,7 +297,7 @@ export default function MailApp() {
     return () => window.removeEventListener('popstate', handler);
   }, [isMobile, setSelectedMessage]);
 
-  const wsRef = useWebSocket();
+  const wsRef = useWebSocket(!isDemoMode);
 
   // Open a specific message by id (fetch → cache → select). Shared by the on-load
   // deep-link path and the service-worker notification-tap path so both behave
@@ -928,6 +930,7 @@ export default function MailApp() {
       <NotificationToasts />
       <PluginRuntime />
       <CommandPalette open={paletteOpen} onClose={() => setPaletteOpen(false)} />
+      {isDemoMode && <DemoBadge enabled={isDemoMode} />}
 
       {/* Keyboard shortcut help overlay — toggled by the '?' key */}
       {showShortcutHelp && (

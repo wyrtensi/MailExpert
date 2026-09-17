@@ -5412,8 +5412,7 @@ function AboutTab() {
   const [showDiagnostics, setShowDiagnostics] = useState(false);
 
   useEffect(() => {
-    fetch('/api/version')
-      .then(r => r.ok ? r.json() : Promise.reject())
+    api.get('/version')
       .then(setInfo)
       .catch(() => setInfo({ version: '—', sha: '—' }));
   }, []);

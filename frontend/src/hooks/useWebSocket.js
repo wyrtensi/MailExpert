@@ -36,11 +36,13 @@ let flagCountRefreshTimer = null;
 const BACKOFF_BASE = 1000;
 const BACKOFF_MAX = 30000;
 
-export function useWebSocket() {
+export function useWebSocket(enabled = true) {
   const { t } = useTranslation();
   const wsRef = useRef(null);
   const reconnectTimer = useRef(null);
-  const mountedRef = useRef(true);
+  const mountedRef = useRef(false);
+  const enabledRef = useRef(enabled);
+  enabledRef.current = enabled;
   const reconnectAttempt = useRef(0);
   // True once the socket has connected at least once. Distinguishes the initial
   // page-load connect (message list is freshly fetched anyway) from any later
@@ -52,6 +54,7 @@ export function useWebSocket() {
   const { addNotification, updateAccount, setFolders, setBackfillProgress } = useStore();
 
   const connect = useCallback(() => {
+    if (!enabledRef.current || !mountedRef.current) return;
     // Clean up any existing socket before opening a new one — prevents duplicate
     // connections if connect() is called while a previous socket is still open.
     if (wsRef.current && wsRef.current.readyState !== WebSocket.CLOSED) {
@@ -63,6 +66,11 @@ export function useWebSocket() {
     const ws = new WebSocket(`${protocol}//${window.location.host}/ws`);
 
     ws.onopen = () => {
+      if (!enabledRef.current || !mountedRef.current) {
+        ws.onclose = null;
+        ws.close();
+        return;
+      }
       const wasReconnect = hasConnectedBefore.current;
       hasConnectedBefore.current = true;
       reconnectAttempt.current = 0;
@@ -103,7 +111,7 @@ export function useWebSocket() {
 
     ws.onclose = (event) => {
       clearInterval(ws._pingInterval);
-      if (!mountedRef.current || NO_RECONNECT_CODES.has(event.code)) return;
+      if (!enabledRef.current || !mountedRef.current || NO_RECONNECT_CODES.has(event.code)) return;
       const attempt = reconnectAttempt.current;
       const delay = Math.min(BACKOFF_BASE * 2 ** attempt, BACKOFF_MAX);
       const jitter = Math.random() * 0.3 * delay;
@@ -354,18 +362,25 @@ export function useWebSocket() {
 
   useEffect(() => {
     mountedRef.current = true;
-    connect();
+    if (enabled) connect();
     return () => {
       mountedRef.current = false;
       clearTimeout(reconnectTimer.current);
-      if (wsRef.current) wsRef.current.close();
+      if (wsRef.current) {
+        wsRef.current.onclose = null;
+        clearInterval(wsRef.current._pingInterval);
+        wsRef.current.close();
+        wsRef.current = null;
+      }
     };
-  }, [connect]);
+  }, [connect, enabled]);
 
   // Revive a dropped socket the moment the user returns to the tab or the network comes back,
   // instead of waiting out the reconnect backoff. (Half-open sockets are handled by the heartbeat.)
   useEffect(() => {
+    if (!enabled) return undefined;
     const revive = () => {
+      if (!enabledRef.current || !mountedRef.current) return;
       if (document.visibilityState !== 'visible') return;
       const ws = wsRef.current;
       if (!ws || ws.readyState === WebSocket.CLOSED || ws.readyState === WebSocket.CLOSING) {
@@ -380,7 +395,7 @@ export function useWebSocket() {
       document.removeEventListener('visibilitychange', revive);
       window.removeEventListener('online', revive);
     };
-  }, [connect]);
+  }, [connect, enabled]);
 
   return wsRef;
 }

@@ -1332,11 +1332,7 @@ ${bodyContent}
   const handleDownload = async (messageId, part, filename) => {
     setDownloadingPart(part);
     try {
-      const res = await fetch(`/api/mail/messages/${messageId}/attachments/${encodeURIComponent(part)}`, {
-        credentials: 'include'
-      });
-      if (!res.ok) throw new Error('Download failed');
-      const blob = await res.blob();
+      const blob = await api.downloadAttachment(messageId, part);
       const url = URL.createObjectURL(blob);
       const a = document.createElement('a');
       a.href = url;
@@ -2596,7 +2592,7 @@ ${bodyContent}
               </div>
               {attachments.length > 1 && (
                 <a
-                  href={`/api/mail/messages/${message.id}/attachments.zip`}
+                  href={api.attachmentArchiveUrl(message.id)}
                   download
                   style={{
                     fontSize: 12, color: 'var(--accent)', textDecoration: 'none',

@@ -133,6 +133,10 @@ docker compose up -d --build
 
 First build takes 2–3 minutes. MailExpert will be available on port 443 (HTTPS, self-signed certificate) and port 80 (HTTP).
 
+#### Demo workspace
+
+For a populated local workspace, set `VITE_DEMO_MODE=true` in `.env` and rebuild. Demo mode needs no mailbox credentials or OAuth, performs no network mail activity, and its local data resets on reload.
+
 **Ports are configurable in `.env`:**
 
 | Variable | Default | Description |

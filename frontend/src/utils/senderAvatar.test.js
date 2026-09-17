@@ -70,4 +70,14 @@ describe('avatarImageCandidates', () => {
       assert.deepEqual(avatarImageCandidates({ email: bad, hasContactPhoto: undefined, senderFavicons: true }), [], String(bad));
     }
   });
+
+  it('does not advertise API-backed images in demo mode', () => {
+    assert.deepEqual(avatarImageCandidates({
+      email,
+      hasContactPhoto: true,
+      gravatarAvatars: true,
+      senderFavicons: true,
+      demoMode: true,
+    }), []);
+  });
 });

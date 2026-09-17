@@ -38,8 +38,8 @@ describe('scrubReport (client safety net)', () => {
 
 describe('collectEnvironment', () => {
   it('returns a non-identifying environment shape (no raw UA)', () => {
-    const env = collectEnvironment({ locale: 'de', theme: 'dark', uiScale: 1.2 });
-    assert.equal(env.locale, 'de');
+    const env = collectEnvironment({ locale: 'ru', theme: 'dark', uiScale: 1.2 });
+    assert.equal(env.locale, 'ru');
     assert.equal(env.theme, 'dark');
     assert.equal(env.uiScale, 1.2);
     assert.equal(env.platform, 'web');

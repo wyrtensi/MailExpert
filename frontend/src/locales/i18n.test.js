@@ -29,11 +29,11 @@
  *   Every key present in any locale file must exist in all locale files.
  *
  *   Failure example:
- *     ✖ de has no missing keys
+ *     ✖ ru has no missing keys
  *       Missing keys:
  *         - admin.rules.title
  *
- *   Fix: open de.json, navigate to admin → rules and add the missing key
+ *   Fix: open ru.json, navigate to admin → rules and add the missing key
  *   with a proper translation. Do NOT copy the English value — translate it.
  *   The dotted path admin.rules.title maps to { "admin": { "rules": { "title": "…" } } }.
  *   Create parent sections if they don't exist yet.
@@ -45,18 +45,16 @@
  *   Failure example:
  *     ✖ admin.sso.allowInsecure
  *       Unexpected duplicate values:
- *         de = en: "Allow local / self-signed connections"
+ *         en = ru: "Allow local / self-signed connections"
  *
- *   Fix A — translate: open de.json and replace the English string with
- *   the German translation.
+ *   Fix A — translate: open ru.json and replace the English string with
+ *   the Russian translation.
  *
  *   Fix B — whitelist: if the strings are legitimately identical (see below),
  *   add an entry to SAME_VALUE_ALLOWED:
  *
  *     'some.key': 'any'              // brand name / placeholder, same everywhere
- *     'some.key': [['de', 'en']]     // only this pair may share a value
- *     'some.key': [['en','fr'],      // two independent groups; cross-group
- *                  ['es','it']]      // duplicates would still fail
+ *     'some.key': [['en', 'ru']]     // only this pair may share a value
  *
  * SUITE 4 — hardcoded user-facing strings
  *   JSX source must not contain user-visible string literals outside of t().
@@ -75,8 +73,8 @@
  *          Before: title="Minimize"
  *          After:  title={t('compose.toolbar.minimize')}
  *     2. Add the key to en.json with the English string.
- *     3. Run the locale tests — Suite 1 will list the other locales that
- *        now need the key. Translate it in each.
+ *     3. Run the locale tests — Suite 2 will report that ru.json
+ *        now needs the key. Translate it there.
  *
  *   If a string is intentionally hardcoded (technical term, placeholder, brand
  *   name) add it to HARDCODED_OK with a short comment explaining why.
@@ -89,10 +87,7 @@
  *   - Brand names / proper nouns (Gmail, iCloud, Outlook)
  *   - Hostnames, URLs, UUID-format placeholders (imap.gmail.com, xxxxxxxx-…)
  *   - Technical abbreviations used internationally (SSO, Cc, Bcc, Port)
- *   - A word spelled identically in both languages: "Spam" (de/en),
- *     "Version" (de/en/fr), "Alias" (es/fr/it), "Archive" (en/fr)
- *   - Two Romance languages sharing the same translation: es+it say "contiene",
- *     es+fr say "De" for "From"
+ *   - A term Russian uses as-is: "SSO", "Email"
  *
  *   When in doubt, translate. Whitelist only when a translation would produce
  *   the identical string anyway.
@@ -103,7 +98,6 @@ import assert from 'node:assert/strict';
 import { readFileSync, readdirSync } from 'node:fs';
 import { join, dirname, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import i18next from 'i18next';
 
 const dir = dirname(fileURLToPath(import.meta.url));
 
@@ -136,249 +130,34 @@ const SAME_VALUE_ALLOWED = {
   'admin.sso.issuerUrlPh':                  'any', // https://accounts.google.com
   'admin.sso.scopesPh':                     'any', // openid email profile
   'login.totp.placeholder':                 'any', // 000000
+  'contacts.auto':                          'any', // "auto" — universal technical loanword
+  'admin.categories.urlSubPh':              'any', // URL placeholder
+  'gtd.title':                              'any', // "GTD" — acronym (Getting Things Done)
+  'shortcuts.groups.gtd':                   'any', // "GTD" — acronym group heading
+  'admin.integrations.todoist.title':       'any', // Todoist — brand name
 
-  // ── Specific language groups ───────────────────────────────────────────────
-  // "Version" — same spelling in de, en, fr
-  'admin.about.version': [['de', 'en', 'fr']],
-  // "via" (on-behalf-of sender, #366) — identical preposition in en and fr
-  'message.via': [['en', 'fr']],
-  // "Account" — identical in en/it; "Konto" — identical in de/pl
-  'admin.cleanup.account': [['en', 'it'], ['de', 'pl']],
-  // "{{n}} min" — the "min" abbreviation is shared in en, es, fr, it
-  'admin.lock.autoLockMin': [['cs', 'en', 'es', 'fr', 'it', 'pl']],
-
-  // "Website" — international term, same in de and en
-  'admin.about.website': [['de', 'en']],
-
-  // "Plugins" — loanword, same spelling in de and en (it uses singular "Plugin")
-  'admin.tabs.plugins':  [['de', 'en']],
-  'admin.plugins.title': [['de', 'en']],
-
-  // "Alias" — Latin origin, same spelling in es, fr, it
-  'admin.accounts.aliases': [['es', 'fr', 'it'], ['cs', 'pl']],
-  'admin.aliases.title':     [['es', 'fr', 'it'], ['cs', 'pl']],
-
-
-  // email placeholder — example.com address looks the same in en, ru, zhCN
-  'admin.accounts.emailPh':    [['en', 'ru', 'zhCN']],
-  'admin.aliases.emailPh':     [['de', 'en', 'ru', 'zhCN']],
-  'admin.privacy.addDomainPh': [['cs', 'de', 'en', 'pl', 'ru', 'zhCN']],
-  'admin.privacy.addSenderPh': [['en', 'ru', 'zhCN']],
-  'admin.aliases.replyToLabel': [['en', 'pl']],
-
-  'admin.rules.actionForwardPlaceholder': [['es', 'it']],
-  'admin.sso.domainsPh':       [['de', 'en', 'pl', 'ru', 'zhCN']],
-  'admin.users.invitePh':      [['cs', 'de', 'en', 'ru', 'zhCN']],
-  'compose.bccPh':             [['de', 'en', 'pl', 'ru', 'zhCN']],
-  'compose.ccPh':              [['de', 'en', 'pl', 'ru', 'zhCN']],
-  'compose.toPh':              [['en', 'ru', 'zhCN']],
-
-  // "Port" — universal technical term, same in de, en, fr
-  'admin.accounts.imapPort':  [['cs', 'de', 'en', 'fr']],
-  'admin.accounts.smtpPort':  [['cs', 'de', 'en', 'fr']],
-  'admin.systemEmail.port':   [['cs', 'de', 'en', 'fr']],
-
-  // "Signature" (en/fr) and "Firma" (es/it) — two separate legitimate groups
-  'admin.accounts.signatureSection': [['en', 'fr'], ['es', 'it'], ['cs', 'pl']],
-  'admin.aliases.signatureSection':  [['en', 'fr'], ['es', 'it'], ['cs', 'pl']],
-
-
-  // "Layout" — international term, same in de, en, it
-  'admin.appearance.layout': [['de', 'en', 'it']],
-
-  // "Display" — typography term, same in en and it
-  'admin.appearance.typographyDisplay': [['en', 'it']],
-
-  // "Mono" — typography abbreviation, same in de, en, es, fr, it
-  'admin.appearance.typographyMono': [['de', 'en', 'es', 'fr', 'it', 'pl']],
-
-  // "Archive" — same spelling in en and fr
-  'admin.folderMappings.archive': [['en', 'fr'], ['cs', 'de']],
-
-  // "Spam / Junk" — "Spam" is a universal loanword, same in de and en
-  'admin.folderMappings.spam': [['de', 'en']],
-
-  // "QR code" — same in en and es; de "QR-Code", fr "code QR", it "codice QR", ru "QR-код", zhCN "QR码"
-  'admin.security.qrCodeAlt': [['en', 'es']],
-
-  // "Visita:" — "Visit:" translates identically in es and it (Romance languages)
-  'admin.integrations.microsoft.deviceCodeVisit': [['es', 'it']],
-
-  // "Notifications" — same spelling in en and fr
-  'admin.notifications.title':  [['en', 'fr']],
-  'admin.tabs.notifications':   [['en', 'fr']],
-
-  // "Privacy" — international term, same in en and it
-  'admin.privacy.title': [['en', 'it']],
-  'admin.tabs.privacy':  [['en', 'it']],
-
-  // "Header" — technical email term used as-is in de and en
-  'admin.rules.fieldHeader': [['de', 'en']],
-
-  // "Actions" / "Conditions" — French loanwords, same in en and fr
-  'admin.rules.actionsLabel':    [['en', 'fr']],
-  'admin.rules.conditionsLabel': [['en', 'fr']],
-
-  // "De" — "From" translates identically in es and fr
-  'admin.rules.fieldFrom': [['es', 'fr'], ['cs', 'pl']],
-  'compose.from':          [['es', 'fr'], ['cs', 'pl']],
-
-  // "contiene" / "Evento" / "Manualmente" — Romance languages share the same word
-  'admin.rules.opContains':          [['es', 'it']],
-  'admin.security.activityColEvent': [['es', 'it']],
-  'admin.messageList.markReadManual': [['es', 'it']],
-
-  // "Status" — same spelling in de and en
-  'admin.security.activityColStatus': [['de', 'en']],
-
-  // "ID client" — fr and it share the same OAuth term
-  'admin.sso.clientId':   [['fr', 'it']],
-  'admin.sso.clientIdPh': [['fr', 'it']],
-
-  // "Scopes" — OAuth technical term, same in de and en
-  'admin.sso.scopes': [['de', 'en']],
-
-  // "Single Sign-On" — international term, same in de, en, it
-  'admin.sso.title': [['de', 'en', 'it']],
-
-  // "SSO" — acronym, same in de, en, es, fr, it, ru
-  'admin.tabs.sso': [['cs', 'de', 'en', 'es', 'fr', 'it', 'pl', 'ru']],
-
-  // "Telefon" / "Projekt" — established Polish/German technical loanwords
-  'contacts.fields.phone': [['cs', 'de', 'pl']],
-  'todoist.project':       [['cs', 'de', 'pl']],
-
-  // "Password" — international term, same in en and it
-  'admin.systemEmail.password':      [['en', 'it']],
-  'login.password':                  [['en', 'it']],
-
-  // "Tema" — "Theme" translates identically in es and it
-  'admin.tabs.theme': [['es', 'it']],
-
-  // "Administration" — same spelling in de, en, fr
-  'admin.tabs.groupAdmin': [['de', 'en', 'fr']],
-
-  // "Admin" — used as-is in de, en, es, fr, it
-  'admin.users.adminBadge': [['de', 'en', 'es', 'fr', 'it']],
-
-  // "Error: {{message}}" — "Error" is the same word in en and es
-  'common.error': [['en', 'es']],
-
-  // "Cc" / "Bcc" — email header abbreviations used internationally
-  'compose.cc':  [['de', 'en', 'es', 'fr', 'it']],
-  'compose.bcc': [['de', 'en', 'it']],
-
-  // "Normal" — loanword, same spelling in de, en, es, fr
-  'compose.priorityNormal': [['de', 'en', 'es', 'fr']],
-
-  // "{{count}} message(s)" — identical spelling in en and fr
-  'thread.messages_one':   [['en', 'fr']],
-  'thread.messages_other': [['en', 'fr']],
-
-  // ── Contacts ───────────────────────────────────────────────────────────────
-  // "auto" — universal technical loanword, same in all locales
-  'contacts.auto': 'any',
-  // "contacts" — same word in English and French
-  'contacts.count': [['en', 'fr']],
-  'contacts.title': [['en', 'fr'], ['cs', 'pl']],
-  // "Email" — international term used as-is in en, es, it, ru, zhCN
-  'contacts.fields.email': [['en', 'es', 'it', 'ru', 'zhCN'], ['cs', 'fr']],
-  // "Notes" — same spelling in English and French
-  'contacts.fields.notes': [['en', 'fr']],
-  // "Organisation" — same spelling in German and French
-  'contacts.fields.organization': [['de', 'fr']],
-  // "Casa" — Spanish and Italian share the same word for "home"
-  'contacts.emailTypes.home': [['es', 'it']],
-  'contacts.phoneTypes.home': [['es', 'it']],
-  // "Mobile" — same spelling in English, French, and Italian
-  'contacts.phoneTypes.mobile': [['en', 'fr', 'it']],
-
-  // ── MFA / 2FA ─────────────────────────────────────────────────────────────
-  // "Optional" — same spelling in de and en
-  'admin.security.mfaEnforcementOff': [['de', 'en']],
-  // "Permanent" — same in en and fr; "Permanente" same in es and it
-  'admin.security.mfaDeviceTrustForever': [['en', 'fr'], ['es', 'it']],
-  // email placeholder — en and ru share same format
-  'admin.security.recoveryEmailPh': [['en', 'ru', 'zhCN']],
-
-  // ── Email categorization ───────────────────────────────────────────────────
-  // URL placeholder — identical in all locales
-  'admin.categories.urlSubPh': 'any',
-  // "Primary" — "Principal" in both es and fr
-  'messageList.categories.primary': [['es', 'fr']],
-  // "Newsletter(s)" — en and fr both use "Newsletters"; de and it both use "Newsletter"
-  'messageList.categories.newsletter': [['en', 'fr'], ['de', 'it'], ['cs', 'pl']],
-  // "Promotions" — same spelling in en and fr
-  'messageList.categories.promotion': [['en', 'fr']],
-  // "Social" — international term used as-is in en, es, and it
-  'messageList.categories.social': [['en', 'es', 'it']],
-
-  // ── GTD ────────────────────────────────────────────────────────────────────
-  // "GTD" — acronym (Getting Things Done), same in every locale
-  'gtd.title': 'any',
-
-  // ── Keyboard shortcuts ─────────────────────────────────────────────────────
-  // "GTD" — acronym group heading, same in every locale (like admin.categories.gtdReveal)
-  'shortcuts.groups.gtd': 'any',
-  // "Navigation" — spelled identically in de, en, fr (es "Navegación", it "Navigazione")
-  'shortcuts.groups.navigation': [['de', 'en', 'fr']],
-
-  // ── Todoist integration ────────────────────────────────────────────────────
-  // "Todoist" — brand name, same in all locales
-  'admin.integrations.todoist.title': 'any',
-  // "Description" — same spelling in en and fr
-  'todoist.description': [['en', 'fr']],
-  // "Labels" — international loanword, same in de and en
-  'todoist.labels': [['de', 'en']],
-  // "Urgent" — same in en and fr; "Urgente" same in es and it (Romance languages)
-  'todoist.priorityUrgent': [['en', 'fr'], ['es', 'it']],
-  // "Alta" — "High" translates identically in es and it (Romance languages)
-  'todoist.priorityHigh': [['es', 'it']],
-  // "Media" — "Medium" translates identically in es and it (Romance languages)
-  'todoist.priorityMedium': [['es', 'it']],
-
-  // ── Czech ────────────────────────────────────────────────────────────────
-  'admin.about.license': [['cs', 'fr']],
-  'admin.ai.chatgptModel': [['cs', 'pl']],
-  'admin.ai.model': [['cs', 'en']],
-  'admin.appearance.typography': [['cs', 'de']],
-  'admin.messageList.markReadDelaySeconds': [['cs', 'pl']],
-  'admin.messageList.markReadDelaySeconds_other': [['cs', 'pl']],
-  'admin.tabs.categories': [['cs', 'pl']],
-  'gtd.state.reference': [['cs', 'en']],
+  // ── English and Russian share the value ───────────────────────────────────
+  // "SSO" — acronym, same in en and ru
+  'admin.tabs.sso': [['en', 'ru']],
+  // "Email" — international term used as-is in en and ru
+  'contacts.fields.email': [['en', 'ru']],
+  // email and domain placeholders — example addresses look the same in en and ru
+  'admin.accounts.emailPh': [['en', 'ru']],
+  'admin.aliases.emailPh': [['en', 'ru']],
+  'admin.privacy.addDomainPh': [['en', 'ru']],
+  'admin.privacy.addSenderPh': [['en', 'ru']],
+  'admin.security.recoveryEmailPh': [['en', 'ru']],
+  'admin.sso.domainsPh': [['en', 'ru']],
+  'admin.users.invitePh': [['en', 'ru']],
+  'compose.bccPh': [['en', 'ru']],
+  'compose.ccPh': [['en', 'ru']],
+  'compose.toPh': [['en', 'ru']],
 };
 
 // Locale-specific plural forms are allowed per locale. A locale may add forms
 // required by its Intl.PluralRules categories without forcing every other locale
 // to carry unused keys. Existing locale files may also define their own forms.
-const LOCALE_SPECIFIC_KEYS_BY_LOCALE = {
-  cs: new Set([
-    'message.attachment_few', 'message.attachment_many',
-    'messageList.bulkDeleted.title_few', 'messageList.bulkDeleted.title_many',
-    'messageList.bulkDeleted.failBody_few', 'messageList.bulkDeleted.failBody_many',
-    'messageList.bulkMoved.title_few', 'messageList.bulkMoved.title_many',
-    'messageList.bulkMoved.failBody_few', 'messageList.bulkMoved.failBody_many',
-    'messageList.bulkArchived.title_few', 'messageList.bulkArchived.title_many',
-    'messageList.bulkArchived.failBody_few', 'messageList.bulkArchived.failBody_many',
-    'sidebar.hiddenFolders_few', 'sidebar.hiddenFolders_many',
-    'admin.messageList.markReadDelaySeconds_one',
-    'admin.messageList.markReadDelaySeconds_few',
-    'admin.messageList.markReadDelaySeconds_many',
-  ]),
-  pl: new Set([
-    'message.attachment_few', 'message.attachment_many',
-    'messageList.bulkDeleted.title_few', 'messageList.bulkDeleted.title_many',
-    'messageList.bulkDeleted.failBody_few', 'messageList.bulkDeleted.failBody_many',
-    'messageList.bulkMoved.title_few', 'messageList.bulkMoved.title_many',
-    'messageList.bulkMoved.failBody_few', 'messageList.bulkMoved.failBody_many',
-    'messageList.bulkArchived.title_few', 'messageList.bulkArchived.title_many',
-    'messageList.bulkArchived.failBody_few', 'messageList.bulkArchived.failBody_many',
-    'sidebar.hiddenFolders_few', 'sidebar.hiddenFolders_many',
-    'admin.messageList.markReadDelaySeconds_one',
-    'admin.messageList.markReadDelaySeconds_few',
-    'admin.messageList.markReadDelaySeconds_many',
-  ]),
-};
+const LOCALE_SPECIFIC_KEYS_BY_LOCALE = {};
 const LOCALE_SPECIFIC_KEYS = new Set(
   Object.values(LOCALE_SPECIFIC_KEYS_BY_LOCALE).flatMap(keys => [...keys]),
 );
@@ -758,62 +537,4 @@ describe('i18n locale files', () => {
     });
   });
 
-});
-
-describe('Polish plural resolution', () => {
-  it('selects one/few/many forms for representative Polish counts', async () => {
-    const instance = i18next.createInstance();
-    await instance.init({
-      lng: 'pl',
-      fallbackLng: false,
-      resources: {
-        pl: { translation: JSON.parse(readFileSync(join(dir, 'pl.json'), 'utf8')) },
-      },
-      interpolation: { escapeValue: false },
-    });
-
-    const expected = new Map([
-      [1, '1 załącznik'],
-      [2, '2 załączniki'],
-      [5, '5 załączników'],
-      [21, '21 załączników'],
-      [22, '22 załączniki'],
-      [25, '25 załączników'],
-      [101, '101 załączników'],
-      [102, '102 załączniki'],
-      [111, '111 załączników'],
-    ]);
-
-    for (const [count, value] of expected) {
-      assert.equal(instance.t('message.attachment', { count }), value, `count=${count}`);
-    }
-  });
-});
-
-describe('Czech plural resolution', () => {
-  it('selects one/few/other forms for representative Czech counts', async () => {
-    const instance = i18next.createInstance();
-    await instance.init({
-      lng: 'cs',
-      fallbackLng: false,
-      resources: {
-        cs: { translation: JSON.parse(readFileSync(join(dir, 'cs.json'), 'utf8')) },
-      },
-      interpolation: { escapeValue: false },
-    });
-
-    const expected = new Map([
-      [1, '1 příloha'],
-      [2, '2 přílohy'],
-      [4, '4 přílohy'],
-      [5, '5 příloh'],
-      [21, '21 příloh'],
-      [22, '22 příloh'],
-      [101, '101 příloh'],
-    ]);
-
-    for (const [count, value] of expected) {
-      assert.equal(instance.t('message.attachment', { count }), value, `count=${count}`);
-    }
-  });
 });

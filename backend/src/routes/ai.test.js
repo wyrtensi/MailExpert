@@ -368,19 +368,13 @@ describe('aiLanguageInstruction', () => {
   it.each([
     ['en', 'English'],
     ['ru', 'Russian'],
-    ['de', 'German'],
-    ['es', 'Spanish'],
-    ['fr', 'French'],
-    ['it', 'Italian'],
-    ['zhCN', 'Simplified Chinese'],
-    ['pl', 'Polish'],
   ])('maps %s to %s', (language, name) => {
     expect(aiLanguageInstruction(language)).toBe(
       `Always respond in ${name}, unless the user explicitly asks for another language. For email drafting and rewriting, preserve the original email language when it differs from ${name}.`,
     );
   });
 
-  it.each([undefined, null, '', 'pt', 'constructor', 'toString'])(
+  it.each([undefined, null, '', 'pt', 'de', 'constructor', 'toString'])(
     'uses a non-interpolating fallback for unsupported value %s',
     (language) => {
       expect(aiLanguageInstruction(language)).toBe(

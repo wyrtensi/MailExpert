@@ -45,7 +45,7 @@ Implemented: full dependency modernization (Express 5, ImapFlow 2, Nodemailer 10
 - **Attachments** — send and receive file attachments across all accounts
 - **Multiple layouts** — classic, compact, wide reader, vertical split, and more
 - **Multiple themes** — dark, light, and several color schemes; custom CSS field for per-user style overrides
-- **Multi-language UI** — English, French, Spanish, Italian, German, Russian, Simplified Chinese, and Polish
+- **Two-language UI** — English and Russian
 - **Full-text search** — across all connected accounts simultaneously
 - **Real-time notifications** — WebSocket-powered new-mail toasts and web push notifications
 - **PWA** — installable as a desktop or mobile app with push notification support

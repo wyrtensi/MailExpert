@@ -8,7 +8,7 @@ vi.mock('../encryption.js', () => ({
 
 import { query } from '../db.js';
 import {
-  ACCESS_SYNC_CONFIG_KEY, ACCESS_SYNC_STATE_KEY, accessSyncMaxDisables, loadRunConfig, loadState,
+  ACCESS_SYNC_CONFIG_KEY, ACCESS_SYNC_STATE_KEY, accessSyncMaxDisables, isAccessSyncEnabled, loadRunConfig, loadState,
   loadStoredConfig, publicConfig, saveConfig, saveState,
 } from './settings.js';
 
@@ -88,6 +88,51 @@ describe('settings', () => {
     expect(stored(ACCESS_SYNC_STATE_KEY).baseline).toEqual(['a@example.com']);
     await saveConfig({ ...full, apiToken: '', policyId: OTHER_POLICY });
     expect(stored(ACCESS_SYNC_STATE_KEY)).toEqual({ baseline: [], abortedCandidates: null, lastRun: { outcome: 'updated' } });
+  });
+
+  it('writes the state key before the config key when retargeting', async () => {
+    await saveConfig(full);
+    const insertedKeys = [];
+    query.mockImplementation(async (sql, params) => {
+      if (/^SELECT value FROM system_settings WHERE key = \$1$/.test(sql)) {
+        return { rows: store.has(params[0]) ? [{ value: store.get(params[0]) }] : [] };
+      }
+      if (/^INSERT INTO system_settings/.test(sql)) {
+        insertedKeys.push(params[0]);
+        store.set(params[0], params[1]);
+        return { rowCount: 1 };
+      }
+      throw new Error(`unexpected SQL: ${sql}`);
+    });
+    await saveConfig({ ...full, apiToken: '', policyId: OTHER_POLICY });
+    expect(insertedKeys).toEqual([ACCESS_SYNC_STATE_KEY, ACCESS_SYNC_CONFIG_KEY]);
+  });
+
+  it('resets the baseline before writing the config, so a failed config write cannot leave a stale baseline', async () => {
+    await saveConfig(full);
+    await saveState({ baseline: ['a@example.com'], abortedCandidates: ['b@example.com'], lastRun: { outcome: 'updated' } });
+    query.mockImplementation(async (sql, params) => {
+      if (/^SELECT value FROM system_settings WHERE key = \$1$/.test(sql)) {
+        return { rows: store.has(params[0]) ? [{ value: store.get(params[0]) }] : [] };
+      }
+      if (/^INSERT INTO system_settings/.test(sql)) {
+        if (params[0] === ACCESS_SYNC_CONFIG_KEY) throw new Error('config write failed');
+        store.set(params[0], params[1]);
+        return { rowCount: 1 };
+      }
+      throw new Error(`unexpected SQL: ${sql}`);
+    });
+    await expect(saveConfig({ ...full, apiToken: '', policyId: OTHER_POLICY })).rejects.toThrow('config write failed');
+    expect(stored(ACCESS_SYNC_STATE_KEY)).toEqual({ baseline: [], abortedCandidates: null, lastRun: { outcome: 'updated' } });
+    expect(stored(ACCESS_SYNC_CONFIG_KEY).policyId).toBe(POLICY);
+  });
+
+  it('reports whether the sync is on', async () => {
+    expect(await isAccessSyncEnabled()).toBe(false);
+    await saveConfig(full);
+    expect(await isAccessSyncEnabled()).toBe(true);
+    await saveConfig({ ...full, enabled: false, apiToken: '' });
+    expect(await isAccessSyncEnabled()).toBe(false);
   });
 
   it('hands a run a null token it cannot decrypt, and survives a corrupt state', async () => {

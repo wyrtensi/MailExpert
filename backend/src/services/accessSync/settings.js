@@ -73,6 +73,12 @@ export async function loadRunConfig() {
   };
 }
 
+// Whether the sync is turned on, for callers outside a run that only need that one flag (the
+// Cloudflare sign-in gate in userIdentity.js).
+export async function isAccessSyncEnabled() {
+  return (await loadStoredConfig()).enabled === true;
+}
+
 export async function loadState() {
   const stored = await readJson(ACCESS_SYNC_STATE_KEY);
   return {
@@ -90,7 +96,10 @@ const text = (value) => (typeof value === 'string' ? value.trim() : '');
 
 // Saves settings from the admin screen. A blank token keeps the stored one. Pointing the sync at
 // another account, application or policy forgets the baseline: the emails written to the old
-// policy would otherwise look removed from the new one and disable their users.
+// policy would otherwise look removed from the new one and disable their users. The baseline is
+// reset before the new config is written, not after: a reset followed by a failed config write is
+// harmless (an empty baseline never disables anyone), while the old order could pair a new policy
+// with a stale baseline if the config write succeeded but the state write then failed.
 export async function saveConfig(input) {
   if (typeof input?.enabled !== 'boolean') throw new AccessSyncConfigError('invalid_field');
   const stored = await loadStoredConfig();
@@ -112,9 +121,9 @@ export async function saveConfig(input) {
   }
   if (token) next.apiToken = encrypt(token);
 
-  await writeJson(ACCESS_SYNC_CONFIG_KEY, next);
   if (next.accountId !== stored.accountId || next.appId !== stored.appId || next.policyId !== stored.policyId) {
     await saveState({ ...(await loadState()), baseline: [], abortedCandidates: null });
   }
+  await writeJson(ACCESS_SYNC_CONFIG_KEY, next);
   return next;
 }

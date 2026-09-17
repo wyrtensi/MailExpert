@@ -22,6 +22,7 @@ import { resolveForConnection, createPinnedLookup } from './hostValidation.js';
 import { getConnectionPolicy } from './connectionPolicy.js';
 import { applyInboxRules, applyBlockList } from './inboxRules.js';
 import { generateVCard } from '../utils/vcard.js';
+import { computeThreadId } from './threading/threadId.js';
 import { randomUUID } from 'crypto';
 
 
@@ -1242,26 +1243,6 @@ function sanitizeStr(str) {
   return str.replace(/\0/g, '');
 }
 
-// Parse RFC 5322 References header into an ordered array of angle-bracketed Message-IDs.
-function parseReferences(refHeader) {
-  if (!refHeader) return [];
-  return refHeader.match(/<[^>]+>/g) || [];
-}
-
-// Strip common reply/forward prefixes (Re:, FW:, AW:, SV:, …) from a subject,
-// handling multiple nested levels, and return the lowercase core.
-const SUBJECT_PREFIX_RE = /^(?:re|fw|fwd|aw|sv|vs|tr|wg|ant|antw|ref|rif|ynt|odp|vb|atb)\s*:\s*/i;
-function normalizeSubject(subject) {
-  if (!subject) return '';
-  let s = subject.trim();
-  let prev;
-  do {
-    prev = s;
-    s = s.replace(SUBJECT_PREFIX_RE, '').trim();
-  } while (s !== prev);
-  return s.toLowerCase();
-}
-
 // Propagate a resolved thread_id to earlier messages that used this message as a provisional
 // thread root (out-of-order delivery, newest-first backfill). The is_deleted predicate lets
 // Postgres use the partial idx_messages_thread_id; without it every call scanned all rows of the
@@ -1273,64 +1254,6 @@ export async function rerootThreadChildren(accountId, threadId, messageId) {
      WHERE account_id = $2 AND thread_id = $3 AND message_id != $3 AND is_deleted = false`,
     [threadId, accountId, messageId]
   );
-}
-
-// Compute the thread_id for an incoming message.
-// Primary: RFC 5322 References / In-Reply-To header chain.
-// Fallback: subject normalization when headers are absent (e.g. Outlook RE: replies).
-async function computeThreadId(accountId, messageId, inReplyTo, references, subject) {
-  if (!messageId) return null;
-
-  const refIds = parseReferences(references);
-  const candidates = [...refIds];
-  if (inReplyTo && !candidates.includes(inReplyTo)) candidates.push(inReplyTo);
-
-  if (candidates.length > 0) {
-    // Fetch all candidates in one query instead of N sequential lookups.
-    // Priority: RFC 5322 root (candidates[0]) > newest ancestor (candidates[last]).
-    const rows = await query(
-      `SELECT message_id, thread_id FROM messages
-       WHERE account_id = $1 AND message_id = ANY($2) AND thread_id IS NOT NULL`,
-      [accountId, candidates]
-    );
-
-    if (rows.rows.length > 0) {
-      const found = new Map(rows.rows.map(r => [r.message_id, r.thread_id]));
-      // Prefer the thread root (first Reference per RFC 5322).
-      if (found.has(candidates[0])) return found.get(candidates[0]);
-      // Otherwise use the most recent ancestor present in the DB (newest→oldest).
-      for (let i = candidates.length - 1; i >= 0; i--) {
-        if (found.has(candidates[i])) return found.get(candidates[i]);
-      }
-    }
-
-    // Ancestor referenced but not yet in DB — use the root as a provisional thread_id.
-    // When it arrives its thread_id will equal its own message_id, so threads converge.
-    // Don't fall through to subject fallback; the header chain takes priority.
-    return candidates[0] || messageId;
-  }
-
-  // No RFC 5322 threading headers — fall back to subject normalization.
-  // Looks for the earliest message in the same account with the same normalized subject
-  // within the past 90 days and joins that thread.
-  const normalized = normalizeSubject(subject);
-  if (normalized) {
-    const subjectRow = await query(
-      `SELECT thread_id FROM messages
-       WHERE account_id = $1
-         AND is_deleted = false
-         AND message_id IS DISTINCT FROM $2
-         AND thread_id IS NOT NULL
-         AND normalized_subject = $3
-         AND date > NOW() - INTERVAL '90 days'
-       ORDER BY date ASC
-       LIMIT 1`,
-      [accountId, messageId, normalized]
-    );
-    if (subjectRow.rows.length > 0) return subjectRow.rows[0].thread_id;
-  }
-
-  return messageId;
 }
 
 // Timeout budget for an OAuth token refresh on an IMAP path, per provider: the capped lock wait
@@ -3502,7 +3425,7 @@ export class ImapManager {
             const msgId = sanitizeStr(parsed.messageId);
             const inReplyTo = sanitizeStr(parsed.inReplyTo);
             const refs = sanitizeStr(parsed.references);
-            const threadId = await computeThreadId(account.id, msgId, inReplyTo, refs, sanitizeStr(parsed.subject));
+            const threadId = await computeThreadId(account.id, msgId, inReplyTo, refs);
 
             // Upsert only this server UID. Shared Message-IDs do not prove a move,
             // including self-mail and duplicate deliveries within one mailbox.
@@ -4172,7 +4095,7 @@ export class ImapManager {
                 const bfMsgId    = sanitizeStr(parsed.messageId);
                 const bfReplyTo  = sanitizeStr(parsed.inReplyTo);
                 const bfRefs     = sanitizeStr(parsed.references);
-                const bfThreadId = await computeThreadId(account.id, bfMsgId, bfReplyTo, bfRefs, sanitizeStr(parsed.subject));
+                const bfThreadId = await computeThreadId(account.id, bfMsgId, bfReplyTo, bfRefs);
 
                 let bfCategory = null;
                 if (account.categorization_enabled || await getGlobalCategorizationEnabled()) {
@@ -4795,7 +4718,7 @@ export class ImapManager {
     // Self-rooting orphaned every sent message into its own thread, showing as a duplicate
     // "shadow" separate from the conversation (#378).
     const threadId = msgId
-      ? await computeThreadId(account.id, msgId, sanitizeStr(inReplyTo), sanitizeStr(references), sanitizeStr(subject))
+      ? await computeThreadId(account.id, msgId, sanitizeStr(inReplyTo), sanitizeStr(references))
       : null;
     await query(`
       INSERT INTO messages (

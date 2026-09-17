@@ -20,6 +20,7 @@ describe('recordAudit', () => {
       'mailbox.added', 'mailbox.reconnected', 'mailbox.deleted', 'mailbox.connection_changed',
       'mailbox.enabled', 'mailbox.disabled', 'message.sent', 'message.deleted',
       'user.added', 'user.deleted', 'user.enabled', 'user.disabled', 'user.admin_changed',
+      'access.sync_aborted',
     ]);
   });
 
@@ -33,13 +34,13 @@ describe('recordAudit', () => {
     expect(query).toHaveBeenCalledTimes(1);
     const [sql] = query.mock.calls[0];
     expect(sql).toMatch(/INSERT INTO mailbox_audit_log \(actor_user_id, actor_email, account_id, account_email, action, details\)/);
-    expect(sql).toMatch(/COALESCE\(NULLIF\(u\.email, ''\), u\.username\)/);
+    expect(sql).toMatch(/COALESCE\(NULLIF\(u\.email, ''\), u\.username, e\.actor_email\)/);
     expect(sql).toMatch(/COALESCE\(a\.email_address, e\.account_email\)/);
     expect(sql).toMatch(/LEFT JOIN users u ON u\.id = e\.actor_user_id/);
     expect(sql).toMatch(/LEFT JOIN email_accounts a ON a\.id = e\.account_id/);
     expect(insertedRows()).toEqual([
-      { actor_user_id: 'u1', account_id: 'a1', account_email: null, action: 'message.deleted', details: { messageId: '<m1@example.com>', folder: 'INBOX', from: 'x@example.com', permanent: false } },
-      { actor_user_id: 'u1', account_id: null, account_email: 'gone@example.com', action: 'mailbox.deleted', details: {} },
+      { actor_user_id: 'u1', actor_email: null, account_id: 'a1', account_email: null, action: 'message.deleted', details: { messageId: '<m1@example.com>', folder: 'INBOX', from: 'x@example.com', permanent: false } },
+      { actor_user_id: 'u1', actor_email: null, account_id: null, account_email: 'gone@example.com', action: 'mailbox.deleted', details: {} },
     ]);
   });
 
@@ -47,8 +48,22 @@ describe('recordAudit', () => {
     query.mockResolvedValue({ rowCount: 1 });
     await recordAudit({ actorUserId: 'u1', accountId: 'a1', action: 'mailbox.disabled' });
     expect(insertedRows()).toEqual([
-      { actor_user_id: 'u1', account_id: 'a1', account_email: null, action: 'mailbox.disabled', details: {} },
+      { actor_user_id: 'u1', actor_email: null, account_id: 'a1', account_email: null, action: 'mailbox.disabled', details: {} },
     ]);
+  });
+
+  it('names an actor that is not a user', async () => {
+    query.mockResolvedValue({ rowCount: 1 });
+    await recordAudit({
+      actorEmail: 'Cloudflare Access', action: 'access.sync_aborted',
+      details: { candidates: ['a@example.com'], activeUsers: 1, maxDisables: 10 },
+    });
+    const [sql] = query.mock.calls[0];
+    expect(sql).toMatch(/AS e\(actor_user_id uuid, actor_email text, account_id uuid, account_email text, action text, details jsonb\)/);
+    expect(insertedRows()).toEqual([{
+      actor_user_id: null, actor_email: 'Cloudflare Access', account_id: null, account_email: null,
+      action: 'access.sync_aborted', details: { candidates: ['a@example.com'], activeUsers: 1, maxDisables: 10 },
+    }]);
   });
 
   it('writes nothing for an empty batch and drops unknown actions', async () => {

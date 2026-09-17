@@ -63,6 +63,7 @@ Frontend не ходит к Gmail напрямую. Он обращается к
 | --- | --- |
 | `routes/accounts.js` | CRUD IMAP/SMTP-аккаунтов, aliases, folder mappings и флаг unified inbox |
 | `routes/admin.js` | Пользователи, приглашения, системная почта и административные операции |
+| `routes/accessSync.js` | Настройки и ручной запуск синхронизации с Cloudflare Access; монтируется в `routes/admin.js` |
 | `routes/auth.js` | Регистрация, login, MFA enrolment, password reset, preferences и сессии |
 | `routes/totp.js` | Отдельные TOTP-операции |
 | `routes/oauth.js` | Microsoft OAuth/device code; монтирует `routes/oauthGoogle.js` и реэкспортирует `refreshMicrosoftToken` из `services/oauth/microsoftOAuth.js` |
@@ -108,6 +109,7 @@ Frontend не ходит к Gmail напрямую. Он обращается к
 - `db.js`, `migrations.js` — PostgreSQL pool, транзакции и запуск миграций.
 - `authLimiter.js`, `rateLimiter.js`, `authEvents.js` — защита login/API и журнал безопасности.
 - `auditLog.js` — журнал действий пользователей с ящиками, письмами и пользователями (`mailbox_audit_log`); маршруты пишут в него без ожидания, ошибка записи не ломает действие.
+- `accessSync/` — синхронизация одобренных пользователей с Allow-политикой Cloudflare Access: клиент API (`cloudflareAccessClient.js`), чистая трёхсторонняя сверка (`reconcile.js`), настройки с зашифрованным токеном (`settings.js`), прогон (`runner.js`) и один исполнитель на процесс (`scheduler.js`, `index.js`). `auth/userStatus.js` — проверки последнего администратора и отключение по email.
 - `emailSanitizer.js` — граница недоверенного HTML письма.
 - `logger.js`, `diagnosticsRing.js`, `diagnosticsReport.js` — журналы и redaction.
 - `websocket.js`, `pushNotifications.js` — обновления UI и Web Push.
@@ -163,6 +165,7 @@ Google OAuth — не plugin уровня UI: он является credential p
 Остальные компоненты отвечают за command palette, diagnostics, window layers, notifications, profile, signature editor, GTD views и native notification bridge.
 
 - `AuditLogTab.jsx` — экран журнала для администратора: фильтры и подгрузка по курсору; логика запроса и подписей в `utils/auditLog.js`.
+- `AccessSyncPanel.jsx` — вкладка синхронизации с Cloudflare Access в режиме `google`; логика формы и итога прогона в `utils/accessSync.js`.
 
 ### Utilities и тестируемая бизнес-логика
 

@@ -1,0 +1,103 @@
+import { describe, expect, it, vi } from 'vitest';
+import { CloudflareAccessError, cloudflareApiBase, createCloudflareAccessClient } from './cloudflareAccessClient.js';
+
+const ACCOUNT = '0123456789abcdef0123456789abcdef';
+const APP = '11111111-2222-4333-8444-555555555555';
+const POLICY = '66666666-7777-4888-9999-000000000000';
+const BASE = 'https://cf.test/client/v4';
+
+const reply = (status, body) => ({ ok: status >= 200 && status < 300, status, json: async () => body });
+const client = (fetchImpl) => createCloudflareAccessClient({ accountId: ACCOUNT, appId: APP, apiToken: 'tok-secret', apiBase: BASE, fetchImpl });
+
+describe('cloudflareApiBase', () => {
+  it('defaults to the public API and trims a trailing slash from an override', () => {
+    expect(cloudflareApiBase({})).toBe('https://api.cloudflare.com/client/v4');
+    expect(cloudflareApiBase({ CF_API_BASE: ' http://127.0.0.1:4010/ ' })).toBe('http://127.0.0.1:4010');
+  });
+});
+
+describe('getPolicy', () => {
+  it('reads the policy through the application with the bearer token and a timeout', async () => {
+    const policy = { id: POLICY, name: 'Allow', decision: 'allow', include: [] };
+    const fetchImpl = vi.fn(async () => reply(200, { success: true, errors: [], result: policy }));
+    expect(await client(fetchImpl).getPolicy(POLICY)).toEqual(policy);
+    const [url, init] = fetchImpl.mock.calls[0];
+    expect(url).toBe(`${BASE}/accounts/${ACCOUNT}/access/apps/${APP}/policies/${POLICY}`);
+    expect(init.method).toBe('GET');
+    expect(init.headers.authorization).toBe('Bearer tok-secret');
+    expect(init.signal).toBeInstanceOf(AbortSignal);
+  });
+
+  it('reports only the status and error codes, never the response text', async () => {
+    const fetchImpl = vi.fn(async () => reply(403, { success: false, errors: [{ code: 10000, message: 'Authentication error for person@example.com' }] }));
+    const err = await client(fetchImpl).getPolicy(POLICY).catch((e) => e);
+    expect(err).toBeInstanceOf(CloudflareAccessError);
+    expect(err.message).toBe('Cloudflare getPolicy failed (403): error 10000');
+    expect(err.status).toBe(403);
+    expect(err.codes).toEqual([10000]);
+    expect(err.message).not.toContain('person@example.com');
+  });
+
+  it('treats success: false or an unreadable body as a failure', async () => {
+    await expect(client(async () => reply(200, { success: false, errors: [] })).getPolicy(POLICY))
+      .rejects.toThrow('Cloudflare getPolicy failed (200)');
+    await expect(client(async () => ({ ok: true, status: 200, json: async () => { throw new SyntaxError('bad'); } })).getPolicy(POLICY))
+      .rejects.toThrow('Cloudflare getPolicy failed (200)');
+  });
+
+  it('says a policy exists but is not attached when only the account knows it', async () => {
+    const fetchImpl = vi.fn()
+      .mockResolvedValueOnce(reply(404, { success: false, errors: [{ code: 12130 }] }))
+      .mockResolvedValueOnce(reply(200, { success: true, result: { id: POLICY } }));
+    const err = await client(fetchImpl).getPolicy(POLICY).catch((e) => e);
+    expect(err.status).toBe('not_attached');
+    expect(fetchImpl.mock.calls[1][0]).toBe(`${BASE}/accounts/${ACCOUNT}/access/policies/${POLICY}`);
+
+    const missing = vi.fn(async () => reply(404, { success: false, errors: [{ code: 12130 }] }));
+    const notFound = await client(missing).getPolicy(POLICY).catch((e) => e);
+    expect(notFound.status).toBe(404);
+  });
+
+  it('reports the probe\'s own failure when the probe itself is not a 404', async () => {
+    const fetchImpl = vi.fn()
+      .mockResolvedValueOnce(reply(404, { success: false, errors: [{ code: 12130 }] }))
+      .mockImplementationOnce(async () => { throw new TypeError('fetch failed'); });
+    const err = await client(fetchImpl).getPolicy(POLICY).catch((e) => e);
+    expect(err).toBeInstanceOf(CloudflareAccessError);
+    expect(err.status).toBe('network');
+  });
+
+  it('names network failures and timeouts', async () => {
+    const network = await client(async () => { throw new TypeError('fetch failed'); }).getPolicy(POLICY).catch((e) => e);
+    expect(network.status).toBe('network');
+    const timeout = await client(async () => { throw new DOMException('timed out', 'TimeoutError'); }).getPolicy(POLICY).catch((e) => e);
+    expect(timeout.status).toBe('timeout');
+  });
+});
+
+describe('updatePolicy', () => {
+  const stored = {
+    id: POLICY, uid: 'u', created_at: 'c', updated_at: 'u', app_count: 1, name: 'Allow', decision: 'allow',
+    include: [{ email: { email: 'a@example.com' } }], precedence: 1,
+  };
+
+  it('writes an application policy whole, without read-only fields', async () => {
+    const fetchImpl = vi.fn(async () => reply(200, { success: true, result: {} }));
+    await client(fetchImpl).updatePolicy({ ...stored, reusable: false });
+    const [url, init] = fetchImpl.mock.calls[0];
+    expect(url).toBe(`${BASE}/accounts/${ACCOUNT}/access/apps/${APP}/policies/${POLICY}`);
+    expect(init.method).toBe('PUT');
+    expect(JSON.parse(init.body)).toEqual({
+      name: 'Allow', decision: 'allow', include: [{ email: { email: 'a@example.com' } }], precedence: 1, exclude: [], require: [],
+    });
+  });
+
+  it('writes a reusable policy through the account', async () => {
+    const fetchImpl = vi.fn(async () => reply(200, { success: true, result: {} }));
+    await client(fetchImpl).updatePolicy({ ...stored, reusable: true, exclude: [{ email: { email: 'x@example.com' } }] });
+    const [url, init] = fetchImpl.mock.calls[0];
+    expect(url).toBe(`${BASE}/accounts/${ACCOUNT}/access/policies/${POLICY}`);
+    expect(JSON.parse(init.body).exclude).toEqual([{ email: { email: 'x@example.com' } }]);
+    expect(JSON.parse(init.body)).not.toHaveProperty('reusable');
+  });
+});

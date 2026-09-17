@@ -1,4 +1,5 @@
 import { query, withTransaction } from '../db.js';
+import { isAccessSyncEnabled } from '../accessSync/settings.js';
 
 export const USER_COLUMNS = 'id, username, email, is_admin, disabled_at, created_at';
 export const SESSION_AUTH_METHODS = new Set(['cloudflare', 'google']);
@@ -62,9 +63,10 @@ export async function claimOrCreateUserByEmail(client, email, { isAdmin = false 
 }
 
 // The account a verified identity signs in as, or { error }. A Cloudflare Access identity is
-// already approved by the Access policy and gets an account on first sign-in; a direct Google
-// sign-in needs an approved user, except for bootstrap admins. Bootstrap admins become admins
-// on every sign-in.
+// already approved by the Access policy and gets an account on first sign-in — unless the Access
+// sync is on, in which case MailExpert's user list is the only place users are approved and an
+// unknown Cloudflare identity is refused instead (see below). A direct Google sign-in needs an
+// approved user, except for bootstrap admins. Bootstrap admins become admins on every sign-in.
 export async function resolveVerifiedUser({ email, source, settings }) {
   const address = normalizeEmail(email);
   if (!address) return { error: 'not_allowed' };
@@ -75,6 +77,14 @@ export async function resolveVerifiedUser({ email, source, settings }) {
   if (known?.disabled_at) return { error: 'user_disabled' };
   if (known && (!bootstrap || known.is_admin)) return { user: known };
   if (!known && source !== 'cloudflare' && !bootstrap) return { error: 'not_allowed' };
+  // A deleted user must not come back just because their Cloudflare Access session token is
+  // still valid: while the sync is on, it is MailExpert's user list that removed them from the
+  // policy, and letting Cloudflare recreate them here would write their email straight back in
+  // on the next run. Only read the setting when there is no known user, so the common signed-in
+  // path above stays a single read.
+  if (!known && source === 'cloudflare' && !bootstrap && await isAccessSyncEnabled()) {
+    return { error: 'not_allowed' };
+  }
 
   try {
     return await withTransaction(async (client) => {

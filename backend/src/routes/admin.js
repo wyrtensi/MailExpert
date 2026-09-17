@@ -14,8 +14,11 @@ import { UUID_RE, uuidParam } from '../utils/uuid.js';
 import { AUDIT_ACTIONS, recordAudit } from '../services/auditLog.js';
 import { getAuthSettings } from '../services/auth/authSettings.js';
 import { UserIdentityError, claimOrCreateUserByEmail, normalizeEmail } from '../services/auth/userIdentity.js';
+import { countsAsActiveAdmin, lockAdminGuard, otherActiveAdminExists } from '../services/auth/userStatus.js';
 import { closeUserSockets } from '../services/websocket.js';
 import { destroyUserSessions } from './auth.js';
+import accessSyncRoutes from './accessSync.js';
+import { requestAccessSync } from '../services/accessSync/index.js';
 import {
   FOLDER_SYNC_INTERVAL_KEY, SYNC_INTERVAL_KEY, loadSyncSettings, parseFolderSyncIntervalSec, parseSyncIntervalSec,
 } from '../services/syncSettings.js';
@@ -24,6 +27,7 @@ const router = Router();
 router.use(requireAdmin);
 // Reject a malformed :id (user UUID) with a 400 before it reaches a uuid-typed query.
 router.param('id', uuidParam('id'));
+router.use('/access-sync', accessSyncRoutes);
 
 // ── Users ──────────────────────────────────────────────────────────────────────
 
@@ -49,24 +53,6 @@ function publicUser(row, bootstrapAdminEmails = getAuthSettings().bootstrapAdmin
     isBootstrapAdmin: !!row.email && bootstrapAdminEmails.has(row.email.toLowerCase()),
   };
 }
-
-// Whether the user can still reach the admin panel: an admin, not disabled, and — in google
-// mode, where sign-in is by email — with an email.
-function countsAsActiveAdmin({ is_admin: isAdmin, disabled_at: disabledAt, email }, googleMode) {
-  return !!isAdmin && !disabledAt && (!googleMode || !!email);
-}
-
-async function otherActiveAdminExists(client, userId, googleMode) {
-  const { rows } = await client.query(
-    `SELECT COUNT(*)::int AS count FROM users
-      WHERE is_admin = true AND disabled_at IS NULL AND id <> $1${googleMode ? ' AND email IS NOT NULL' : ''}`,
-    [userId],
-  );
-  return rows[0].count > 0;
-}
-
-// Serializes changes that could leave the install without a reachable admin.
-const lockAdminGuard = (client) => client.query("SELECT pg_advisory_xact_lock(hashtext('users-admin-guard'))");
 
 const lockTargetUser = async (client, id) => {
   const { rows } = await client.query('SELECT id, email, is_admin, disabled_at FROM users WHERE id = $1 FOR UPDATE', [id]);
@@ -122,6 +108,7 @@ router.post('/users', async (req, res) => {
       return res.status(409).json({ error: 'A user with this email already exists', code: 'user_exists' });
     }
     recordAudit([userAuditEntry(req, 'user.added', user)]);
+    requestAccessSync('user_added');
     console.log(`[admin] ${req.session.userId} approved user ${user.id}`);
     return res.status(created ? 201 : 200).json({ user: publicUser(user) });
   } catch (err) {
@@ -216,6 +203,8 @@ router.patch('/users/:id', async (req, res) => {
     }
     if (!!previous.is_admin !== !!row.is_admin) auditEntries.push(userAuditEntry(req, 'user.admin_changed', row));
     if (auditEntries.length) recordAudit(auditEntries);
+    // Who may sign in changed: the Access policy follows.
+    if (!!previous.disabled_at !== !!row.disabled_at || previous.email !== row.email) requestAccessSync('user_changed');
     console.log(`[admin] ${req.session.userId} updated user ${id}`);
     return res.json({ ok: true, user: publicUser(row, settings.bootstrapAdminEmails) });
   } catch (err) {
@@ -250,6 +239,7 @@ router.delete('/users/:id', async (req, res) => {
   await signOutEverywhere(id);
   await query('DELETE FROM users WHERE id = $1', [id]);
   recordAudit([userAuditEntry(req, 'user.deleted', deleted)]);
+  requestAccessSync('user_deleted');
   // Let plugins clean up any user-scoped data the FK cascade can't reach (GTD removes the
   // imported pet, stored under a slug derived from the user id rather than an FK). Best-effort
   // and after the delete: the user row is already gone, so a hook failure must not misreport a

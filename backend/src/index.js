@@ -13,7 +13,7 @@ import draftRoutes from './routes/draft.js';
 import oauthRoutes from './routes/oauth.js';
 import authGoogleRoutes from './routes/authGoogle.js';
 import integrationsRoutes, { loadIntegrationConfigs } from './routes/integrations.js';
-import authRoutes from './routes/auth.js';
+import authRoutes, { destroyUserSessions } from './routes/auth.js';
 import accountRoutes from './routes/accounts.js';
 import mailRoutes from './routes/mail.js';
 import searchRoutes from './routes/search.js';
@@ -36,13 +36,14 @@ import { encryptExistingCredentials, query } from './services/db.js';
 import { runMigrations } from './services/migrations.js';
 import { parseVCard } from './utils/vcard.js';
 import { reloadAuthSettings } from './services/authLimiter.js';
-import { setupWebSocket } from './services/websocket.js';
+import { closeUserSockets, setupWebSocket } from './services/websocket.js';
 import { ImapManager } from './services/imapManager.js';
 import { loadSyncSettings } from './services/syncSettings.js';
 import { getUpdateStatus } from './services/updateCheck.js';
 import { recordHttp } from './services/performanceMetrics.js';
 import { defaultEmptyBody } from './middleware/defaultEmptyBody.js';
-import { authSettingsError } from './services/auth/authSettings.js';
+import { authSettingsError, getAuthSettings } from './services/auth/authSettings.js';
+import { startAccessSync } from './services/accessSync/index.js';
 import { identityGate } from './middleware/identityGate.js';
 
 const packageMeta = JSON.parse(readFileSync(new URL('../package.json', import.meta.url), 'utf-8'));
@@ -279,6 +280,16 @@ await loadIntegrationConfigs();
 
 // Start background snooze watcher — polls every 60 seconds to restore snoozed messages
 imapManager.startSnoozeWatcher();
+
+// Keep the Cloudflare Access policy in line with approved users; only google mode approves users.
+if (getAuthSettings().mode === 'google') {
+  startAccessSync({
+    signOutUser: async (userId) => {
+      await destroyUserSessions(userId);
+      closeUserSockets(wss, userId);
+    },
+  });
+}
 
 // Mailboxes are serviced by the server: apply the install-wide sync cadence, then connect every
 // enabled IMAP mailbox through a bounded queue (IMAP_CONNECT_CONCURRENCY). Signing in, signing

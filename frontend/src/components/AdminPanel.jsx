@@ -31,6 +31,7 @@ import SignatureEditor from './SignatureEditor.jsx';
 import DiagnosticsReportModal from './DiagnosticsReportModal.jsx';
 import ConfirmOverlay from './ConfirmOverlay.jsx';
 import GoogleUsersPanel from './GoogleUsersPanel.jsx';
+import AccessSyncPanel from './AccessSyncPanel.jsx';
 import MailboxSyncSettings from './MailboxSyncSettings.jsx';
 import AuditLogTab from './AuditLogTab.jsx';
 import { isGoogleAuthMode } from '../utils/authMode.js';
@@ -4456,9 +4457,12 @@ function SystemEmailSection() {
 function UsersTab() {
   const { t } = useTranslation();
   const { user } = useStore();
+  const googleAuth = isGoogleAuthMode(user);
   return (
     <SubTabs tabs={[
-      { id: 'users', label: t('admin.systemEmail.tabUsers'), content: isGoogleAuthMode(user) ? <GoogleUsersPanel /> : <UsersAndInvitesPanel /> },
+      { id: 'users', label: t('admin.systemEmail.tabUsers'), content: googleAuth ? <GoogleUsersPanel /> : <UsersAndInvitesPanel /> },
+      // Approved users are kept in the Cloudflare Access policy only in google mode.
+      ...(googleAuth ? [{ id: 'accesssync', label: t('admin.accessSync.tab'), content: <AccessSyncPanel /> }] : []),
       { id: 'systememail', label: t('admin.systemEmail.tabEmail'), content: <SystemEmailSection /> },
     ]} />
   );

@@ -1,8 +1,10 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 
 vi.mock('../db.js', () => ({ query: vi.fn(), withTransaction: vi.fn() }));
+vi.mock('../accessSync/settings.js', () => ({ isAccessSyncEnabled: vi.fn() }));
 
 const { query, withTransaction } = await import('../db.js');
+const { isAccessSyncEnabled } = await import('../accessSync/settings.js');
 const {
   UserIdentityError,
   bindSessionUser,
@@ -37,6 +39,7 @@ function scriptedClient(handlers) {
 beforeEach(() => {
   query.mockReset();
   withTransaction.mockReset();
+  isAccessSyncEnabled.mockReset().mockResolvedValue(false);
 });
 
 describe('normalizeEmail', () => {
@@ -137,8 +140,9 @@ describe('resolveVerifiedUser', () => {
     expect(withTransaction).not.toHaveBeenCalled();
   });
 
-  it('creates an account for a new Cloudflare Access identity', async () => {
+  it('creates an account for a new Cloudflare Access identity while the sync is off', async () => {
     query.mockResolvedValue({ rows: [] });
+    isAccessSyncEnabled.mockResolvedValue(false);
     const { client } = scriptedClient([
       [/pg_advisory_xact_lock/, { rows: [] }],
       [/^\s*SELECT .* WHERE lower\(email\) = \$1/, { rows: [] }],
@@ -148,6 +152,35 @@ describe('resolveVerifiedUser', () => {
     withTransaction.mockImplementation(async (fn) => fn(client));
     expect(await resolveVerifiedUser({ email: 'new@example.com', source: 'cloudflare', settings: settings() }))
       .toEqual({ user: { ...USER, email: 'new@example.com' } });
+  });
+
+  it('refuses an unknown Cloudflare identity while the Access sync is on', async () => {
+    query.mockResolvedValue({ rows: [] });
+    isAccessSyncEnabled.mockResolvedValue(true);
+    expect(await resolveVerifiedUser({ email: 'new@example.com', source: 'cloudflare', settings: settings() }))
+      .toEqual({ error: 'not_allowed' });
+    expect(withTransaction).not.toHaveBeenCalled();
+  });
+
+  it('still creates a bootstrap admin on Cloudflare sign-in while the Access sync is on', async () => {
+    query.mockResolvedValue({ rows: [] });
+    isAccessSyncEnabled.mockResolvedValue(true);
+    const { client } = scriptedClient([
+      [/pg_advisory_xact_lock/, { rows: [] }],
+      [/^\s*SELECT .* WHERE lower\(email\) = \$1/, { rows: [] }],
+      [/^\s*UPDATE users SET email = \$1/, { rows: [] }],
+      [/^\s*INSERT INTO users/, { rows: [{ ...USER, is_admin: true }] }],
+    ]);
+    withTransaction.mockImplementation(async (fn) => fn(client));
+    expect(await resolveVerifiedUser({ email: 'user@example.com', source: 'cloudflare', settings: settings(['user@example.com']) }))
+      .toEqual({ user: { ...USER, is_admin: true } });
+  });
+
+  it('returns a known active user without reading the Access sync setting', async () => {
+    query.mockResolvedValue({ rows: [USER] });
+    expect(await resolveVerifiedUser({ email: 'user@example.com', source: 'cloudflare', settings: settings() }))
+      .toEqual({ user: USER });
+    expect(isAccessSyncEnabled).not.toHaveBeenCalled();
   });
 
   it('creates and promotes a bootstrap admin on direct sign-in', async () => {

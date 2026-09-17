@@ -129,3 +129,29 @@ test('the demo audit log lists entries newest first and applies the mailbox, use
   const nobody = await demoRequest('GET', '/admin/audit?user=someone-else');
   assert.deepEqual(nobody.entries, []);
 });
+
+test('the demo Access sync keeps the token hidden and reports a manual run', async () => {
+  const initial = await demoRequest('GET', '/admin/access-sync');
+  assert.equal(initial.googleMode, true);
+  assert.equal(initial.config.apiTokenSet, true);
+  assert.equal('apiToken' in initial.config, false);
+  assert.equal(initial.lastRun.outcome, 'updated');
+
+  const off = await demoRequest('PUT', '/admin/access-sync', { ...initial.config, enabled: false, apiToken: 'demo-token' });
+  assert.equal(off.config.enabled, false);
+  assert.equal(JSON.stringify(off).includes('demo-token'), false);
+  assert.equal((await demoRequest('POST', '/admin/access-sync/run')).result.outcome, 'not_configured');
+
+  await demoRequest('PUT', '/admin/access-sync', { ...initial.config, enabled: true });
+  const ran = await demoRequest('POST', '/admin/access-sync/run');
+  assert.equal(ran.result.outcome, 'unchanged');
+  assert.equal(ran.lastRun.trigger, 'manual');
+  assert.deepEqual(ran.config, { ...initial.config, enabled: true });
+});
+
+test('the demo audit log shows a stopped Access sync', async () => {
+  const { entries } = await demoRequest('GET', '/admin/audit?action=access.sync_aborted');
+  assert.equal(entries.length, 1);
+  assert.equal(entries[0].actorEmail, 'Cloudflare Access');
+  assert.ok(entries[0].details.candidates.length > 0);
+});

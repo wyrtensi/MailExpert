@@ -72,7 +72,7 @@ const journaled = () => query.mock.calls
   .filter(([sql]) => sql.includes('INSERT INTO mailbox_audit_log'))
   .flatMap(([, [payload]]) => JSON.parse(payload));
 const deleted = (messageId, folder, permanent) => ({
-  actor_user_id: 'u1', account_id: ACCOUNT_ID, account_email: null, action: 'message.deleted',
+  actor_user_id: 'u1', actor_email: null, account_id: ACCOUNT_ID, account_email: null, action: 'message.deleted',
   details: { messageId, folder, from: 'sender@example.com', permanent },
 });
 

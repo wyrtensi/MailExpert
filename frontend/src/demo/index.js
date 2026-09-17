@@ -191,6 +191,11 @@ const DEMO_USER = {
 // the same on every load.
 const AUDIT_FIXTURES = [
   {
+    id: '7', occurredAt: '2026-09-17T10:05:00.000Z', actorUserId: null, actorEmail: 'Cloudflare Access',
+    accountId: null, accountEmail: null, action: 'access.sync_aborted',
+    details: { candidates: ['colleague@demo.mailexpert.local', 'former@demo.mailexpert.local'], activeUsers: 3, maxDisables: 10 },
+  },
+  {
     id: '6', occurredAt: '2026-09-17T09:40:00.000Z', actorUserId: 'demo-user', actorEmail: 'demo@mailexpert.local',
     accountId: 'demo-sales', accountEmail: 'sales@demo.mailexpert.local', action: 'message.deleted',
     details: { messageId: '<demo-archive@demo.mailexpert.local>', folder: 'INBOX', from: 'newsletter@example.com', permanent: false },
@@ -222,6 +227,23 @@ const AUDIT_FIXTURES = [
   },
 ];
 
+// Cloudflare Access sync settings as an admin sees them. The ids are made up.
+const ACCESS_SYNC_FIXTURE = {
+  config: {
+    enabled: true,
+    accountId: '0123456789abcdef0123456789abcdef',
+    appId: '11111111-2222-4333-8444-555555555555',
+    policyId: '66666666-7777-4888-9999-000000000000',
+    apiTokenSet: true,
+  },
+  lastRun: {
+    trigger: 'schedule', startedAt: '2026-09-17T09:00:00.000Z', finishedAt: '2026-09-17T09:00:01.000Z',
+    outcome: 'updated', added: 1, removed: 0, disabled: 0, wouldDisable: 0, error: null,
+  },
+  maxDisables: 10,
+  googleMode: true,
+};
+
 const DEFAULT_PREFERENCES = {
   theme: 'system',
   language: 'en',
@@ -237,6 +259,7 @@ let contacts = structuredClone(CONTACT_FIXTURES);
 let preferences = structuredClone(DEFAULT_PREFERENCES);
 let nextDraftUid = 1000;
 let nextMessageSequence = 10;
+let accessSync = structuredClone(ACCESS_SYNC_FIXTURE);
 
 function clone(value) {
   return structuredClone(value);
@@ -639,6 +662,26 @@ export async function demoRequest(method, path, body = {}) {
       && (!searchParams.get('action') || entry.action === searchParams.get('action'))
     ));
     return { entries: clone(entries), nextCursor: null };
+  }
+  if (verb === 'GET' && pathname === '/admin/access-sync') return clone(accessSync);
+  if (verb === 'PUT' && pathname === '/admin/access-sync') {
+    accessSync.config = {
+      enabled: !!body.enabled,
+      accountId: String(body.accountId ?? '').trim(),
+      appId: String(body.appId ?? '').trim(),
+      policyId: String(body.policyId ?? '').trim(),
+      apiTokenSet: accessSync.config.apiTokenSet || !!String(body.apiToken ?? '').trim(),
+    };
+    return clone(accessSync);
+  }
+  if (verb === 'POST' && pathname === '/admin/access-sync/run') {
+    if (!accessSync.config.enabled) return { result: { outcome: 'not_configured' }, ...clone(accessSync) };
+    const now = new Date().toISOString();
+    accessSync.lastRun = {
+      trigger: 'manual', startedAt: now, finishedAt: now, outcome: 'unchanged',
+      added: 0, removed: 0, disabled: 0, wouldDisable: 0, error: null,
+    };
+    return { result: clone(accessSync.lastRun), ...clone(accessSync) };
   }
   if (verb === 'GET' && pathname === '/admin/ai') return { enabled: false, provider: null };
   if (verb === 'GET' && pathname === '/todoist/status') return { connected: false };

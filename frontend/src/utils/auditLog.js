@@ -15,6 +15,7 @@ export const AUDIT_ACTION_LABEL_KEYS = Object.freeze({
   'user.enabled': 'admin.audit.actionUserEnabled',
   'user.disabled': 'admin.audit.actionUserDisabled',
   'user.admin_changed': 'admin.audit.actionUserAdminChanged',
+  'access.sync_aborted': 'admin.audit.actionAccessSyncAborted',
 });
 
 export const AUDIT_ACTIONS = Object.freeze(Object.keys(AUDIT_ACTION_LABEL_KEYS));
@@ -90,6 +91,13 @@ export function auditDetail(entry) {
     case 'user.enabled':
     case 'user.disabled':
       return details.email ? { text: details.email } : null;
+    case 'access.sync_aborted': {
+      const candidates = Array.isArray(details.candidates) ? details.candidates : [];
+      return {
+        key: 'admin.audit.detailAccessSyncAborted',
+        values: { wouldDisable: candidates.length, emails: candidates.join(', ') },
+      };
+    }
     default:
       return null;
   }

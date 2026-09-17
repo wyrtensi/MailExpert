@@ -57,7 +57,7 @@ describe('sending is journaled', () => {
     await vi.waitFor(() => expect(auditInsert()).toBeTruthy());
     const [, [payload]] = auditInsert();
     expect(JSON.parse(payload)).toEqual([{
-      actor_user_id: 'u1', account_id: 'a1', account_email: null, action: 'message.sent',
+      actor_user_id: 'u1', actor_email: null, account_id: 'a1', account_email: null, action: 'message.sent',
       details: {
         messageId: sendMail.mock.calls[0][0].messageId,
         to: ['you@example.com'], cc: ['cc@example.com'], bcc: ['hidden@example.com'],

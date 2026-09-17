@@ -1,30 +1,34 @@
 import { query } from './db.js';
 
-// Everything a user can do that the journal records. Sync and inbox rules never write here.
+// Everything a user can do that the journal records, plus the Cloudflare Access sync stopping
+// itself. Mail sync and inbox rules never write here.
 export const AUDIT_ACTIONS = Object.freeze([
   'mailbox.added', 'mailbox.reconnected', 'mailbox.deleted', 'mailbox.connection_changed',
   'mailbox.enabled', 'mailbox.disabled', 'message.sent', 'message.deleted',
   'user.added', 'user.deleted', 'user.enabled', 'user.disabled', 'user.admin_changed',
+  'access.sync_aborted',
 ]);
 const KNOWN_ACTIONS = new Set(AUDIT_ACTIONS);
 
 // Rows per INSERT, so emptying a large folder never builds one huge parameter.
 const CHUNK_SIZE = 1000;
 
-// The database fills in both emails: the actor's email (or username when it has none) and the
-// mailbox address, falling back to the address the caller passed for a mailbox already deleted.
+// The database fills in both emails: the actor's email (or username when it has none, or the
+// name the caller passed for an actor that is not a user) and the mailbox address, falling back
+// to the address the caller passed for a mailbox already deleted.
 const INSERT_SQL = `
   INSERT INTO mailbox_audit_log (actor_user_id, actor_email, account_id, account_email, action, details)
-  SELECT u.id, COALESCE(NULLIF(u.email, ''), u.username), a.id, COALESCE(a.email_address, e.account_email),
+  SELECT u.id, COALESCE(NULLIF(u.email, ''), u.username, e.actor_email), a.id, COALESCE(a.email_address, e.account_email),
          e.action, COALESCE(e.details, '{}'::jsonb)
     FROM jsonb_to_recordset($1::jsonb)
-         AS e(actor_user_id uuid, account_id uuid, account_email text, action text, details jsonb)
+         AS e(actor_user_id uuid, actor_email text, account_id uuid, account_email text, action text, details jsonb)
     LEFT JOIN users u ON u.id = e.actor_user_id
     LEFT JOIN email_accounts a ON a.id = e.account_id`;
 
 function toRow(entry) {
   return {
     actor_user_id: entry.actorUserId ?? null,
+    actor_email: entry.actorEmail ?? null,
     account_id: entry.accountId ?? null,
     account_email: entry.accountEmail ?? null,
     action: entry.action,

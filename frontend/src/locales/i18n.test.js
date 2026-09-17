@@ -98,6 +98,7 @@ import assert from 'node:assert/strict';
 import { readFileSync, readdirSync } from 'node:fs';
 import { join, dirname, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import i18next from 'i18next';
 
 const dir = dirname(fileURLToPath(import.meta.url));
 
@@ -157,7 +158,23 @@ const SAME_VALUE_ALLOWED = {
 // Locale-specific plural forms are allowed per locale. A locale may add forms
 // required by its Intl.PluralRules categories without forcing every other locale
 // to carry unused keys. Existing locale files may also define their own forms.
-const LOCALE_SPECIFIC_KEYS_BY_LOCALE = {};
+const LOCALE_SPECIFIC_KEYS_BY_LOCALE = {
+  ru: new Set([
+    'message.attachment_few', 'message.attachment_many',
+    'messageList.bulkDeleted.title_few', 'messageList.bulkDeleted.title_many',
+    'messageList.bulkDeleted.failBody_few', 'messageList.bulkDeleted.failBody_many',
+    'messageList.bulkMoved.title_few', 'messageList.bulkMoved.title_many',
+    'messageList.bulkMoved.failBody_few', 'messageList.bulkMoved.failBody_many',
+    'messageList.bulkArchived.title_few', 'messageList.bulkArchived.title_many',
+    'messageList.bulkArchived.failBody_few', 'messageList.bulkArchived.failBody_many',
+    'sidebar.hiddenFolders_few', 'sidebar.hiddenFolders_many',
+    'admin.messageList.markReadDelaySeconds_few', 'admin.messageList.markReadDelaySeconds_many',
+    'admin.categories.domainCount_few', 'admin.categories.domainCount_many',
+    'admin.categories.fetchedOk_few', 'admin.categories.fetchedOk_many',
+    'spam.failBodyBulk_few', 'spam.failBodyBulk_many',
+    'contacts.count_few', 'contacts.count_many',
+  ]),
+};
 const LOCALE_SPECIFIC_KEYS = new Set(
   Object.values(LOCALE_SPECIFIC_KEYS_BY_LOCALE).flatMap(keys => [...keys]),
 );
@@ -537,4 +554,48 @@ describe('i18n locale files', () => {
     });
   });
 
+});
+
+describe('Russian plural forms', () => {
+  it('every English plural key has one/few/many/other forms in Russian', () => {
+    const englishBases = [...new Set(Object.keys(locales.en)
+      .filter(key => /_(one|other)$/.test(key))
+      .map(baseKey))];
+    const missing = [];
+    for (const base of englishBases) {
+      for (const form of ['one', 'few', 'many', 'other']) {
+        if (typeof locales.ru[`${base}_${form}`] !== 'string') missing.push(`  - ${base}_${form}`);
+      }
+    }
+    assert.equal(missing.length, 0, `Russian plural forms missing:\n${missing.join('\n')}`);
+  });
+
+  it('selects one/few/many forms for representative Russian counts', async () => {
+    const instance = i18next.createInstance();
+    await instance.init({
+      lng: 'ru',
+      fallbackLng: false,
+      resources: {
+        ru: { translation: JSON.parse(readFileSync(join(dir, 'ru.json'), 'utf8')) },
+      },
+      interpolation: { escapeValue: false },
+    });
+
+    const expected = new Map([
+      [0, '0 вложений'],
+      [1, '1 вложение'],
+      [2, '2 вложения'],
+      [4, '4 вложения'],
+      [5, '5 вложений'],
+      [11, '11 вложений'],
+      [21, '21 вложение'],
+      [22, '22 вложения'],
+      [25, '25 вложений'],
+      [111, '111 вложений'],
+    ]);
+
+    for (const [count, value] of expected) {
+      assert.equal(instance.t('message.attachment', { count }), value, `count=${count}`);
+    }
+  });
 });

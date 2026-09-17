@@ -4114,7 +4114,7 @@ function CategoriesSection({ initialSubTab }) {
               <span style={{ flex: 1, fontSize: 13, color: 'var(--text-primary)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{s.label || s.value}</span>
               {s.source_type === 'url' && s.domain_count != null && (
                 <span style={{ fontSize: 11, color: 'var(--text-tertiary)', flexShrink: 0 }}>
-                  {t('admin.categories.domainCount', { count: s.domain_count })}
+                  {t('admin.categories.domainCount', { count: s.domain_count ?? 0 })}
                 </span>
               )}
               {s.source_type === 'url' && (

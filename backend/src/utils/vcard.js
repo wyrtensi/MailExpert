@@ -63,7 +63,7 @@ function unfold(raw) {
  * Parse a vCard 3.0 string and return a plain object with the fields
  * MailExpert cares about. Unknown properties are silently ignored.
  *
- * Returns: { uid, displayName, firstName, lastName, emails, phones, organization, notes, photoData }
+ * Returns: { uid, displayName, firstName, lastName, emails, phones, urls, organization, notes, photoData }
  */
 export function parseVCard(raw) {
   const text = unfold(raw || '');
@@ -74,6 +74,7 @@ export function parseVCard(raw) {
     lastName: null,
     emails: [],
     phones: [],
+    urls: [],
     organization: null,
     notes: null,
     photoData: null,
@@ -129,6 +130,15 @@ export function parseVCard(raw) {
         }
         break;
       }
+      case 'URL': {
+        const urlVal = unescapeValue(value).trim();
+        if (urlVal) {
+          const typeMatch = params.match(/TYPE=([^;]+)/i);
+          const type = typeMatch ? typeMatch[1].toLowerCase().replace(/["']/g, '') : 'work';
+          result.urls.push({ value: urlVal, type });
+        }
+        break;
+      }
       case 'ORG':
         result.organization = unescapeValue(value.split(';')[0]).trim() || null;
         break;
@@ -163,7 +173,7 @@ export function parseVCard(raw) {
 /**
  * Generate a vCard 3.0 string from a contact object.
  *
- * contact: { uid, displayName, firstName, lastName, emails, phones, organization, notes }
+ * contact: { uid, displayName, firstName, lastName, emails, phones, urls, organization, notes }
  */
 export function generateVCard(contact) {
   const {
@@ -173,6 +183,7 @@ export function generateVCard(contact) {
     lastName,
     emails = [],
     phones = [],
+    urls = [],
     organization,
     notes,
   } = contact;
@@ -199,6 +210,11 @@ export function generateVCard(contact) {
   for (const p of phones) {
     const type = escapeParam((p.type || 'voice').toUpperCase());
     lines.push(`TEL;TYPE=${type}:${escapeValue(p.value || '')}`);
+  }
+
+  for (const u of urls) {
+    const type = escapeParam((u.type || 'work').toUpperCase());
+    lines.push(`URL;TYPE=${type}:${escapeValue(u.value || '')}`);
   }
 
   if (organization) {

@@ -60,7 +60,8 @@ describe('contacts are shared', () => {
     expect(res.status).toBe(200);
     expect(query).toHaveBeenCalledWith('SELECT * FROM contacts WHERE id = $1', ['c1']);
     const [, params] = query.mock.calls.find(([s]) => s.includes('UPDATE contacts SET'));
-    expect(params).toHaveLength(11);
+    // The 12th parameter is the contact's websites.
+    expect(params).toHaveLength(12);
     expect(params[10]).toBe('c1');
     expect(noOwnerOrSync()).toBe(true);
   });

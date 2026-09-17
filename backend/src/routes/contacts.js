@@ -4,6 +4,7 @@ import { requireAuth } from '../middleware/auth.js';
 import { generateVCard } from '../utils/vcard.js';
 import { safeFetch } from '../services/safeFetch.js';
 import { defaultAddressBookId } from '../services/addressBooks.js';
+import { normalizeContactUrls } from '../utils/contactUrls.js';
 import crypto from 'crypto';
 
 const router = Router();
@@ -42,7 +43,8 @@ router.get('/', async (req, res) => {
       OR c.primary_email ILIKE $${p}
       OR c.organization ILIKE $${p}
       OR (jsonb_typeof(c.emails) = 'array' AND EXISTS (SELECT 1 FROM jsonb_array_elements(c.emails) ae WHERE ae->>'value' ILIKE $${p}))
-      OR (jsonb_typeof(c.phones) = 'array' AND EXISTS (SELECT 1 FROM jsonb_array_elements(c.phones) ap WHERE ap->>'value' ILIKE $${p}))
+      OR (jsonb_typeof(c.phones) = 'array' AND EXISTS (SELECT 1 FROM jsonb_array_elements(c.phones) ap WHERE ap->>'value' ILIKE ${p}))
+      OR (jsonb_typeof(c.urls) = 'array' AND EXISTS (SELECT 1 FROM jsonb_array_elements(c.urls) au WHERE au->>'value' ILIKE ${p}))
     )`);
     p++;
   }
@@ -59,7 +61,7 @@ router.get('/', async (req, res) => {
     const result = await query(`
       SELECT
         c.id, c.uid, c.display_name, c.first_name, c.last_name,
-        c.primary_email, c.emails, c.phones, c.organization,
+        c.primary_email, c.emails, c.phones, c.urls, c.organization,
         c.notes, c.is_auto, c.send_count, c.last_sent,
         c.etag, c.created_at, c.updated_at,
         (c.photo_data IS NOT NULL) AS has_contact_photo
@@ -179,7 +181,7 @@ router.get('/:id', async (req, res) => {
   try {
     const result = await query(
       `SELECT c.id, c.uid, c.display_name, c.first_name, c.last_name,
-              c.primary_email, c.emails, c.phones, c.organization,
+              c.primary_email, c.emails, c.phones, c.urls, c.organization,
               c.notes, c.photo_data, c.is_auto, c.send_count, c.last_sent,
               c.etag, c.vcard, c.created_at, c.updated_at
        FROM contacts c
@@ -198,12 +200,14 @@ router.get('/:id', async (req, res) => {
 router.post('/', async (req, res) => {
   const {
     displayName, firstName, lastName,
-    emails = [], phones = [],
+    emails = [], phones = [], urls: rawUrls,
     organization, notes,
   } = req.body || {};
 
   if (!Array.isArray(emails)) return res.status(400).json({ error: 'emails must be an array' });
   if (!Array.isArray(phones)) return res.status(400).json({ error: 'phones must be an array' });
+  let urls;
+  try { urls = normalizeContactUrls(rawUrls); } catch (err) { return res.status(400).json({ error: err.message }); }
 
   const primaryEmail = emails[0]?.value
     ? emails[0].value.toLowerCase().trim()
@@ -216,23 +220,24 @@ router.post('/', async (req, res) => {
   try {
     const addressBookId = await defaultAddressBookId();
     const uid = crypto.randomUUID();
-    const vcard = generateVCard({ uid, displayName, firstName, lastName, emails, phones, organization, notes });
+    const vcard = generateVCard({ uid, displayName, firstName, lastName, emails, phones, urls, organization, notes });
     const etag = crypto.createHash('md5').update(vcard).digest('hex');
 
     const result = await query(`
       INSERT INTO contacts (
         address_book_id, uid, vcard, etag,
         display_name, first_name, last_name, primary_email,
-        emails, phones, organization, notes, is_auto
-      ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12, false)
+        emails, phones, organization, notes, is_auto, urls
+      ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12, false, $13)
       RETURNING id, uid, display_name, first_name, last_name,
-                primary_email, emails, phones, organization, notes,
+                primary_email, emails, phones, urls, organization, notes,
                 is_auto, send_count, last_sent, etag, created_at, updated_at
     `, [
       addressBookId, uid, vcard, etag,
       displayName || null, firstName || null, lastName || null, primaryEmail,
       JSON.stringify(emails), JSON.stringify(phones),
       organization || null, notes || null,
+      JSON.stringify(urls),
     ]);
 
     res.status(201).json(result.rows[0]);
@@ -247,11 +252,15 @@ router.post('/', async (req, res) => {
 router.patch('/:id', async (req, res) => {
   const {
     displayName, firstName, lastName,
-    emails, phones, organization, notes,
+    emails, phones, urls: rawUrls, organization, notes,
   } = req.body || {};
 
   if (emails !== undefined && !Array.isArray(emails)) return res.status(400).json({ error: 'emails must be an array' });
   if (phones !== undefined && !Array.isArray(phones)) return res.status(400).json({ error: 'phones must be an array' });
+  let urls;
+  if (rawUrls !== undefined) {
+    try { urls = normalizeContactUrls(rawUrls); } catch (err) { return res.status(400).json({ error: err.message }); }
+  }
 
   try {
     const cur = await query('SELECT * FROM contacts WHERE id = $1', [req.params.id]);
@@ -260,6 +269,7 @@ router.patch('/:id', async (req, res) => {
 
     const newEmails    = emails    !== undefined ? emails    : c.emails;
     const newPhones    = phones    !== undefined ? phones    : c.phones;
+    const newUrls      = urls      !== undefined ? urls      : (c.urls || []);
     const newDisplay   = displayName  !== undefined ? displayName  : c.display_name;
     const newFirst     = firstName    !== undefined ? firstName    : c.first_name;
     const newLast      = lastName     !== undefined ? lastName     : c.last_name;
@@ -276,6 +286,7 @@ router.patch('/:id', async (req, res) => {
       lastName: newLast,
       emails: newEmails,
       phones: newPhones,
+      urls: newUrls,
       organization: newOrg,
       notes: newNotes,
     });
@@ -287,10 +298,10 @@ router.patch('/:id', async (req, res) => {
         primary_email = $4, emails = $5, phones = $6,
         organization = $7, notes = $8,
         vcard = $9, etag = $10, updated_at = NOW(),
-        is_auto = false
+        is_auto = false, urls = $12
       WHERE id = $11
       RETURNING id, uid, display_name, first_name, last_name,
-                primary_email, emails, phones, organization, notes,
+                primary_email, emails, phones, urls, organization, notes,
                 is_auto, send_count, last_sent, etag, created_at, updated_at
     `, [
       newDisplay || null, newFirst || null, newLast || null,
@@ -299,6 +310,7 @@ router.patch('/:id', async (req, res) => {
       newOrg || null, newNotes || null,
       vcard, etag,
       req.params.id,
+      JSON.stringify(newUrls),
     ]);
 
     res.json(result.rows[0]);

@@ -10,7 +10,8 @@ import { reloadAuthSettings } from '../services/authLimiter.js';
 import { invalidateGlobalCategorizationCache } from '../services/categorizer.js';
 import { imapManager } from '../index.js';
 import { pluginRegistry } from '../plugins/registry.js';
-import { uuidParam } from '../utils/uuid.js';
+import { UUID_RE, uuidParam } from '../utils/uuid.js';
+import { AUDIT_ACTIONS } from '../services/auditLog.js';
 import { getAuthSettings } from '../services/auth/authSettings.js';
 import { UserIdentityError, claimOrCreateUserByEmail, normalizeEmail } from '../services/auth/userIdentity.js';
 import { closeUserSockets } from '../services/websocket.js';
@@ -261,6 +262,86 @@ router.get('/auth-events', async (req, res) => {
     query('SELECT COUNT(*) AS total FROM auth_events'),
   ]);
   res.json({ events: eventsResult.rows, total: parseInt(countResult.rows[0].total) });
+});
+
+// ── Audit log ─────────────────────────────────────────────────────────────────
+
+const AUDIT_PAGE_SIZE = 100;
+const AUDIT_ACTION_SET = new Set(AUDIT_ACTIONS);
+// The cursor is produced by the database with microsecond precision, which a JS Date would lose.
+const AUDIT_CURSOR_RE = /^(\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{6}Z)_(\d{1,19})$/;
+
+class AuditFilterError extends Error {}
+
+function parseAuditTime(value) {
+  const date = new Date(value);
+  if (typeof value !== 'string' || Number.isNaN(date.getTime())) throw new AuditFilterError();
+  return date.toISOString();
+}
+
+// Newest first, 100 per page. `from` is inclusive, `to` exclusive; `before` is the nextCursor
+// of the previous page.
+router.get('/audit', async (req, res) => {
+  const { account, user, action, from, to, before } = req.query;
+  const where = [];
+  const params = [];
+  const add = (clause, ...values) => {
+    const placeholders = values.map((value) => { params.push(value); return `$${params.length}`; });
+    where.push(clause(...placeholders));
+  };
+
+  try {
+    if (account !== undefined) {
+      if (typeof account !== 'string' || !UUID_RE.test(account)) throw new AuditFilterError();
+      add((p) => `account_id = ${p}`, account);
+    }
+    if (user !== undefined) {
+      if (typeof user !== 'string' || !UUID_RE.test(user)) throw new AuditFilterError();
+      add((p) => `actor_user_id = ${p}`, user);
+    }
+    if (action !== undefined) {
+      if (!AUDIT_ACTION_SET.has(action)) throw new AuditFilterError();
+      add((p) => `action = ${p}`, action);
+    }
+    if (from !== undefined) add((p) => `occurred_at >= ${p}`, parseAuditTime(from));
+    if (to !== undefined) add((p) => `occurred_at < ${p}`, parseAuditTime(to));
+    if (before !== undefined) {
+      const match = typeof before === 'string' ? AUDIT_CURSOR_RE.exec(before) : null;
+      if (!match) throw new AuditFilterError();
+      add((at, id) => `(occurred_at, id) < (${at}::timestamptz, ${id}::bigint)`, match[1], match[2]);
+    }
+  } catch (err) {
+    if (!(err instanceof AuditFilterError)) throw err;
+    return res.status(400).json({ error: 'Invalid audit filter', code: 'invalid_filter' });
+  }
+
+  params.push(AUDIT_PAGE_SIZE + 1);
+  const { rows } = await query(
+    `SELECT id::text AS id, occurred_at,
+            to_char(occurred_at AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.US"Z"') AS cursor_at,
+            actor_user_id, actor_email, account_id, account_email, action, details
+       FROM mailbox_audit_log
+       ${where.length ? `WHERE ${where.join(' AND ')}` : ''}
+      ORDER BY occurred_at DESC, id DESC
+      LIMIT $${params.length}`,
+    params,
+  );
+
+  const page = rows.slice(0, AUDIT_PAGE_SIZE);
+  const last = page[page.length - 1];
+  res.json({
+    entries: page.map((r) => ({
+      id: r.id,
+      occurredAt: r.occurred_at,
+      actorUserId: r.actor_user_id,
+      actorEmail: r.actor_email,
+      accountId: r.account_id,
+      accountEmail: r.account_email,
+      action: r.action,
+      details: r.details,
+    })),
+    nextCursor: rows.length > AUDIT_PAGE_SIZE ? `${last.cursor_at}_${last.id}` : null,
+  });
 });
 
 router.patch('/settings', async (req, res) => {

@@ -4,6 +4,7 @@ import { api } from '../utils/api.js';
 import { useStore } from '../store/index.js';
 import { useMobile } from '../hooks/useMobile.js';
 import SenderAvatarImage from './SenderAvatarImage.jsx';
+import { contactComposeAddress, contactForEmail, contactFormFromSender, websiteHref, websiteLabel } from '../utils/contactLinks.js';
 
 // Deterministic avatar color from a string
 function avatarColor(str) {
@@ -46,6 +47,7 @@ function emptyContact() {
     lastName: '',
     emails: EmptyEmailForm(),
     phones: [],
+    urls: [],
     organization: '',
     notes: '',
   };
@@ -55,7 +57,7 @@ const PAGE_SIZE = 100;
 
 export default function ContactsPage() {
   const { t } = useTranslation();
-  const { setShowContacts } = useStore();
+  const { setShowContacts, contactsFocus, clearContactsFocus, openCompose } = useStore();
   const isMobile = useMobile();
 
   const [contacts, setContacts]     = useState([]);
@@ -80,6 +82,8 @@ export default function ContactsPage() {
   const totalRef       = useRef(0);
   const loadingMoreRef = useRef(false);
   const searchRef      = useRef('');
+  // Latest sender lookup; an older one that resolves later is ignored.
+  const focusRequestRef = useRef(0);
 
   useEffect(() => { contactsRef.current = contacts; }, [contacts]);
   useEffect(() => { totalRef.current = total; }, [total]);
@@ -100,6 +104,48 @@ export default function ContactsPage() {
   }, []);
 
   useEffect(() => { load(''); }, [load]);
+
+  // Opened from a message sender: show that sender's contact, or a new contact prefilled from it.
+  // Clearing the focus re-runs this effect, so staleness is tracked by request number rather
+  // than by effect cleanup, which would drop the lookup this run just started.
+  useEffect(() => {
+    if (!contactsFocus) return;
+    const { email, name } = contactsFocus;
+    clearContactsFocus();
+    const request = ++focusRequestRef.current;
+    const stale = () => request !== focusRequestRef.current;
+    (async () => {
+      clearTimeout(searchTimer.current);
+      setSearch(email);
+      searchRef.current = email;
+      setListError(null);
+      try {
+        const res = await api.getContacts({ q: email, limit: PAGE_SIZE, offset: 0 });
+        if (stale()) return;
+        setContacts(res.contacts);
+        setTotal(res.total);
+        const match = contactForEmail(res.contacts, email);
+        if (match) {
+          const full = await api.getContact(match.id);
+          if (stale()) return;
+          setSelected(full);
+          setShowNew(false);
+        } else {
+          setSelected(null);
+          setForm(contactFormFromSender({ email, name }));
+          setShowNew(true);
+        }
+        setEditing(false);
+        setConfirmDelete(false);
+        setError(null);
+        if (isMobile) setMobilePanel('detail');
+      } catch (err) {
+        if (!stale()) setListError(err.message);
+      } finally {
+        if (!stale()) setLoading(false);
+      }
+    })();
+  }, [contactsFocus, clearContactsFocus, isMobile]);
 
   const onSearchChange = (e) => {
     const val = e.target.value;
@@ -169,6 +215,7 @@ export default function ContactsPage() {
       lastName:     selected.last_name     || '',
       emails:       (selected.emails?.length ? selected.emails : EmptyEmailForm()),
       phones:       selected.phones        || [],
+      urls:         selected.urls          || [],
       organization: selected.organization  || '',
       notes:        selected.notes         || '',
     });
@@ -200,6 +247,7 @@ export default function ContactsPage() {
         lastName:     form.lastName     || null,
         emails:       form.emails.filter(e => e.value.trim()),
         phones:       form.phones.filter(p => p.value.trim()),
+        urls:         form.urls.filter(u => u.value.trim()),
         organization: form.organization || null,
         notes:        form.notes        || null,
       };
@@ -267,6 +315,23 @@ export default function ContactsPage() {
   const removePhone = (idx) => setForm(f => ({
     ...f, phones: f.phones.filter((_, i) => i !== idx),
   }));
+
+  const setUrl = (idx, field, val) => setForm(f => ({
+    ...f, urls: f.urls.map((u, i) => i === idx ? { ...u, [field]: val } : u),
+  }));
+
+  const addUrl = () => setForm(f => ({
+    ...f, urls: [...f.urls, { value: '', type: 'work' }],
+  }));
+
+  const removeUrl = (idx) => setForm(f => ({
+    ...f, urls: f.urls.filter((_, i) => i !== idx),
+  }));
+
+  const writeTo = (contact) => {
+    const address = contactComposeAddress(contact);
+    if (address) openCompose({ to: [address] });
+  };
 
   const inForm = editing || showNew;
 
@@ -391,6 +456,9 @@ export default function ContactsPage() {
           onSetPhone={setPhone}
           onAddPhone={addPhone}
           onRemovePhone={removePhone}
+          onSetUrl={setUrl}
+          onAddUrl={addUrl}
+          onRemoveUrl={removeUrl}
           onSave={saveContact}
           onCancel={cancelEdit}
           t={t}
@@ -404,6 +472,7 @@ export default function ContactsPage() {
           saving={saving}
           error={error}
           onEdit={startEdit}
+          onWrite={() => writeTo(selected)}
           onDeleteRequest={() => setConfirmDelete(true)}
           onDeleteConfirm={deleteContact}
           onDeleteCancel={() => setConfirmDelete(false)}
@@ -558,15 +627,17 @@ export default function ContactsPage() {
   );
 }
 
-function ContactDetail({ contact: c, confirmDelete, saving, error, onEdit, onDeleteRequest, onDeleteConfirm, onDeleteCancel, t }) {
+function ContactDetail({ contact: c, confirmDelete, saving, error, onEdit, onWrite, onDeleteRequest, onDeleteConfirm, onDeleteCancel, t }) {
+  const canWrite = Boolean(contactComposeAddress(c));
   return (
     <div style={{ width: '100%', maxWidth: 560, position: 'relative', animation: 'pane-fade-in var(--motion-normal) var(--ease-emphasized) both' }}>
-      {/* Edit/Delete — out of flow, top-right (fixed width). */}
+      {/* Write/Edit/Delete — out of flow, top-right (fixed width). */}
       <div style={{ position: 'absolute', top: 0, right: 0, display: 'flex', gap: 8 }}>
+        {canWrite && <ActionBtn onClick={onWrite}>{t('contacts.write')}</ActionBtn>}
         <ActionBtn onClick={onEdit}>{t('common.edit')}</ActionBtn>
         <ActionBtn onClick={onDeleteRequest} danger>{t('common.delete')}</ActionBtn>
       </div>
-      <div style={{ display: 'flex', alignItems: 'flex-start', gap: 18, marginBottom: 28, paddingRight: 128 }}>
+      <div style={{ display: 'flex', alignItems: 'flex-start', gap: 18, marginBottom: 28, paddingRight: canWrite ? 210 : 128 }}>
         <Avatar
           name={c.display_name}
           email={c.primary_email}
@@ -607,7 +678,7 @@ function ContactDetail({ contact: c, confirmDelete, saving, error, onEdit, onDel
         </div>
       )}
 
-      {((c.emails?.length > 0) || (c.phones?.length > 0) || c.notes) && (
+      {((c.emails?.length > 0) || (c.phones?.length > 0) || (c.urls?.length > 0) || c.notes) && (
         <DetailSection>
           {(c.emails || []).map((e, i) => (
             <DetailRow key={i} label={t(`contacts.emailTypes.${e.type || 'other'}`, { defaultValue: t('contacts.emailTypes.other') })}>
@@ -619,6 +690,16 @@ function ContactDetail({ contact: c, confirmDelete, saving, error, onEdit, onDel
               <a href={`tel:${p.value}`} style={{ color: 'var(--text-primary)', textDecoration: 'none' }}>{p.value}</a>
             </DetailRow>
           ))}
+          {(c.urls || []).map((u, i) => {
+            const href = websiteHref(u.value);
+            return (
+              <DetailRow key={'url-' + i} label={t('contacts.urlTypes.' + (u.type || 'work'), { defaultValue: t('contacts.fields.website') })}>
+                {href
+                  ? <a href={href} target="_blank" rel="noopener noreferrer" style={{ color: 'var(--accent)', textDecoration: 'none' }}>{websiteLabel(u.value)}</a>
+                  : u.value}
+              </DetailRow>
+            );
+          })}
           {c.notes && <DetailRow label={t('contacts.fields.notes')}>{c.notes}</DetailRow>}
         </DetailSection>
       )}
@@ -643,6 +724,7 @@ function ContactForm({
   form, isNew, saving, error,
   onField, onSetEmail, onAddEmail, onRemoveEmail,
   onSetPhone, onAddPhone, onRemovePhone,
+  onSetUrl, onAddUrl, onRemoveUrl,
   onSave, onCancel, t,
 }) {
   const inputStyle = {
@@ -742,6 +824,35 @@ function ContactForm({
           </div>
         ))}
         <button onClick={onAddPhone} style={addFieldBtn}>+ {t('contacts.addPhone')}</button>
+      </div>
+
+      {/* Websites */}
+      <div style={{ marginBottom: 12 }}>
+        <label style={labelStyle}>{t('contacts.fields.website')}</label>
+        {form.urls.map((u, i) => (
+          <div key={i} style={{ display: 'flex', gap: 6, marginBottom: 6 }}>
+            <input
+              style={{ ...inputStyle, flex: 1 }}
+              type="url"
+              value={u.value}
+              placeholder={t('contacts.websitePh')}
+              onChange={ev => onSetUrl(i, 'value', ev.target.value)}
+            />
+            <select
+              value={u.type}
+              onChange={ev => onSetUrl(i, 'type', ev.target.value)}
+              style={{ ...inputStyle, width: 90, padding: '8px 6px' }}
+            >
+              <option value="work">{t('contacts.urlTypes.work')}</option>
+              <option value="home">{t('contacts.urlTypes.home')}</option>
+              <option value="other">{t('contacts.urlTypes.other')}</option>
+            </select>
+            <button onClick={() => onRemoveUrl(i)} style={removeBtn}>
+              <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>
+            </button>
+          </div>
+        ))}
+        <button onClick={onAddUrl} style={addFieldBtn}>+ {t('contacts.addWebsite')}</button>
       </div>
 
       <div style={{ marginBottom: 24 }}>

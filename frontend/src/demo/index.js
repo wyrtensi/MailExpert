@@ -150,6 +150,7 @@ const CONTACT_FIXTURES = [
     primary_email: 'maya.chen@northstar.example',
     emails: [{ value: 'maya.chen@northstar.example', type: 'work', primary: true }],
     phones: [{ value: '+1 555 0142', type: 'work', primary: true }],
+    urls: [{ value: 'https://northstar.example', type: 'work' }],
     organization: 'Northstar', notes: 'Enterprise renewal contact', is_auto: false, send_count: 8,
     last_sent: '2026-09-15T15:42:00.000Z', etag: 'demo-contact-1-v1', created_at: '2026-08-20T09:00:00.000Z',
     updated_at: '2026-09-15T15:42:00.000Z', has_contact_photo: false,
@@ -435,8 +436,12 @@ function listContacts(url) {
   const offset = Math.max(0, Number.parseInt(url.searchParams.get('offset') || '0', 10));
   let result = contacts;
   if (query) {
-    result = result.filter(contact => [contact.display_name, contact.primary_email, contact.organization]
-      .some(value => String(value || '').toLocaleLowerCase().includes(query)));
+    result = result.filter(contact => [
+      contact.display_name, contact.primary_email, contact.organization,
+      ...(contact.emails || []).map(entry => entry.value),
+      ...(contact.phones || []).map(entry => entry.value),
+      ...(contact.urls || []).map(entry => entry.value),
+    ].some(value => String(value || '').toLocaleLowerCase().includes(query)));
   }
   return { contacts: result.slice(offset, offset + limit), total: result.length };
 }
@@ -452,6 +457,8 @@ function contactMethods(values, defaultType) {
 function contactFromPayload(payload, current = {}) {
   const emails = contactMethods(payload.emails ?? current.emails, 'other');
   const phones = contactMethods(payload.phones ?? current.phones, 'mobile');
+  const urls = contactMethods(payload.urls ?? current.urls, 'work')
+    .map(entry => ({ ...entry, value: /^[a-z][a-z0-9+.-]*:/i.test(entry.value) ? entry.value : `https://${entry.value}` }));
   const primaryEmail = emails[0]?.value?.trim().toLocaleLowerCase() || null;
   const now = new Date().toISOString();
   return {
@@ -462,6 +469,7 @@ function contactFromPayload(payload, current = {}) {
     primary_email: primaryEmail,
     emails,
     phones,
+    urls,
     organization: payload.organization ?? current.organization ?? '',
     notes: payload.notes ?? current.notes ?? '',
     is_auto: current.is_auto ?? false,

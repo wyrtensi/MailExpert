@@ -1649,12 +1649,17 @@
     "deleteConfirm": "Удалить этот контакт?",
     "addEmail": "Добавить email",
     "addPhone": "Добавить телефон",
+    "addWebsite": "Добавить сайт",
+    "websitePh": "https://example.com",
+    "write": "Написать",
+    "openContact": "Открыть контакт",
     "fields": {
       "displayName": "Отображаемое имя",
       "firstName": "Имя",
       "lastName": "Фамилия",
       "email": "Email",
       "phone": "Телефон",
+      "website": "Сайт",
       "organization": "Организация",
       "notes": "Заметки",
       "emailsSent": "Отправлено писем",
@@ -1669,6 +1674,11 @@
       "mobile": "Мобильный",
       "work": "Работа",
       "home": "Дом",
+      "other": "Другой"
+    },
+    "urlTypes": {
+      "work": "Рабочий",
+      "home": "Личный",
       "other": "Другой"
     }
   },

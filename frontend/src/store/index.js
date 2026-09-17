@@ -546,6 +546,14 @@ export const useStore = create((set, get) => ({
   // Contacts view
   showContacts: false,
   setShowContacts: (v) => set({ showContacts: v }),
+  // A sender the contacts page should show: its contact when one exists, otherwise a new
+  // contact prefilled from the message. The page clears it once handled.
+  contactsFocus: null,
+  openContactFor: ({ email, name } = {}) => {
+    if (!email) return;
+    set({ showContacts: true, showAdmin: false, contactsFocus: { email, name: name || '' } });
+  },
+  clearContactsFocus: () => set({ contactsFocus: null }),
   rulesPreFill: null, // { accountId, fromEmail, fromName } — transient, set by context menu
   setRulesPreFill: (v) => set({ rulesPreFill: v }),
 

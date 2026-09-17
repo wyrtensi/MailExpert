@@ -2341,6 +2341,7 @@ export default function MessageList() {
           draftFolder: message.folder,
           to: formatAddressArray(message.to_addresses),
           cc: formatAddressArray(message.cc_addresses),
+          bcc: formatAddressArray(bodyData?.bccAddresses),
           subject: message.subject || '',
           // Split the stored signature out of the body so the composer does not add a second
           // copy (#432); draftSignature seeds the composer's signature editor instead.

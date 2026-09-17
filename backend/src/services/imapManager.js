@@ -4843,6 +4843,7 @@ export class ImapManager {
     fromEmail,
     to = [],
     cc = [],
+    bcc = [],
     inReplyTo = null,
     snippet = '',
     bodyHtml = null,
@@ -4856,8 +4857,8 @@ export class ImapManager {
         account_id, uid, folder, message_id, subject,
         from_name, from_email, to_addresses, cc_addresses,
         in_reply_to, date, snippet, is_read, is_starred, has_attachments,
-        flags, body_html, body_text, thread_id
-      ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8::jsonb,$9::jsonb,$10,$11,$12,true,false,false,$13::jsonb,$14,$15,$16)
+        flags, body_html, body_text, thread_id, bcc_addresses
+      ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8::jsonb,$9::jsonb,$10,$11,$12,true,false,false,$13::jsonb,$14,$15,$16,$17::jsonb)
       ON CONFLICT (account_id, uid, folder) DO UPDATE SET
         message_id = COALESCE(EXCLUDED.message_id, messages.message_id),
         subject = CASE
@@ -4876,7 +4877,8 @@ export class ImapManager {
         snippet = CASE WHEN EXCLUDED.snippet <> '' THEN EXCLUDED.snippet ELSE messages.snippet END,
         flags = EXCLUDED.flags,
         body_html = COALESCE(EXCLUDED.body_html, messages.body_html),
-        body_text = COALESCE(EXCLUDED.body_text, messages.body_text)
+        body_text = COALESCE(EXCLUDED.body_text, messages.body_text),
+        bcc_addresses = EXCLUDED.bcc_addresses
     `, [
       account.id, uid, folder, msgId,
       sanitizeStr(subject || '(no subject)'),
@@ -4887,6 +4889,7 @@ export class ImapManager {
       bodyHtml != null ? sanitizeStr(bodyHtml) : null,
       bodyText != null ? sanitizeStr(bodyText) : null,
       msgId || null,
+      JSON.stringify(Array.isArray(bcc) ? bcc : []),
     ]);
   }
 

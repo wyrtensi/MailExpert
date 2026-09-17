@@ -878,8 +878,16 @@ export default function ComposeModal() {
         ...(signatureContentRef.current || fromSignature != null
           ? { editedSignature: plaintextEmail ? plainSig : signatureContentRef.current }
           : {}),
-        ...(draftUid != null && draftFolder != null ? { existingUid: draftUid, existingFolder: draftFolder } : {}),
+        // The server replaces the previous copy only in the mailbox it lives in.
+        ...(draftUid != null && draftFolder != null
+          ? { existingUid: draftUid, existingFolder: draftFolder, existingAccountId: draftAccountId }
+          : {}),
       });
+      // From switched to another mailbox: the draft now lives there, so remove the old copy
+      // from the mailbox it was saved in.
+      if (draftUid != null && draftFolder != null && draftAccountId && draftAccountId !== accountId) {
+        api.deleteDraft(draftAccountId, draftUid, draftFolder).catch(() => {});
+      }
       if (result.uid != null) {
         setDraftUid(result.uid);
         setDraftFolder(result.folder);

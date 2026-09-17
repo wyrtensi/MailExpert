@@ -82,7 +82,7 @@ const RELOCATE_COPY_COLS = [
   'read_changed_at', 'star_changed_at', 'spam_score_sa', 'spam_score_ml', 'spam_verdict',
   'spam_analyzed_at', 'spam_details', 'spam_user_override', 'category', 'list_unsubscribe',
   'list_unsubscribe_post', 'unsubscribed_at', 'delivery_addresses', 'plugin_annotations',
-  'sender_name', 'sender_email',
+  'sender_name', 'sender_email', 'bcc_addresses',
 ];
 // INSERT target list and the matching SELECT projection. account_id + the carried columns come
 // from the deleted row; uid is the UIDPLUS-mapped new uid; folder is the destination ($4).
@@ -95,6 +95,13 @@ export const RELOCATE_SELECT_COLS = ['d.account_id', 'u.new_uid', '$4', ...RELOC
 //   - &entity; — undecoded HTML entities from before the entity-stripping fix
 //   - ##marker## — unexpanded template placeholders (UPS, Epsilon marketing mail)
 //   - --> — dangling HTML comment end leaked by comment-stripping gap
+// Bcc recipients of a draft saved from the composer, so reopening it keeps them. Other messages
+// carry no Bcc column data, so nothing is added for them.
+function draftBcc(message) {
+  const bcc = typeof message.bcc_addresses === 'string' ? JSON.parse(message.bcc_addresses) : message.bcc_addresses;
+  return Array.isArray(bcc) && bcc.length ? { bccAddresses: bcc } : {};
+}
+
 function snippetIsGarbled(s) {
   return s && (
     /&[a-z][a-z0-9]*;/i.test(s) ||   // undecoded HTML entity
@@ -452,7 +459,7 @@ router.get('/messages/:id/body', async (req, res) => {
       responseHtml = blockRemoteImages(html);
       hasBlockedRemoteImages = true;
     }
-    return res.json({ html: responseHtml, text: message.body_text, attachments, hasBlockedRemoteImages, senderEmail: message.sender_email, senderName: message.sender_name });
+    return res.json({ html: responseHtml, text: message.body_text, attachments, hasBlockedRemoteImages, senderEmail: message.sender_email, senderName: message.sender_name, ...draftBcc(message) });
   }
 
   // Fetch from IMAP — signal user activity so background jobs back off during this request.
@@ -491,7 +498,7 @@ router.get('/messages/:id/body', async (req, res) => {
       responseHtml = blockRemoteImages(safeHtml);
       hasBlockedRemoteImages = true;
     }
-    res.json({ html: responseHtml, text: safeText, attachments: attachments || [], hasBlockedRemoteImages, senderEmail: message.sender_email, senderName: message.sender_name });
+    res.json({ html: responseHtml, text: safeText, attachments: attachments || [], hasBlockedRemoteImages, senderEmail: message.sender_email, senderName: message.sender_name, ...draftBcc(message) });
   } catch (err) {
     const msg = err.message || 'Unknown error';
     console.error('Body fetch error:', msg);

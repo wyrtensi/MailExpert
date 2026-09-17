@@ -184,7 +184,32 @@ describe('POST /api/mail/draft — replacing the previous copy', () => {
   const saveDraft = (extra) => fetch(`${base}/api/mail/draft`, {
     method: 'POST',
     headers: { 'content-type': 'application/json' },
-    body: JSON.stringify({ accountId: ACCOUNT_ID, to: ['a@b.com'], subject: 'x', body: 'y', ...extra }),
+    // The composer names the mailbox the previous copy lives in; default it to this one.
+    body: JSON.stringify({
+      accountId: ACCOUNT_ID, to: ['a@b.com'], subject: 'x', body: 'y',
+      ...(extra?.existingUid !== undefined ? { existingAccountId: ACCOUNT_ID } : {}),
+      ...extra,
+    }),
+  });
+
+  it('keeps the previous copy when it lives in another mailbox', async () => {
+    // Switching From to another mailbox saves there; the same uid in this mailbox's Drafts is
+    // somebody else's draft, so only the composer may remove the old copy, from its own mailbox.
+    const res = await saveDraft({ existingUid: 4, existingFolder: 'Drafts', existingAccountId: '22222222-2222-4222-8222-222222222222' });
+    expect(res.status).toBe(200);
+    expect(imapManager.permanentDeleteMessage).not.toHaveBeenCalled();
+  });
+
+  it('keeps the previous copy when the request does not say which mailbox it lives in', async () => {
+    const res = await saveDraft({ existingUid: 4, existingFolder: 'Drafts', existingAccountId: undefined });
+    expect(res.status).toBe(200);
+    expect(imapManager.permanentDeleteMessage).not.toHaveBeenCalled();
+  });
+
+  it('stores Bcc recipients on the local draft row so a reopened draft keeps them', async () => {
+    const res = await saveDraft({ bcc: ['Hidden <hidden@example.com>'] });
+    expect(res.status).toBe(200);
+    expect(imapManager.upsertDraftMessageRecord.mock.calls[0][3].bcc).toEqual([{ name: 'Hidden', email: 'hidden@example.com' }]);
   });
 
   it('replaces the previous copy when it is in the Drafts folder it just saved to', async () => {

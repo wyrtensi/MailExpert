@@ -144,7 +144,7 @@ async function isDraftsPath(account, folder, draftsFolder) {
 }
 
 router.post('/draft', async (req, res) => {
-  const { accountId, aliasId, to, cc, bcc, subject, body, bodyIsHtml = false, quotedBody, quotedBodyHtml, editedSignature, existingUid, existingFolder } = req.body;
+  const { accountId, aliasId, to, cc, bcc, subject, body, bodyIsHtml = false, quotedBody, quotedBodyHtml, editedSignature, existingUid, existingFolder, existingAccountId } = req.body;
   if (!accountId) return res.status(400).json({ error: 'accountId required' });
 
   const ownerCheck = await query(
@@ -174,6 +174,7 @@ router.post('/draft', async (req, res) => {
           fromEmail: meta.fromEmail,
           to: mapRecipientList(to),
           cc: mapRecipientList(cc),
+          bcc: mapRecipientList(bcc),
           snippet: meta.snippet,
           bodyHtml: meta.bodyHtml,
           bodyText: meta.bodyText,
@@ -185,7 +186,12 @@ router.post('/draft', async (req, res) => {
 
     // Delete the old draft only after the new one is safely stored, and only a single numeric uid
     // in a Drafts folder: the uid goes to IMAP as a UID set, so "1:*" would expunge the folder.
-    if (existingUid && existingFolder) {
+    // The old copy must also live in this mailbox. After From switches to another mailbox the same
+    // uid here is an unrelated draft, possibly a colleague's; the composer removes the old copy
+    // from its own mailbox instead.
+    if (existingUid && existingFolder && existingAccountId !== account.id) {
+      console.error(`Draft: not deleting old uid=${JSON.stringify(existingUid)}: it is not in this mailbox`);
+    } else if (existingUid && existingFolder) {
       try {
         const oldUid = (typeof existingUid === 'number' || typeof existingUid === 'string')
           && /^[1-9]\d*$/.test(String(existingUid)) ? Number(existingUid) : null;

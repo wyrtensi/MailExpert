@@ -28,6 +28,7 @@ import { getConnectionPolicy } from './connectionPolicy.js';
 import { invalidateGtdConfigCache } from '../plugins/gtd/gtdConfig.js';
 import { parseMessage } from './messageParser.js';
 import { getImapSnapshot, _resetImapMetrics } from './imapMetrics.js';
+import { GMAIL_KEY_PREFIX } from './threading/threadId.js';
 
 const account = (imap_host, oauth_provider = null) => ({ imap_host, oauth_provider });
 
@@ -2319,6 +2320,15 @@ describe('staleness probe connection recovery', () => {
   });
 });
 
+// Column lists in these inserts change whenever a migration adds a column; read the value by
+// column name so a shifted position fails loudly instead of silently asserting the wrong field.
+function insertedValue(sql, params, column) {
+  const columns = sql.slice(sql.indexOf('(') + 1, sql.indexOf(')')).split(',').map(c => c.trim());
+  const index = columns.indexOf(column);
+  if (index === -1) throw new Error(`column ${column} is not in the insert`);
+  return params[index];
+}
+
 describe('Gmail label memberships (#418)', () => {
   let rows, acct, serverUids, inserts;
   const sent = '[Gmail]/Sent Mail';
@@ -2442,10 +2452,8 @@ describe('Gmail label memberships (#418)', () => {
       expect(client.fetch.mock.calls.some(([, q]) => q?.threadId === true)).toBe(true);
       const insert = inserts.find(i => i.params[1] === 1);
       expect(insert.sql).toMatch(/provider_thread_id, provider_message_id/);
-      // Column list order is `provider_thread_id, provider_message_id`, so the thread id is
-      // the second-to-last bound parameter and the message id is the last one.
-      expect(insert.params.at(-2)).toBe('90001');
-      expect(insert.params.at(-1)).toBe('80001');
+      expect(insertedValue(insert.sql, insert.params, 'provider_thread_id')).toBe('90001');
+      expect(insertedValue(insert.sql, insert.params, 'provider_message_id')).toBe('80001');
       expect(insert.sql).toMatch(/provider_thread_id = COALESCE\(EXCLUDED\.provider_thread_id, messages\.provider_thread_id\)/);
     });
 
@@ -2463,10 +2471,70 @@ describe('Gmail label memberships (#418)', () => {
       }
       expect(client.fetch.mock.calls.every(([, q]) => q?.threadId !== true)).toBe(true);
       const insert = inserts.find(i => i.params[1] === 1);
-      expect(insert.params.at(-2)).toBeNull();
-      expect(insert.params.at(-1)).toBeNull();
+      expect(insertedValue(insert.sql, insert.params, 'provider_thread_id')).toBeNull();
+      expect(insertedValue(insert.sql, insert.params, 'provider_message_id')).toBeNull();
     });
   }
+
+  describe('gmail thread mode (PR C1)', () => {
+    it('sync keys a new message by the Gmail thread number in gmail mode', async () => {
+      acct.thread_mode = 'gmail';
+      await sync(manager(), 'INBOX');
+      expect(insertedValue(inserts[0].sql, inserts[0].params, 'thread_id')).toBe(`${GMAIL_KEY_PREFIX}90001`);
+      expect(insertedValue(inserts[0].sql, inserts[0].params, 'threading_reason')).toBe('gmail-thrid');
+    });
+
+    it('backfill keys a new message by the Gmail thread number in gmail mode', async () => {
+      acct.thread_mode = 'gmail';
+      await backfill(manager(), 'INBOX');
+      expect(insertedValue(inserts[0].sql, inserts[0].params, 'thread_id')).toBe(`${GMAIL_KEY_PREFIX}90001`);
+      expect(insertedValue(inserts[0].sql, inserts[0].params, 'threading_reason')).toBe('gmail-thrid');
+    });
+
+    it.each([['rfc'], [undefined]])('sync roots a new message under its own Message-ID in rfc mode (thread_mode=%s)', async (mode) => {
+      acct.thread_mode = mode;
+      await sync(manager(), 'INBOX');
+      expect(insertedValue(inserts[0].sql, inserts[0].params, 'thread_id')).toBe('<self@example.com>');
+      expect(insertedValue(inserts[0].sql, inserts[0].params, 'threading_reason')).toBe('new-root');
+    });
+
+    it('skips the reroot update in gmail mode but issues it in rfc mode', async () => {
+      // A provisional ancestor makes the resolved thread_id differ from the message's own
+      // Message-ID, so a real (unguarded) sync would always call the reroot update here.
+      parseMessage.mockImplementation(async m => ({ ...parsed(m.uid), inReplyTo: '<root@x>', references: '<root@x>' }));
+
+      acct.thread_mode = 'gmail';
+      await sync(manager(), 'INBOX');
+      expect(query.mock.calls.some(([sql]) => /UPDATE messages SET thread_id/.test(sql))).toBe(false);
+
+      rows = []; inserts = []; serverUids = [1];
+      acct.thread_mode = 'rfc';
+      await sync(manager(), 'INBOX');
+      expect(query.mock.calls.some(([sql]) => /UPDATE messages SET thread_id/.test(sql))).toBe(true);
+    });
+
+    it('keys the conflict branch on a parameter holding the Gmail key prefix', async () => {
+      await sync(manager(), 'INBOX');
+      const sql = inserts[0].sql;
+      expect(sql).toMatch(/thread_id = CASE[\s\S]*WHEN EXCLUDED\.thread_id LIKE \$\d+/);
+      expect(sql).toMatch(/threading_reason = CASE[\s\S]*WHEN EXCLUDED\.thread_id LIKE \$\d+/);
+      expect(inserts[0].params).toContain(GMAIL_KEY_PREFIX);
+    });
+
+    // The mock query implementation cannot evaluate SQL, so the CASE semantics are checked
+    // against a real database in Task 5. Here we only confirm the thread_id and
+    // threading_reason branches share the exact same WHEN conditions, since a mismatch there
+    // would silently desynchronize the reason from the key it explains.
+    it('mirrors the thread_id and threading_reason CASE conditions exactly', async () => {
+      await sync(manager(), 'INBOX');
+      const sql = inserts[0].sql;
+      const section = sql.slice(sql.indexOf('thread_id = CASE'), sql.indexOf('is_bulk = COALESCE'));
+      const conditions = section.match(/WHEN[\s\S]*?(?=\s*THEN)/g);
+      expect(conditions).toHaveLength(4);
+      expect(conditions[0]).toBe(conditions[2]);
+      expect(conditions[1]).toBe(conditions[3]);
+    });
+  });
 });
 
 describe('Gmail staleness membership check (#418)', () => {

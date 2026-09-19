@@ -155,6 +155,13 @@ describe('startProviderIdBackfill', () => {
     expect(mgr.providerIdBackfillRunning.has(gmail.id)).toBe(false);
     expect(mgr.providerIdBackfillClean.has(gmail.id)).toBe(false);
   });
+
+  it('passes the mailbox thread mode to the runner', async () => {
+    const mgr = newManager();
+    runProviderIdBackfill.mockResolvedValue({ outcome: 'done', processed: 0, total: 0, failedFolders: [], skippedFolders: [] });
+    await mgr.startProviderIdBackfill({ ...gmail, thread_mode: 'gmail' });
+    expect(runProviderIdBackfill.mock.calls[0][0]).toMatchObject({ threadMode: 'gmail' });
+  });
 });
 
 describe('startProviderIdBackfill connection handling', () => {

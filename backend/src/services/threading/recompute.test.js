@@ -103,6 +103,17 @@ function fakeDb({ messages, state = null }) {
         }],
       };
     }
+    // The tail select for rows the ordered walk can never reach: `date IS NULL` never satisfies
+    // the (date, id) cursor comparison, in SQL as in the `after()` helper below (null > x is false).
+    if (/date IS NULL/.test(sql)) {
+      const [accountId] = params;
+      return {
+        rows: db.messages
+          .filter(m => m.account_id === accountId && !m.is_deleted && m.date == null)
+          .sort((a, b) => (a.id < b.id ? -1 : a.id > b.id ? 1 : 0))
+          .map(m => ({ ...m })),
+      };
+    }
     if (/SELECT id, message_id, in_reply_to, thread_references, provider_thread_id, thread_id, threading_reason, date/.test(sql)) {
       const [accountId, cursorDate, cursorId, limit] = params;
       const lossless = /date::text AS cursor_date/.test(sql);
@@ -553,6 +564,58 @@ describe('runRecompute', () => {
 
     const second = await run(db);
     expect(second).toEqual({ outcome: 'done', processed: 1, changed: 0, total: 1 });
+  });
+
+  it('rekeys rows with no date, which the ordered walk can never reach, and reaches processed == total', async () => {
+    const messages = [
+      msg('m1', '2024-01-01T00:00:00.000Z', { provider_thread_id: '100', thread_id: '<m1>' }),
+      msg('n1', null, { provider_thread_id: '900', thread_id: 'glue', threading_reason: null }),
+      msg('n2', null, { provider_thread_id: '900', thread_id: 'glue', threading_reason: null }),
+    ];
+    const db = fakeDb({ messages });
+
+    const result = await run(db);
+
+    expect(result).toEqual({ outcome: 'done', processed: 3, changed: 3, total: 3 });
+    expect(messages.map(m => [m.id, m.thread_id, m.threading_reason])).toEqual([
+      ['m1', 'gmail:100', 'gmail-thrid'],
+      ['n1', 'gmail:900', 'gmail-thrid'],
+      ['n2', 'gmail:900', 'gmail-thrid'],
+    ]);
+    expect(db.db.finished).toBe(1);
+  });
+
+  it('resolves an undated row through an ancestor the pass already rekeyed', async () => {
+    const messages = [
+      msg('m1', '2024-01-01T00:00:00.000Z', { thread_id: 'glue', threading_reason: null }),
+      msg('n1', null, { in_reply_to: '<m1>', thread_id: 'glue', threading_reason: null }),
+    ];
+    const db = fakeDb({ messages });
+
+    const result = await run(db, { targetMode: 'rfc' });
+
+    expect(result).toEqual({ outcome: 'done', processed: 2, changed: 2, total: 2 });
+    expect(messages.map(m => [m.id, m.thread_id, m.threading_reason])).toEqual([
+      ['m1', '<m1>', 'new-root'],
+      ['n1', '<m1>', 'rfc-root'],
+    ]);
+  });
+
+  it('does not touch the undated rows, or finish, when the pass is asked to stop first', async () => {
+    const messages = [
+      msg('m1', '2024-01-01T00:00:00.000Z', { provider_thread_id: '100', thread_id: '<m1>' }),
+      msg('n1', null, { provider_thread_id: '900', thread_id: 'glue' }),
+    ];
+    const db = fakeDb({ messages });
+    // true for the walk's two iterations (the second selects nothing and ends it), false at the
+    // tail: the undated batch must honour shouldContinue the same way the walk does.
+    const shouldContinue = vi.fn().mockResolvedValueOnce(true).mockResolvedValueOnce(true).mockResolvedValue(false);
+
+    const result = await run(db, { shouldContinue });
+
+    expect(result).toEqual({ outcome: 'stopped', processed: 1, changed: 1, total: 2 });
+    expect(messages.find(m => m.id === 'n1').thread_id).toBe('glue');
+    expect(db.db.finished).toBe(0);
   });
 
   it('does not write a row whose key and reason are already correct', async () => {

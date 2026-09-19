@@ -2,7 +2,7 @@
 // derived from scratch — the Gmail thread number, else the RFC 5322 chain, else its own
 // Message-ID — so a key that only ever existed because of the old subject grouping cannot
 // survive, and a group that was glued by subject splits into its real conversations.
-import { GMAIL_KEY_PREFIX, THREAD_MODE_GMAIL, parseReferences } from './threadId.js';
+import { GMAIL_KEY_PREFIX, THREAD_MODE_GMAIL, ancestorCandidates } from './threadId.js';
 import { finishRecompute, loadRecompute, saveRecomputeCursor, startRecomputeRow } from './recomputeStore.js';
 
 export const RECOMPUTE_BATCH_SIZE = 2000;
@@ -17,12 +17,9 @@ export function threadingForRow(row, { mode, ancestorKeys }) {
     return { threadId: `${GMAIL_KEY_PREFIX}${row.provider_thread_id}`, reason: 'gmail-thrid' };
   }
   if (!row.message_id) return { threadId: null, reason: null };
-  // Drop the row's own Message-ID from its candidates: a malformed References header that echoes
-  // itself must not let the row resolve to (or through) its own entry.
-  const candidates = parseReferences(row.thread_references).filter(id => id !== row.message_id);
-  if (row.in_reply_to && row.in_reply_to !== row.message_id && !candidates.includes(row.in_reply_to)) {
-    candidates.push(row.in_reply_to);
-  }
+  // Same candidate list computeThreading builds for a live message, including the guard against a
+  // row's own Message-ID (see ancestorCandidates).
+  const candidates = ancestorCandidates(row.message_id, row.in_reply_to, row.thread_references);
   if (candidates.length === 0) return { threadId: row.message_id, reason: 'new-root' };
   if (ancestorKeys.has(candidates[0])) return { threadId: ancestorKeys.get(candidates[0]), reason: 'rfc-root' };
   for (let i = candidates.length - 1; i >= 0; i--) {
@@ -147,15 +144,12 @@ async function resolveAncestors(query, accountId, candidateIds, cursorDate, curs
   return rows;
 }
 
-// A row's own Message-ID is dropped here too (see threadingForRow), so a self-referencing header
-// never asks the database to resolve a row against itself.
+// A row's own Message-ID is dropped here too (see ancestorCandidates), so a self-referencing
+// header never asks the database to resolve a row against itself.
 function collectCandidateIds(batch) {
   const ids = new Set();
   for (const row of batch) {
-    for (const ref of parseReferences(row.thread_references)) {
-      if (ref !== row.message_id) ids.add(ref);
-    }
-    if (row.in_reply_to && row.in_reply_to !== row.message_id) ids.add(row.in_reply_to);
+    for (const id of ancestorCandidates(row.message_id, row.in_reply_to, row.thread_references)) ids.add(id);
   }
   return [...ids];
 }
@@ -174,6 +168,44 @@ async function writeBatch(query, accountId, updates) {
     [accountId, updates.map(u => u.id), updates.map(u => u.threadId), updates.map(u => u.reason)],
   );
   return rowCount ?? 0;
+}
+
+// Rows the ordered walk can never reach: `date IS NULL` never satisfies `(date, id) > (cursor,
+// id)` — NULL comparisons are never true — so such a row would keep its pre-recompute key forever
+// while still counting toward `total`. messages.date has no NOT NULL constraint and historical
+// rows predate the write paths that guarantee one (see selectBatch), so the pass cleans them up
+// in one tail batch. They have no ordering requirement: nothing resolves through them by date.
+async function selectUndated(query, accountId) {
+  const { rows } = await query(
+    `SELECT id, message_id, in_reply_to, thread_references, provider_thread_id, thread_id, threading_reason
+       FROM messages
+      WHERE account_id = $1 AND is_deleted = false AND date IS NULL
+      ORDER BY id`,
+    [accountId],
+  );
+  return rows;
+}
+
+// Derives every row of one batch from scratch and writes the ones that actually change, returning
+// how many the database reported as updated. cursorDate/cursorId are the cursor as it stood BEFORE
+// this batch: that is the bound resolveAncestors needs to see only rows the pass already committed.
+async function rekeyBatch(query, accountId, batch, { targetMode, cursorDate, cursorId }) {
+  // Seeded per batch from the database (a previous batch's UPDATE is committed by then, so the
+  // seed already reflects this pass's own results), then extended with the current batch's rows as
+  // they are computed, since those are not committed yet.
+  const ancestorKeys = new Map();
+  const resolved = await resolveAncestors(query, accountId, collectCandidateIds(batch), cursorDate, cursorId);
+  for (const r of resolved) ancestorKeys.set(r.message_id, r.thread_id);
+
+  const updates = [];
+  for (const row of batch) {
+    const { threadId, reason } = threadingForRow(row, { mode: targetMode, ancestorKeys });
+    if (row.message_id) ancestorKeys.set(row.message_id, threadId);
+    if (row.thread_id !== threadId || row.threading_reason !== reason) {
+      updates.push({ id: row.id, threadId, reason });
+    }
+  }
+  return writeBatch(query, accountId, updates);
 }
 
 export async function runRecompute({
@@ -203,6 +235,8 @@ export async function runRecompute({
     );
     cursorDate = cursorRows[0]?.cursor_date ?? cursorDate;
   } else {
+    // Every live row of the mailbox — which is exactly what the pass covers: the ordered walk
+    // below, then the undated tail — so `processed` reaches `total` and the percentage reaches 100.
     const { rows } = await query(
       `SELECT count(*)::bigint AS total FROM messages WHERE account_id = $1 AND is_deleted = false`,
       [accountId],
@@ -211,34 +245,13 @@ export async function runRecompute({
     await startRecomputeRow(query, accountId, targetMode, total);
   }
 
-  // Cleared and re-seeded at the start of every batch (see resolveAncestors below). A previous
-  // batch's UPDATE is already committed by the time this query runs, so the seed it reads back
-  // already reflects this pass's own results, not stale pre-recompute keys. The current batch's
-  // own rows are added as they're computed, further down, since they aren't committed yet.
-  const ancestorKeys = new Map();
-
   for (;;) {
     if (!(await shouldContinue())) return { outcome: 'stopped', processed, changed, total };
 
     const batch = await selectBatch(query, accountId, cursorDate, cursorId, batchSize);
     if (batch.length === 0) break;
 
-    ancestorKeys.clear();
-    // cursorDate/cursorId here are still the pre-batch cursor: this is the bound the resolution
-    // query needs to see only rows this pass has already committed (see resolveAncestors).
-    const resolved = await resolveAncestors(query, accountId, collectCandidateIds(batch), cursorDate, cursorId);
-    for (const r of resolved) ancestorKeys.set(r.message_id, r.thread_id);
-
-    const updates = [];
-    for (const row of batch) {
-      const { threadId, reason } = threadingForRow(row, { mode: targetMode, ancestorKeys });
-      if (row.message_id) ancestorKeys.set(row.message_id, threadId);
-      if (row.thread_id !== threadId || row.threading_reason !== reason) {
-        updates.push({ id: row.id, threadId, reason });
-      }
-    }
-
-    changed += await writeBatch(query, accountId, updates);
+    changed += await rekeyBatch(query, accountId, batch, { targetMode, cursorDate, cursorId });
 
     processed += batch.length;
     const last = batch[batch.length - 1];
@@ -247,6 +260,18 @@ export async function runRecompute({
     await saveRecomputeCursor(query, accountId, { cursorDate, cursorId, processed, changed });
     await onProgress({ processed, changed, total });
     await pause();
+  }
+
+  // The tail: rows with no date, resolved against the pass's final cursor, i.e. against everything
+  // the walk has already written (see selectUndated). The cursor is left where the walk ended, so
+  // a pass stopped here resumes with an empty walk and runs the tail again — it is idempotent.
+  if (!(await shouldContinue())) return { outcome: 'stopped', processed, changed, total };
+  const undated = await selectUndated(query, accountId);
+  if (undated.length) {
+    changed += await rekeyBatch(query, accountId, undated, { targetMode, cursorDate, cursorId });
+    processed += undated.length;
+    await saveRecomputeCursor(query, accountId, { cursorDate, cursorId, processed, changed });
+    await onProgress({ processed, changed, total });
   }
 
   await finishRecompute(query, accountId);

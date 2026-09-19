@@ -79,12 +79,17 @@ export async function planProviderIdBackfill(query, accountId) {
 // problem with one mailbox); the connection is still usable for the next folder.
 const isFolderError = (err) => err?.responseStatus === 'NO' || err?.responseStatus === 'BAD';
 
+// The mailbox's mode as it stands right now. Read per batch rather than captured when the job
+// started: a fill of a large mailbox outlives an admin's rollback to rfc, and a stale capture
+// would keep writing gmail: keys into a mailbox that no longer threads that way.
+async function rekeyNow(query, accountId) {
+  const { rows } = await query('SELECT thread_mode FROM email_accounts WHERE id = $1', [accountId]);
+  return rows[0]?.thread_mode === THREAD_MODE_GMAIL;
+}
+
 export async function runProviderIdBackfill({
-  query, accountId, getClient, shouldContinue, onProgress = () => {}, pause = async () => {}, threadMode = 'rfc',
+  query, accountId, getClient, shouldContinue, onProgress = () => {}, pause = async () => {},
 }) {
-  // In gmail mode the thread key follows the number the fill just learned; the sync will not
-  // revisit these UIDs, so this UPDATE is where an old row joins its Gmail conversation.
-  const rekey = threadMode === THREAD_MODE_GMAIL;
   const plan = await planProviderIdBackfill(query, accountId);
   let processed = 0;
   const failedFolders = []; // { path, error }: the server refused SELECT or FETCH for the folder
@@ -141,6 +146,9 @@ export async function runProviderIdBackfill({
       }
 
       if (found.length) {
+        // In gmail mode the thread key follows the number the fill just learned; the sync will not
+        // revisit these UIDs, so this UPDATE is where an old row joins its Gmail conversation.
+        const rekey = await rekeyNow(query, accountId);
         await query(
           `UPDATE messages m
            SET provider_thread_id = v.thread_id,

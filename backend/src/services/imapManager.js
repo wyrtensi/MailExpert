@@ -4851,7 +4851,8 @@ export class ImapManager {
           const extraDelay = quietFor < QUIET_WINDOW_MS ? QUIET_WINDOW_MS - quietFor : 0;
           await new Promise(resolve => setTimeout(resolve, cfg.batchDelay + extraDelay));
         },
-        threadMode: account.thread_mode,
+        // No thread mode is passed: the run re-reads it per batch, so a rollback to rfc during a
+        // long fill is seen instead of the mode this account object was captured with.
       });
       if (result.outcome === 'done') {
         this.providerIdBackoff.delete(account.id);

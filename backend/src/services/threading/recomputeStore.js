@@ -27,34 +27,32 @@ export async function startRecomputeRow(query, accountId, targetMode, total) {
 }
 
 // Saves how far a run has gotten: the cursor to resume from and the counters seen so far.
+// Plain UPDATE: the row always exists by now (startRecomputeRow creates it, carrying the
+// NOT NULL target_mode), so there is nothing to insert here — an update of no rows for an
+// account that never started a run is the honest no-op outcome.
 export async function saveRecomputeCursor(query, accountId, { cursorDate, cursorId, processed, changed }) {
   await query(
-    `INSERT INTO thread_recompute (account_id, cursor_date, cursor_id, processed, changed, updated_at)
-     VALUES ($1, $2, $3, $4, $5, now())
-     ON CONFLICT (account_id) DO UPDATE
-       SET cursor_date = EXCLUDED.cursor_date, cursor_id = EXCLUDED.cursor_id, processed = EXCLUDED.processed,
-           changed = EXCLUDED.changed, updated_at = now()`,
+    `UPDATE thread_recompute
+        SET cursor_date = $2, cursor_id = $3, processed = $4, changed = $5, updated_at = now()
+      WHERE account_id = $1`,
     [accountId, cursorDate, cursorId, processed, changed],
   );
 }
 
-// Marks a run as complete.
+// Marks a run as complete. Plain UPDATE, see saveRecomputeCursor for why.
 export async function finishRecompute(query, accountId) {
   await query(
-    `INSERT INTO thread_recompute (account_id, finished_at, updated_at)
-     VALUES ($1, now(), now())
-     ON CONFLICT (account_id) DO UPDATE SET finished_at = now(), updated_at = now()`,
+    `UPDATE thread_recompute SET finished_at = now(), updated_at = now() WHERE account_id = $1`,
     [accountId],
   );
 }
 
 // Records the last failure of a run, bounded so a runaway message never bloats the row.
+// Plain UPDATE, see saveRecomputeCursor for why.
 export async function recordRecomputeError(query, accountId, message) {
   const text = String(message || 'Unknown error').slice(0, ERROR_MAX_LENGTH);
   await query(
-    `INSERT INTO thread_recompute (account_id, error, updated_at)
-     VALUES ($1, $2, now())
-     ON CONFLICT (account_id) DO UPDATE SET error = EXCLUDED.error, updated_at = now()`,
+    `UPDATE thread_recompute SET error = $2, updated_at = now() WHERE account_id = $1`,
     [accountId, text],
   );
 }

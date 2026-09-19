@@ -101,18 +101,26 @@ export async function previewRecompute(query, accountId, targetMode) {
   };
 }
 
-// Selects the next batch after the cursor, oldest first. The walk assumes `date` is never NULL:
-// every write path either computes it through imapManager.js's safeDate() (live sync, backfill,
-// the Sent/Draft upserts — falls back to `new Date()` rather than ever storing NULL) or copies it
-// verbatim from an existing row (insertCopiedSibling, the relocate CTEs in routes/mail.js), whose
-// own date was written the same way; see idx_messages_account_date (migration 0066) for the index
-// this ordering relies on.
+// Selects the next batch after the cursor, oldest first. The cursor is carried forward as
+// `date::text`, never the bare `date` column: messages.date is timestamptz with microsecond
+// precision, but node-postgres parses a bare timestamptz into a JS Date, which only holds
+// milliseconds. A cursor taken from that truncated Date would still be less than the very row it
+// came from — `(date, id) > (cursor, id)` would stay true for that row forever, and the pass
+// would never terminate (confirmed against a real mailbox: `processed` climbed past 272000 on an
+// 8-row mailbox, `changed` stuck at 8, one row selected per batch, forever). `date::text` is
+// exact in Postgres, so round-tripping that string back in as an explicit ::timestamptz keeps
+// the comparison lossless. The walk assumes `date` itself is never NULL: every write path either
+// computes it through imapManager.js's safeDate() (live sync, backfill, the Sent/Draft upserts —
+// falls back to `new Date()` rather than ever storing NULL) or copies it verbatim from an
+// existing row (insertCopiedSibling, the relocate CTEs in routes/mail.js), whose own date was
+// written the same way; see idx_messages_account_date (migration 0066) for the index this
+// ordering relies on.
 async function selectBatch(query, accountId, cursorDate, cursorId, batchSize) {
   const { rows } = await query(
-    `SELECT id, message_id, in_reply_to, thread_references, provider_thread_id, thread_id, threading_reason, date
+    `SELECT id, message_id, in_reply_to, thread_references, provider_thread_id, thread_id, threading_reason, date::text AS cursor_date
        FROM messages
       WHERE account_id = $1 AND is_deleted = false
-        AND (date, id) > ($2, $3)
+        AND (date, id) > ($2::timestamptz, $3)
       ORDER BY date, id
       LIMIT $4`,
     [accountId, cursorDate, cursorId, batchSize],
@@ -126,13 +134,14 @@ async function selectBatch(query, accountId, cursorDate, cursorId, batchSize) {
 // bound a row not yet reached, or one that is soft-deleted and will never be reached, would seed
 // the map with its old, pre-recompute key — exactly the kind of stale key the recompute exists to
 // remove. A candidate that belongs to the current batch itself is resolved through the in-memory
-// map instead (see the loop below), not through this query.
+// map instead (see the loop below), not through this query. cursorDate is always the lossless
+// text form described above (never a JS Date), hence the explicit ::timestamptz cast here too.
 async function resolveAncestors(query, accountId, candidateIds, cursorDate, cursorId) {
   if (candidateIds.length === 0) return [];
   const { rows } = await query(
     `SELECT message_id, thread_id FROM messages
       WHERE account_id = $1 AND message_id = ANY($2) AND thread_id IS NOT NULL
-        AND is_deleted = false AND (date, id) <= ($3, $4)`,
+        AND is_deleted = false AND (date, id) <= ($3::timestamptz, $4)`,
     [accountId, candidateIds, cursorDate, cursorId],
   );
   return rows;
@@ -184,8 +193,15 @@ export async function runRecompute({
     total = Number(existing.total);
     processed = Number(existing.processed);
     changed = Number(existing.changed);
-    cursorDate = existing.cursor_date ?? cursorDate;
     cursorId = existing.cursor_id ?? cursorId;
+    // loadRecompute's cursor_date comes back as a JS Date — same millisecond truncation as the
+    // messages.date column (see selectBatch) — so it is re-read here as text instead, or a
+    // resumed pass would reselect its last row forever too.
+    const { rows: cursorRows } = await query(
+      `SELECT cursor_date::text AS cursor_date FROM thread_recompute WHERE account_id = $1`,
+      [accountId],
+    );
+    cursorDate = cursorRows[0]?.cursor_date ?? cursorDate;
   } else {
     const { rows } = await query(
       `SELECT count(*)::bigint AS total FROM messages WHERE account_id = $1 AND is_deleted = false`,
@@ -226,7 +242,7 @@ export async function runRecompute({
 
     processed += batch.length;
     const last = batch[batch.length - 1];
-    cursorDate = last.date;
+    cursorDate = last.cursor_date;
     cursorId = last.id;
     await saveRecomputeCursor(query, accountId, { cursorDate, cursorId, processed, changed });
     await onProgress({ processed, changed, total });

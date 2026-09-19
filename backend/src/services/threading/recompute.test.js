@@ -30,11 +30,35 @@ function previewAggregate(messages, accountId, targetMode) {
   };
 }
 
+// Simulates node-postgres's default timestamptz handling, which is the root of the bug this file
+// pins down: a bare `date` column comes back from the driver as a JS Date, which only carries
+// millisecond precision, while a `date::text` projection comes back as the exact stored string
+// (Postgres renders full microseconds). When a Date object is later bound back as a query
+// parameter, Postgres receives exactly the millisecond instant it encodes — not the row's real
+// microsecond value — so padding it out to a 6-digit fractional string here mirrors what the
+// database itself would see. A value that is already a string (a `::text` projection, or the
+// '-infinity' starting cursor) passes through unchanged, since that round trip is lossless.
+function toComparable(value) {
+  if (value instanceof Date) return value.toISOString().replace('Z', '000Z');
+  return value;
+}
+
 function fakeDb({ messages, state = null }) {
   const db = { state, messages, updates: [], finished: 0 };
   const query = vi.fn(async (sql, params = []) => {
+    if (/cursor_date::text/.test(sql)) {
+      return { rows: [{ cursor_date: db.state?.cursor_date ?? null }] };
+    }
     if (/FROM thread_recompute WHERE account_id/.test(sql)) {
-      return { rows: db.state ? [{ account_id: params[0], ...db.state }] : [] };
+      // Mirrors loadRecompute: cursor_date comes back as a JS Date, same precision loss as the
+      // `date` column on messages (see toComparable above) — the reason runRecompute's resume
+      // path must not use this value directly for the cursor.
+      const cursorDate = db.state?.cursor_date;
+      return {
+        rows: db.state
+          ? [{ account_id: params[0], ...db.state, cursor_date: cursorDate != null ? new Date(cursorDate) : null }]
+          : [],
+      };
     }
     if (/INSERT INTO thread_recompute/.test(sql)) {
       const [, targetMode, total] = params;
@@ -81,7 +105,9 @@ function fakeDb({ messages, state = null }) {
     }
     if (/SELECT id, message_id, in_reply_to, thread_references, provider_thread_id, thread_id, threading_reason, date/.test(sql)) {
       const [accountId, cursorDate, cursorId, limit] = params;
-      const after = (m) => m.date > cursorDate || (m.date === cursorDate && m.id > cursorId);
+      const lossless = /date::text AS cursor_date/.test(sql);
+      const cmpCursor = toComparable(cursorDate);
+      const after = (m) => m.date > cmpCursor || (m.date === cmpCursor && m.id > cursorId);
       const cmp = (a, b) => {
         if (a.date !== b.date) return a.date < b.date ? -1 : 1;
         return a.id < b.id ? -1 : a.id > b.id ? 1 : 0;
@@ -90,12 +116,17 @@ function fakeDb({ messages, state = null }) {
         .filter(m => m.account_id === accountId && !m.is_deleted && after(m))
         .sort(cmp)
         .slice(0, limit);
-      return { rows: batch.map(m => ({ ...m })) };
+      // Mirrors what the real SELECT list projects: `date::text AS cursor_date` gives the exact
+      // stored string; a bare `date` column gives a JS Date (see toComparable).
+      return {
+        rows: batch.map(m => ({ ...m, ...(lossless ? { cursor_date: m.date } : { date: new Date(m.date) }) })),
+      };
     }
     if (/SELECT message_id, thread_id FROM messages/.test(sql)) {
       const [accountId, ids, cursorDate, cursorId] = params;
       const idSet = new Set(ids);
-      const atOrBeforeCursor = (m) => m.date < cursorDate || (m.date === cursorDate && m.id <= cursorId);
+      const cmpCursor = toComparable(cursorDate);
+      const atOrBeforeCursor = (m) => m.date < cmpCursor || (m.date === cmpCursor && m.id <= cursorId);
       const rows = db.messages.filter(m => m.account_id === accountId && idSet.has(m.message_id)
         && m.thread_id != null && !m.is_deleted && atOrBeforeCursor(m));
       return { rows: rows.map(m => ({ message_id: m.message_id, thread_id: m.thread_id })) };
@@ -373,6 +404,82 @@ describe('runRecompute', () => {
       ['mid2', '<mid2>', 'new-root'],
       ['reply', '<root>', 'rfc-root'],
     ]);
+  });
+
+  it('keeps the cursor at full microsecond precision, so the last row of a batch is not selected again', async () => {
+    // messages.date is timestamptz (microsecond precision); node-postgres hands back a bare `date`
+    // column as a JS Date, which only holds milliseconds. If the cursor were taken from that Date
+    // instead of a lossless text projection, this row's own (truncated) cursor would still be
+    // less than its own (real, microsecond) stored date, so `(date, id) > (cursor, id)` would
+    // stay true for it forever and the pass would never terminate.
+    const messages = [
+      msg('a', '2024-01-01T00:00:00.123456Z', { thread_id: 'glue', threading_reason: null }),
+    ];
+    const db = fakeDb({ messages });
+    const selectCalls = [];
+    const realImpl = db.query.getMockImplementation();
+    db.query.mockImplementation(async (sql, params) => {
+      const result = await realImpl(sql, params);
+      if (/SELECT id, message_id, in_reply_to, thread_references, provider_thread_id, thread_id, threading_reason, date/.test(sql)) {
+        selectCalls.push(result.rows.map(r => r.id));
+      }
+      return result;
+    });
+
+    const result = await run(db, { targetMode: 'rfc' });
+
+    expect(result).toEqual({ outcome: 'done', processed: 1, changed: 1, total: 1 });
+    // One real batch plus the closing empty one — not a third call re-selecting 'a'.
+    expect(selectCalls).toEqual([['a'], []]);
+    expect(db.db.state.cursor_date).toBe('2024-01-01T00:00:00.123456Z');
+    expect(typeof db.db.state.cursor_date).toBe('string');
+  });
+
+  it('a resumed pass reads the stored cursor at full precision too, so it does not reselect its last row forever', async () => {
+    // The earlier run's cursor was saved with microseconds intact ('...123456Z'); the row it
+    // points at is already correct. loadRecompute would hand this back as a millisecond-truncated
+    // Date ('...123000Z' once compared), which would make that already-correct row look newer
+    // than the cursor and reselect it. The resume path must read the cursor losslessly instead.
+    const messages = [
+      msg('a', '2024-01-01T00:00:00.123456Z', { thread_id: '<a>', threading_reason: 'new-root' }),
+      msg('b', '2024-01-02T00:00:00.000000Z', { thread_id: 'glue', threading_reason: null }),
+    ];
+    const db = fakeDb({
+      messages,
+      state: {
+        target_mode: 'rfc', total: 2, processed: 1, changed: 0,
+        cursor_date: '2024-01-01T00:00:00.123456Z', cursor_id: 'a', finished_at: null, error: null,
+      },
+    });
+    const selectCalls = [];
+    const realImpl = db.query.getMockImplementation();
+    db.query.mockImplementation(async (sql, params) => {
+      const result = await realImpl(sql, params);
+      if (/SELECT id, message_id, in_reply_to, thread_references, provider_thread_id, thread_id, threading_reason, date/.test(sql)) {
+        selectCalls.push(result.rows.map(r => r.id));
+      }
+      return result;
+    });
+
+    const result = await run(db, { targetMode: 'rfc' });
+
+    expect(result).toEqual({ outcome: 'done', processed: 2, changed: 1, total: 2 });
+    expect(selectCalls).toEqual([['b'], []]);
+  });
+
+  it('never processes more rows than the mailbox had, once the cursor advances losslessly', async () => {
+    const messages = [
+      msg('a', '2024-01-01T00:00:00.111111Z', { thread_id: 'glue', threading_reason: null }),
+      msg('b', '2024-01-02T00:00:00.222222Z', { thread_id: 'glue', threading_reason: null }),
+      msg('c', '2024-01-03T00:00:00.333333Z', { thread_id: 'glue', threading_reason: null }),
+    ];
+    const db = fakeDb({ messages });
+
+    const result = await run(db, { targetMode: 'rfc', batchSize: 1 });
+
+    expect(result.outcome).toBe('done');
+    expect(result.processed).toBe(result.total);
+    expect(result.processed).toBeLessThanOrEqual(result.total);
   });
 
   it('processes rows oldest first and saves the cursor to the batch\'s last (date, id)', async () => {

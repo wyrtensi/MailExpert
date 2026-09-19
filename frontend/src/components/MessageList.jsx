@@ -9,6 +9,7 @@ import { isAccountInUnifiedInbox } from '../utils/unifiedInbox.js';
 import { shouldSyncFolder, folderSyncKey } from '../utils/folderSync.js';
 import { manualSyncAccountIds, noSyncStarted } from '../utils/mailboxSync.js';
 import { resolveThreadMessages } from '../utils/threadActions.js';
+import { threadCacheKey } from '../utils/threadKey.js';
 import { useSwipeRow } from '../hooks/useSwipeRow.js';
 import ContextMenu from './ContextMenu.jsx';
 import RowHoverActions from './RowHoverActions.jsx';
@@ -796,13 +797,14 @@ export default function MessageList() {
   // on the delete and move paths, silently untouched. See utils/threadActions.js.
   const resolveMessagesForThreadAction = useCallback(async (message, { allowCache = false } = {}) => {
     const tid = message.thread_id || message.id;
+    const cacheKey = threadCacheKey(message);
     const effectiveFolder = selectedAccountId ? selectedFolder : 'INBOX';
     return resolveThreadMessages({
       message,
       isThreadRow: isThreadListRow(message),
-      cached: threadMessages[tid],
+      cached: threadMessages[cacheKey],
       allowCache,
-      fetchThread: () => api.getThread(tid, effectiveFolder, isUnified, isUnified ? null : message.account_id),
+      fetchThread: () => api.getThread(tid, effectiveFolder, isUnified, message.account_id),
     });
   }, [isThreadListRow, threadMessages, selectedAccountId, selectedFolder, isUnified]);
 
@@ -813,16 +815,16 @@ export default function MessageList() {
   }, [clearThreadMessages, setLoadingThread]);
 
   const setCachedThreadRead = useCallback((message, read) => {
-    const tid = message.thread_id || message.id;
-    if (threadMessages[tid]) {
-      setThreadMessages(tid, threadMessages[tid].map(msg => ({ ...msg, is_read: read })));
+    const cacheKey = threadCacheKey(message);
+    if (threadMessages[cacheKey]) {
+      setThreadMessages(cacheKey, threadMessages[cacheKey].map(msg => ({ ...msg, is_read: read })));
     }
   }, [threadMessages, setThreadMessages]);
 
   const setCachedThreadStarred = useCallback((message, starred) => {
-    const tid = message.thread_id || message.id;
-    if (threadMessages[tid]) {
-      setThreadMessages(tid, threadMessages[tid].map(msg => ({ ...msg, is_starred: starred })));
+    const cacheKey = threadCacheKey(message);
+    if (threadMessages[cacheKey]) {
+      setThreadMessages(cacheKey, threadMessages[cacheKey].map(msg => ({ ...msg, is_starred: starred })));
     }
   }, [threadMessages, setThreadMessages]);
 
@@ -976,6 +978,7 @@ export default function MessageList() {
   // Undo-able delete: optimistically remove, delay the API call by 4.5s so user can undo
   const scheduleDelete = useCallback(async (message) => {
     const tid = message.thread_id || message.id;
+    const cacheKey = threadCacheKey(message);
     const isThreadRow = isThreadListRow(message);
     const key = isThreadRow ? `thread:${tid}` : message.id;
     if (pendingDeleteTimers.current.has(key)) return;
@@ -1003,7 +1006,7 @@ export default function MessageList() {
     }
 
     removeMessage(visibleMessage.id);
-    if (expandedThreadId === tid) setExpandedThreadId(null);
+    if (expandedThreadId === cacheKey) setExpandedThreadId(null);
 
     const unreadCount = Number.parseInt(message.unread_count, 10);
     const unreadDelta = Number.isFinite(unreadCount)
@@ -1212,6 +1215,7 @@ export default function MessageList() {
     if (!archiveMessage) return;
     const threadRow = isThreadListRow(message);
     const threadId = message.thread_id || message.id;
+    const cacheKey = threadCacheKey(message);
     const activeFolder = selectedAccountId ? selectedFolder : 'INBOX';
     const threadGuard = threadRow
       ? threadDeleteGuardKey(threadId, activeFolder, selectedAccountId)
@@ -1223,7 +1227,7 @@ export default function MessageList() {
     guards.forEach(setPendingDelete);
     advanceSelectionAfterRemoval(message.id);
     removeMessage(message.id);
-    if (threadRow && expandedThreadId === threadId) setExpandedThreadId(null);
+    if (threadRow && expandedThreadId === cacheKey) setExpandedThreadId(null);
     const aggregateUnread = Number.parseInt(message.unread_count, 10);
     const optimisticUnread = threadRow && Number.isFinite(aggregateUnread)
       ? aggregateUnread
@@ -1663,7 +1667,7 @@ export default function MessageList() {
           unreadByAccount = resolvedUnreadByAccount;
 
           groups.forEach(({ row }) => {
-            if (isThreadListRow(row)) invalidateThreadCache(row.thread_id || row.id);
+            if (isThreadListRow(row)) invalidateThreadCache(threadCacheKey(row));
           });
 
           const result = await archiveInChunks(archiveIds, api.bulkArchive);
@@ -1726,6 +1730,7 @@ export default function MessageList() {
   } = {}) => {
     const threadRow = isThreadListRow(message);
     const threadId = message.thread_id || message.id;
+    const cacheKey = threadCacheKey(message);
     const activeFolder = selectedAccountId ? selectedFolder : 'INBOX';
     const threadGuard = threadRow
       ? threadDeleteGuardKey(threadId, activeFolder, selectedAccountId)
@@ -1738,7 +1743,7 @@ export default function MessageList() {
     if (!alreadyRemoved) {
       advanceSelectionAfterRemoval(message.id, true);
       removeMessage(message.id);
-      if (threadRow && expandedThreadId === threadId) setExpandedThreadId(null);
+      if (threadRow && expandedThreadId === cacheKey) setExpandedThreadId(null);
     }
 
     const aggregateUnread = Number.parseInt(message.unread_count, 10);
@@ -1781,7 +1786,7 @@ export default function MessageList() {
       if (!archived.has(message.id)) clearDeleteGuard(message.id);
 
       const failed = targets.filter(target => !archived.has(target.id));
-      if (threadRow) invalidateThreadCache(threadId);
+      if (threadRow) invalidateThreadCache(cacheKey);
       if (failed.length === 0) {
         if (threadGuard) setCompletedDelete(threadGuard);
         return;
@@ -2097,6 +2102,7 @@ export default function MessageList() {
         if (!archiveMessage) break;
         const threadRow = isThreadListRow(archived);
         const threadId = archived.thread_id || archived.id;
+        const cacheKey = threadCacheKey(archived);
         const activeFolder = selectedAccountId ? selectedFolder : 'INBOX';
         const threadGuard = threadRow
           ? threadDeleteGuardKey(threadId, activeFolder, selectedAccountId)
@@ -2108,7 +2114,7 @@ export default function MessageList() {
         guards.forEach(setPendingDelete);
         advanceSelectionAfterRemoval(archived.id);
         removeMessage(archived.id);
-        if (threadRow && expandedThreadId === threadId) setExpandedThreadId(null);
+        if (threadRow && expandedThreadId === cacheKey) setExpandedThreadId(null);
         const aggregateUnread = Number.parseInt(archived.unread_count, 10);
         const optimisticUnread = threadRow && Number.isFinite(aggregateUnread)
           ? aggregateUnread
@@ -2412,28 +2418,29 @@ export default function MessageList() {
 
   const handleThreadToggle = async (message) => {
     const tid = message.thread_id || message.id;
+    const cacheKey = threadCacheKey(message);
     if (!message.thread_id || (message.message_count || 1) <= 1) {
       return;
     }
-    if (expandedThreadId === tid) {
+    if (expandedThreadId === cacheKey) {
       setExpandedThreadId(null);
       return;
     }
-    setExpandedThreadId(tid);
-    if (!threadMessages[tid]) {
-      const loadVersion = currentThreadLoadVersion(threadLoadVersionsRef.current, tid);
-      setLoadingThread(tid);
+    setExpandedThreadId(cacheKey);
+    if (!threadMessages[cacheKey]) {
+      const loadVersion = currentThreadLoadVersion(threadLoadVersionsRef.current, cacheKey);
+      setLoadingThread(cacheKey);
       try {
         const effectiveFolder = selectedAccountId ? selectedFolder : 'INBOX';
-        const data = await api.getThread(tid, effectiveFolder, isUnified, isUnified ? null : message.account_id);
+        const data = await api.getThread(tid, effectiveFolder, isUnified, message.account_id);
         const msgs = data.messages || [];
-        if (isCurrentThreadLoad(threadLoadVersionsRef.current, tid, loadVersion)) {
-          setThreadMessages(tid, msgs);
+        if (isCurrentThreadLoad(threadLoadVersionsRef.current, cacheKey, loadVersion)) {
+          setThreadMessages(cacheKey, msgs);
         }
       } catch (err) {
         console.error('Failed to load thread:', err);
       } finally {
-        if (isCurrentThreadLoad(threadLoadVersionsRef.current, tid, loadVersion)) {
+        if (isCurrentThreadLoad(threadLoadVersionsRef.current, cacheKey, loadVersion)) {
           setLoadingThread(null);
         }
       }
@@ -3637,16 +3644,16 @@ export default function MessageList() {
 
         {threadedView && !searchQuery.trim() ? (
           displayMessages.map(message => {
-            const tid = message.thread_id || message.id;
+            const cacheKey = threadCacheKey(message);
             const swipeLeftAction = swipeActions?.left || 'archive';
             const swipeRightAction = swipeActions?.right || 'markRead';
             return (
               <ThreadRow
-                key={tid}
+                key={cacheKey}
                 message={message}
-                isExpanded={expandedThreadId === tid}
-                threadMsgs={threadMessages[tid] || null}
-                isLoadingThread={loadingThread === tid}
+                isExpanded={expandedThreadId === cacheKey}
+                threadMsgs={threadMessages[cacheKey] || null}
+                isLoadingThread={loadingThread === cacheKey}
                 selectedMessageId={selectedMessageId}
                 selectedMid={selectedMid}
                 lastViewedMessageId={lastViewedMessageId}

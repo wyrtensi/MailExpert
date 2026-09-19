@@ -20,6 +20,7 @@ import { TableCell } from '@tiptap/extension-table-cell';
 import { ComposerLink } from '../utils/editorLink.js';
 import { copyToClipboard } from '../utils/clipboard.js';
 import { resolveInitialFrom } from '../utils/defaultSender.js';
+import { threadCacheKey } from '../utils/threadKey.js';
 
 // Resize an image blob/file to max maxW pixels wide, preserving aspect ratio.
 // Returns a Promise<string> of a base64 data URL.
@@ -802,6 +803,7 @@ export default function ComposeModal() {
       // Send confirmed — clear the key so a subsequent send from a reused modal gets a fresh one.
       idempotencyKeyRef.current = null;
       const replyThreadId = isReply ? composeData?.threadId : null;
+      const replyAccountId = composeData?.accountId ?? null;
       closeCompose();
       if (draftUid != null && draftFolder != null && draftAccountId) {
         api.deleteDraft(draftAccountId, draftUid, draftFolder).catch(() => {});
@@ -828,8 +830,10 @@ export default function ComposeModal() {
       if (replyThreadId) {
         const refreshThread = async () => {
           try {
-            const data = await api.getThread(replyThreadId);
-            if (data.messages?.length) setThreadMessages(replyThreadId, data.messages);
+            const data = await api.getThread(replyThreadId, undefined, false, replyAccountId);
+            if (data.messages?.length) {
+              setThreadMessages(threadCacheKey({ account_id: replyAccountId, thread_id: replyThreadId }), data.messages);
+            }
           } catch { /* best-effort refresh */ }
         };
         setTimeout(refreshThread, 3000);

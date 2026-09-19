@@ -185,6 +185,24 @@ describe('listMessages — threaded mode', () => {
   });
 });
 
+describe('listMessages — threaded grouping is per mailbox', () => {
+  it('groups, counts and ranks threads by account and thread key', async () => {
+    query
+      .mockResolvedValueOnce({ rows: [{ id: 'acc-1', include_in_unified_inbox: true }, { id: 'acc-2', include_in_unified_inbox: true }] })
+      .mockResolvedValueOnce({ rows: [{ n: 2 }] })
+      .mockResolvedValueOnce({ rows: [] })
+      .mockResolvedValueOnce({ rows: [{ total: 0 }] });
+
+    await listMessages({ userId: 'user-1', threaded: 'true' });
+
+    const sql = query.mock.calls[2][0];
+    expect(sql).toMatch(/GROUP BY m\.account_id, m\.thread_key/);
+    expect(sql).toMatch(/PARTITION BY d\.account_id, d\.thread_id/);
+    expect(sql).toContain('(m.account_id, m.thread_key) IN (SELECT account_id, thread_id FROM paged_threads)');
+    expect(query.mock.calls[3][0]).toContain('COUNT(DISTINCT (m.account_id, m.thread_key))');
+  });
+});
+
 describe('listMessages — message shape', () => {
   it('selects delivery_addresses in the flat query', async () => {
     query

@@ -1,7 +1,7 @@
 import { publicFolderCounts } from '../services/folderStatus.js';
 import { Router } from 'express';
 import { query } from '../services/db.js';
-import { requireAuth } from '../middleware/auth.js';
+import { requireAuth, requireAdmin } from '../middleware/auth.js';
 import { imapManager } from '../index.js';
 import { providerProfile } from '../services/imapManager.js';
 import { encrypt } from '../services/encryption.js';
@@ -524,7 +524,10 @@ router.post('/:id/reindex', async (req, res) => {
 
 // ── Threading mode (PR C2) ──────────────────────────────────────────────────
 
-router.post('/:id/threading/preview', async (req, res) => {
+// Both threading routes are admin-only, per route: the router as a whole runs behind requireAuth,
+// but switching a shared mailbox's mode rewrites every stored row and the preview is a full-table
+// aggregate. Administrative and expensive, so they carry requireAdmin the way routes/ai.js does.
+router.post('/:id/threading/preview', requireAdmin, async (req, res) => {
   const { id } = req.params;
   const { mode } = req.body;
   if (!THREAD_MODES.has(mode)) return res.status(400).json({ error: 'Invalid mode' });
@@ -536,7 +539,7 @@ router.post('/:id/threading/preview', async (req, res) => {
   res.json(preview);
 });
 
-router.post('/:id/threading/mode', async (req, res) => {
+router.post('/:id/threading/mode', requireAdmin, async (req, res) => {
   const { id } = req.params;
   const { mode } = req.body;
   if (!THREAD_MODES.has(mode)) return res.status(400).json({ error: 'Invalid mode' });

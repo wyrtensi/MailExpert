@@ -7,6 +7,7 @@ vi.mock('../services/auditLog.js', () => ({ recordAudit: vi.fn(async () => {}) }
 vi.mock('../services/db.js', () => ({ query: vi.fn() }));
 vi.mock('../middleware/auth.js', () => ({
   requireAuth: (req, _res, next) => { req.session = { userId: 'u1' }; next(); },
+  requireAdmin: (_req, _res, next) => next(),
 }));
 vi.mock('../index.js', () => ({ imapManager: {} }));
 

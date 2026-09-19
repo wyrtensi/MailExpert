@@ -2,11 +2,17 @@ import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from 'vites
 
 vi.mock('../services/auditLog.js', () => ({ recordAudit: vi.fn(async () => {}) }));
 vi.mock('../services/db.js', () => ({ query: vi.fn() }));
+// Stands in for the real requireAdmin (which verifies against the users table on every call):
+// flip `session.isAdmin` to run a request as an ordinary signed-in user.
+const session = vi.hoisted(() => ({ isAdmin: true }));
 vi.mock('../middleware/auth.js', () => ({
   requireAuth: (req, _res, next) => {
     req.session = { userId: 'user-1' };
     next();
   },
+  requireAdmin: (_req, res, next) => (
+    session.isAdmin ? next() : res.status(403).json({ error: 'Admin access required' })
+  ),
 }));
 vi.mock('../index.js', () => ({
   imapManager: {
@@ -56,6 +62,7 @@ describe('POST /api/accounts/:id/threading', () => {
   afterAll(async () => { await new Promise(resolve => server.close(resolve)); });
   beforeEach(() => {
     vi.clearAllMocks();
+    session.isAdmin = true;
     query.mockReset();
     previewRecompute.mockReset();
     providerThreadIndexState.mockReset();
@@ -96,6 +103,16 @@ describe('POST /api/accounts/:id/threading', () => {
     it('is 400 for a malformed UUID', async () => {
       const res = await post(`${BAD_ID}/threading/preview`, { mode: 'rfc' });
       expect(res.status).toBe(400);
+    });
+
+    it('is 403 for a signed-in user who is not an admin', async () => {
+      session.isAdmin = false;
+
+      const res = await post(`${ID}/threading/preview`, { mode: 'rfc' });
+
+      expect(res.status).toBe(403);
+      expect(previewRecompute).not.toHaveBeenCalled();
+      expect(query).not.toHaveBeenCalled();
     });
   });
 
@@ -199,6 +216,17 @@ describe('POST /api/accounts/:id/threading', () => {
     it('is 400 for a malformed UUID', async () => {
       const res = await post(`${BAD_ID}/threading/mode`, { mode: 'rfc' });
       expect(res.status).toBe(400);
+    });
+
+    it('is 403 for a signed-in user who is not an admin', async () => {
+      session.isAdmin = false;
+
+      const res = await post(`${ID}/threading/mode`, { mode: 'rfc' });
+
+      expect(res.status).toBe(403);
+      expect(query).not.toHaveBeenCalled();
+      expect(recordAudit).not.toHaveBeenCalled();
+      expect(imapManager.startThreadRecompute).not.toHaveBeenCalled();
     });
 
     it('does not reconnect a disabled mailbox', async () => {

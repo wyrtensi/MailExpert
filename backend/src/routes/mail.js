@@ -66,8 +66,7 @@ async function runInBatches(items, concurrency, fn) {
 // Excluded on purpose:
 //   - id, synced_at        -> use their column defaults (a fresh UUID and timestamp), which
 //                             preserves the historical "row gets a new id on move" behavior.
-//   - normalized_subject,
-//     search_vector,
+//   - search_vector,
 //     thread_key           -> GENERATED ALWAYS columns; Postgres computes them, and inserting
 //                             an explicit value (even NULL) errors.
 //
@@ -1795,11 +1794,11 @@ router.post('/messages/bulk-archive', async (req, res) => {
 // message — its thread siblings keep \Inbox and the whole conversation stays in
 // the inbox (#271). MailExpert's own inbox is thread-grouped too. So we snooze the
 // entire conversation, but bounded to the RFC 5322 reply chain (Message-ID /
-// In-Reply-To / References links) rather than thread_id: new mail is no longer grouped
-// by subject, but rows synced before that change may still carry a subject-grouped
-// thread_id until a later recompute, and that can lump hundreds of unrelated messages
-// together (e.g. identical automated-notification emails), which must never be swept
-// into Snoozed.
+// In-Reply-To / References links) rather than thread_id: the reply chain is the
+// conversation the user actually means, and a mailbox in `gmail` mode groups
+// thread_id by Gmail's own provider thread number, which spans folders and can lump
+// hundreds of unrelated messages together (e.g. identical automated-notification
+// emails), which must never be swept into Snoozed.
 //
 // Returns the messages in `msg`'s source folder reachable from `msg` through
 // header links (always including `msg` itself); excludes already-snoozed messages.

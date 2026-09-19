@@ -4,6 +4,7 @@ vi.mock('../services/auditLog.js', () => ({ recordAudit: vi.fn(async () => {}) }
 vi.mock('../services/db.js', () => ({ query: vi.fn() }));
 vi.mock('../middleware/auth.js', () => ({
   requireAuth: (req, _res, next) => { req.session = { userId: 'user-2' }; next(); },
+  requireAdmin: (_req, _res, next) => next(),
 }));
 vi.mock('../index.js', () => ({
   imapManager: {
@@ -12,6 +13,7 @@ vi.mock('../index.js', () => ({
     connectAccount: vi.fn(() => Promise.resolve(true)),
     disconnectAccount: vi.fn(() => Promise.resolve()),
     providerIdBackfillStates: vi.fn(async () => new Map()),
+    threadRecomputeStates: vi.fn(async () => new Map()),
   },
 }));
 vi.mock('../services/encryption.js', () => ({ encrypt: vi.fn((v) => (v ? `enc:${v}` : v)), decrypt: vi.fn() }));

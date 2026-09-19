@@ -7,8 +7,14 @@ vi.mock('../middleware/auth.js', () => ({
     req.session = { userId: 'user-1' };
     next();
   },
+  requireAdmin: (_req, _res, next) => next(),
 }));
-vi.mock('../index.js', () => ({ imapManager: { providerIdBackfillStates: vi.fn(async () => new Map()) } }));
+vi.mock('../index.js', () => ({
+  imapManager: {
+    providerIdBackfillStates: vi.fn(async () => new Map()),
+    threadRecomputeStates: vi.fn(async () => new Map()),
+  },
+}));
 vi.mock('../plugins/registry.js', () => ({ pluginRegistry: { collectHook: vi.fn(async () => []) } }));
 
 import express from 'express';
@@ -18,7 +24,7 @@ import { query } from '../services/db.js';
 const ROW = {
   id: 'a1', name: 'Mailbox', email_address: 'box@gmail.com', protocol: 'imap',
   oauth_provider: 'google', oauth_reconnect_required: false, enabled: true,
-  sync_error: null, signature: null,
+  sync_error: null, signature: null, thread_mode: 'rfc',
 };
 
 describe('GET /api/accounts health', () => {
@@ -63,7 +69,7 @@ describe('GET /api/accounts health', () => {
   it('adds only the health code and keeps sync_error as the sole error text', async () => {
     const row = { ...ROW, last_sync: new Date(), sync_error: 'Connection refused' };
     const [account] = await list([row]);
-    expect(Object.keys(account).sort()).toEqual([...Object.keys(row), 'aliases', 'health', 'provider_ids_backfill'].sort());
+    expect(Object.keys(account).sort()).toEqual([...Object.keys(row), 'aliases', 'health', 'provider_ids_backfill', 'thread_recompute'].sort());
     expect(account.sync_error).toBe('Connection refused');
     expect(account.health).toBe('failed');
   });

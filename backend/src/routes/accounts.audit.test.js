@@ -3,6 +3,7 @@ import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from 'vites
 vi.mock('../services/db.js', () => ({ query: vi.fn() }));
 vi.mock('../middleware/auth.js', () => ({
   requireAuth: (req, _res, next) => { req.session = { userId: 'user-2' }; next(); },
+  requireAdmin: (_req, _res, next) => next(),
 }));
 vi.mock('../index.js', () => ({
   imapManager: {

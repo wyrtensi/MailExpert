@@ -1,8 +1,9 @@
 import { publicFolderCounts } from '../services/folderStatus.js';
 import { Router } from 'express';
 import { query } from '../services/db.js';
-import { requireAuth } from '../middleware/auth.js';
+import { requireAuth, requireAdmin } from '../middleware/auth.js';
 import { imapManager } from '../index.js';
+import { providerProfile } from '../services/imapManager.js';
 import { encrypt } from '../services/encryption.js';
 import { sanitizeSignature } from '../services/emailSanitizer.js';
 import { validateHost } from '../services/hostValidation.js';
@@ -12,6 +13,11 @@ import { pluginRegistry } from '../plugins/registry.js';
 import { recordAudit } from '../services/auditLog.js';
 import { createKeyedSerializer } from '../utils/keyedSerializer.js';
 import { uuidParam } from '../utils/uuid.js';
+import { THREAD_MODE_GMAIL, THREAD_MODE_RFC } from '../services/threading/threadId.js';
+import { previewRecompute } from '../services/threading/recompute.js';
+import { providerThreadIndexState } from '../services/threading/providerThreadIndex.js';
+
+const THREAD_MODES = new Set([THREAD_MODE_RFC, THREAD_MODE_GMAIL]);
 
 // Serialize an account's reconnect triggers so a rapid settings change (e.g. a
 // gtd_enabled double-toggle) can't fire two overlapping disconnect→connect chains —
@@ -56,7 +62,7 @@ const SAFE_FIELDS = [
   'auth_user', 'smtp_auth_user', 'oauth_provider', 'oauth_reconnect_required', 'enabled',
   'include_in_unified_inbox',
   'last_sync', 'sync_error', 'sort_order', 'folder_mappings',
-  'signature', 'created_at', 'categorization_enabled',
+  'signature', 'created_at', 'categorization_enabled', 'thread_mode',
 ];
 function safeAccount(row) {
   const obj = Object.fromEntries(SAFE_FIELDS.map(k => [k, row[k]]));
@@ -71,7 +77,7 @@ router.get('/', async (req, res) => {
             smtp_host, smtp_port, smtp_tls, auth_user, smtp_auth_user, oauth_provider, oauth_reconnect_required, enabled,
             include_in_unified_inbox,
             last_sync, sync_error, sort_order, folder_mappings, signature, created_at,
-            categorization_enabled
+            categorization_enabled, thread_mode
      FROM email_accounts
      ORDER BY sort_order, created_at`
   );
@@ -93,6 +99,9 @@ router.get('/', async (req, res) => {
 
   // Gmail id backfill state (threading/providerIdBackfill.js); absent for other providers.
   const providerIdStates = await imapManager.providerIdBackfillStates(result.rows);
+  // Thread recompute progress (services/threading/recompute.js); applies to every mailbox, not
+  // just Gmail ones, since the rfc target is also a legitimate switch for a non-Gmail mailbox.
+  const recomputeStates = await imapManager.threadRecomputeStates(result.rows);
 
   // One clock for the whole list so every account's stale check uses the same instant.
   const now = Date.now();
@@ -108,6 +117,7 @@ router.get('/', async (req, res) => {
       // Stable code only (see services/accountHealth.js); sync_error stays the sole error text.
       health: computeAccountHealth(a, now),
       provider_ids_backfill: providerIdStates.get(a.id) ?? null,
+      thread_recompute: recomputeStates.get(a.id) ?? null,
       aliases: (aliasMap[a.id] || []).map(alias => ({
         ...alias,
         signature: alias.signature ? sanitizeSignature(alias.signature) : alias.signature,
@@ -510,6 +520,85 @@ router.post('/:id/reindex', async (req, res) => {
     console.error('POST /accounts/:id/reindex error:', err.message);
     res.status(500).json({ error: 'Failed to start reindex' });
   }
+});
+
+// ── Threading mode (PR C2) ──────────────────────────────────────────────────
+
+// Both threading routes are admin-only, per route: the router as a whole runs behind requireAuth,
+// but switching a shared mailbox's mode rewrites every stored row and the preview is a full-table
+// aggregate. Administrative and expensive, so they carry requireAdmin the way routes/ai.js does.
+router.post('/:id/threading/preview', requireAdmin, async (req, res) => {
+  const { id } = req.params;
+  const { mode } = req.body;
+  if (!THREAD_MODES.has(mode)) return res.status(400).json({ error: 'Invalid mode' });
+
+  const check = await query('SELECT id FROM email_accounts WHERE id = $1', [id]);
+  if (!check.rows.length) return res.status(404).json({ error: 'Account not found' });
+
+  const preview = await previewRecompute(query, id, mode);
+  res.json(preview);
+});
+
+router.post('/:id/threading/mode', requireAdmin, async (req, res) => {
+  const { id } = req.params;
+  const { mode } = req.body;
+  if (!THREAD_MODES.has(mode)) return res.status(400).json({ error: 'Invalid mode' });
+
+  const result = await query('SELECT * FROM email_accounts WHERE id = $1', [id]);
+  if (!result.rows.length) return res.status(404).json({ error: 'Account not found' });
+  const row = result.rows[0];
+  const from = row.thread_mode;
+
+  // Switching to gmail needs the mailbox's provider ids in place; rfc is always allowed — it is
+  // the rollback, and it also splits threads the old subject grouping merged, even for a mailbox
+  // that was never in gmail mode.
+  if (mode === THREAD_MODE_GMAIL) {
+    if (!providerProfile(row).gmailThreadIds) {
+      return res.status(409).json({ error: 'threading_switch_blocked', reason: 'not_gmail' });
+    }
+    const indexState = await providerThreadIndexState(query);
+    if (indexState !== 'valid') {
+      return res.status(409).json({ error: 'threading_switch_blocked', reason: 'index_invalid' });
+    }
+    const missing = await query(
+      `SELECT count(*)::bigint AS missing FROM messages
+        WHERE account_id = $1 AND is_deleted = false AND provider_thread_id IS NULL`,
+      [id]
+    );
+    const missingCount = Number(missing.rows[0].missing);
+    if (missingCount > 0) {
+      return res.status(409).json({ error: 'threading_switch_blocked', reason: 'ids_missing', count: missingCount });
+    }
+  }
+
+  await query('UPDATE email_accounts SET thread_mode = $1 WHERE id = $2', [mode, id]);
+  recordAudit({
+    actorUserId: req.session.userId,
+    accountId: id,
+    action: 'mailbox.threading_changed',
+    details: { from, to: mode },
+  });
+
+  // The engine holds the mailbox row in memory, so the new mode only takes effect once it
+  // reconnects — same reconnect chain the settings PATCH uses, guarded the same way (only a
+  // connected-or-connectable mailbox needs it; a disabled or non-IMAP one has nothing to reconnect).
+  if (row.protocol === 'imap' && row.enabled) {
+    reconnectQueue(id, () =>
+      imapManager.disconnectAccount(id)
+        .then(() => query('SELECT * FROM email_accounts WHERE id = $1', [id]))
+        .then(r => {
+          if (!r.rows.length) return;
+          imapManager.clearConnectCooldown(id);
+          return imapManager.connectAccount(r.rows[0]);
+        })
+    ).catch(err => console.error(`Failed to reconnect account ${id} after threading mode change:`, err.message));
+  }
+
+  // New mail arriving during the pass already threads under the new mode; the pass rekeys what's
+  // already stored. Not awaited — this can run for a while on a large mailbox.
+  imapManager.startThreadRecompute(row, mode);
+
+  res.json({ ok: true, mode });
 });
 
 export default router;

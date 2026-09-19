@@ -53,6 +53,27 @@ describe('computeThreading — RFC branch', () => {
       .toEqual({ threadId: `${GMAIL_KEY_PREFIX}17`, reason: 'rfc-ancestor' });
   });
 
+  it('drops its own Message-ID from the candidates, so a self-referencing header starts a thread', async () => {
+    // Same guard the recompute applies (threadingForRow): without it the live sync would key this
+    // row provisionally on itself while a pass keys it as a root, and the two never agree.
+    expect(await computeThreading('a1', '<self@example.com>', null, '<self@example.com>'))
+      .toEqual({ threadId: '<self@example.com>', reason: 'new-root' });
+    expect(query).not.toHaveBeenCalled();
+  });
+
+  it('drops in_reply_to when it equals its own Message-ID', async () => {
+    expect(await computeThreading('a1', '<self@example.com>', '<self@example.com>', null))
+      .toEqual({ threadId: '<self@example.com>', reason: 'new-root' });
+    expect(query).not.toHaveBeenCalled();
+  });
+
+  it('keeps the real ancestors of a self-referencing header', async () => {
+    query.mockResolvedValue({ rows: [{ message_id: '<root@example.com>', thread_id: '<root@example.com>' }] });
+    expect(await computeThreading('a1', '<self@example.com>', null, '<root@example.com> <self@example.com>'))
+      .toEqual({ threadId: '<root@example.com>', reason: 'rfc-root' });
+    expect(query.mock.calls[0][1][1]).toEqual(['<root@example.com>']);
+  });
+
   it('uses the referenced root provisionally when no ancestor is stored', async () => {
     expect(await computeThreading('a1', '<new@example.com>', '<mid@example.com>', '<root@example.com> <mid@example.com>'))
       .toEqual({ threadId: '<root@example.com>', reason: 'rfc-provisional' });

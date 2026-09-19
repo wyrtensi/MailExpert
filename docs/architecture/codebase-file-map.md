@@ -100,7 +100,7 @@ Frontend не ходит к Gmail напрямую. Он обращается к
 - `inboxRules.js` и `ruleForwarder.js` — применение правил и forwarding.
 - `labels.js`, `labelsRead.js` — label/folder metadata.
 - `unifiedInbox.js` — выбор аккаунтов для общей ленты; в нашем MVP все Gmail получают opt-out.
-- `threading/` — цепочки писем: `threadId.js` вычисляет ключ цепочки и причину (`computeThreading`: номер Gmail в режиме `gmail`, иначе цепочка `References`/`In-Reply-To`, без склейки по теме), `providerIds.js` читает `X-GM-THRID`/`X-GM-MSGID` из ответа imapflow, `providerIdBackfill.js` догружает эти номера для уже сохранённых писем и в режиме `gmail` переключает их ключ, `providerIdBackfillStore.js` хранит прогресс догрузки, `providerThreadIndex.js` проверяет, что индекс по номеру цепочки валиден.
+- `threading/` — цепочки писем: `threadId.js` вычисляет ключ цепочки и причину (`computeThreading`: номер Gmail в режиме `gmail`, иначе цепочка `References`/`In-Reply-To`, без склейки по теме), `providerIds.js` читает `X-GM-THRID`/`X-GM-MSGID` из ответа imapflow, `providerIdBackfill.js` догружает эти номера для уже сохранённых писем и в режиме `gmail` переключает их ключ, `providerIdBackfillStore.js` хранит прогресс догрузки, `providerThreadIndex.js` проверяет, что индекс по номеру цепочки валиден, `recompute.js` пересчитывает `thread_id` всех писем ящика заново после смены режима пачками, разбирая старые склейки по теме, `recomputeStore.js` хранит прогресс и курсор этого пересчёта (см. миграцию 0064).
 
 ### Безопасность и инфраструктура backend
 

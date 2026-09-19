@@ -22,12 +22,14 @@ import { resolveForConnection, createPinnedLookup } from './hostValidation.js';
 import { getConnectionPolicy } from './connectionPolicy.js';
 import { applyInboxRules, applyBlockList } from './inboxRules.js';
 import { generateVCard } from '../utils/vcard.js';
-import { GMAIL_KEY_PREFIX, THREAD_MODE_GMAIL, computeThreading } from './threading/threadId.js';
+import { GMAIL_KEY_PREFIX, THREAD_MODE_GMAIL, THREAD_MODE_RFC, computeThreading } from './threading/threadId.js';
 import { gmailProviderIds, NO_PROVIDER_IDS } from './threading/providerIds.js';
 import { runProviderIdBackfill } from './threading/providerIdBackfill.js';
 import {
   loadProviderIdBackfill, markProviderIdBackfillPending, providerIdBackfillState, recordProviderIdBackfillError,
 } from './threading/providerIdBackfillStore.js';
+import { runRecompute, RECOMPUTE_BATCH_DELAY_MS } from './threading/recompute.js';
+import { loadRecompute, recomputeState, recordRecomputeError } from './threading/recomputeStore.js';
 import { randomUUID } from 'crypto';
 
 
@@ -1685,6 +1687,7 @@ export class ImapManager {
     this._providerIdGeneration = new Map(); // accountId -> bumped by every local write that needs ids
     this._providerIdNudges = new Map(); // accountId -> pending timeout after a local write
     this.providerIdBackoff = new Map(); // accountId -> { failures, until } after a failed or incomplete run
+    this.threadRecomputeRunning = new Set(); // accountId — thread key recompute in progress
     // Cap concurrent background IMAP connections (backfill, snippet indexer, folder status, bulk
     // flags) per provider host; a provider profile may set a tighter host limit.
     this._bgConnSem = createKeyedSemaphore(host => backgroundConnectionLimit(host));
@@ -2320,6 +2323,12 @@ export class ImapManager {
           console.warn(`Provider id backfill failed to start for ${logAccount(account)}:`, err.message)
         );
       }
+
+      // Outside the branch above: a thread recompute needs no IMAP connection, so it runs
+      // alongside a backfill, and a mailbox that backfills on connect can have a stopped pass too.
+      this._resumeThreadRecompute(account).catch(err =>
+        console.warn(`Thread recompute failed to resume for ${logAccount(account)}:`, err.message)
+      );
 
       this._startSyncInterval(account, this.syncIntervalMs);
       // Arm any plugin-declared background sync ticks whose isActive gate accepts this account
@@ -4842,7 +4851,8 @@ export class ImapManager {
           const extraDelay = quietFor < QUIET_WINDOW_MS ? QUIET_WINDOW_MS - quietFor : 0;
           await new Promise(resolve => setTimeout(resolve, cfg.batchDelay + extraDelay));
         },
-        threadMode: account.thread_mode,
+        // No thread mode is passed: the run re-reads it per batch, so a rollback to rfc during a
+        // long fill is seen instead of the mode this account object was captured with.
       });
       if (result.outcome === 'done') {
         this.providerIdBackoff.delete(account.id);
@@ -4907,6 +4917,109 @@ export class ImapManager {
   async _broadcastProviderIdBackfill(account) {
     const state = (await this.providerIdBackfillStates([account])).get(account.id);
     if (state) this.broadcast({ type: 'provider_ids_backfill', accountId: account.id, state });
+  }
+
+  // Recomputes a mailbox's stored thread keys after its threading mode changed (admin-triggered,
+  // see routes/accounts.js). No IMAP connection is needed, so this never touches _bgConnSem; it
+  // paces itself with RECOMPUTE_BATCH_DELAY_MS plus the same quiet-window backoff the other
+  // background jobs use. runRecompute itself saves progress to the thread_recompute row before
+  // each onProgress call, so the broadcast can read that row straight back rather than tracking
+  // progress separately in memory.
+  async startThreadRecompute(account, targetMode) {
+    if (this.threadRecomputeRunning.has(account.id)) return;
+    this.threadRecomputeRunning.add(account.id);
+    let outcome = null;
+    let failed = false;
+    try {
+      const result = await runRecompute({
+        query,
+        accountId: account.id,
+        targetMode,
+        shouldContinue: async () => {
+          const row = (await query('SELECT enabled, thread_mode FROM email_accounts WHERE id = $1', [account.id])).rows[0];
+          if (!row?.enabled) return false;
+          // The admin switched the mode again while this pass was walking the mailbox: every key
+          // it writes from here on is already stale, so it stops without a finish mark and the
+          // finally below dispatches a pass for the mode the mailbox has now.
+          return (row.thread_mode || THREAD_MODE_RFC) === targetMode;
+        },
+        onProgress: () => {
+          this._broadcastThreadRecompute(account).catch(() => {});
+        },
+        pause: async () => {
+          const quietFor = Date.now() - (this.lastUserActivity.get(account.id) || 0);
+          const extraDelay = quietFor < QUIET_WINDOW_MS ? QUIET_WINDOW_MS - quietFor : 0;
+          await new Promise(resolve => setTimeout(resolve, RECOMPUTE_BATCH_DELAY_MS + extraDelay));
+        },
+      });
+      outcome = result?.outcome ?? null;
+    } catch (err) {
+      failed = true;
+      console.warn(`Thread recompute failed for ${logAccount(account)}: ${err.message}`);
+      await recordRecomputeError(query, account.id, err.message).catch(() => {});
+    } finally {
+      this.threadRecomputeRunning.delete(account.id);
+      this._broadcastThreadRecompute(account).catch(() => {});
+      // A pass that ran for a mode the mailbox no longer has left the keys of the losing mode
+      // behind, whether it stopped early or ran to the end: dispatch one for the current mode.
+      // This terminates: the new pass targets the mode the mailbox has right now, so it can only
+      // dispatch another if the admin switches the mode again — the chain is as long as the
+      // admin's own toggles, never longer. A pass that failed is not re-dispatched: its error is
+      // what the panel shows, and the admin retries it (a failing pass restarted here would spin).
+      if (!failed) await this._redispatchThreadRecompute(account, targetMode, outcome);
+    }
+  }
+
+  // Starts a pass for the mailbox's current mode when the pass that just ended was for another
+  // one. `outcome` is kept for the log line: a stopped pass and a finished-but-stale one are both
+  // continued here, they only read differently in the logs.
+  async _redispatchThreadRecompute(account, targetMode, outcome) {
+    try {
+      const row = (await query('SELECT * FROM email_accounts WHERE id = $1', [account.id])).rows[0];
+      if (!row?.enabled) return; // a disabled or deleted mailbox is picked up again on connect
+      const mode = row.thread_mode || THREAD_MODE_RFC;
+      if (mode === targetMode) return;
+      logger.debug(`Thread recompute ${outcome ?? 'failed'} for ${targetMode} on ${logAccount(account)}; starting one for ${mode}`);
+      await this.startThreadRecompute(row, mode);
+    } catch (err) {
+      console.warn(`Could not start the follow-up thread recompute for ${logAccount(account)}:`, err.message);
+    }
+  }
+
+  // Continues a pass that stopped (a restart, a crash, a mailbox that was disabled) and starts one
+  // for a mailbox whose last pass ran for a mode it no longer has. Called from the connect path —
+  // the mode switch is the only other trigger, so without this the mailbox would keep half of its
+  // keys in the old mode forever. A pass that failed is left alone: its error stays on the panel
+  // until an admin retries it, rather than being retried on every reconnect.
+  async _resumeThreadRecompute(account) {
+    const row = await loadRecompute(query, account.id);
+    if (!row || row.error) return;
+    const mode = account.thread_mode || THREAD_MODE_RFC;
+    if (row.finished_at && row.target_mode === mode) return;
+    await this.startThreadRecompute(account, mode);
+  }
+
+  // Admin state of the thread recompute for `accounts`.
+  async threadRecomputeStates(accounts) {
+    const states = new Map();
+    if (!accounts.length) return states;
+    const { rows } = await query(
+      'SELECT account_id, processed, changed, total, finished_at, error FROM thread_recompute WHERE account_id = ANY($1)',
+      [accounts.map(account => account.id)],
+    );
+    const byAccount = new Map(rows.map(row => [row.account_id, row]));
+    for (const account of accounts) {
+      states.set(account.id, recomputeState({
+        row: byAccount.get(account.id) || null,
+        running: this.threadRecomputeRunning.has(account.id),
+      }));
+    }
+    return states;
+  }
+
+  async _broadcastThreadRecompute(account) {
+    const state = (await this.threadRecomputeStates([account])).get(account.id);
+    if (state) this.broadcast({ type: 'thread_recompute', accountId: account.id, state });
   }
 
   // A row the app wrote itself after an APPEND has no Gmail ids, and the sync never refetches its

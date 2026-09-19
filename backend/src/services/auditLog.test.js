@@ -18,7 +18,7 @@ describe('recordAudit', () => {
   it('lists every action of the spec', () => {
     expect(AUDIT_ACTIONS).toEqual([
       'mailbox.added', 'mailbox.reconnected', 'mailbox.deleted', 'mailbox.connection_changed',
-      'mailbox.enabled', 'mailbox.disabled', 'message.sent', 'message.deleted',
+      'mailbox.enabled', 'mailbox.disabled', 'mailbox.threading_changed', 'message.sent', 'message.deleted',
       'user.added', 'user.deleted', 'user.enabled', 'user.disabled', 'user.admin_changed',
       'access.sync_aborted',
     ]);

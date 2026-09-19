@@ -7,10 +7,13 @@ const THREAD = '1700000000000000001';
 const gm = (uid, over = {}) => ({ uid, threadId: THREAD, emailId: String(1800000000000000000n + BigInt(uid)), ...over });
 
 // An in-memory stand-in for the SQL this module issues. Each branch mirrors one statement.
-function fakeDb({ folders, messages, state = null }) {
-  const db = { state, messages, updates: [], finished: 0, finishedWith: [] };
+function fakeDb({ folders, messages, state = null, threadMode = 'rfc' }) {
+  const db = { state, messages, updates: [], finished: 0, finishedWith: [], threadMode };
+  // The mailbox's live mode, re-read per batch by the runner; a test flips db.threadMode
+  // mid-run to stand for an admin rolling the mailbox back while the fill is walking it.
   const query = vi.fn(async (sql, params = []) => {
     if (/FROM provider_id_backfill/.test(sql)) return { rows: db.state ? [db.state] : [] };
+    if (/thread_mode FROM email_accounts/.test(sql)) return { rows: [{ thread_mode: db.threadMode }] };
     if (/FROM folders/.test(sql)) return { rows: folders };
     if (/AS remaining/.test(sql)) {
       const cursors = JSON.parse(params[1]);
@@ -354,14 +357,27 @@ describe('runProviderIdBackfill', () => {
   });
 
   it('rekeys the rows it fills when the mailbox is in gmail mode', async () => {
-    const db = fakeDb({ folders: FOLDERS, messages: [row('INBOX', 1), row('INBOX', 2)] });
+    const db = fakeDb({ folders: FOLDERS, messages: [row('INBOX', 1), row('INBOX', 2)], threadMode: 'gmail' });
     const client = fakeClient({ INBOX: [gm(1), gm(2, { threadId: undefined })] });
 
-    await run(db, client, { threadMode: 'gmail' });
+    await run(db, client);
 
     expect(db.db.messages.map(m => [m.uid, m.thread_id, m.threading_reason])).toEqual([
       [1, 'gmail:1700000000000000001', 'gmail-thrid'],
       [2, undefined, undefined], // no Gmail thread number: the row keeps its RFC key
+    ]);
+  });
+
+  it('stops rekeying as soon as the mailbox is rolled back to rfc mid-run', async () => {
+    const db = fakeDb({ folders: FOLDERS, messages: [row('INBOX', 1), row('[Gmail]/Sent Mail', 2)], threadMode: 'gmail' });
+    const client = fakeClient({ INBOX: [gm(1)], '[Gmail]/Sent Mail': [gm(2)] });
+
+    // The admin rolled the mailbox back between the two batches.
+    await run(db, client, { pause: async () => { db.db.threadMode = 'rfc'; } });
+
+    expect(db.db.messages.map(m => [m.uid, m.thread_id])).toEqual([
+      [1, 'gmail:1700000000000000001'],
+      [2, undefined], // filled with its Gmail ids, but keyed by the rfc chain the mailbox is on
     ]);
   });
 

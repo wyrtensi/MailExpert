@@ -253,6 +253,11 @@ export function useWebSocket(enabled = true) {
         break;
       }
 
+      case 'thread_recompute': {
+        updateAccount(data.accountId, { thread_recompute: data.state });
+        break;
+      }
+
       case 'folder_updated': {
         // Emitted by move/archive/delete routes after messages leave one folder and land in
         // another. The event names ONE folder (usually the move destination), but the change

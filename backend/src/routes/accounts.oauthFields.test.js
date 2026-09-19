@@ -7,8 +7,14 @@ vi.mock('../middleware/auth.js', () => ({
     req.session = { userId: 'user-1' };
     next();
   },
+  requireAdmin: (_req, _res, next) => next(),
 }));
-vi.mock('../index.js', () => ({ imapManager: { providerIdBackfillStates: vi.fn(async () => new Map()) } }));
+vi.mock('../index.js', () => ({
+  imapManager: {
+    providerIdBackfillStates: vi.fn(async () => new Map()),
+    threadRecomputeStates: vi.fn(async () => new Map()),
+  },
+}));
 vi.mock('../plugins/registry.js', () => ({ pluginRegistry: { collectHook: vi.fn(async () => []) } }));
 
 import express from 'express';

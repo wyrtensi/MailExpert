@@ -4,7 +4,7 @@ import { query } from './db.js';
 // itself. Mail sync and inbox rules never write here.
 export const AUDIT_ACTIONS = Object.freeze([
   'mailbox.added', 'mailbox.reconnected', 'mailbox.deleted', 'mailbox.connection_changed',
-  'mailbox.enabled', 'mailbox.disabled', 'message.sent', 'message.deleted',
+  'mailbox.enabled', 'mailbox.disabled', 'mailbox.threading_changed', 'message.sent', 'message.deleted',
   'user.added', 'user.deleted', 'user.enabled', 'user.disabled', 'user.admin_changed',
   'access.sync_aborted',
 ]);

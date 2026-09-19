@@ -45,6 +45,7 @@ import { folderParentLabel } from '../utils/folderDisplay.js';
 import { accountLabel } from '../utils/accountLabel.js';
 import { LANGUAGES } from '../utils/language.js';
 import { providerIdsBackfillText } from '../utils/providerIdsBackfill.js';
+import { threadModeLabel, threadModeOf, threadRecomputeText, threadSwitchTarget } from '../utils/threadMode.js';
 
 // ─── Shared field component ───────────────────────────────────────────────────
 function Field({ label, required, children }) {
@@ -460,9 +461,28 @@ function AccountForm({ initial, onSave, onCancel }) {
 }
 
 // ─── Accounts Tab ─────────────────────────────────────────────────────────────
+const threadingBtnStyle = {
+  padding: '2px 8px', fontSize: 11, borderRadius: 5,
+  border: '1px solid var(--border-subtle)', background: 'var(--bg-elevated)',
+  color: 'var(--text-secondary)', cursor: 'pointer',
+};
+
+// Maps a refused switch's reason (POST .../threading/mode, 409 threading_switch_blocked) to its
+// message. Unknown reasons fall back to the raw error message rather than showing nothing. Each
+// key is a literal t() call (not built from a template) so the i18n "unused keys" scan finds it.
+function threadingBlockedMessage(err, t) {
+  switch (err.reason) {
+    case 'not_gmail': return t('admin.accounts.threading.blockedNotGmail');
+    case 'index_invalid': return t('admin.accounts.threading.blockedIndex');
+    case 'ids_missing': return t('admin.accounts.threading.blockedIds', { count: err.count });
+    default: return err.message;
+  }
+}
+
 function AccountsTab() {
   const { t } = useTranslation();
-  const { accounts, setAccounts, updateAccount, setUnreadCounts, addNotification, backfillProgress } = useStore();
+  const { accounts, setAccounts, updateAccount, setUnreadCounts, addNotification, backfillProgress, user } = useStore();
+  const isAdmin = !!user?.isAdmin;
   const [subview, setSubview] = useState('list'); // 'list' | 'add' | 'edit' | 'folders' | 'aliases'
   const [editTarget, setEditTarget] = useState(null);
   const [folderMappings, setFolderMappings] = useState({});
@@ -528,6 +548,67 @@ function AccountsTab() {
       addNotification({ type: 'error', title: t('admin.accounts.reindexError'), body: err.message });
     }
   };
+
+  const formatThreadingPreview = (preview) => t('admin.accounts.threading.previewResult', {
+    changing: preview.changing,
+    rows: preview.rows,
+    subjectOnly: preview.subjectOnly,
+    threadsNow: preview.threadsNow,
+    // threadsAfter is null for the rfc target (not predictable without the per-row walk).
+    threadsAfter: preview.threadsAfter ?? '—',
+  });
+
+  // The preview follows the action the admin is about to take: the switch target when a switch is
+  // offered at all, else the mailbox's own mode — which is what the Recompute action posts.
+  const handlePreviewThreading = async (account) => {
+    const targetMode = threadSwitchTarget(account) ?? threadModeOf(account);
+    try {
+      const preview = await api.previewThreading(account.id, targetMode);
+      addNotification({ title: t('admin.accounts.threading.title'), body: formatThreadingPreview(preview) });
+    } catch (err) {
+      addNotification({ type: 'error', title: t('admin.accounts.threading.title'), body: err.message });
+    }
+  };
+
+  // Both actions post to the same endpoint: a switch names the other mode, a recompute names the
+  // mailbox's current one (which rekeys every row in place — the way threads glued by the old
+  // subject grouping are split, and the retry after a failed pass).
+  const confirmThreadingMode = async (account, targetMode, confirmLabel) => {
+    let preview;
+    try {
+      preview = await api.previewThreading(account.id, targetMode);
+    } catch (err) {
+      addNotification({ type: 'error', title: t('admin.accounts.threading.title'), body: err.message });
+      return;
+    }
+    setConfirmDialog({
+      title: t('admin.accounts.threading.title'),
+      message: formatThreadingPreview(preview),
+      confirmLabel,
+      onConfirm: async () => {
+        try {
+          const result = await api.setThreadingMode(account.id, targetMode);
+          updateAccount(account.id, { thread_mode: result.mode });
+        } catch (err) {
+          // A refused switch (409 threading_switch_blocked) leaves the mailbox untouched — surface
+          // the specific reason rather than the raw machine-readable error code, and keep the
+          // dialog open (ConfirmOverlay shows the thrown message and does not close on failure).
+          throw new Error(threadingBlockedMessage(err, t), { cause: err });
+        }
+      },
+    });
+  };
+
+  const handleSwitchThreading = (account) => {
+    const targetMode = threadSwitchTarget(account);
+    if (!targetMode) return;
+    return confirmThreadingMode(account, targetMode, targetMode === 'gmail'
+      ? t('admin.accounts.threading.switchToGmail')
+      : t('admin.accounts.threading.switchToRfc'));
+  };
+
+  const handleRecomputeThreading = (account) =>
+    confirmThreadingMode(account, threadModeOf(account), t('admin.accounts.threading.recompute'));
 
   const handleSyncFolders = async (id) => {
     try {
@@ -1082,6 +1163,37 @@ function AccountsTab() {
                 color: account.provider_ids_backfill.status === 'error' ? 'var(--red)' : 'var(--text-tertiary)',
               }}>
                 {providerIdsBackfillText(account.provider_ids_backfill, t)}
+              </div>
+            )}
+            <div style={{ fontSize: 11, display: 'flex', alignItems: 'center', gap: 6 }}>
+              <span style={{ color: 'var(--text-tertiary)' }}>{t('admin.accounts.threading.title')} </span>
+              <span style={{ color: 'var(--text-secondary)' }}>{threadModeLabel(account, t)}</span>
+              {isAdmin && (
+                <>
+                  <button onClick={() => handlePreviewThreading(account)} style={threadingBtnStyle}>
+                    {t('admin.accounts.threading.preview')}
+                  </button>
+                  <button onClick={() => handleRecomputeThreading(account)} style={threadingBtnStyle}>
+                    {t('admin.accounts.threading.recompute')}
+                  </button>
+                  {/* Offered only when the backend would accept it: a non-Gmail mailbox is never
+                      invited to switch to gmail, which it would refuse with 409 not_gmail. */}
+                  {threadSwitchTarget(account) && (
+                    <button onClick={() => handleSwitchThreading(account)} style={threadingBtnStyle}>
+                      {threadSwitchTarget(account) === 'rfc'
+                        ? t('admin.accounts.threading.switchToRfc')
+                        : t('admin.accounts.threading.switchToGmail')}
+                    </button>
+                  )}
+                </>
+              )}
+            </div>
+            {threadRecomputeText(account.thread_recompute, t) && (
+              <div style={{
+                fontSize: 11,
+                color: account.thread_recompute?.status === 'error' ? 'var(--red)' : 'var(--text-tertiary)',
+              }}>
+                {threadRecomputeText(account.thread_recompute, t)}
               </div>
             )}
             {backfillProgress[account.id] && (

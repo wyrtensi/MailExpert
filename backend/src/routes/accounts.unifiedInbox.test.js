@@ -7,6 +7,7 @@ vi.mock('../middleware/auth.js', () => ({
     req.session = { userId: 'user-1' };
     next();
   },
+  requireAdmin: (_req, _res, next) => next(),
 }));
 vi.mock('../index.js', () => ({ imapManager: {} }));
 vi.mock('../services/connectionPolicy.js', () => ({

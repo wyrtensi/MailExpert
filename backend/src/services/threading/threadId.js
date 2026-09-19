@@ -10,6 +10,19 @@ export function parseReferences(refHeader) {
 // keys them by the RFC 5322 References chain inside one mailbox.
 export const GMAIL_KEY_PREFIX = 'gmail:';
 export const THREAD_MODE_GMAIL = 'gmail';
+// The default mode, and what an empty thread_mode column reads as.
+export const THREAD_MODE_RFC = 'rfc';
+
+// The Message-IDs a message may thread under, in RFC 5322 order (References first, then
+// In-Reply-To when it adds something). A message's own Message-ID is never a candidate: a
+// malformed header that echoes the message itself must not let it resolve to, or through, its own
+// entry. Shared with the recompute (services/threading/recompute.js) so a pass and the live sync
+// derive the same chain — dropping it on one side only made the two disagree forever.
+export function ancestorCandidates(messageId, inReplyTo, references) {
+  const candidates = parseReferences(references).filter(id => id !== messageId);
+  if (inReplyTo && inReplyTo !== messageId && !candidates.includes(inReplyTo)) candidates.push(inReplyTo);
+  return candidates;
+}
 
 // Thread key and the reason it was chosen, for one incoming message. The Gmail branch needs both
 // the mailbox mode and a Gmail thread number: a mailbox switched to gmail mode still receives
@@ -22,8 +35,7 @@ export async function computeThreading(accountId, messageId, inReplyTo, referenc
   }
   if (!messageId) return { threadId: null, reason: null };
 
-  const candidates = parseReferences(references);
-  if (inReplyTo && !candidates.includes(inReplyTo)) candidates.push(inReplyTo);
+  const candidates = ancestorCandidates(messageId, inReplyTo, references);
   if (candidates.length === 0) return { threadId: messageId, reason: 'new-root' };
 
   const rows = await query(

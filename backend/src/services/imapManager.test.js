@@ -369,7 +369,7 @@ describe('insertCopiedSibling', () => {
     await insertCopiedSibling('acct-1', 100, 'INBOX', 'Todo', 5001);
     const ins = findCall('INSERT INTO messages');
     const [insertList, selectList] = ins[0].split('SELECT');
-    for (const col of ['provider_thread_id', 'provider_message_id', 'bcc_addresses']) {
+    for (const col of ['provider_thread_id', 'provider_message_id', 'bcc_addresses', 'threading_reason']) {
       expect(insertList).toContain(col);
       expect(selectList).toContain(col);
     }

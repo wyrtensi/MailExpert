@@ -1,9 +1,10 @@
 // Loads Gmail's X-GM-THRID / X-GM-MSGID for cached messages that were stored without them:
 // rows synced before migration 0060, and Sent/Drafts rows the app wrote itself after an APPEND.
 // Rows are taken from the database in UID order, so a cursor per folder makes the walk resumable
-// and later runs only look at rows above it. thread_id is never touched here.
+// and later runs only look at rows above it. thread_id is only touched in gmail mode (see rekey).
 import { gmailProviderIds } from './providerIds.js';
 import { loadProviderIdBackfill, markProviderIdBackfillFinished, saveProviderIdCursor } from './providerIdBackfillStore.js';
+import { GMAIL_KEY_PREFIX, THREAD_MODE_GMAIL } from './threadId.js';
 
 export const PROVIDER_ID_BATCH_SIZE = 500;
 
@@ -79,8 +80,11 @@ export async function planProviderIdBackfill(query, accountId) {
 const isFolderError = (err) => err?.responseStatus === 'NO' || err?.responseStatus === 'BAD';
 
 export async function runProviderIdBackfill({
-  query, accountId, getClient, shouldContinue, onProgress = () => {}, pause = async () => {},
+  query, accountId, getClient, shouldContinue, onProgress = () => {}, pause = async () => {}, threadMode = 'rfc',
 }) {
+  // In gmail mode the thread key follows the number the fill just learned; the sync will not
+  // revisit these UIDs, so this UPDATE is where an old row joins its Gmail conversation.
+  const rekey = threadMode === THREAD_MODE_GMAIL;
   const plan = await planProviderIdBackfill(query, accountId);
   let processed = 0;
   const failedFolders = []; // { path, error }: the server refused SELECT or FETCH for the folder
@@ -139,11 +143,16 @@ export async function runProviderIdBackfill({
       if (found.length) {
         await query(
           `UPDATE messages m
-           SET provider_thread_id = v.thread_id, provider_message_id = v.message_id
+           SET provider_thread_id = v.thread_id,
+               provider_message_id = v.message_id,
+               thread_id = CASE WHEN $6::boolean AND v.thread_id IS NOT NULL
+                                THEN $7::text || v.thread_id ELSE m.thread_id END,
+               threading_reason = CASE WHEN $6::boolean AND v.thread_id IS NOT NULL
+                                       THEN 'gmail-thrid' ELSE m.threading_reason END
            FROM unnest($3::bigint[], $4::text[], $5::text[]) AS v(uid, thread_id, message_id)
            WHERE m.account_id = $1 AND m.folder = $2 AND m.uid = v.uid
              AND m.provider_message_id IS NULL`,
-          [accountId, folder.path, found.map(f => f.uid), found.map(f => f.providerThreadId), found.map(f => f.providerMessageId)],
+          [accountId, folder.path, found.map(f => f.uid), found.map(f => f.providerThreadId), found.map(f => f.providerMessageId), rekey, GMAIL_KEY_PREFIX],
         );
       }
       lastUid = uids[uids.length - 1];

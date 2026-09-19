@@ -9,7 +9,7 @@
 // hook transforms .jsx with sucrase, and react-i18next is stubbed because the component only
 // needs t() to return something.
 
-import { test, describe } from 'node:test';
+import { test, describe, after } from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { registerHooks } from 'node:module';
@@ -59,17 +59,25 @@ Object.assign(globalThis, {
 // innerWidth to 1024, which is the desktop case the bug report is about.
 dom.window.matchMedia = () => ({ matches: false, addEventListener() {}, removeEventListener() {}, addListener() {}, removeListener() {} });
 dom.window.ResizeObserver = class { observe() {} unobserve() {} disconnect() {} };
+// jsdom implements no layout, so Element.scrollIntoView is missing; the list calls it whenever
+// the selection changes.
+dom.window.Element.prototype.scrollIntoView = function scrollIntoView() {};
 globalThis.matchMedia = dom.window.matchMedia;
 globalThis.__VITE_ENV__ = { MODE: 'test', DEV: false, PROD: true };
 // MessageList loads its own messages on mount and overwrites anything seeded in the store,
 // so the fetch stub has to serve the row rather than the store. Only the messages endpoint
 // needs a real shape; everything else can be an empty object.
+// THREAD_MESSAGES and ARCHIVED serve the two calls a thread-row archive makes after the guard
+// is armed: without them the archive fails and the code under test clears the guard again.
 let SERVED = [];
+let THREAD_MESSAGES = [];
+let ARCHIVED = [];
 globalThis.fetch = async (url) => {
   const path = String(url);
-  const body = path.includes('/mail/messages?')
-    ? { messages: SERVED, total: SERVED.length }
-    : {};
+  let body = {};
+  if (path.includes('/mail/messages?')) body = { messages: SERVED, total: SERVED.length };
+  else if (path.includes('/mail/thread/')) body = { messages: THREAD_MESSAGES };
+  else if (path.includes('/mail/messages/bulk-archive')) body = { archived: ARCHIVED, noArchiveFolder: [] };
   return { ok: true, status: 200, headers: { get: () => 'application/json' }, json: async () => body, text: async () => JSON.stringify(body) };
 };
 
@@ -77,8 +85,11 @@ const React = await import('react');
 const { createRoot } = await import('react-dom/client');
 const { useStore } = await import('../store/index.js');
 const MessageList = (await import('./MessageList.jsx')).default;
+const { shortcutBus } = await import('../utils/shortcutBus.js');
+const { applyDeleteGuard, clearDeleteGuard, threadDeleteGuardKey } = await import('../utils/pendingDeletes.js');
 
 const ACCOUNT = { id: 'acct-1', email_address: 'a@example.com', name: 'A', color: '#6366f1', include_in_unified_inbox: true };
+const ACCOUNT_B = { id: 'acct-2', email_address: 'b@example.com', name: 'B', color: '#22c55e', include_in_unified_inbox: true };
 const MESSAGE = {
   id: 'msg-1', account_id: 'acct-1', folder: 'INBOX', uid: 1,
   subject: 'Draggable subject', snippet: 'preview text', message_id: '<m1@example.com>',
@@ -93,16 +104,17 @@ let container, root;
 
 // Mount fresh for each scenario. MessageList refetches on mount and overwrites anything seeded
 // in the store, so the fixture is served through fetch rather than set as state.
-async function mount({ rows, threadedView }) {
+async function mount({ rows, threadedView, accounts = [ACCOUNT], state = {} }) {
   SERVED = rows;
   if (root) await React.act(async () => root.unmount());
   container = dom.window.document.getElementById('root');
   useStore.setState({
-    accounts: [ACCOUNT], accountsReady: true,
+    accounts, accountsReady: true,
     selectedAccountId: 'acct-1', selectedFolder: 'INBOX',
     messages: rows, messagesTotal: rows.length, hasMoreMessages: false, loadingMessages: false,
     searchQuery: '', threadedView,
-    folders: { 'acct-1': [{ path: 'INBOX', name: 'INBOX' }, { path: 'Archive', name: 'Archive' }] },
+    folders: Object.fromEntries(accounts.map(a => [a.id, [{ path: 'INBOX', name: 'INBOX' }, { path: 'Archive', name: 'Archive' }]])),
+    ...state,
   });
   await React.act(async () => {
     root = createRoot(container);
@@ -133,5 +145,43 @@ describe('MessageList — drag source (#130)', () => {
     const el = draggableIn('msg-2');
     assert.ok(el, 'expected a conversation row to be draggable');
     assert.equal(el.getAttribute('draggable'), 'true');
+  });
+});
+
+// One conversation delivered to two mailboxes is now one thread row per mailbox, so the
+// optimistic delete guard the list arms on archive has to name the mailbox. In the unified
+// inbox there is no selected account, and a guard keyed only by thread id and folder hid the
+// other mailbox's row too — for the guard's whole lifetime, across every refetch.
+describe('MessageList — the delete guard names the row mailbox', () => {
+  const shared = { thread_id: 'thr-9', message_count: 2, unread_count: 0, is_read: true, folder: 'INBOX' };
+  const inA = { ...MESSAGE, ...shared, id: 'a1', account_id: 'acct-1' };
+  const inB = { ...MESSAGE, ...shared, id: 'b1', account_id: 'acct-2' };
+
+  // setPendingDelete / setCompletedDelete arm real timers; leaving them would hold the runner.
+  after(() => ['a1', 'b1', 'thread:thr-9:folder:INBOX', threadDeleteGuardKey('thr-9', 'INBOX', 'acct-1')]
+    .forEach(clearDeleteGuard));
+
+  test('archiving the conversation in one mailbox keeps the other mailbox row', async () => {
+    THREAD_MESSAGES = [inA];
+    ARCHIVED = ['a1'];
+    await mount({
+      rows: [inA, inB],
+      threadedView: true,
+      accounts: [ACCOUNT, ACCOUNT_B],
+      state: { selectedAccountId: null, selectedMessageId: 'a1', searchResults: [], threadMessages: {} },
+    });
+
+    await React.act(async () => { shortcutBus.emit('archive'); });
+    await React.act(async () => { await new Promise(resolve => setTimeout(resolve, 0)); });
+
+    assert.ok(
+      applyDeleteGuard([inA]).length === 0,
+      'the archived mailbox row must stay hidden until the refetch catches up',
+    );
+    assert.deepEqual(
+      applyDeleteGuard([inA, inB]).map(message => message.id),
+      ['b1'],
+      'the same conversation in the other mailbox was never archived and must still show',
+    );
   });
 });

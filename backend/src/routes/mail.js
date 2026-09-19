@@ -75,7 +75,8 @@ async function runInBatches(items, concurrency, fn) {
 // or a relocate will silently reset it to its default. This list previously went stale and
 // dropped delivery_addresses (0037), plugin_annotations (0044) and sender_name/sender_email
 // (0050). A unit test (mail.relocate.test.js) guards the four that regression touched. Also
-// covered: bcc_addresses (0058) and provider_thread_id/provider_message_id (0060).
+// covered: bcc_addresses (0058), provider_thread_id/provider_message_id (0060) and
+// threading_reason (0063).
 const RELOCATE_COPY_COLS = [
   'message_id', 'subject', 'from_name', 'from_email', 'to_addresses', 'cc_addresses',
   'reply_to', 'in_reply_to', 'date', 'snippet', 'is_read', 'is_starred', 'has_attachments',
@@ -84,6 +85,7 @@ const RELOCATE_COPY_COLS = [
   'spam_analyzed_at', 'spam_details', 'spam_user_override', 'category', 'list_unsubscribe',
   'list_unsubscribe_post', 'unsubscribed_at', 'delivery_addresses', 'plugin_annotations',
   'sender_name', 'sender_email', 'bcc_addresses', 'provider_thread_id', 'provider_message_id',
+  'threading_reason',
 ];
 // INSERT target list and the matching SELECT projection. account_id + the carried columns come
 // from the deleted row; uid is the UIDPLUS-mapped new uid; folder is the destination ($4).

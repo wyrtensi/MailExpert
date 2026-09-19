@@ -346,8 +346,7 @@ export default function Sidebar() {
           message: row,
           isThreadRow: true,
           fetchThread: () => api.getThread(
-            payload.threadId, payload.threadFolder, payload.threadUnified,
-            payload.threadUnified ? null : row.account_id,
+            payload.threadId, payload.threadFolder, payload.threadUnified, row.account_id,
           ),
         });
       } catch (err) {

@@ -27,10 +27,15 @@ describe('relocate reinsert column lists', () => {
   });
 
   it('carries the provider thread and message ids (migration 0060)', () => {
-    for (const col of ['provider_thread_id', 'provider_message_id', 'bcc_addresses']) {
+    for (const col of ['provider_thread_id', 'provider_message_id', 'bcc_addresses', 'threading_reason']) {
       expect(insertCols).toContain(col);
       expect(selectCols).toContain(`d.${col}`);
     }
+  });
+
+  it('carries the threading reason to the relocated row', () => {
+    expect(RELOCATE_INSERT_COLS).toContain('threading_reason');
+    expect(RELOCATE_SELECT_COLS).toContain('d.threading_reason');
   });
 
   it('never inserts id, synced_at, or GENERATED columns (would regress id / error)', () => {

@@ -13,12 +13,12 @@ const {
 } = threadedArchive;
 
 describe('findVisibleArchiveMessage', () => {
-  const parent = { id: 'head', thread_id: 'thread-1', message_count: 3 };
-  const sibling = { id: 'other', thread_id: 'thread-2', message_count: 2 };
+  const parent = { id: 'head', account_id: 'a1', thread_id: 'thread-1', message_count: 3 };
+  const sibling = { id: 'other', account_id: 'a1', thread_id: 'thread-2', message_count: 2 };
   const messages = [parent, sibling];
   const threadMessages = {
-    'thread-1': [{ id: 'oldest' }, { id: 'middle' }, { id: 'head' }],
-    'thread-2': [{ id: 'other-child' }, { id: 'other' }],
+    'a1:thread-1': [{ id: 'oldest' }, { id: 'middle' }, { id: 'head' }],
+    'a1:thread-2': [{ id: 'other-child' }, { id: 'other' }],
   };
 
   it('returns the selected visible row directly', () => {
@@ -31,6 +31,14 @@ describe('findVisibleArchiveMessage', () => {
 
   it('returns null when the selection is no longer represented in the list', () => {
     assert.equal(findVisibleArchiveMessage(messages, 'missing', threadMessages), null);
+  });
+
+  it('does not match a sub-message cached under the same thread id in another mailbox', () => {
+    // Same thread_id in two mailboxes: the a2 mailbox's cache must not satisfy a1's row.
+    const crossMailboxCache = {
+      'a2:thread-1': [{ id: 'middle' }],
+    };
+    assert.equal(findVisibleArchiveMessage(messages, 'middle', crossMailboxCache), null);
   });
 });
 

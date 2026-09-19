@@ -33,10 +33,13 @@ function fakeDb({ folders, messages, state = null }) {
       };
     }
     if (/^\s*UPDATE messages m/.test(sql)) {
-      const [, folder, uids, threads, ids] = params;
+      const [, folder, uids, threads, ids, rekey, prefix] = params;
       uids.forEach((uid, i) => {
         const row = db.messages.find(m => m.folder === folder && m.uid === uid && !m.provider_message_id);
-        if (row) Object.assign(row, { provider_thread_id: threads[i], provider_message_id: ids[i] });
+        if (row) {
+          Object.assign(row, { provider_thread_id: threads[i], provider_message_id: ids[i] });
+          if (rekey && threads[i] != null) Object.assign(row, { thread_id: `${prefix}${threads[i]}`, threading_reason: 'gmail-thrid' });
+        }
       });
       db.updates.push({ folder, uids });
       return { rows: [] };
@@ -348,5 +351,27 @@ describe('runProviderIdBackfill', () => {
     for (const release of releases) expect(release).toHaveBeenCalledTimes(1);
     expect(db.db.state.cursors.INBOX).toEqual({ lastUid: PROVIDER_ID_BATCH_SIZE, uidValidity: '7' });
     expect(db.db.finished).toBe(0);
+  });
+
+  it('rekeys the rows it fills when the mailbox is in gmail mode', async () => {
+    const db = fakeDb({ folders: FOLDERS, messages: [row('INBOX', 1), row('INBOX', 2)] });
+    const client = fakeClient({ INBOX: [gm(1), gm(2, { threadId: undefined })] });
+
+    await run(db, client, { threadMode: 'gmail' });
+
+    expect(db.db.messages.map(m => [m.uid, m.thread_id, m.threading_reason])).toEqual([
+      [1, 'gmail:1700000000000000001', 'gmail-thrid'],
+      [2, undefined, undefined], // no Gmail thread number: the row keeps its RFC key
+    ]);
+  });
+
+  it('never touches thread_id in rfc mode', async () => {
+    const db = fakeDb({ folders: FOLDERS, messages: [row('INBOX', 1)] });
+    const client = fakeClient({ INBOX: [gm(1)] });
+
+    await run(db, client);
+
+    expect(db.db.messages[0].thread_id).toBeUndefined();
+    expect(db.db.messages[0].provider_thread_id).toBe('1700000000000000001');
   });
 });

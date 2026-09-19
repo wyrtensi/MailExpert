@@ -22,7 +22,7 @@ import { resolveForConnection, createPinnedLookup } from './hostValidation.js';
 import { getConnectionPolicy } from './connectionPolicy.js';
 import { applyInboxRules, applyBlockList } from './inboxRules.js';
 import { generateVCard } from '../utils/vcard.js';
-import { computeThreadId } from './threading/threadId.js';
+import { GMAIL_KEY_PREFIX, THREAD_MODE_GMAIL, computeThreading } from './threading/threadId.js';
 import { gmailProviderIds, NO_PROVIDER_IDS } from './threading/providerIds.js';
 import { runProviderIdBackfill } from './threading/providerIdBackfill.js';
 import {
@@ -1112,7 +1112,7 @@ export async function insertCopiedSibling(accountId, uid, fromFolder, toFolder, 
       read_changed_at, star_changed_at, spam_score_sa, spam_score_ml,
       spam_verdict, spam_analyzed_at, spam_details, spam_user_override,
       category, list_unsubscribe, list_unsubscribe_post, unsubscribed_at, delivery_addresses, sender_name, sender_email,
-      bcc_addresses, provider_thread_id, provider_message_id
+      bcc_addresses, provider_thread_id, provider_message_id, threading_reason
     )
     SELECT
       account_id, $4, $5, message_id, subject,
@@ -1123,7 +1123,7 @@ export async function insertCopiedSibling(accountId, uid, fromFolder, toFolder, 
       read_changed_at, star_changed_at, spam_score_sa, spam_score_ml,
       spam_verdict, spam_analyzed_at, spam_details, spam_user_override,
       category, list_unsubscribe, list_unsubscribe_post, unsubscribed_at, delivery_addresses, sender_name, sender_email,
-      bcc_addresses, provider_thread_id, provider_message_id
+      bcc_addresses, provider_thread_id, provider_message_id, threading_reason
     FROM messages
     WHERE account_id = $1 AND folder = $2 AND uid = $3
     ON CONFLICT (account_id, uid, folder) DO NOTHING
@@ -1266,10 +1266,12 @@ function sanitizeStr(str) {
 // thread root (out-of-order delivery, newest-first backfill). The is_deleted predicate lets
 // Postgres use the partial idx_messages_thread_id; without it every call scanned all rows of the
 // account (40k rows: 12 ms vs 0.5 ms). Soft-deleted rows are never restored, so skipping them
-// changes nothing visible.
+// changes nothing visible. The reason moves with the key: these rows now hang on the real root,
+// so whatever they carried ('rfc-provisional', or NULL from before migration 0063) stops being
+// true.
 export async function rerootThreadChildren(accountId, threadId, messageId) {
   await query(
-    `UPDATE messages SET thread_id = $1
+    `UPDATE messages SET thread_id = $1, threading_reason = 'rfc-root'
      WHERE account_id = $2 AND thread_id = $3 AND message_id != $3 AND is_deleted = false`,
     [threadId, accountId, messageId]
   );
@@ -3461,8 +3463,11 @@ export class ImapManager {
             const msgId = sanitizeStr(parsed.messageId);
             const inReplyTo = sanitizeStr(parsed.inReplyTo);
             const refs = sanitizeStr(parsed.references);
-            const threadId = await computeThreadId(account.id, msgId, inReplyTo, refs);
             const providerIds = provider.gmailThreadIds ? gmailProviderIds(msg) : NO_PROVIDER_IDS;
+            const { threadId, reason: threadingReason } = await computeThreading(account.id, msgId, inReplyTo, refs, {
+              mode: account.thread_mode,
+              providerThreadId: providerIds.providerThreadId,
+            });
 
             // Upsert only this server UID. Shared Message-IDs do not prove a move,
             // including self-mail and duplicate deliveries within one mailbox.
@@ -3485,8 +3490,8 @@ export class ImapManager {
                 body_html, body_text, attachments,
                 thread_references, thread_id, is_bulk, category,
                 list_unsubscribe, list_unsubscribe_post, delivery_addresses,
-                sender_name, sender_email, provider_thread_id, provider_message_id
-              ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24,$25,$26,$27,$28,$29,$30,$31)
+                sender_name, sender_email, provider_thread_id, provider_message_id, threading_reason
+              ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24,$25,$26,$27,$28,$29,$30,$31,$32)
               ON CONFLICT (account_id, uid, folder) DO UPDATE
               SET subject = CASE
                     WHEN EXCLUDED.subject IS NOT NULL
@@ -3528,15 +3533,35 @@ export class ImapManager {
                   body_text = COALESCE(messages.body_text, EXCLUDED.body_text),
                   attachments = COALESCE(messages.attachments::text, EXCLUDED.attachments::text)::jsonb,
                   thread_references = COALESCE(messages.thread_references, EXCLUDED.thread_references),
-                  -- #378: heal a row that was self-rooted (thread_id = its own Message-ID, e.g. a
-                  -- sent copy orphaned by an older upsert) by adopting the real conversation root
-                  -- the sync just computed. Genuine thread roots keep their value (EXCLUDED equals it).
+                  -- A Gmail thread key is the mailbox's own grouping: it replaces a key computed
+                  -- from headers. A stored Gmail key stays, including against a different one.
+                  -- starts_with, not LIKE: LIKE would read a percent or underscore in the bound
+                  -- prefix as a wildcard.
                   thread_id = CASE
+                    WHEN starts_with(EXCLUDED.thread_id, $33)
+                         AND (messages.thread_id IS NULL OR NOT starts_with(messages.thread_id, $33))
+                      THEN EXCLUDED.thread_id
+                    -- #378: heal a row that was self-rooted (thread_id = its own Message-ID, e.g. a
+                    -- Sent copy) once the conversation root is known.
                     WHEN messages.thread_id = messages.message_id
                          AND EXCLUDED.thread_id IS NOT NULL
                          AND EXCLUDED.thread_id <> messages.message_id
-                    THEN EXCLUDED.thread_id
+                      THEN EXCLUDED.thread_id
                     ELSE COALESCE(messages.thread_id, EXCLUDED.thread_id)
+                  END,
+                  -- Same branches as the key, ELSE included: the reason describes the key this
+                  -- row ends up with. A row written before migration 0063 keeps its key and has
+                  -- no reason, and taking the new computation's reason there would explain a key
+                  -- that was never applied.
+                  threading_reason = CASE
+                    WHEN starts_with(EXCLUDED.thread_id, $33)
+                         AND (messages.thread_id IS NULL OR NOT starts_with(messages.thread_id, $33))
+                      THEN EXCLUDED.threading_reason
+                    WHEN messages.thread_id = messages.message_id
+                         AND EXCLUDED.thread_id IS NOT NULL
+                         AND EXCLUDED.thread_id <> messages.message_id
+                      THEN EXCLUDED.threading_reason
+                    ELSE CASE WHEN messages.thread_id IS NULL THEN EXCLUDED.threading_reason ELSE messages.threading_reason END
                   END,
                   is_bulk = COALESCE(messages.is_bulk, EXCLUDED.is_bulk),
                   category = COALESCE(messages.category, EXCLUDED.category),
@@ -3563,7 +3588,8 @@ export class ImapManager {
               sanitizeStr(decodeMimeWords(parsed.parsedHeaders?.['list-unsubscribe-post'] ?? null)),
               JSON.stringify(parsed.deliveryAddresses || []),
               sanitizeStr(parsed.senderName), sanitizeStr(parsed.senderEmail),
-              providerIds.providerThreadId, providerIds.providerMessageId,
+              providerIds.providerThreadId, providerIds.providerMessageId, threadingReason,
+              GMAIL_KEY_PREFIX,
             ]);
             if (result.rows[0]?.is_new) {
               insertedCount++;
@@ -3580,7 +3606,8 @@ export class ImapManager {
             }
             // Propagate resolved thread_id to any earlier messages that used this
             // message as a provisional thread root (out-of-order delivery / sync).
-            if (threadId && threadId !== msgId) {
+            // A mailbox keyed by Gmail thread numbers has no provisional roots to move.
+            if (threadId && threadId !== msgId && account.thread_mode !== THREAD_MODE_GMAIL) {
               await rerootThreadChildren(account.id, threadId, msgId);
             }
           } catch (parseErr) {
@@ -4136,8 +4163,11 @@ export class ImapManager {
                 const bfMsgId    = sanitizeStr(parsed.messageId);
                 const bfReplyTo  = sanitizeStr(parsed.inReplyTo);
                 const bfRefs     = sanitizeStr(parsed.references);
-                const bfThreadId = await computeThreadId(account.id, bfMsgId, bfReplyTo, bfRefs);
                 const bfProviderIds = cfg.gmailThreadIds ? gmailProviderIds(msg) : NO_PROVIDER_IDS;
+                const { threadId: bfThreadId, reason: bfThreadingReason } = await computeThreading(account.id, bfMsgId, bfReplyTo, bfRefs, {
+                  mode: account.thread_mode,
+                  providerThreadId: bfProviderIds.providerThreadId,
+                });
 
                 let bfCategory = null;
                 if (account.categorization_enabled || await getGlobalCategorizationEnabled()) {
@@ -4157,8 +4187,8 @@ export class ImapManager {
                     body_html, body_text, attachments,
                     thread_references, thread_id, is_bulk, category,
                     list_unsubscribe, list_unsubscribe_post, delivery_addresses,
-                    sender_name, sender_email, provider_thread_id, provider_message_id
-                  ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24,$25,$26,$27,$28,$29,$30,$31)
+                    sender_name, sender_email, provider_thread_id, provider_message_id, threading_reason
+                  ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24,$25,$26,$27,$28,$29,$30,$31,$32)
                   ON CONFLICT (account_id, uid, folder) DO UPDATE
                   SET subject = CASE
                         WHEN EXCLUDED.subject IS NOT NULL
@@ -4200,13 +4230,33 @@ export class ImapManager {
                       body_text = COALESCE(messages.body_text, EXCLUDED.body_text),
                       attachments = COALESCE(messages.attachments::text, EXCLUDED.attachments::text)::jsonb,
                       thread_references = COALESCE(messages.thread_references, EXCLUDED.thread_references),
-                      -- #378: heal a self-rooted (orphaned) row by adopting the real conversation root.
+                      -- A Gmail thread key is the mailbox's own grouping: it replaces a key computed
+                      -- from headers. A stored Gmail key stays, including against a different one.
+                      -- starts_with, not LIKE: LIKE would read a percent or underscore in the
+                      -- bound prefix as a wildcard.
                       thread_id = CASE
+                        WHEN starts_with(EXCLUDED.thread_id, $33)
+                             AND (messages.thread_id IS NULL OR NOT starts_with(messages.thread_id, $33))
+                          THEN EXCLUDED.thread_id
+                        -- #378: heal a self-rooted (orphaned) row by adopting the real conversation root.
                         WHEN messages.thread_id = messages.message_id
                              AND EXCLUDED.thread_id IS NOT NULL
                              AND EXCLUDED.thread_id <> messages.message_id
-                        THEN EXCLUDED.thread_id
+                          THEN EXCLUDED.thread_id
                         ELSE COALESCE(messages.thread_id, EXCLUDED.thread_id)
+                      END,
+                      -- Same branches as the key, ELSE included: a row written before migration
+                      -- 0063 keeps its key and has no reason, so it must not take the new
+                      -- computation's reason for a key that was never applied.
+                      threading_reason = CASE
+                        WHEN starts_with(EXCLUDED.thread_id, $33)
+                             AND (messages.thread_id IS NULL OR NOT starts_with(messages.thread_id, $33))
+                          THEN EXCLUDED.threading_reason
+                        WHEN messages.thread_id = messages.message_id
+                             AND EXCLUDED.thread_id IS NOT NULL
+                             AND EXCLUDED.thread_id <> messages.message_id
+                          THEN EXCLUDED.threading_reason
+                        ELSE CASE WHEN messages.thread_id IS NULL THEN EXCLUDED.threading_reason ELSE messages.threading_reason END
                       END,
                       is_bulk = COALESCE(messages.is_bulk, EXCLUDED.is_bulk),
                       category = COALESCE(messages.category, EXCLUDED.category),
@@ -4232,10 +4282,12 @@ export class ImapManager {
                   sanitizeStr(decodeMimeWords(parsed.parsedHeaders?.['list-unsubscribe-post'] ?? null)),
                   JSON.stringify(parsed.deliveryAddresses || []),
                   sanitizeStr(parsed.senderName), sanitizeStr(parsed.senderEmail),
-                  bfProviderIds.providerThreadId, bfProviderIds.providerMessageId,
+                  bfProviderIds.providerThreadId, bfProviderIds.providerMessageId, bfThreadingReason,
+                  GMAIL_KEY_PREFIX,
                 ]);
                 backfilledRows++;
-                if (bfThreadId && bfThreadId !== bfMsgId) {
+                // A mailbox keyed by Gmail thread numbers has no provisional roots to move.
+                if (bfThreadId && bfThreadId !== bfMsgId && account.thread_mode !== THREAD_MODE_GMAIL) {
                   await rerootThreadChildren(account.id, bfThreadId, bfMsgId);
                 }
               } catch (parseErr) {
@@ -4790,6 +4842,7 @@ export class ImapManager {
           const extraDelay = quietFor < QUIET_WINDOW_MS ? QUIET_WINDOW_MS - quietFor : 0;
           await new Promise(resolve => setTimeout(resolve, cfg.batchDelay + extraDelay));
         },
+        threadMode: account.thread_mode,
       });
       if (result.outcome === 'done') {
         this.providerIdBackoff.delete(account.id);
@@ -4926,15 +4979,15 @@ export class ImapManager {
     // RFC 5322 References/In-Reply-To chain — instead of rooting it at its own Message-ID.
     // Self-rooting orphaned every sent message into its own thread, showing as a duplicate
     // "shadow" separate from the conversation (#378).
-    const threadId = msgId
-      ? await computeThreadId(account.id, msgId, sanitizeStr(inReplyTo), sanitizeStr(references))
-      : null;
+    const { threadId, reason: threadingReason } = msgId
+      ? await computeThreading(account.id, msgId, sanitizeStr(inReplyTo), sanitizeStr(references), { mode: account.thread_mode })
+      : { threadId: null, reason: null };
     await query(`
       INSERT INTO messages (
         account_id, uid, folder, message_id, subject,
         from_name, from_email, to_addresses, cc_addresses,
-        date, snippet, is_read, is_starred, has_attachments, flags, thread_id
-      ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8::jsonb,$9::jsonb,$10,$11,true,false,false,'[]',$12)
+        date, snippet, is_read, is_starred, has_attachments, flags, thread_id, threading_reason
+      ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8::jsonb,$9::jsonb,$10,$11,true,false,false,'[]',$12,$13)
       ON CONFLICT (account_id, uid, folder) DO UPDATE SET
         message_id = COALESCE(EXCLUDED.message_id, messages.message_id),
         subject = CASE
@@ -4958,13 +5011,23 @@ export class ImapManager {
                AND EXCLUDED.thread_id <> messages.message_id
           THEN EXCLUDED.thread_id
           ELSE COALESCE(messages.thread_id, EXCLUDED.thread_id)
+        END,
+        -- Same branches as the key, ELSE included: a row written before migration 0063 keeps its
+        -- key and has no reason, so it must not take the new computation's reason for a key that
+        -- was never applied.
+        threading_reason = CASE
+          WHEN messages.thread_id = messages.message_id
+               AND EXCLUDED.thread_id IS NOT NULL
+               AND EXCLUDED.thread_id <> messages.message_id
+          THEN EXCLUDED.threading_reason
+          ELSE CASE WHEN messages.thread_id IS NULL THEN EXCLUDED.threading_reason ELSE messages.threading_reason END
         END
     `, [
       account.id, uid, folder, msgId,
       sanitizeStr(subject || '(no subject)'),
       sanitizeStr(fromName || ''), sanitizeStr(fromEmail || ''),
       JSON.stringify(to), JSON.stringify(cc),
-      safeDate(date), sanitizeStr(snippet || ''), threadId,
+      safeDate(date), sanitizeStr(snippet || ''), threadId, threadingReason,
     ]);
     this._scheduleProviderIdBackfill(account);
   }
@@ -4992,13 +5055,16 @@ export class ImapManager {
   }) {
     if (!uid || !folder) return;
     const msgId = sanitizeStr(messageId);
+    const { threadId, reason: threadingReason } = msgId
+      ? await computeThreading(account.id, msgId, sanitizeStr(inReplyTo), null, { mode: account.thread_mode })
+      : { threadId: null, reason: null };
     await query(`
       INSERT INTO messages (
         account_id, uid, folder, message_id, subject,
         from_name, from_email, to_addresses, cc_addresses,
         in_reply_to, date, snippet, is_read, is_starred, has_attachments,
-        flags, body_html, body_text, thread_id, bcc_addresses
-      ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8::jsonb,$9::jsonb,$10,$11,$12,true,false,false,$13::jsonb,$14,$15,$16,$17::jsonb)
+        flags, body_html, body_text, thread_id, bcc_addresses, threading_reason
+      ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8::jsonb,$9::jsonb,$10,$11,$12,true,false,false,$13::jsonb,$14,$15,$16,$17::jsonb,$18)
       ON CONFLICT (account_id, uid, folder) DO UPDATE SET
         message_id = COALESCE(EXCLUDED.message_id, messages.message_id),
         subject = CASE
@@ -5028,8 +5094,9 @@ export class ImapManager {
       JSON.stringify(['\\Draft', '\\Seen']),
       bodyHtml != null ? sanitizeStr(bodyHtml) : null,
       bodyText != null ? sanitizeStr(bodyText) : null,
-      msgId || null,
+      threadId,
       JSON.stringify(Array.isArray(bcc) ? bcc : []),
+      threadingReason,
     ]);
     this._scheduleProviderIdBackfill(account);
   }

@@ -26,4 +26,10 @@ describe('api.getThread', () => {
     await api.getThread('thread-1', 'INBOX', true);
     assert.match(urls[0], /\/mail\/thread\/thread-1\?folder=INBOX&unified=true$/);
   });
+
+  it('still names the mailbox for a unified request when one is given', async () => {
+    const urls = captureUrl();
+    await api.getThread('thread-1', 'INBOX', true, 'acc-1');
+    assert.match(urls[0], /\/mail\/thread\/thread-1\?folder=INBOX&unified=true&accountId=acc-1$/);
+  });
 });

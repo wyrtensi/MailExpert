@@ -1,11 +1,12 @@
+import { threadCacheKey } from './threadKey.js';
+
 export function findVisibleArchiveMessage(messages, selectedMessageId, threadMessages = {}) {
   if (!selectedMessageId || !Array.isArray(messages)) return null;
   const direct = messages.find(message => message?.id === selectedMessageId);
   if (direct) return direct;
 
   return messages.find((message) => {
-    const threadId = message?.thread_id || message?.id;
-    const children = threadMessages?.[threadId];
+    const children = threadMessages?.[threadCacheKey(message)];
     return Array.isArray(children) && children.some(child => child?.id === selectedMessageId);
   }) || null;
 }

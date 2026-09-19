@@ -89,12 +89,14 @@ export async function listMessages({ accountId, folder = 'INBOX', limit = 50, of
 
     const threadResult = await query(`
       WITH paged_threads AS (
-        SELECT m.thread_key AS thread_id
+        SELECT m.account_id, m.thread_key AS thread_id
         FROM messages m
         WHERE ${where}
-        GROUP BY m.thread_key
-        -- thread_key breaks exact date ties so paging is stable (see the flat query).
-        ORDER BY MAX(m.date) DESC, m.thread_key
+        GROUP BY m.account_id, m.thread_key
+        -- One conversation delivered to two mailboxes is one row per mailbox: the mailboxes are
+        -- separate, and a Gmail thread number only means anything inside its own mailbox.
+        -- account_id and thread_key break exact date ties so paging is stable (see the flat query).
+        ORDER BY MAX(m.date) DESC, m.account_id, m.thread_key
         LIMIT $${p + 1} OFFSET $${p + 2}
       ),
       deduped AS MATERIALIZED (
@@ -115,7 +117,7 @@ export async function listMessages({ accountId, folder = 'INBOX', limit = 50, of
         FROM messages m
         JOIN email_accounts a ON m.account_id = a.id
         WHERE ${where}
-          AND m.thread_key IN (SELECT thread_id FROM paged_threads)
+          AND (m.account_id, m.thread_key) IN (SELECT account_id, thread_id FROM paged_threads)
         ORDER BY m.account_id,
                  m.thread_key,
                  m.message_id,
@@ -123,30 +125,30 @@ export async function listMessages({ accountId, folder = 'INBOX', limit = 50, of
                  m.date ASC
       ),
       thread_totals AS (
-        SELECT m.thread_key AS thread_id,
+        SELECT m.account_id, m.thread_key AS thread_id,
                COUNT(DISTINCT m.message_id)::int AS message_count
         FROM messages m
         WHERE m.account_id = ANY($${p})
           AND m.is_deleted = false
           AND m.message_id IS NOT NULL
           ${threadFolderFilter}
-          AND m.thread_key IN (SELECT thread_id FROM paged_threads)
-        GROUP BY m.thread_key
+          AND (m.account_id, m.thread_key) IN (SELECT account_id, thread_id FROM paged_threads)
+        GROUP BY m.account_id, m.thread_key
       ),
       ranked AS (
         SELECT d.*,
                COALESCE(tt.message_count, 1) AS message_count,
-               COUNT(*) FILTER (WHERE NOT d.is_read) OVER (PARTITION BY d.thread_id)::int AS unread_count,
-               FIRST_VALUE(d.subject)           OVER (PARTITION BY d.thread_id ORDER BY d.date ASC) AS thread_subject,
-               FIRST_VALUE(d.from_name)          OVER (PARTITION BY d.thread_id ORDER BY d.date ASC) AS thread_from_name,
-               FIRST_VALUE(d.from_email)         OVER (PARTITION BY d.thread_id ORDER BY d.date ASC) AS thread_from_email,
-               FIRST_VALUE(d.has_contact_photo)  OVER (PARTITION BY d.thread_id ORDER BY d.date ASC) AS thread_has_contact_photo,
+               COUNT(*) FILTER (WHERE NOT d.is_read) OVER (PARTITION BY d.account_id, d.thread_id)::int AS unread_count,
+               FIRST_VALUE(d.subject)           OVER (PARTITION BY d.account_id, d.thread_id ORDER BY d.date ASC) AS thread_subject,
+               FIRST_VALUE(d.from_name)          OVER (PARTITION BY d.account_id, d.thread_id ORDER BY d.date ASC) AS thread_from_name,
+               FIRST_VALUE(d.from_email)         OVER (PARTITION BY d.account_id, d.thread_id ORDER BY d.date ASC) AS thread_from_email,
+               FIRST_VALUE(d.has_contact_photo)  OVER (PARTITION BY d.account_id, d.thread_id ORDER BY d.date ASC) AS thread_has_contact_photo,
                -- Representative for the thread row. On an exact date tie prefer the UNREAD
                -- copy (is_read ASC puts false first), so a thread holding unread mail never
                -- renders as its already-read duplicate; d.id keeps the choice deterministic.
-               ROW_NUMBER() OVER (PARTITION BY d.thread_id ORDER BY d.date DESC, d.is_read ASC, d.id) AS rn
+               ROW_NUMBER() OVER (PARTITION BY d.account_id, d.thread_id ORDER BY d.date DESC, d.is_read ASC, d.id) AS rn
         FROM deduped d
-        LEFT JOIN thread_totals tt ON tt.thread_id = d.thread_id
+        LEFT JOIN thread_totals tt ON tt.thread_id = d.thread_id AND tt.account_id = d.account_id
       )
       SELECT id, uid, folder, message_id, thread_id, thread_subject AS subject,
              thread_from_name AS from_name, thread_from_email AS from_email,
@@ -161,8 +163,14 @@ export async function listMessages({ accountId, folder = 'INBOX', limit = 50, of
       ORDER BY date DESC, id
     `, [...filterValues, threadAccountParam, safeLimit, safeOffset]);
 
+    // COUNT(DISTINCT (a, b)) builds a record per row, and records have no hash function, so the
+    // planner sorts the whole filtered set on every threaded list load. Scoped to one mailbox the
+    // account id is constant, so counting thread keys alone is the same number for less work.
+    const threadCountExpr = isSpecificAccount
+      ? 'COUNT(DISTINCT m.thread_key)'
+      : 'COUNT(DISTINCT (m.account_id, m.thread_key))';
     const threadCountResult = await query(`
-      SELECT COUNT(DISTINCT m.thread_key)::int AS total
+      SELECT ${threadCountExpr}::int AS total
       FROM messages m
       WHERE ${where}
     `, filterValues);

@@ -20,6 +20,7 @@ import {
 } from '../utils/gtd.js';
 import { applyGtdRemovalGuard } from '../utils/pendingGtdRemovals.js';
 import { clampRightSidebarWidth } from '../utils/rightSidebar.js';
+import { threadCacheKey } from '../utils/threadKey.js';
 import {
   cacheFolderOrderFromPreferences,
   mergeFolderOrder,
@@ -300,8 +301,7 @@ export const useStore = create((set, get) => ({
     const messages = state.messages.map(m => {
       const updated = apply(m);
       if (inMainList) return updated;
-      const tid = m.thread_id || m.id;
-      const subs = threadMessages[tid];
+      const subs = threadMessages[threadCacheKey(m)];
       if (!subs) return updated;
       const unread_count = subs.filter(s => !s.is_read).length;
       return { ...updated, unread_count, is_read: unread_count === 0 };

@@ -8,7 +8,7 @@ vi.mock('../middleware/auth.js', () => ({
     next();
   },
 }));
-vi.mock('../index.js', () => ({ imapManager: { providerIdBackfillStates: vi.fn() } }));
+vi.mock('../index.js', () => ({ imapManager: { providerIdBackfillStates: vi.fn(), threadRecomputeStates: vi.fn(async () => new Map()) } }));
 vi.mock('../plugins/registry.js', () => ({ pluginRegistry: { collectHook: vi.fn(async () => []) } }));
 
 import express from 'express';

@@ -35,6 +35,10 @@ async function request(method, path, body, extraHeaders) {
     const e = new Error(err.error || 'Request failed');
     // Stable machine-readable code (e.g. send_in_progress) for callers that branch on it.
     if (err.code) e.code = err.code;
+    // Same idea as code, for a 409 that also names why it refused (e.g. threading_switch_blocked's
+    // reason: not_gmail/index_invalid/ids_missing) and, for ids_missing, the row count.
+    if (err.reason) e.reason = err.reason;
+    if (err.count != null) e.count = err.count;
     throw e;
   }
   return res.json();
@@ -326,6 +330,8 @@ export const api = {
   deleteAccount: (id) => request('DELETE', `/accounts/${id}`),
   reconnectAccount: (id) => request('POST', `/accounts/${id}/reconnect`),
   reindexAccount: (id) => request('POST', `/accounts/${id}/reindex`),
+  previewThreading: (id, mode) => request('POST', `/accounts/${id}/threading/preview`, { mode }),
+  setThreadingMode: (id, mode) => request('POST', `/accounts/${id}/threading/mode`, { mode }),
   getFolders: (accountId) => request('GET', `/accounts/${accountId}/folders`),
   getAliases: (accountId) => request('GET', `/accounts/${accountId}/aliases`),
   addAlias: (accountId, data) => request('POST', `/accounts/${accountId}/aliases`, data),

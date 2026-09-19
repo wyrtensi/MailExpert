@@ -818,6 +818,21 @@
         "done": "Gmail thread ids: loaded",
         "error": "Gmail thread ids: failed ({{error}}), retries automatically"
       },
+      "threading": {
+        "title": "Threading mode",
+        "modeRfc": "By reply chain",
+        "modeGmail": "By Gmail thread",
+        "preview": "Preview",
+        "previewResult": "{{changing}} of {{rows}} messages would change ({{subjectOnly}} split from subject grouping); {{threadsNow}} threads now, {{threadsAfter}} after",
+        "switchToGmail": "Switch to Gmail threading",
+        "switchToRfc": "Switch to reply-chain threading",
+        "running": "Recomputing threads",
+        "done": "Threads recomputed: {{changed}} messages changed",
+        "failed": "Thread recompute failed: {{error}}",
+        "blockedNotGmail": "Gmail threading needs a Gmail mailbox",
+        "blockedIndex": "Gmail threading needs a database index that is not ready yet",
+        "blockedIds": "{{count}} messages are still missing their Gmail thread id"
+      },
       "syncFolders": "Sync folders",
       "syncFoldersError": "Folder sync failed",
       "unifiedInboxSection": "Unified Inbox",

@@ -23,6 +23,21 @@ describe('API error propagation', () => {
     });
   });
 
+  it('attaches the reason and count from a 409 threading refusal', async () => {
+    globalThis.fetch = async () => ({
+      ok: false,
+      status: 409,
+      json: async () => ({ error: 'threading_switch_blocked', reason: 'ids_missing', count: 7 }),
+    });
+
+    await assert.rejects(api.getIntegrationsStatus(), (err) => {
+      assert.equal(err.message, 'threading_switch_blocked');
+      assert.equal(err.reason, 'ids_missing');
+      assert.equal(err.count, 7);
+      return true;
+    });
+  });
+
   it('leaves code unset when the response has none', async () => {
     globalThis.fetch = async () => ({ ok: false, status: 500, json: async () => ({ error: 'Boom' }) });
 

@@ -12,6 +12,7 @@ vi.mock('../index.js', () => ({
     connectAccount: vi.fn(() => Promise.resolve(true)),
     disconnectAccount: vi.fn(() => Promise.resolve()),
     providerIdBackfillStates: vi.fn(async () => new Map()),
+    threadRecomputeStates: vi.fn(async () => new Map()),
   },
 }));
 vi.mock('../services/encryption.js', () => ({ encrypt: vi.fn((v) => (v ? `enc:${v}` : v)), decrypt: vi.fn() }));

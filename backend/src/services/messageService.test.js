@@ -201,6 +201,22 @@ describe('listMessages — threaded grouping is per mailbox', () => {
     expect(sql).toContain('(m.account_id, m.thread_key) IN (SELECT account_id, thread_id FROM paged_threads)');
     expect(query.mock.calls[3][0]).toContain('COUNT(DISTINCT (m.account_id, m.thread_key))');
   });
+
+  // COUNT(DISTINCT (a, b)) builds a record per row, which cannot be hashed, so the planner sorts
+  // the whole filtered set on every threaded list load. Scoped to one mailbox the account id is
+  // constant and the pair buys nothing.
+  it('counts distinct thread keys alone when the list is scoped to one mailbox', async () => {
+    query
+      .mockResolvedValueOnce({ rows: [{ id: 'acc-1' }] })
+      .mockResolvedValueOnce({ rows: [{ total_count: 10, unread_count: 0 }] })
+      .mockResolvedValueOnce({ rows: [] })
+      .mockResolvedValueOnce({ rows: [{ total: 0 }] });
+
+    await listMessages({ userId: 'user-1', accountId: 'acc-1', threaded: 'true' });
+
+    expect(query.mock.calls[3][0]).toContain('COUNT(DISTINCT m.thread_key)');
+    expect(query.mock.calls[3][0]).not.toContain('COUNT(DISTINCT (m.account_id, m.thread_key))');
+  });
 });
 
 describe('listMessages — message shape', () => {

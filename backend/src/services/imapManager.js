@@ -1266,10 +1266,12 @@ function sanitizeStr(str) {
 // thread root (out-of-order delivery, newest-first backfill). The is_deleted predicate lets
 // Postgres use the partial idx_messages_thread_id; without it every call scanned all rows of the
 // account (40k rows: 12 ms vs 0.5 ms). Soft-deleted rows are never restored, so skipping them
-// changes nothing visible.
+// changes nothing visible. The reason moves with the key: these rows now hang on the real root,
+// so whatever they carried ('rfc-provisional', or NULL from before migration 0063) stops being
+// true.
 export async function rerootThreadChildren(accountId, threadId, messageId) {
   await query(
-    `UPDATE messages SET thread_id = $1
+    `UPDATE messages SET thread_id = $1, threading_reason = 'rfc-root'
      WHERE account_id = $2 AND thread_id = $3 AND message_id != $3 AND is_deleted = false`,
     [threadId, accountId, messageId]
   );
@@ -3533,9 +3535,11 @@ export class ImapManager {
                   thread_references = COALESCE(messages.thread_references, EXCLUDED.thread_references),
                   -- A Gmail thread key is the mailbox's own grouping: it replaces a key computed
                   -- from headers. A stored Gmail key stays, including against a different one.
+                  -- starts_with, not LIKE: LIKE would read a percent or underscore in the bound
+                  -- prefix as a wildcard.
                   thread_id = CASE
-                    WHEN EXCLUDED.thread_id LIKE $33 || '%'
-                         AND (messages.thread_id IS NULL OR messages.thread_id NOT LIKE $33 || '%')
+                    WHEN starts_with(EXCLUDED.thread_id, $33)
+                         AND (messages.thread_id IS NULL OR NOT starts_with(messages.thread_id, $33))
                       THEN EXCLUDED.thread_id
                     -- #378: heal a row that was self-rooted (thread_id = its own Message-ID, e.g. a
                     -- Sent copy) once the conversation root is known.
@@ -3545,15 +3549,19 @@ export class ImapManager {
                       THEN EXCLUDED.thread_id
                     ELSE COALESCE(messages.thread_id, EXCLUDED.thread_id)
                   END,
+                  -- Same branches as the key, ELSE included: the reason describes the key this
+                  -- row ends up with. A row written before migration 0063 keeps its key and has
+                  -- no reason, and taking the new computation's reason there would explain a key
+                  -- that was never applied.
                   threading_reason = CASE
-                    WHEN EXCLUDED.thread_id LIKE $33 || '%'
-                         AND (messages.thread_id IS NULL OR messages.thread_id NOT LIKE $33 || '%')
+                    WHEN starts_with(EXCLUDED.thread_id, $33)
+                         AND (messages.thread_id IS NULL OR NOT starts_with(messages.thread_id, $33))
                       THEN EXCLUDED.threading_reason
                     WHEN messages.thread_id = messages.message_id
                          AND EXCLUDED.thread_id IS NOT NULL
                          AND EXCLUDED.thread_id <> messages.message_id
                       THEN EXCLUDED.threading_reason
-                    ELSE COALESCE(messages.threading_reason, EXCLUDED.threading_reason)
+                    ELSE CASE WHEN messages.thread_id IS NULL THEN EXCLUDED.threading_reason ELSE messages.threading_reason END
                   END,
                   is_bulk = COALESCE(messages.is_bulk, EXCLUDED.is_bulk),
                   category = COALESCE(messages.category, EXCLUDED.category),
@@ -4224,9 +4232,11 @@ export class ImapManager {
                       thread_references = COALESCE(messages.thread_references, EXCLUDED.thread_references),
                       -- A Gmail thread key is the mailbox's own grouping: it replaces a key computed
                       -- from headers. A stored Gmail key stays, including against a different one.
+                      -- starts_with, not LIKE: LIKE would read a percent or underscore in the
+                      -- bound prefix as a wildcard.
                       thread_id = CASE
-                        WHEN EXCLUDED.thread_id LIKE $33 || '%'
-                             AND (messages.thread_id IS NULL OR messages.thread_id NOT LIKE $33 || '%')
+                        WHEN starts_with(EXCLUDED.thread_id, $33)
+                             AND (messages.thread_id IS NULL OR NOT starts_with(messages.thread_id, $33))
                           THEN EXCLUDED.thread_id
                         -- #378: heal a self-rooted (orphaned) row by adopting the real conversation root.
                         WHEN messages.thread_id = messages.message_id
@@ -4235,15 +4245,18 @@ export class ImapManager {
                           THEN EXCLUDED.thread_id
                         ELSE COALESCE(messages.thread_id, EXCLUDED.thread_id)
                       END,
+                      -- Same branches as the key, ELSE included: a row written before migration
+                      -- 0063 keeps its key and has no reason, so it must not take the new
+                      -- computation's reason for a key that was never applied.
                       threading_reason = CASE
-                        WHEN EXCLUDED.thread_id LIKE $33 || '%'
-                             AND (messages.thread_id IS NULL OR messages.thread_id NOT LIKE $33 || '%')
+                        WHEN starts_with(EXCLUDED.thread_id, $33)
+                             AND (messages.thread_id IS NULL OR NOT starts_with(messages.thread_id, $33))
                           THEN EXCLUDED.threading_reason
                         WHEN messages.thread_id = messages.message_id
                              AND EXCLUDED.thread_id IS NOT NULL
                              AND EXCLUDED.thread_id <> messages.message_id
                           THEN EXCLUDED.threading_reason
-                        ELSE COALESCE(messages.threading_reason, EXCLUDED.threading_reason)
+                        ELSE CASE WHEN messages.thread_id IS NULL THEN EXCLUDED.threading_reason ELSE messages.threading_reason END
                       END,
                       is_bulk = COALESCE(messages.is_bulk, EXCLUDED.is_bulk),
                       category = COALESCE(messages.category, EXCLUDED.category),
@@ -4999,12 +5012,15 @@ export class ImapManager {
           THEN EXCLUDED.thread_id
           ELSE COALESCE(messages.thread_id, EXCLUDED.thread_id)
         END,
+        -- Same branches as the key, ELSE included: a row written before migration 0063 keeps its
+        -- key and has no reason, so it must not take the new computation's reason for a key that
+        -- was never applied.
         threading_reason = CASE
           WHEN messages.thread_id = messages.message_id
                AND EXCLUDED.thread_id IS NOT NULL
                AND EXCLUDED.thread_id <> messages.message_id
           THEN EXCLUDED.threading_reason
-          ELSE COALESCE(messages.threading_reason, EXCLUDED.threading_reason)
+          ELSE CASE WHEN messages.thread_id IS NULL THEN EXCLUDED.threading_reason ELSE messages.threading_reason END
         END
     `, [
       account.id, uid, folder, msgId,

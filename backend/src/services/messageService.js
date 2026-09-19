@@ -163,8 +163,14 @@ export async function listMessages({ accountId, folder = 'INBOX', limit = 50, of
       ORDER BY date DESC, id
     `, [...filterValues, threadAccountParam, safeLimit, safeOffset]);
 
+    // COUNT(DISTINCT (a, b)) builds a record per row, and records have no hash function, so the
+    // planner sorts the whole filtered set on every threaded list load. Scoped to one mailbox the
+    // account id is constant, so counting thread keys alone is the same number for less work.
+    const threadCountExpr = isSpecificAccount
+      ? 'COUNT(DISTINCT m.thread_key)'
+      : 'COUNT(DISTINCT (m.account_id, m.thread_key))';
     const threadCountResult = await query(`
-      SELECT COUNT(DISTINCT (m.account_id, m.thread_key))::int AS total
+      SELECT ${threadCountExpr}::int AS total
       FROM messages m
       WHERE ${where}
     `, filterValues);

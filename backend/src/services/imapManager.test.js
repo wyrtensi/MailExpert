@@ -2513,26 +2513,46 @@ describe('Gmail label memberships (#418)', () => {
       expect(query.mock.calls.some(([sql]) => /UPDATE messages SET thread_id/.test(sql))).toBe(true);
     });
 
+    // LIKE reads `%` and `_` in its pattern as wildcards, so a prefix parameter has to be
+    // escaped to be matched literally. starts_with takes the parameter as plain text.
     it('keys the conflict branch on a parameter holding the Gmail key prefix', async () => {
       await sync(manager(), 'INBOX');
       const sql = inserts[0].sql;
-      expect(sql).toMatch(/thread_id = CASE[\s\S]*WHEN EXCLUDED\.thread_id LIKE \$\d+/);
-      expect(sql).toMatch(/threading_reason = CASE[\s\S]*WHEN EXCLUDED\.thread_id LIKE \$\d+/);
+      expect(sql).toMatch(/thread_id = CASE[\s\S]*WHEN starts_with\(EXCLUDED\.thread_id, \$\d+\)/);
+      expect(sql).toMatch(/threading_reason = CASE[\s\S]*WHEN starts_with\(EXCLUDED\.thread_id, \$\d+\)/);
+      expect(sql).toMatch(/NOT starts_with\(messages\.thread_id, \$\d+\)/);
+      expect(sql).not.toMatch(/LIKE \$\d+ \|\| '%'/);
       expect(inserts[0].params).toContain(GMAIL_KEY_PREFIX);
     });
 
     // The mock query implementation cannot evaluate SQL, so the CASE semantics are checked
     // against a real database in Task 5. Here we only confirm the thread_id and
-    // threading_reason branches share the exact same WHEN conditions, since a mismatch there
-    // would silently desynchronize the reason from the key it explains.
-    it('mirrors the thread_id and threading_reason CASE conditions exactly', async () => {
+    // threading_reason branches decide alike — the same WHEN conditions and an ELSE that keeps
+    // the stored reason on exactly the rows whose stored key is kept. A mismatch either way
+    // silently stores a reason that explains a key the row never took: a row written before
+    // migration 0063 has a key and a NULL reason.
+    it('mirrors the thread_id and threading_reason CASE branches, ELSE included', async () => {
       await sync(manager(), 'INBOX');
       const sql = inserts[0].sql;
-      const section = sql.slice(sql.indexOf('thread_id = CASE'), sql.indexOf('is_bulk = COALESCE'));
-      const conditions = section.match(/WHEN[\s\S]*?(?=\s*THEN)/g);
-      expect(conditions).toHaveLength(4);
-      expect(conditions[0]).toBe(conditions[2]);
-      expect(conditions[1]).toBe(conditions[3]);
+      const keyCase = sql.slice(sql.indexOf('thread_id = CASE'), sql.indexOf('threading_reason = CASE'));
+      const reasonCase = sql.slice(sql.indexOf('threading_reason = CASE'), sql.indexOf('is_bulk = COALESCE'));
+      const whens = section => section.slice(0, section.indexOf('ELSE')).match(/WHEN[\s\S]*?(?=\s*THEN)/g);
+      expect(whens(keyCase)).toHaveLength(2);
+      expect(whens(reasonCase)).toEqual(whens(keyCase));
+      expect(keyCase).toContain('ELSE COALESCE(messages.thread_id, EXCLUDED.thread_id)');
+      expect(reasonCase).toContain('ELSE CASE WHEN messages.thread_id IS NULL THEN EXCLUDED.threading_reason ELSE messages.threading_reason END');
+      expect(reasonCase).not.toContain('COALESCE(messages.threading_reason');
+    });
+
+    // The Sent-copy upsert has the same key/reason pair and the same pre-0063 rows, without the
+    // Gmail branch: it never sees a provider thread number.
+    it('keeps the stored reason with the stored key in the Sent-copy upsert', async () => {
+      const mgr = { ...manager(), _scheduleProviderIdBackfill: vi.fn() };
+      await ImapManager.prototype.upsertSentMessageRecord.call(mgr, acct, sent, 7, { messageId: '<sent@example.com>' });
+      const sql = inserts.at(-1).sql;
+      expect(sql).toContain('ELSE COALESCE(messages.thread_id, EXCLUDED.thread_id)');
+      expect(sql).toContain('ELSE CASE WHEN messages.thread_id IS NULL THEN EXCLUDED.threading_reason ELSE messages.threading_reason END');
+      expect(sql).not.toContain('COALESCE(messages.threading_reason');
     });
   });
 });
@@ -3579,6 +3599,9 @@ describe('rerootThreadChildren', () => {
     expect(query).toHaveBeenCalledTimes(1);
     const [sql, params] = query.mock.calls[0];
     expect(sql).toMatch(/UPDATE messages SET thread_id = \$1/);
+    // The row no longer hangs on a provisional root but on the resolved one, so the reason it
+    // still carries ('rfc-provisional', or NULL from before migration 0063) stops being true.
+    expect(sql).toMatch(/UPDATE messages SET thread_id = \$1, threading_reason = 'rfc-root'/);
     expect(sql).toMatch(/account_id = \$2 AND thread_id = \$3 AND message_id != \$3/);
     // idx_messages_thread_id is partial on is_deleted = false. Without the same predicate the
     // planner scans every row of the account for each reply (measured: 12 ms vs 0.5 ms at 40k rows).

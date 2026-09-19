@@ -56,7 +56,7 @@ const SAFE_FIELDS = [
   'auth_user', 'smtp_auth_user', 'oauth_provider', 'oauth_reconnect_required', 'enabled',
   'include_in_unified_inbox',
   'last_sync', 'sync_error', 'sort_order', 'folder_mappings',
-  'signature', 'created_at', 'categorization_enabled',
+  'signature', 'created_at', 'categorization_enabled', 'thread_mode',
 ];
 function safeAccount(row) {
   const obj = Object.fromEntries(SAFE_FIELDS.map(k => [k, row[k]]));
@@ -71,7 +71,7 @@ router.get('/', async (req, res) => {
             smtp_host, smtp_port, smtp_tls, auth_user, smtp_auth_user, oauth_provider, oauth_reconnect_required, enabled,
             include_in_unified_inbox,
             last_sync, sync_error, sort_order, folder_mappings, signature, created_at,
-            categorization_enabled
+            categorization_enabled, thread_mode
      FROM email_accounts
      ORDER BY sort_order, created_at`
   );

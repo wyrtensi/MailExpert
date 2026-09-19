@@ -18,7 +18,7 @@ import { query } from '../services/db.js';
 const ROW = {
   id: 'a1', name: 'Mailbox', email_address: 'box@gmail.com', protocol: 'imap',
   oauth_provider: 'google', oauth_reconnect_required: false, enabled: true,
-  sync_error: null, signature: null,
+  sync_error: null, signature: null, thread_mode: 'rfc',
 };
 
 describe('GET /api/accounts health', () => {

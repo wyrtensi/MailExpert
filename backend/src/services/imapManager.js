@@ -28,6 +28,8 @@ import { runProviderIdBackfill } from './threading/providerIdBackfill.js';
 import {
   loadProviderIdBackfill, markProviderIdBackfillPending, providerIdBackfillState, recordProviderIdBackfillError,
 } from './threading/providerIdBackfillStore.js';
+import { runRecompute, RECOMPUTE_BATCH_DELAY_MS } from './threading/recompute.js';
+import { recomputeState, recordRecomputeError } from './threading/recomputeStore.js';
 import { randomUUID } from 'crypto';
 
 
@@ -1685,6 +1687,7 @@ export class ImapManager {
     this._providerIdGeneration = new Map(); // accountId -> bumped by every local write that needs ids
     this._providerIdNudges = new Map(); // accountId -> pending timeout after a local write
     this.providerIdBackoff = new Map(); // accountId -> { failures, until } after a failed or incomplete run
+    this.threadRecomputeRunning = new Set(); // accountId — thread key recompute in progress
     // Cap concurrent background IMAP connections (backfill, snippet indexer, folder status, bulk
     // flags) per provider host; a provider profile may set a tighter host limit.
     this._bgConnSem = createKeyedSemaphore(host => backgroundConnectionLimit(host));
@@ -4907,6 +4910,65 @@ export class ImapManager {
   async _broadcastProviderIdBackfill(account) {
     const state = (await this.providerIdBackfillStates([account])).get(account.id);
     if (state) this.broadcast({ type: 'provider_ids_backfill', accountId: account.id, state });
+  }
+
+  // Recomputes a mailbox's stored thread keys after its threading mode changed (admin-triggered,
+  // see routes/admin.js). No IMAP connection is needed, so this never touches _bgConnSem; it
+  // paces itself with RECOMPUTE_BATCH_DELAY_MS plus the same quiet-window backoff the other
+  // background jobs use. runRecompute itself saves progress to the thread_recompute row before
+  // each onProgress call, so the broadcast can read that row straight back rather than tracking
+  // progress separately in memory.
+  async startThreadRecompute(account, targetMode) {
+    if (this.threadRecomputeRunning.has(account.id)) return;
+    this.threadRecomputeRunning.add(account.id);
+    try {
+      await runRecompute({
+        query,
+        accountId: account.id,
+        targetMode,
+        shouldContinue: async () => {
+          const row = (await query('SELECT enabled FROM email_accounts WHERE id = $1', [account.id])).rows[0];
+          return Boolean(row?.enabled);
+        },
+        onProgress: () => {
+          this._broadcastThreadRecompute(account).catch(() => {});
+        },
+        pause: async () => {
+          const quietFor = Date.now() - (this.lastUserActivity.get(account.id) || 0);
+          const extraDelay = quietFor < QUIET_WINDOW_MS ? QUIET_WINDOW_MS - quietFor : 0;
+          await new Promise(resolve => setTimeout(resolve, RECOMPUTE_BATCH_DELAY_MS + extraDelay));
+        },
+      });
+    } catch (err) {
+      console.warn(`Thread recompute failed for ${logAccount(account)}: ${err.message}`);
+      await recordRecomputeError(query, account.id, err.message).catch(() => {});
+    } finally {
+      this.threadRecomputeRunning.delete(account.id);
+      this._broadcastThreadRecompute(account).catch(() => {});
+    }
+  }
+
+  // Admin state of the thread recompute for `accounts`.
+  async threadRecomputeStates(accounts) {
+    const states = new Map();
+    if (!accounts.length) return states;
+    const { rows } = await query(
+      'SELECT account_id, processed, changed, total, finished_at, error FROM thread_recompute WHERE account_id = ANY($1)',
+      [accounts.map(account => account.id)],
+    );
+    const byAccount = new Map(rows.map(row => [row.account_id, row]));
+    for (const account of accounts) {
+      states.set(account.id, recomputeState({
+        row: byAccount.get(account.id) || null,
+        running: this.threadRecomputeRunning.has(account.id),
+      }));
+    }
+    return states;
+  }
+
+  async _broadcastThreadRecompute(account) {
+    const state = (await this.threadRecomputeStates([account])).get(account.id);
+    if (state) this.broadcast({ type: 'thread_recompute', accountId: account.id, state });
   }
 
   // A row the app wrote itself after an APPEND has no Gmail ids, and the sync never refetches its

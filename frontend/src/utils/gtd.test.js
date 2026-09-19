@@ -711,8 +711,10 @@ describe('openDeepLinkMessage — stale-id recovery', () => {
     const deps = {
       ...base,
       getMessage: async () => { throw new Error('404'); },
-      getThread: async (tk) => { calls.push(['thread', tk]); return { messages: [fresh] }; },
-      thread: { id: 'stale', message_id: '<mid>', thread_key: 'tk1' },
+      // The recovery read is scoped to the row's mailbox: unscoped, the thread route answers
+      // from every enabled mailbox and the click could open another mailbox's copy.
+      getThread: async (...args) => { calls.push(['thread', ...args]); return { messages: [fresh] }; },
+      thread: { id: 'stale', message_id: '<mid>', thread_key: 'tk1', account_id: 'acct-1' },
       onMiss: () => { refetched += 1; },
     };
     const { result, warned } = await withWarnCaptured(() => openDeepLinkMessage('stale', deps));
@@ -721,7 +723,7 @@ describe('openDeepLinkMessage — stale-id recovery', () => {
     assert.equal(warned.length, 1);
     assert.match(warned[0], /stale/);
     assert.deepEqual(calls, [
-      ['thread', 'tk1'],
+      ['thread', 'tk1', undefined, false, 'acct-1'],
       ['stash', '__dl_fresh', [fresh]],
       ['select', 'fresh'],
     ]);
@@ -1074,13 +1076,16 @@ describe('setGtdThreadReadInSections', () => {
 });
 
 describe('collectThreadReadIds', () => {
-  const head = { id: 'head-1', thread_key: 'tk-1' };
+  const head = { id: 'head-1', thread_key: 'tk-1', account_id: 'acct-1' };
 
+  // The thread route falls back to every enabled mailbox when no account id is given, and it
+  // dedupes copies by message_id, so an unscoped read would hand bulkRead ids belonging to
+  // another mailbox's copy of the same conversation.
   it('marking READ targets every message in the thread, not just the head', async () => {
     const asked = [];
-    const getThread = async (tk) => { asked.push(tk); return { messages: [{ id: 'a' }, { id: 'b' }, { id: 'head-1' }] }; };
+    const getThread = async (...args) => { asked.push(args); return { messages: [{ id: 'a' }, { id: 'b' }, { id: 'head-1' }] }; };
     const ids = await collectThreadReadIds(head, true, getThread);
-    assert.deepEqual(asked, ['tk-1']);
+    assert.deepEqual(asked, [['tk-1', undefined, false, 'acct-1']]);
     assert.deepEqual(ids, ['a', 'b', 'head-1']);
   });
 

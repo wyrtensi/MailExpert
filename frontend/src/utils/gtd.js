@@ -391,7 +391,9 @@ export function setGtdThreadReadInSections(sections, identity, isRead) {
 export async function collectThreadReadIds(thread, read, getThread) {
   if (!read || !getThread || !thread?.thread_key) return [thread.id];
   try {
-    const { messages } = await getThread(thread.thread_key);
+    // Scoped to the row's own mailbox: unscoped, the thread route answers from every enabled
+    // mailbox and dedupes copies by message_id, so bulkRead would be handed another mailbox's ids.
+    const { messages } = await getThread(thread.thread_key, undefined, false, thread.account_id);
     const ids = (Array.isArray(messages) ? messages : []).map(m => m?.id).filter(Boolean);
     return ids.length ? ids : [thread.id];
   } catch {
@@ -654,7 +656,9 @@ export async function openDeepLinkMessage(id, {
 
   if (getThread && thread?.thread_key) {
     try {
-      const { messages } = await getThread(thread.thread_key);
+      // Scoped to the row's own mailbox, for the same reason as collectThreadReadIds: the
+      // unscoped route would let the click land on another mailbox's copy.
+      const { messages } = await getThread(thread.thread_key, undefined, false, thread.account_id);
       const msg = pickThreadMessage(messages, thread.message_id);
       if (msg) return open(msg);
     } catch {

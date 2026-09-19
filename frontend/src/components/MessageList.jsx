@@ -808,10 +808,12 @@ export default function MessageList() {
     });
   }, [isThreadListRow, threadMessages, selectedAccountId, selectedFolder, isUnified]);
 
-  const invalidateThreadCache = useCallback((threadId) => {
-    invalidateThreadLoad(threadLoadVersionsRef.current, threadId);
-    clearThreadMessages(threadId);
-    if (useStore.getState().loadingThread === threadId) setLoadingThread(null);
+  // cacheKey is a threadCacheKey(message) — `${account_id}:${thread_id or id}`, not a bare
+  // thread id: the same conversation in two mailboxes caches separately.
+  const invalidateThreadCache = useCallback((cacheKey) => {
+    invalidateThreadLoad(threadLoadVersionsRef.current, cacheKey);
+    clearThreadMessages(cacheKey);
+    if (useStore.getState().loadingThread === cacheKey) setLoadingThread(null);
   }, [clearThreadMessages, setLoadingThread]);
 
   const setCachedThreadRead = useCallback((message, read) => {
@@ -1216,8 +1218,10 @@ export default function MessageList() {
     const threadId = message.thread_id || message.id;
     const cacheKey = threadCacheKey(message);
     const activeFolder = selectedAccountId ? selectedFolder : 'INBOX';
+    // Keyed by the row's own mailbox, not the selected one: the unified inbox has no selected
+    // mailbox, and a guard without one hides the same conversation in every other mailbox too.
     const threadGuard = threadRow
-      ? threadDeleteGuardKey(threadId, activeFolder, selectedAccountId)
+      ? threadDeleteGuardKey(threadId, activeFolder, message.account_id)
       : null;
     const guards = [message.id, threadGuard].filter(Boolean);
     const viewKey = archiveViewKeyRef.current;
@@ -1606,12 +1610,14 @@ export default function MessageList() {
 
   const handleBulkArchive = useCallback((ids, msgs) => {
     const activeFolder = selectedAccountId ? selectedFolder : 'INBOX';
+    // Each guard names the mailbox of the row it belongs to: in the unified inbox there is no
+    // selected mailbox, and an unscoped guard hides every mailbox's copy of the conversation.
     const threadGuardsByRow = new Map(
       msgs
         .filter(message => isThreadListRow(message))
         .map(message => [
           message.id,
-          threadDeleteGuardKey(message.thread_id || message.id, activeFolder, selectedAccountId),
+          threadDeleteGuardKey(message.thread_id || message.id, activeFolder, message.account_id),
         ])
         .filter(([, guard]) => Boolean(guard)),
     );
@@ -1731,8 +1737,9 @@ export default function MessageList() {
     const threadId = message.thread_id || message.id;
     const cacheKey = threadCacheKey(message);
     const activeFolder = selectedAccountId ? selectedFolder : 'INBOX';
+    // The row's own mailbox, not the selected one — see handleSwipeArchive.
     const threadGuard = threadRow
-      ? threadDeleteGuardKey(threadId, activeFolder, selectedAccountId)
+      ? threadDeleteGuardKey(threadId, activeFolder, message.account_id)
       : null;
     const initialGuards = [message.id, threadGuard].filter(Boolean);
     const viewKey = actionViewKey;
@@ -2103,8 +2110,9 @@ export default function MessageList() {
         const threadId = archived.thread_id || archived.id;
         const cacheKey = threadCacheKey(archived);
         const activeFolder = selectedAccountId ? selectedFolder : 'INBOX';
+        // The row's own mailbox, not the selected one — see handleSwipeArchive.
         const threadGuard = threadRow
-          ? threadDeleteGuardKey(threadId, activeFolder, selectedAccountId)
+          ? threadDeleteGuardKey(threadId, activeFolder, archived.account_id)
           : null;
         const guards = [archived.id, threadGuard].filter(Boolean);
         const viewKey = archiveViewKeyRef.current;

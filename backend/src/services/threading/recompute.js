@@ -17,8 +17,12 @@ export function threadingForRow(row, { mode, ancestorKeys }) {
     return { threadId: `${GMAIL_KEY_PREFIX}${row.provider_thread_id}`, reason: 'gmail-thrid' };
   }
   if (!row.message_id) return { threadId: null, reason: null };
-  const candidates = parseReferences(row.thread_references);
-  if (row.in_reply_to && !candidates.includes(row.in_reply_to)) candidates.push(row.in_reply_to);
+  // Drop the row's own Message-ID from its candidates: a malformed References header that echoes
+  // itself must not let the row resolve to (or through) its own entry.
+  const candidates = parseReferences(row.thread_references).filter(id => id !== row.message_id);
+  if (row.in_reply_to && row.in_reply_to !== row.message_id && !candidates.includes(row.in_reply_to)) {
+    candidates.push(row.in_reply_to);
+  }
   if (candidates.length === 0) return { threadId: row.message_id, reason: 'new-root' };
   if (ancestorKeys.has(candidates[0])) return { threadId: ancestorKeys.get(candidates[0]), reason: 'rfc-root' };
   for (let i = candidates.length - 1; i >= 0; i--) {
@@ -34,7 +38,10 @@ export async function previewRecompute(query, accountId, targetMode) {
     const { rows } = await query(
       `SELECT
          count(*)::bigint AS rows,
-         -- rows whose provider_thread_id already resolved but whose stored key does not match it yet
+         -- lower bound: rows whose provider_thread_id already resolved but whose stored key does
+         -- not match it yet. A row whose key already matches but whose threading_reason is stale
+         -- (e.g. carried over from before gmail-thrid existed) is also written by the pass and is
+         -- not counted here — this is a floor on "changing", not the exact count.
          count(*) FILTER (
            WHERE m.provider_thread_id IS NOT NULL
              AND m.thread_id IS DISTINCT FROM $2 || m.provider_thread_id
@@ -67,7 +74,9 @@ export async function previewRecompute(query, accountId, targetMode) {
   const { rows } = await query(
     `SELECT
        count(*)::bigint AS rows,
-       -- rows that will change: a leftover gmail: key (mode no longer gmail), or a subject-glued row
+       -- lower bound: a leftover gmail: key (mode no longer gmail), or a subject-glued row. A row
+       -- whose key stays but whose threading_reason changes is also written by the pass and is
+       -- not counted here — this is a floor on "changing", not the exact count.
        count(*) FILTER (
          WHERE m.thread_id LIKE $2 || '%'
             OR (m.in_reply_to IS NULL AND m.thread_references IS NULL
@@ -92,8 +101,13 @@ export async function previewRecompute(query, accountId, targetMode) {
   };
 }
 
-// Selects the next batch after the cursor, oldest first.
-async function selectBatch(query, accountId, cursorDate, cursorId) {
+// Selects the next batch after the cursor, oldest first. The walk assumes `date` is never NULL:
+// every write path either computes it through imapManager.js's safeDate() (live sync, backfill,
+// the Sent/Draft upserts — falls back to `new Date()` rather than ever storing NULL) or copies it
+// verbatim from an existing row (insertCopiedSibling, the relocate CTEs in routes/mail.js), whose
+// own date was written the same way; see idx_messages_account_date (migration 0066) for the index
+// this ordering relies on.
+async function selectBatch(query, accountId, cursorDate, cursorId, batchSize) {
   const { rows } = await query(
     `SELECT id, message_id, in_reply_to, thread_references, provider_thread_id, thread_id, threading_reason, date
        FROM messages
@@ -101,28 +115,38 @@ async function selectBatch(query, accountId, cursorDate, cursorId) {
         AND (date, id) > ($2, $3)
       ORDER BY date, id
       LIMIT $4`,
-    [accountId, cursorDate, cursorId, RECOMPUTE_BATCH_SIZE],
+    [accountId, cursorDate, cursorId, batchSize],
   );
   return rows;
 }
 
 // Resolves every candidate ancestor Message-ID referenced by the batch to its currently stored
-// thread key, in one query.
-async function resolveAncestors(query, accountId, candidateIds) {
+// thread key, in one query — bounded to rows this pass has already walked and written
+// (is_deleted = false and at or before the cursor as it stood before this batch). Without that
+// bound a row not yet reached, or one that is soft-deleted and will never be reached, would seed
+// the map with its old, pre-recompute key — exactly the kind of stale key the recompute exists to
+// remove. A candidate that belongs to the current batch itself is resolved through the in-memory
+// map instead (see the loop below), not through this query.
+async function resolveAncestors(query, accountId, candidateIds, cursorDate, cursorId) {
   if (candidateIds.length === 0) return [];
   const { rows } = await query(
     `SELECT message_id, thread_id FROM messages
-      WHERE account_id = $1 AND message_id = ANY($2) AND thread_id IS NOT NULL`,
-    [accountId, candidateIds],
+      WHERE account_id = $1 AND message_id = ANY($2) AND thread_id IS NOT NULL
+        AND is_deleted = false AND (date, id) <= ($3, $4)`,
+    [accountId, candidateIds, cursorDate, cursorId],
   );
   return rows;
 }
 
+// A row's own Message-ID is dropped here too (see threadingForRow), so a self-referencing header
+// never asks the database to resolve a row against itself.
 function collectCandidateIds(batch) {
   const ids = new Set();
   for (const row of batch) {
-    for (const ref of parseReferences(row.thread_references)) ids.add(ref);
-    if (row.in_reply_to) ids.add(row.in_reply_to);
+    for (const ref of parseReferences(row.thread_references)) {
+      if (ref !== row.message_id) ids.add(ref);
+    }
+    if (row.in_reply_to && row.in_reply_to !== row.message_id) ids.add(row.in_reply_to);
   }
   return [...ids];
 }
@@ -145,6 +169,7 @@ async function writeBatch(query, accountId, updates) {
 
 export async function runRecompute({
   query, accountId, targetMode, shouldContinue, onProgress = () => {}, pause = async () => {},
+  batchSize = RECOMPUTE_BATCH_SIZE,
 }) {
   const existing = await loadRecompute(query, accountId);
   const resuming = Boolean(existing) && existing.target_mode === targetMode && !existing.finished_at;
@@ -170,18 +195,22 @@ export async function runRecompute({
     await startRecomputeRow(query, accountId, targetMode, total);
   }
 
-  // Survives across batches; cleared and re-seeded at the start of each one (see resolveAncestors
-  // and the loop below) so it never grows unbounded and always reflects this pass's own progress.
+  // Cleared and re-seeded at the start of every batch (see resolveAncestors below). A previous
+  // batch's UPDATE is already committed by the time this query runs, so the seed it reads back
+  // already reflects this pass's own results, not stale pre-recompute keys. The current batch's
+  // own rows are added as they're computed, further down, since they aren't committed yet.
   const ancestorKeys = new Map();
 
   for (;;) {
     if (!(await shouldContinue())) return { outcome: 'stopped', processed, changed, total };
 
-    const batch = await selectBatch(query, accountId, cursorDate, cursorId);
+    const batch = await selectBatch(query, accountId, cursorDate, cursorId, batchSize);
     if (batch.length === 0) break;
 
     ancestorKeys.clear();
-    const resolved = await resolveAncestors(query, accountId, collectCandidateIds(batch));
+    // cursorDate/cursorId here are still the pre-batch cursor: this is the bound the resolution
+    // query needs to see only rows this pass has already committed (see resolveAncestors).
+    const resolved = await resolveAncestors(query, accountId, collectCandidateIds(batch), cursorDate, cursorId);
     for (const r of resolved) ancestorKeys.set(r.message_id, r.thread_id);
 
     const updates = [];
@@ -200,7 +229,7 @@ export async function runRecompute({
     cursorDate = last.date;
     cursorId = last.id;
     await saveRecomputeCursor(query, accountId, { cursorDate, cursorId, processed, changed });
-    onProgress({ processed, changed, total });
+    await onProgress({ processed, changed, total });
     await pause();
   }
 

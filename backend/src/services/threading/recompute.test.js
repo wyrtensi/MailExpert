@@ -93,9 +93,11 @@ function fakeDb({ messages, state = null }) {
       return { rows: batch.map(m => ({ ...m })) };
     }
     if (/SELECT message_id, thread_id FROM messages/.test(sql)) {
-      const [accountId, ids] = params;
+      const [accountId, ids, cursorDate, cursorId] = params;
       const idSet = new Set(ids);
-      const rows = db.messages.filter(m => m.account_id === accountId && idSet.has(m.message_id) && m.thread_id != null);
+      const atOrBeforeCursor = (m) => m.date < cursorDate || (m.date === cursorDate && m.id <= cursorId);
+      const rows = db.messages.filter(m => m.account_id === accountId && idSet.has(m.message_id)
+        && m.thread_id != null && !m.is_deleted && atOrBeforeCursor(m));
       return { rows: rows.map(m => ({ message_id: m.message_id, thread_id: m.thread_id })) };
     }
     if (/^\s*UPDATE messages m/.test(sql)) {
@@ -177,6 +179,21 @@ describe('threadingForRow', () => {
     const result = threadingForRow(row, { mode: 'rfc', ancestorKeys });
     expect(result).toEqual({ threadId: 'keyA', reason: 'rfc-ancestor' });
     expect(calls).toEqual(['<b>', '<a>']);
+  });
+
+  it('drops its own Message-ID from the candidate list before resolving', () => {
+    // The self-reference is placed FIRST, so a naive candidates[0] check would find nothing (no
+    // row ever resolves to its own id) and fall back to the real ancestor via the backward scan,
+    // reporting 'rfc-ancestor' instead of 'rfc-root'. Dropping it makes '<a>' the real first
+    // candidate, resolving as the root.
+    const row = { message_id: '<c>', in_reply_to: null, thread_references: '<c> <a>' };
+    const ancestorKeys = new Map([['<a>', 'keyA']]);
+    expect(threadingForRow(row, { mode: 'rfc', ancestorKeys })).toEqual({ threadId: 'keyA', reason: 'rfc-root' });
+  });
+
+  it('drops in_reply_to when it equals its own Message-ID', () => {
+    const row = { message_id: '<c>', in_reply_to: '<c>', thread_references: null };
+    expect(threadingForRow(row, { mode: 'rfc', ancestorKeys: new Map() })).toEqual({ threadId: '<c>', reason: 'new-root' });
   });
 });
 
@@ -278,6 +295,82 @@ describe('runRecompute', () => {
     expect(result.outcome).toBe('done');
     expect(messages.map(m => [m.id, m.thread_id, m.threading_reason])).toEqual([
       ['root', '<root>', 'new-root'],
+      ['reply', '<root>', 'rfc-root'],
+    ]);
+  });
+
+  it('does not resolve an ancestor through a soft-deleted row\'s stale key', async () => {
+    // The root was gmail-keyed, then soft-deleted; the mailbox rolls back to rfc. No live row can
+    // ever reproduce 'gmail:5' again, so the reply must not inherit it — it falls through to its
+    // own provisional root instead, same as any other unresolved reference.
+    const messages = [
+      msg('root', '2024-01-01T00:00:00.000Z', {
+        message_id: '<root>', thread_id: 'gmail:5', is_deleted: true,
+      }),
+      msg('reply', '2024-01-02T00:00:00.000Z', {
+        message_id: '<reply>', in_reply_to: '<root>', thread_id: 'gmail:5',
+      }),
+    ];
+    const db = fakeDb({ messages });
+
+    const result = await run(db, { targetMode: 'rfc' });
+
+    expect(result.outcome).toBe('done');
+    expect(messages.find(m => m.id === 'reply').thread_id).toBe('<root>');
+    expect(messages.find(m => m.id === 'reply').threading_reason).toBe('rfc-provisional');
+  });
+
+  it('does not resolve an ancestor ordered after the current row in the same pass', async () => {
+    // '<later>' references an ancestor that has not been walked yet (it sorts after '<earlier>'
+    // in this batch but the ancestor resolution only looks at rows already committed by a prior
+    // batch). It must not adopt the not-yet-recomputed row's still-stale stored key.
+    const messages = [
+      msg('earlier', '2024-01-01T00:00:00.000Z', {
+        message_id: '<earlier>', in_reply_to: '<later>', thread_id: 'stale',
+      }),
+      msg('later', '2024-01-02T00:00:00.000Z', {
+        message_id: '<later>', thread_id: 'stale',
+      }),
+    ];
+    const db = fakeDb({ messages });
+
+    const result = await run(db, { targetMode: 'rfc' });
+
+    expect(result.outcome).toBe('done');
+    expect(messages.find(m => m.id === 'earlier').thread_id).toBe('<later>');
+    expect(messages.find(m => m.id === 'earlier').threading_reason).toBe('rfc-provisional');
+  });
+
+  it('carries an ancestor rekeyed in an earlier batch forward into a later batch', async () => {
+    const messages = [
+      msg('root', '2024-01-01T00:00:00.000Z', { message_id: '<root>', thread_id: 'glue', threading_reason: null }),
+      msg('mid1', '2024-01-02T00:00:00.000Z', { message_id: '<mid1>', thread_id: 'glue', threading_reason: null }),
+      msg('mid2', '2024-01-03T00:00:00.000Z', { message_id: '<mid2>', thread_id: 'glue', threading_reason: null }),
+      msg('reply', '2024-01-04T00:00:00.000Z', {
+        message_id: '<reply>', in_reply_to: '<root>', thread_id: 'glue', threading_reason: null,
+      }),
+    ];
+    const db = fakeDb({ messages });
+    const selectCalls = [];
+    const realImpl = db.query.getMockImplementation();
+    db.query.mockImplementation(async (sql, params) => {
+      const result = await realImpl(sql, params);
+      if (/SELECT id, message_id, in_reply_to, thread_references, provider_thread_id, thread_id, threading_reason, date/.test(sql)) {
+        selectCalls.push(result.rows.map(r => r.id));
+      }
+      return result;
+    });
+
+    const result = await run(db, { targetMode: 'rfc', batchSize: 1 });
+
+    expect(result).toEqual({ outcome: 'done', processed: 4, changed: 4, total: 4 });
+    // Four batches of one row each, plus a final empty batch that ends the walk.
+    expect(selectCalls).toEqual([['root'], ['mid1'], ['mid2'], ['reply'], []]);
+    expect(db.db.state.cursor_id).toBe('reply');
+    expect(messages.map(m => [m.id, m.thread_id, m.threading_reason])).toEqual([
+      ['root', '<root>', 'new-root'],
+      ['mid1', '<mid1>', 'new-root'],
+      ['mid2', '<mid2>', 'new-root'],
       ['reply', '<root>', 'rfc-root'],
     ]);
   });

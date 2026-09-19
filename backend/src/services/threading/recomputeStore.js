@@ -59,7 +59,10 @@ export async function recordRecomputeError(query, accountId, message) {
 
 // What the admin panel shows for a mailbox's recompute. `running` comes from process memory; the
 // row holds what survives a restart. A row without finished_at and without an error, not running,
-// is a run that stopped early (restart, disabled mailbox) and has not been resumed yet.
+// is a run that stopped early (restart, disabled mailbox, a mode switch during the pass) and is
+// reported as `paused` — the same word the provider-id backfill uses for its own stopped run:
+// the mailbox reconnect continues it, so it is not `idle`, which stays for a mailbox that never
+// ran a pass at all.
 export function recomputeState({ row = null, running = false } = {}) {
   if (running) {
     const total = row?.total ?? 0;
@@ -71,5 +74,5 @@ export function recomputeState({ row = null, running = false } = {}) {
   // error before finished_at on purpose: a failure after an earlier complete run must show.
   if (row.error) return { status: 'error', percent: null, changed: row.changed ?? null, error: row.error };
   if (row.finished_at) return { status: 'done', percent: 100, changed: row.changed ?? null, error: null };
-  return { status: 'idle', percent: null, changed: row.changed ?? null, error: null };
+  return { status: 'paused', percent: null, changed: row.changed ?? null, error: null };
 }

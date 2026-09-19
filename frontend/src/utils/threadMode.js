@@ -10,13 +10,17 @@ export function threadModeLabel(account, t) {
 }
 
 // state is the mailbox's `thread_recompute` field: { status, percent, changed, error } | null,
-// status one of 'idle' | 'running' | 'done' | 'error'. null and 'idle' both mean nothing to show.
+// status one of 'idle' | 'running' | 'paused' | 'done' | 'error'. null and 'idle' both mean the
+// mailbox never ran a pass, so there is nothing to show; 'paused' is a pass that stopped and is
+// continued when the mailbox reconnects, which must be visible.
 export function threadRecomputeText(state, t) {
   switch (state?.status) {
     case 'running':
       return state.percent == null
         ? t('admin.accounts.threading.running')
         : `${t('admin.accounts.threading.running')} ${state.percent}%`;
+    case 'paused':
+      return t('admin.accounts.threading.paused');
     case 'done':
       return t('admin.accounts.threading.done', { changed: state.changed });
     case 'error':

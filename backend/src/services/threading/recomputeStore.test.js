@@ -70,7 +70,9 @@ describe('recomputeState', () => {
     [{ running: true, row: { processed: 1, total: 0, changed: 0 } }, { status: 'running', percent: null, changed: 0, error: null }],
     [{ row: { error: 'Command failed', processed: 2, total: 4, changed: 1 } }, { status: 'error', percent: null, changed: 1, error: 'Command failed' }],
     [{ row: { finished_at: '2026-09-17T10:00:00Z', processed: 4, total: 4, changed: 2, error: null } }, { status: 'done', percent: 100, changed: 2, error: null }],
-    [{ row: { finished_at: null, processed: 0, total: 0, changed: 0, error: null } }, { status: 'idle', percent: null, changed: 0, error: null }],
+    // a row that exists but never finished and is not running: the pass stopped (restart, disabled
+    // mailbox, a mode switch during the pass) and a later trigger continues it — not idle.
+    [{ row: { finished_at: null, processed: 0, total: 0, changed: 0, error: null } }, { status: 'paused', percent: null, changed: 0, error: null }],
     // running stays running and hides a stale error stored from an earlier failed run.
     [{ running: true, row: { error: 'stale failure', processed: 2, total: 4, changed: 1 } }, { status: 'running', percent: 50, changed: 1, error: null }],
     // a row carrying both an error and finished_at reports error: a failure after an earlier

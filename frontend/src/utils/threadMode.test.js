@@ -6,7 +6,7 @@ import { threadModeLabel, threadRecomputeText } from './threadMode.js';
 const t = (key, vars) => (vars ? `${key} ${JSON.stringify(vars)}` : key);
 const KEYS = [
   'title', 'modeRfc', 'modeGmail', 'preview', 'previewResult', 'switchToGmail', 'switchToRfc',
-  'running', 'done', 'failed', 'blockedNotGmail', 'blockedIndex', 'blockedIds',
+  'running', 'paused', 'done', 'failed', 'blockedNotGmail', 'blockedIndex', 'blockedIds',
 ];
 
 describe('threadModeLabel', () => {
@@ -42,6 +42,13 @@ describe('threadRecomputeText', () => {
     assert.equal(
       threadRecomputeText({ status: 'running', percent: 42, changed: 10, error: null }, t),
       'admin.accounts.threading.running 42%'
+    );
+  });
+
+  it('names a stopped pass, which a later trigger continues', () => {
+    assert.equal(
+      threadRecomputeText({ status: 'paused', percent: null, changed: 3, error: null }, t),
+      'admin.accounts.threading.paused'
     );
   });
 

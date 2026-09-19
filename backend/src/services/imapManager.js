@@ -22,14 +22,14 @@ import { resolveForConnection, createPinnedLookup } from './hostValidation.js';
 import { getConnectionPolicy } from './connectionPolicy.js';
 import { applyInboxRules, applyBlockList } from './inboxRules.js';
 import { generateVCard } from '../utils/vcard.js';
-import { GMAIL_KEY_PREFIX, THREAD_MODE_GMAIL, computeThreading } from './threading/threadId.js';
+import { GMAIL_KEY_PREFIX, THREAD_MODE_GMAIL, THREAD_MODE_RFC, computeThreading } from './threading/threadId.js';
 import { gmailProviderIds, NO_PROVIDER_IDS } from './threading/providerIds.js';
 import { runProviderIdBackfill } from './threading/providerIdBackfill.js';
 import {
   loadProviderIdBackfill, markProviderIdBackfillPending, providerIdBackfillState, recordProviderIdBackfillError,
 } from './threading/providerIdBackfillStore.js';
 import { runRecompute, RECOMPUTE_BATCH_DELAY_MS } from './threading/recompute.js';
-import { recomputeState, recordRecomputeError } from './threading/recomputeStore.js';
+import { loadRecompute, recomputeState, recordRecomputeError } from './threading/recomputeStore.js';
 import { randomUUID } from 'crypto';
 
 
@@ -2323,6 +2323,12 @@ export class ImapManager {
           console.warn(`Provider id backfill failed to start for ${logAccount(account)}:`, err.message)
         );
       }
+
+      // Outside the branch above: a thread recompute needs no IMAP connection, so it runs
+      // alongside a backfill, and a mailbox that backfills on connect can have a stopped pass too.
+      this._resumeThreadRecompute(account).catch(err =>
+        console.warn(`Thread recompute failed to resume for ${logAccount(account)}:`, err.message)
+      );
 
       this._startSyncInterval(account, this.syncIntervalMs);
       // Arm any plugin-declared background sync ticks whose isActive gate accepts this account
@@ -4913,7 +4919,7 @@ export class ImapManager {
   }
 
   // Recomputes a mailbox's stored thread keys after its threading mode changed (admin-triggered,
-  // see routes/admin.js). No IMAP connection is needed, so this never touches _bgConnSem; it
+  // see routes/accounts.js). No IMAP connection is needed, so this never touches _bgConnSem; it
   // paces itself with RECOMPUTE_BATCH_DELAY_MS plus the same quiet-window backoff the other
   // background jobs use. runRecompute itself saves progress to the thread_recompute row before
   // each onProgress call, so the broadcast can read that row straight back rather than tracking
@@ -4921,14 +4927,20 @@ export class ImapManager {
   async startThreadRecompute(account, targetMode) {
     if (this.threadRecomputeRunning.has(account.id)) return;
     this.threadRecomputeRunning.add(account.id);
+    let outcome = null;
+    let failed = false;
     try {
-      await runRecompute({
+      const result = await runRecompute({
         query,
         accountId: account.id,
         targetMode,
         shouldContinue: async () => {
-          const row = (await query('SELECT enabled FROM email_accounts WHERE id = $1', [account.id])).rows[0];
-          return Boolean(row?.enabled);
+          const row = (await query('SELECT enabled, thread_mode FROM email_accounts WHERE id = $1', [account.id])).rows[0];
+          if (!row?.enabled) return false;
+          // The admin switched the mode again while this pass was walking the mailbox: every key
+          // it writes from here on is already stale, so it stops without a finish mark and the
+          // finally below dispatches a pass for the mode the mailbox has now.
+          return (row.thread_mode || THREAD_MODE_RFC) === targetMode;
         },
         onProgress: () => {
           this._broadcastThreadRecompute(account).catch(() => {});
@@ -4939,13 +4951,51 @@ export class ImapManager {
           await new Promise(resolve => setTimeout(resolve, RECOMPUTE_BATCH_DELAY_MS + extraDelay));
         },
       });
+      outcome = result?.outcome ?? null;
     } catch (err) {
+      failed = true;
       console.warn(`Thread recompute failed for ${logAccount(account)}: ${err.message}`);
       await recordRecomputeError(query, account.id, err.message).catch(() => {});
     } finally {
       this.threadRecomputeRunning.delete(account.id);
       this._broadcastThreadRecompute(account).catch(() => {});
+      // A pass that ran for a mode the mailbox no longer has left the keys of the losing mode
+      // behind, whether it stopped early or ran to the end: dispatch one for the current mode.
+      // This terminates: the new pass targets the mode the mailbox has right now, so it can only
+      // dispatch another if the admin switches the mode again — the chain is as long as the
+      // admin's own toggles, never longer. A pass that failed is not re-dispatched: its error is
+      // what the panel shows, and the admin retries it (a failing pass restarted here would spin).
+      if (!failed) await this._redispatchThreadRecompute(account, targetMode, outcome);
     }
+  }
+
+  // Starts a pass for the mailbox's current mode when the pass that just ended was for another
+  // one. `outcome` is kept for the log line: a stopped pass and a finished-but-stale one are both
+  // continued here, they only read differently in the logs.
+  async _redispatchThreadRecompute(account, targetMode, outcome) {
+    try {
+      const row = (await query('SELECT * FROM email_accounts WHERE id = $1', [account.id])).rows[0];
+      if (!row?.enabled) return; // a disabled or deleted mailbox is picked up again on connect
+      const mode = row.thread_mode || THREAD_MODE_RFC;
+      if (mode === targetMode) return;
+      logger.debug(`Thread recompute ${outcome ?? 'failed'} for ${targetMode} on ${logAccount(account)}; starting one for ${mode}`);
+      await this.startThreadRecompute(row, mode);
+    } catch (err) {
+      console.warn(`Could not start the follow-up thread recompute for ${logAccount(account)}:`, err.message);
+    }
+  }
+
+  // Continues a pass that stopped (a restart, a crash, a mailbox that was disabled) and starts one
+  // for a mailbox whose last pass ran for a mode it no longer has. Called from the connect path —
+  // the mode switch is the only other trigger, so without this the mailbox would keep half of its
+  // keys in the old mode forever. A pass that failed is left alone: its error stays on the panel
+  // until an admin retries it, rather than being retried on every reconnect.
+  async _resumeThreadRecompute(account) {
+    const row = await loadRecompute(query, account.id);
+    if (!row || row.error) return;
+    const mode = account.thread_mode || THREAD_MODE_RFC;
+    if (row.finished_at && row.target_mode === mode) return;
+    await this.startThreadRecompute(account, mode);
   }
 
   // Admin state of the thread recompute for `accounts`.

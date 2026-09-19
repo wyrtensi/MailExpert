@@ -28,8 +28,8 @@ function newManager() {
   return mgr;
 }
 
-const account = { id: 'a1', user_id: 'u1', enabled: true, protocol: 'imap', email_address: 'box@example.com' };
-const other = { id: 'a2', user_id: 'u1', enabled: true, protocol: 'imap', email_address: 'other@example.com' };
+const account = { id: 'a1', user_id: 'u1', enabled: true, protocol: 'imap', email_address: 'box@example.com', thread_mode: 'rfc' };
+const other = { id: 'a2', user_id: 'u1', enabled: true, protocol: 'imap', email_address: 'other@example.com', thread_mode: 'rfc' };
 
 let recomputeRows; // rows thread_recompute would hold, keyed by account id
 let accountRow; // what email_accounts holds for `account`; tests change or null it mid-run
@@ -41,6 +41,10 @@ beforeEach(() => {
     if (/FROM thread_recompute WHERE account_id = ANY/.test(sql)) {
       const ids = params[0];
       return { rows: recomputeRows.filter(row => ids.includes(row.account_id)) };
+    }
+    // loadRecompute, the single-row read the resume trigger uses.
+    if (/FROM thread_recompute WHERE account_id = \$1/.test(sql)) {
+      return { rows: recomputeRows.filter(row => row.account_id === params[0]) };
     }
     if (/FROM email_accounts WHERE id = \$1/.test(sql)) {
       return { rows: accountRow && accountRow.id === params[0] ? [accountRow] : [] };
@@ -74,7 +78,7 @@ describe('startThreadRecompute', () => {
     });
   });
 
-  it('does not start a second pass while one is already running', async () => {
+  it('does not start an overlapping pass while one is already running', async () => {
     const mgr = newManager();
     let resolveRun;
     runRecompute.mockImplementation(() => new Promise(resolve => { resolveRun = resolve; }));
@@ -85,6 +89,64 @@ describe('startThreadRecompute', () => {
 
     resolveRun({ outcome: 'done', processed: 0, changed: 0, total: 0 });
     await first;
+    // The mailbox is still in the mode this pass ran for, so nothing is re-dispatched either.
+    expect(runRecompute).toHaveBeenCalledTimes(1);
+  });
+
+  it('starts a pass for the new mode when the mode changed while the pass ran', async () => {
+    const mgr = newManager();
+    const modes = [];
+    runRecompute.mockImplementation(async ({ targetMode, shouldContinue }) => {
+      modes.push(targetMode);
+      // The admin switched the mailbox to gmail while the rfc pass was walking it.
+      if (modes.length === 1) accountRow = { ...account, thread_mode: 'gmail' };
+      const keepGoing = await shouldContinue();
+      return { outcome: keepGoing ? 'done' : 'stopped', processed: 0, changed: 0, total: 0 };
+    });
+
+    await mgr.startThreadRecompute(account, 'rfc');
+
+    expect(modes).toEqual(['rfc', 'gmail']);
+    expect(mgr.threadRecomputeRunning.has(account.id)).toBe(false);
+  });
+
+  it('starts a pass for the current mode when a pass finished for a mode the mailbox no longer has', async () => {
+    const mgr = newManager();
+    const modes = [];
+    runRecompute.mockImplementation(async ({ targetMode }) => {
+      modes.push(targetMode);
+      if (modes.length === 1) accountRow = { ...account, thread_mode: 'gmail' };
+      return { outcome: 'done', processed: 1, changed: 1, total: 1 };
+    });
+
+    await mgr.startThreadRecompute(account, 'rfc');
+
+    expect(modes).toEqual(['rfc', 'gmail']);
+  });
+
+  it('does not re-dispatch a pass that failed: the error stays visible until a retry', async () => {
+    const mgr = newManager();
+    runRecompute.mockImplementation(async () => {
+      accountRow = { ...account, thread_mode: 'gmail' };
+      throw new Error('Connection closed');
+    });
+
+    await mgr.startThreadRecompute(account, 'rfc');
+
+    expect(runRecompute).toHaveBeenCalledTimes(1);
+  });
+
+  it('does not re-dispatch for a mailbox that was disabled mid-pass', async () => {
+    const mgr = newManager();
+    runRecompute.mockImplementation(async ({ shouldContinue }) => {
+      accountRow = { ...account, enabled: false, thread_mode: 'gmail' };
+      await shouldContinue();
+      return { outcome: 'stopped', processed: 0, changed: 0, total: 1 };
+    });
+
+    await mgr.startThreadRecompute(account, 'rfc');
+
+    expect(runRecompute).toHaveBeenCalledTimes(1);
   });
 
   it('records the error through the store and clears the running flag when the run fails', async () => {
@@ -115,15 +177,17 @@ describe('startThreadRecompute', () => {
 });
 
 describe('startThreadRecompute shouldContinue', () => {
+  // Only the FIRST pass's answer is returned: a pass stopped by a mode change re-dispatches a
+  // pass for the new mode, and that one answers for itself.
   async function continueAnswer(mgr, during = () => {}) {
-    let answer;
+    const answers = [];
     runRecompute.mockImplementation(async ({ shouldContinue }) => {
-      during();
-      answer = await shouldContinue();
+      if (answers.length === 0) during();
+      answers.push(await shouldContinue());
       return { outcome: 'stopped', processed: 0, changed: 0, total: 1 };
     });
     await mgr.startThreadRecompute(account, 'rfc');
-    return answer;
+    return answers[0];
   }
 
   it('continues for an enabled mailbox', async () => {
@@ -136,6 +200,44 @@ describe('startThreadRecompute shouldContinue', () => {
 
   it('stops once the mailbox row is gone', async () => {
     expect(await continueAnswer(newManager(), () => { accountRow = null; })).toBe(false);
+  });
+
+  it('stops once the mailbox mode no longer matches the mode the pass started for', async () => {
+    expect(await continueAnswer(newManager(), () => { accountRow = { ...account, thread_mode: 'gmail' }; })).toBe(false);
+  });
+
+  it('continues for a mailbox whose mode column is empty, which reads as rfc', async () => {
+    expect(await continueAnswer(newManager(), () => { accountRow = { ...account, thread_mode: null }; })).toBe(true);
+  });
+});
+
+describe('_resumeThreadRecompute', () => {
+  const resumeWith = async (row) => {
+    const mgr = newManager();
+    recomputeRows = row ? [row] : [];
+    runRecompute.mockResolvedValue({ outcome: 'done', processed: 0, changed: 0, total: 0 });
+    await mgr._resumeThreadRecompute(account);
+    return runRecompute.mock.calls.map(([args]) => args.targetMode);
+  };
+
+  it('starts nothing for a mailbox that never ran a pass', async () => {
+    expect(await resumeWith(null)).toEqual([]);
+  });
+
+  it('continues a pass that stopped, for the mode the mailbox has now', async () => {
+    expect(await resumeWith({ account_id: account.id, target_mode: 'rfc', finished_at: null, error: null })).toEqual(['rfc']);
+  });
+
+  it('starts nothing for a pass that finished for the mode the mailbox still has', async () => {
+    expect(await resumeWith({ account_id: account.id, target_mode: 'rfc', finished_at: new Date(), error: null })).toEqual([]);
+  });
+
+  it('starts a pass when the last one finished for a mode the mailbox no longer has', async () => {
+    expect(await resumeWith({ account_id: account.id, target_mode: 'gmail', finished_at: new Date(), error: null })).toEqual(['rfc']);
+  });
+
+  it('starts nothing for a pass that failed: the error stays visible until a retry', async () => {
+    expect(await resumeWith({ account_id: account.id, target_mode: 'rfc', finished_at: null, error: 'Connection closed' })).toEqual([]);
   });
 });
 

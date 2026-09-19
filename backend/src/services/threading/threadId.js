@@ -10,6 +10,8 @@ export function parseReferences(refHeader) {
 // keys them by the RFC 5322 References chain inside one mailbox.
 export const GMAIL_KEY_PREFIX = 'gmail:';
 export const THREAD_MODE_GMAIL = 'gmail';
+// The default mode, and what an empty thread_mode column reads as.
+export const THREAD_MODE_RFC = 'rfc';
 
 // Thread key and the reason it was chosen, for one incoming message. The Gmail branch needs both
 // the mailbox mode and a Gmail thread number: a mailbox switched to gmail mode still receives

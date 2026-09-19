@@ -827,6 +827,7 @@
         "switchToGmail": "Switch to Gmail threading",
         "switchToRfc": "Switch to reply-chain threading",
         "running": "Recomputing threads",
+        "paused": "Thread recompute paused, continues when the mailbox reconnects",
         "done": "Threads recomputed: {{changed}} messages changed",
         "failed": "Thread recompute failed: {{error}}",
         "blockedNotGmail": "Gmail threading needs a Gmail mailbox",

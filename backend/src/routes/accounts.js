@@ -13,11 +13,10 @@ import { pluginRegistry } from '../plugins/registry.js';
 import { recordAudit } from '../services/auditLog.js';
 import { createKeyedSerializer } from '../utils/keyedSerializer.js';
 import { uuidParam } from '../utils/uuid.js';
-import { THREAD_MODE_GMAIL } from '../services/threading/threadId.js';
+import { THREAD_MODE_GMAIL, THREAD_MODE_RFC } from '../services/threading/threadId.js';
 import { previewRecompute } from '../services/threading/recompute.js';
 import { providerThreadIndexState } from '../services/threading/providerThreadIndex.js';
 
-const THREAD_MODE_RFC = 'rfc';
 const THREAD_MODES = new Set([THREAD_MODE_RFC, THREAD_MODE_GMAIL]);
 
 // Serialize an account's reconnect triggers so a rapid settings change (e.g. a

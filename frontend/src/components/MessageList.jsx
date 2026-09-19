@@ -9,7 +9,7 @@ import { isAccountInUnifiedInbox } from '../utils/unifiedInbox.js';
 import { shouldSyncFolder, folderSyncKey } from '../utils/folderSync.js';
 import { manualSyncAccountIds, noSyncStarted } from '../utils/mailboxSync.js';
 import { resolveThreadMessages } from '../utils/threadActions.js';
-import { threadCacheKey } from '../utils/threadKey.js';
+import { threadCacheKey, pendingDeleteTimerKey } from '../utils/threadKey.js';
 import { useSwipeRow } from '../hooks/useSwipeRow.js';
 import ContextMenu from './ContextMenu.jsx';
 import RowHoverActions from './RowHoverActions.jsx';
@@ -977,10 +977,9 @@ export default function MessageList() {
 
   // Undo-able delete: optimistically remove, delay the API call by 4.5s so user can undo
   const scheduleDelete = useCallback(async (message) => {
-    const tid = message.thread_id || message.id;
     const cacheKey = threadCacheKey(message);
     const isThreadRow = isThreadListRow(message);
-    const key = isThreadRow ? `thread:${tid}` : message.id;
+    const key = pendingDeleteTimerKey(message, isThreadRow);
     if (pendingDeleteTimers.current.has(key)) return;
 
     let deleteMessages = [message];

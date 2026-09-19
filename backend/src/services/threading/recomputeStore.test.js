@@ -1,5 +1,6 @@
 import { describe, expect, it, vi } from 'vitest';
 import {
+  clearRecomputeError,
   finishRecompute,
   loadRecompute,
   recomputeState,
@@ -41,13 +42,25 @@ describe('recompute store', () => {
     expect(params).toEqual(['a1', '2026-09-17T10:00:00Z', 'm1', 10, 3]);
   });
 
-  it('finishes a run by setting finished_at to now, as a plain UPDATE', async () => {
+  it('finishes a run by setting finished_at to now and clearing the error, as a plain UPDATE', async () => {
     const query = vi.fn(async () => ({ rows: [] }));
     await finishRecompute(query, 'a1');
     const [sql, params] = query.mock.calls[0];
     expect(sql).toMatch(/^\s*UPDATE thread_recompute\b/);
     expect(sql).not.toMatch(/INSERT INTO/);
     expect(sql).toMatch(/finished_at = now\(\)/);
+    // A run that completed is not a failed one: a stale error would keep the panel reporting the
+    // failure (recomputeState reads error before finished_at) after a successful retry.
+    expect(sql).toMatch(/error = NULL/);
+    expect(params).toEqual(['a1']);
+  });
+
+  it('clears the error of a run that is being continued, as a plain UPDATE', async () => {
+    const query = vi.fn(async () => ({ rows: [] }));
+    await clearRecomputeError(query, 'a1');
+    const [sql, params] = query.mock.calls[0];
+    expect(sql).toMatch(/^\s*UPDATE thread_recompute\b/);
+    expect(sql).toMatch(/error = NULL/);
     expect(params).toEqual(['a1']);
   });
 

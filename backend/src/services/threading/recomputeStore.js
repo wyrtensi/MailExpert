@@ -39,10 +39,23 @@ export async function saveRecomputeCursor(query, accountId, { cursorDate, cursor
   );
 }
 
-// Marks a run as complete. Plain UPDATE, see saveRecomputeCursor for why.
+// Marks a run as complete. The error of an earlier attempt is cleared with it: recomputeState
+// reads error before finished_at, so a stale one would keep reporting a failure the run just
+// undid. Plain UPDATE, see saveRecomputeCursor for why.
 export async function finishRecompute(query, accountId) {
   await query(
-    `UPDATE thread_recompute SET finished_at = now(), updated_at = now() WHERE account_id = $1`,
+    `UPDATE thread_recompute SET finished_at = now(), error = NULL, updated_at = now() WHERE account_id = $1`,
+    [accountId],
+  );
+}
+
+// Clears the error of the run a new pass is continuing (the admin's retry of a failed pass posts
+// the same mode, which resumes the stored row instead of starting a fresh one). Without this the
+// row would carry the old error while the retry walks the mailbox, and a retry that stopped early
+// would keep reporting `error` — which no trigger resumes. Plain UPDATE, see saveRecomputeCursor.
+export async function clearRecomputeError(query, accountId) {
+  await query(
+    `UPDATE thread_recompute SET error = NULL, updated_at = now() WHERE account_id = $1`,
     [accountId],
   );
 }

@@ -2,6 +2,7 @@ import { describe, expect, it, vi } from 'vitest';
 import {
   RECOMPUTE_BATCH_SIZE, previewRecompute, runRecompute, threadingForRow,
 } from './recompute.js';
+import { recomputeState } from './recomputeStore.js';
 
 // An in-memory stand-in for the SQL this module issues, same shape as providerIdBackfill.test.js's
 // fakeDb: routes by regex over an in-memory array of message rows plus a single thread_recompute
@@ -75,7 +76,12 @@ function fakeDb({ messages, state = null }) {
     }
     if (/UPDATE thread_recompute SET finished_at/.test(sql)) {
       db.finished += 1;
-      db.state = { ...db.state, finished_at: new Date() };
+      db.state = { ...db.state, finished_at: new Date(), error: null };
+      return { rows: [] };
+    }
+    // clearRecomputeError, issued when a run continues a stored one.
+    if (/UPDATE thread_recompute SET error = NULL/.test(sql)) {
+      db.state = { ...db.state, error: null };
       return { rows: [] };
     }
     if (/AS total FROM messages/.test(sql)) {
@@ -538,6 +544,43 @@ describe('runRecompute', () => {
     expect(result).toEqual({ outcome: 'done', processed: 3, changed: 1, total: 3 });
     expect(selectCalls.map(r => r.rows.map(row => row.id))).toEqual([['m3'], []]);
     expect(messages.find(m => m.id === 'm3').thread_id).toBe('gmail:300');
+  });
+
+  it('clears the error of the run it continues, so a retry of a failed pass does not stay failed', async () => {
+    const messages = [
+      msg('m1', '2024-01-01T00:00:00.000Z', { provider_thread_id: '100', thread_id: 'gmail:100', threading_reason: 'gmail-thrid' }),
+      msg('m2', '2024-01-02T00:00:00.000Z', { provider_thread_id: '200' }),
+    ];
+    // The pass that walked m1 died with an error; the admin pressed Recompute for the same mode.
+    const db = fakeDb({
+      messages,
+      state: {
+        target_mode: 'gmail', total: 2, processed: 1, changed: 0,
+        cursor_date: '2024-01-01T00:00:00.000Z', cursor_id: 'm1', finished_at: null, error: 'Connection closed',
+      },
+    });
+
+    const result = await run(db);
+
+    expect(result).toEqual({ outcome: 'done', processed: 2, changed: 1, total: 2 });
+    expect(db.db.state.error).toBeNull();
+    expect(recomputeState({ row: db.db.state })).toEqual({ status: 'done', percent: 100, changed: 1, error: null });
+  });
+
+  it('a pass that is stopped after continuing a failed one reports paused, not the old error', async () => {
+    const messages = [msg('m1', '2024-01-01T00:00:00.000Z', { provider_thread_id: '100' })];
+    const db = fakeDb({
+      messages,
+      state: {
+        target_mode: 'gmail', total: 1, processed: 0, changed: 0,
+        cursor_date: null, cursor_id: null, finished_at: null, error: 'Connection closed',
+      },
+    });
+
+    const result = await run(db, { shouldContinue: vi.fn(async () => false) });
+
+    expect(result.outcome).toBe('stopped');
+    expect(recomputeState({ row: db.db.state }).status).toBe('paused');
   });
 
   it('stops before the next batch when asked, without marking the run finished', async () => {

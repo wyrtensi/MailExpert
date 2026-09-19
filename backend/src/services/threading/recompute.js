@@ -3,7 +3,7 @@
 // Message-ID — so a key that only ever existed because of the old subject grouping cannot
 // survive, and a group that was glued by subject splits into its real conversations.
 import { GMAIL_KEY_PREFIX, THREAD_MODE_GMAIL, ancestorCandidates } from './threadId.js';
-import { finishRecompute, loadRecompute, saveRecomputeCursor, startRecomputeRow } from './recomputeStore.js';
+import { clearRecomputeError, finishRecompute, loadRecompute, saveRecomputeCursor, startRecomputeRow } from './recomputeStore.js';
 
 export const RECOMPUTE_BATCH_SIZE = 2000;
 export const RECOMPUTE_BATCH_DELAY_MS = 200;
@@ -234,6 +234,9 @@ export async function runRecompute({
       [accountId],
     );
     cursorDate = cursorRows[0]?.cursor_date ?? cursorDate;
+    // This run replaces whatever stopped the last one — a retry of a failed pass comes through
+    // here, since it posts the same mode and therefore resumes rather than starting fresh.
+    if (existing.error) await clearRecomputeError(query, accountId);
   } else {
     // Every live row of the mailbox — which is exactly what the pass covers: the ordered walk
     // below, then the undated tail — so `processed` reaches `total` and the percentage reaches 100.

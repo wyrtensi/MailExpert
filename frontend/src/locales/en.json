@@ -823,6 +823,7 @@
         "modeRfc": "By reply chain",
         "modeGmail": "By Gmail thread",
         "preview": "Preview",
+        "recompute": "Recompute",
         "previewResult": "{{changing}} of {{rows}} messages would change ({{subjectOnly}} split from subject grouping); {{threadsNow}} threads now, {{threadsAfter}} after",
         "switchToGmail": "Switch to Gmail threading",
         "switchToRfc": "Switch to reply-chain threading",

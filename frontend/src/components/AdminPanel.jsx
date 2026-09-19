@@ -45,7 +45,7 @@ import { folderParentLabel } from '../utils/folderDisplay.js';
 import { accountLabel } from '../utils/accountLabel.js';
 import { LANGUAGES } from '../utils/language.js';
 import { providerIdsBackfillText } from '../utils/providerIdsBackfill.js';
-import { threadModeLabel, threadRecomputeText } from '../utils/threadMode.js';
+import { threadModeLabel, threadModeOf, threadRecomputeText, threadSwitchTarget } from '../utils/threadMode.js';
 
 // ─── Shared field component ───────────────────────────────────────────────────
 function Field({ label, required, children }) {
@@ -558,8 +558,10 @@ function AccountsTab() {
     threadsAfter: preview.threadsAfter ?? '—',
   });
 
+  // The preview follows the action the admin is about to take: the switch target when a switch is
+  // offered at all, else the mailbox's own mode — which is what the Recompute action posts.
   const handlePreviewThreading = async (account) => {
-    const targetMode = account.thread_mode === 'gmail' ? 'rfc' : 'gmail';
+    const targetMode = threadSwitchTarget(account) ?? threadModeOf(account);
     try {
       const preview = await api.previewThreading(account.id, targetMode);
       addNotification({ title: t('admin.accounts.threading.title'), body: formatThreadingPreview(preview) });
@@ -568,8 +570,10 @@ function AccountsTab() {
     }
   };
 
-  const handleSwitchThreading = async (account) => {
-    const targetMode = account.thread_mode === 'gmail' ? 'rfc' : 'gmail';
+  // Both actions post to the same endpoint: a switch names the other mode, a recompute names the
+  // mailbox's current one (which rekeys every row in place — the way threads glued by the old
+  // subject grouping are split, and the retry after a failed pass).
+  const confirmThreadingMode = async (account, targetMode, confirmLabel) => {
     let preview;
     try {
       preview = await api.previewThreading(account.id, targetMode);
@@ -580,9 +584,7 @@ function AccountsTab() {
     setConfirmDialog({
       title: t('admin.accounts.threading.title'),
       message: formatThreadingPreview(preview),
-      confirmLabel: targetMode === 'gmail'
-        ? t('admin.accounts.threading.switchToGmail')
-        : t('admin.accounts.threading.switchToRfc'),
+      confirmLabel,
       onConfirm: async () => {
         try {
           const result = await api.setThreadingMode(account.id, targetMode);
@@ -596,6 +598,17 @@ function AccountsTab() {
       },
     });
   };
+
+  const handleSwitchThreading = (account) => {
+    const targetMode = threadSwitchTarget(account);
+    if (!targetMode) return;
+    return confirmThreadingMode(account, targetMode, targetMode === 'gmail'
+      ? t('admin.accounts.threading.switchToGmail')
+      : t('admin.accounts.threading.switchToRfc'));
+  };
+
+  const handleRecomputeThreading = (account) =>
+    confirmThreadingMode(account, threadModeOf(account), t('admin.accounts.threading.recompute'));
 
   const handleSyncFolders = async (id) => {
     try {
@@ -1160,11 +1173,18 @@ function AccountsTab() {
                   <button onClick={() => handlePreviewThreading(account)} style={threadingBtnStyle}>
                     {t('admin.accounts.threading.preview')}
                   </button>
-                  <button onClick={() => handleSwitchThreading(account)} style={threadingBtnStyle}>
-                    {account.thread_mode === 'gmail'
-                      ? t('admin.accounts.threading.switchToRfc')
-                      : t('admin.accounts.threading.switchToGmail')}
+                  <button onClick={() => handleRecomputeThreading(account)} style={threadingBtnStyle}>
+                    {t('admin.accounts.threading.recompute')}
                   </button>
+                  {/* Offered only when the backend would accept it: a non-Gmail mailbox is never
+                      invited to switch to gmail, which it would refuse with 409 not_gmail. */}
+                  {threadSwitchTarget(account) && (
+                    <button onClick={() => handleSwitchThreading(account)} style={threadingBtnStyle}>
+                      {threadSwitchTarget(account) === 'rfc'
+                        ? t('admin.accounts.threading.switchToRfc')
+                        : t('admin.accounts.threading.switchToGmail')}
+                    </button>
+                  )}
                 </>
               )}
             </div>

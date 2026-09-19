@@ -1,12 +1,13 @@
 import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
-import { threadModeLabel, threadRecomputeText } from './threadMode.js';
+import { isGmailMailbox, threadModeLabel, threadModeOf, threadRecomputeText, threadSwitchTarget } from './threadMode.js';
 
 const t = (key, vars) => (vars ? `${key} ${JSON.stringify(vars)}` : key);
 const KEYS = [
   'title', 'modeRfc', 'modeGmail', 'preview', 'previewResult', 'switchToGmail', 'switchToRfc',
   'running', 'paused', 'done', 'failed', 'blockedNotGmail', 'blockedIndex', 'blockedIds',
+  'recompute',
 ];
 
 describe('threadModeLabel', () => {
@@ -21,6 +22,46 @@ describe('threadModeLabel', () => {
   it('falls back to rfc for an unknown or missing mode', () => {
     assert.equal(threadModeLabel({ thread_mode: null }, t), 'admin.accounts.threading.modeRfc');
     assert.equal(threadModeLabel({}, t), 'admin.accounts.threading.modeRfc');
+  });
+});
+
+describe('threadModeOf', () => {
+  it('reads the stored mode, and anything else as rfc', () => {
+    assert.equal(threadModeOf({ thread_mode: 'gmail' }), 'gmail');
+    assert.equal(threadModeOf({ thread_mode: 'rfc' }), 'rfc');
+    assert.equal(threadModeOf({ thread_mode: null }), 'rfc');
+    assert.equal(threadModeOf(undefined), 'rfc');
+  });
+});
+
+describe('isGmailMailbox', () => {
+  it('accepts the Gmail hosts the backend profile accepts', () => {
+    assert.equal(isGmailMailbox({ imap_host: 'imap.gmail.com' }), true);
+    assert.equal(isGmailMailbox({ imap_host: 'IMAP.GMAIL.COM' }), true);
+    assert.equal(isGmailMailbox({ imap_host: 'imap.googlemail.com' }), true);
+  });
+
+  it('rejects every other host, including a missing one', () => {
+    assert.equal(isGmailMailbox({ imap_host: 'imap.example.com' }), false);
+    assert.equal(isGmailMailbox({ imap_host: 'gmail.com.example.org' }), false);
+    assert.equal(isGmailMailbox({}), false);
+    assert.equal(isGmailMailbox(null), false);
+  });
+});
+
+describe('threadSwitchTarget', () => {
+  it('offers gmail for a Gmail mailbox threading by reply chain', () => {
+    assert.equal(threadSwitchTarget({ imap_host: 'imap.gmail.com', thread_mode: 'rfc' }), 'gmail');
+  });
+
+  it('offers no switch for a non-Gmail mailbox, which the backend would refuse', () => {
+    assert.equal(threadSwitchTarget({ imap_host: 'imap.example.com', thread_mode: 'rfc' }), null);
+    assert.equal(threadSwitchTarget({ thread_mode: null }), null);
+  });
+
+  it('offers the rollback to rfc for any mailbox in gmail mode, whatever its host', () => {
+    assert.equal(threadSwitchTarget({ imap_host: 'imap.gmail.com', thread_mode: 'gmail' }), 'rfc');
+    assert.equal(threadSwitchTarget({ imap_host: 'imap.example.com', thread_mode: 'gmail' }), 'rfc');
   });
 });
 

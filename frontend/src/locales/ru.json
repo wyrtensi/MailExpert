@@ -837,6 +837,7 @@
         "modeRfc": "По цепочке ответов",
         "modeGmail": "По цепочке Gmail",
         "preview": "Предпросмотр",
+        "recompute": "Пересчитать",
         "previewResult": "Изменится {{changing}} из {{rows}} сообщений ({{subjectOnly}} разделятся из группировки по теме); сейчас {{threadsNow}} цепочек, после — {{threadsAfter}}",
         "switchToGmail": "Переключить на группировку Gmail",
         "switchToRfc": "Переключить на группировку по цепочке ответов",

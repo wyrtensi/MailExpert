@@ -24,12 +24,27 @@
  * @param cached       previously fetched sub-messages, used only when allowCache is true
  * @param fetchThread  () => Promise<{ messages }> — authoritative fetch
  * @param allowCache   opt in to the snapshot; only safe when staleness cannot change the outcome
+ * @param excludeDrafts  drop the thread's drafts; for actions that would destroy or relocate them
  */
-export async function resolveThreadMessages({ message, isThreadRow, cached, fetchThread, allowCache = false }) {
+export async function resolveThreadMessages({ message, isThreadRow, cached, fetchThread, allowCache = false, excludeDrafts = false }) {
   if (!isThreadRow) return [message];
-  if (allowCache && Array.isArray(cached) && cached.length > 0) return cached;
+  if (allowCache && Array.isArray(cached) && cached.length > 0) return withoutDrafts(cached, excludeDrafts);
   const data = await fetchThread();
   // An empty or malformed response must not silently reduce the action to nothing: fall back to
   // the row itself, which is the same conservative choice the previous implementation made.
-  return data?.messages?.length ? data.messages : [message];
+  return data?.messages?.length ? withoutDrafts(data.messages, excludeDrafts) : [message];
+}
+
+// Deleting a thread expunges its drafts outright — the bulk-delete route permanently deletes
+// anything in a Drafts folder instead of moving it to Trash — and moving or archiving a thread
+// drags the draft out of Drafts, where it stops being editable as a draft. Neither is what the
+// user asked for when they acted on the conversation around it.
+//
+// A thread that is nothing BUT drafts keeps them: there the drafts are the user's explicit
+// target, not collateral. The same holds for a single draft row, which never reaches this
+// function because it is not a thread row.
+function withoutDrafts(messages, excludeDrafts) {
+  if (!excludeDrafts) return messages;
+  const kept = messages.filter(msg => msg?.is_draft !== true);
+  return kept.length ? kept : messages;
 }

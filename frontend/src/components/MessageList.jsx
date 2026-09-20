@@ -795,7 +795,7 @@ export default function MessageList() {
   // than the expansion-time cache: a thread gains messages while you look at it, and acting on
   // the snapshot left newer ones unread (unreachable, since the row then rendered as read) or,
   // on the delete and move paths, silently untouched. See utils/threadActions.js.
-  const resolveMessagesForThreadAction = useCallback(async (message, { allowCache = false } = {}) => {
+  const resolveMessagesForThreadAction = useCallback(async (message, { allowCache = false, excludeDrafts = false } = {}) => {
     const tid = message.thread_id || message.id;
     const cacheKey = threadCacheKey(message);
     const effectiveFolder = selectedAccountId ? selectedFolder : 'INBOX';
@@ -804,6 +804,7 @@ export default function MessageList() {
       isThreadRow: isThreadListRow(message),
       cached: threadMessages[cacheKey],
       allowCache,
+      excludeDrafts,
       fetchThread: () => api.getThread(tid, effectiveFolder, isUnified, message.account_id),
     });
   }, [isThreadListRow, threadMessages, selectedAccountId, selectedFolder, isUnified]);
@@ -986,7 +987,7 @@ export default function MessageList() {
 
     let deleteMessages = [message];
     try {
-      deleteMessages = await resolveMessagesForThreadAction(message);
+      deleteMessages = await resolveMessagesForThreadAction(message, { excludeDrafts: true });
     } catch (err) {
       console.error('Failed to load thread for delete:', err.message);
       addNotification({ type: 'error', title: t('messageList.deleted.failTitle'), body: t('messageList.deleted.failBody') });
@@ -1463,7 +1464,7 @@ export default function MessageList() {
     // (newest) message was deleted and the rest of the thread survived.
     let deleteIds = ids;
     try {
-      const resolved = await Promise.all(msgs.map(m => resolveMessagesForThreadAction(m)));
+      const resolved = await Promise.all(msgs.map(m => resolveMessagesForThreadAction(m, { excludeDrafts: true })));
       deleteIds = [...new Set([...ids, ...resolved.flat().map(m => m?.id).filter(Boolean)])];
     } catch (err) {
       console.error('Failed to load thread for bulk delete:', err.message);
@@ -1538,7 +1539,7 @@ export default function MessageList() {
     let moveIds = ids;
     try {
       const resolved = await Promise.all(msgs.map(async (m) => {
-        const thread = await resolveMessagesForThreadAction(m);
+        const thread = await resolveMessagesForThreadAction(m, { excludeDrafts: true });
         return thread.filter(tm => tm?.account_id === m.account_id);
       }));
       moveIds = [...new Set([...ids, ...resolved.flat().map(m => m?.id).filter(Boolean)])];
@@ -1648,7 +1649,7 @@ export default function MessageList() {
         try {
           groups = await archiveTargetGroupsForRows(
             msgs,
-            message => resolveMessagesForThreadAction(message),
+            message => resolveMessagesForThreadAction(message, { excludeDrafts: true }),
             activeFolder,
             isThreadListRow,
             selectedAccountId,
@@ -1762,7 +1763,7 @@ export default function MessageList() {
 
     let targets;
     try {
-      const resolved = await resolveMessagesForThreadAction(message);
+      const resolved = await resolveMessagesForThreadAction(message, { excludeDrafts: true });
       targets = archiveTargetsForFolder(message, resolved, activeFolder, threadRow, selectedAccountId);
 
       const resolvedUnreadByAccount = unreadCountsByAccount(targets);
@@ -2160,7 +2161,7 @@ export default function MessageList() {
         const moved = message;
         let moveMessages;
         try {
-          moveMessages = await resolveMessagesForThreadAction(message);
+          moveMessages = await resolveMessagesForThreadAction(message, { excludeDrafts: true });
         } catch (err) {
           console.error('Failed to load thread for move:', err.message);
           addNotification({ title: t('message.moved.failTitle'), body: t('message.moved.failBody') });

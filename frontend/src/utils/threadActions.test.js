@@ -84,3 +84,50 @@ describe('resolveThreadMessages: degenerate responses', () => {
     );
   });
 });
+
+describe('the draft destroyed by deleting the conversation around it', () => {
+  // bulk-delete expunges anything in a Drafts folder instead of moving it to Trash, and the
+  // thread endpoint returns every folder, so an unsent reply written in Gmail's web client used
+  // to disappear for good when the user deleted the thread it belongs to.
+  const withDraft = [{ id: 'a' }, { id: 'draft', is_draft: true }, { id: 'c' }];
+  const fetchWithDraft = () => Promise.resolve({ messages: withDraft });
+
+  test('a thread-wide action leaves the draft alone', async () => {
+    const got = await resolveThreadMessages({
+      message: row, isThreadRow: true, cached, excludeDrafts: true, fetchThread: fetchWithDraft,
+    });
+    assert.deepEqual(got.map(m => m.id), ['a', 'c']);
+  });
+
+  test('the cached path drops it too, so opting into the snapshot is not a way back in', async () => {
+    const got = await resolveThreadMessages({
+      message: row, isThreadRow: true, cached: withDraft, allowCache: true, excludeDrafts: true,
+      fetchThread: fetchWithDraft,
+    });
+    assert.deepEqual(got.map(m => m.id), ['a', 'c']);
+  });
+
+  test('reading and starring still cover the draft: neither destroys anything', async () => {
+    const got = await resolveThreadMessages({
+      message: row, isThreadRow: true, cached, fetchThread: fetchWithDraft,
+    });
+    assert.deepEqual(got.map(m => m.id), ['a', 'draft', 'c']);
+  });
+
+  test('a thread of nothing but drafts is the explicit target and is still acted on', async () => {
+    const onlyDrafts = [{ id: 'd1', is_draft: true }, { id: 'd2', is_draft: true }];
+    const got = await resolveThreadMessages({
+      message: row, isThreadRow: true, cached, excludeDrafts: true,
+      fetchThread: () => Promise.resolve({ messages: onlyDrafts }),
+    });
+    assert.deepEqual(got.map(m => m.id), ['d1', 'd2']);
+  });
+
+  test('a single draft row is its own action and never reaches the filter', async () => {
+    const draftRow = { id: 'draft', is_draft: true };
+    const got = await resolveThreadMessages({
+      message: draftRow, isThreadRow: false, cached, excludeDrafts: true, fetchThread: fetchWithDraft,
+    });
+    assert.deepEqual(got, [draftRow]);
+  });
+});

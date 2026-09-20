@@ -63,3 +63,50 @@ describe('GET /api/mail/thread scoped to one mailbox', () => {
     expect(query.mock.calls[1][1]).toEqual([[SALES, OPS], 'thread-1']);
   });
 });
+
+describe('GET /api/mail/thread marks the drafts it returns', () => {
+  let server;
+  let base;
+
+  beforeAll(async () => {
+    const app = express();
+    app.use('/api/mail', mailRoutes);
+    await new Promise(resolve => { server = app.listen(0, resolve); });
+    base = `http://127.0.0.1:${server.address().port}`;
+  });
+  afterAll(async () => { await new Promise(resolve => server.close(resolve)); });
+
+  beforeEach(() => { query.mockReset(); });
+
+  it('flags the row that lives in a Drafts folder, so a thread-wide delete can spare it', async () => {
+    // bulk-delete expunges a Drafts row outright instead of moving it to Trash. The thread
+    // endpoint returns every folder, so without this flag the client hands the draft to the
+    // delete route together with the conversation and the unsent reply is gone for good.
+    query
+      .mockResolvedValueOnce({ rows: [{ id: SALES, include_in_unified_inbox: true, folder_mappings: null }] })
+      .mockResolvedValueOnce({ rows: [
+        { id: 'm1', account_id: SALES, folder: 'INBOX' },
+        { id: 'm2', account_id: SALES, folder: '[Gmail]/Drafts' },
+      ] })
+      .mockResolvedValueOnce({ rows: [{ path: '[Gmail]/Drafts' }] });
+
+    const response = await fetch(`${base}/api/mail/thread/thread-1?accountId=${SALES}`);
+    expect(response.status).toBe(200);
+    const { messages } = await response.json();
+    expect(messages.map(m => [m.id, m.is_draft])).toEqual([['m1', false], ['m2', true]]);
+  });
+
+  it('resolves the drafts folders once per mailbox, not once per message', async () => {
+    query
+      .mockResolvedValueOnce({ rows: [{ id: SALES, include_in_unified_inbox: true, folder_mappings: null }] })
+      .mockResolvedValueOnce({ rows: [
+        { id: 'm1', account_id: SALES, folder: 'INBOX' },
+        { id: 'm2', account_id: SALES, folder: 'Sent' },
+        { id: 'm3', account_id: SALES, folder: 'Drafts' },
+      ] })
+      .mockResolvedValueOnce({ rows: [{ path: 'Drafts' }] });
+
+    await fetch(`${base}/api/mail/thread/thread-1?accountId=${SALES}`);
+    expect(query).toHaveBeenCalledTimes(3);
+  });
+});

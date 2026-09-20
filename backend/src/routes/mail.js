@@ -311,7 +311,7 @@ router.get('/thread/:threadId', async (req, res) => {
 
   try {
     const accountsResult = await query(
-      'SELECT id, include_in_unified_inbox FROM email_accounts WHERE enabled = true'
+      'SELECT id, include_in_unified_inbox, folder_mappings FROM email_accounts WHERE enabled = true'
     );
     const accountIds = scopedAccountId !== null
       ? accountsResult.rows.filter(row => row.id === scopedAccountId).map(row => row.id)
@@ -346,7 +346,23 @@ router.get('/thread/:threadId', async (req, res) => {
       SELECT * FROM deduped ORDER BY date ASC
     `, [accountIds, threadId]);
 
-    res.json({ messages: result.rows });
+    // Mark the rows that live in a Drafts folder. A thread-wide delete sends every id it is
+    // given to bulk-delete, which expunges a draft instead of moving it to Trash, so an unsent
+    // reply written in Gmail's web client would be destroyed as collateral of deleting the
+    // conversation around it. The client drops these rows from thread-wide actions; the flag is
+    // resolved here, with resolveAllDraftsPaths, so it cannot disagree with the delete route.
+    const draftsPaths = new Map();
+    for (const row of result.rows) {
+      if (draftsPaths.has(row.account_id)) continue;
+      const mappings = accountsResult.rows.find(a => a.id === row.account_id)?.folder_mappings;
+      draftsPaths.set(row.account_id, await resolveAllDraftsPaths(row.account_id, mappings));
+    }
+    const messages = result.rows.map(row => ({
+      ...row,
+      is_draft: draftsPaths.get(row.account_id).has(row.folder),
+    }));
+
+    res.json({ messages });
   } catch (err) {
     console.error('Thread fetch error:', err);
     res.status(500).json({ error: 'Failed to load thread' });

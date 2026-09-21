@@ -13,7 +13,10 @@
 #   - install.sh then starts the panel and checks it. --no-start stops before that: a rehearsal
 #     must not run a second panel next to the live one (both would sync every mailbox).
 #
-#   restore.sh latest|<snapshot id> [--prefix /opt/mailexpert] [--no-start]
+#   restore.sh latest|<snapshot id> [--prefix /opt/mailexpert] [--host <restic host>] [--no-start]
+#
+# latest is the newest snapshot of any server (each server backs up under its own restic host);
+# --host limits the choice to one server's snapshots. The host and time restored are printed.
 #
 # Exit codes: 0 restored, 1 failure, 2 invalid input or not a fresh server (no data changed).
 # shellcheck source-path=SCRIPTDIR
@@ -39,12 +42,13 @@ WORK=''
 
 usage() {
   cat <<'EOF'
-Usage: restore.sh latest|<snapshot id> [--prefix /opt/mailexpert] [--no-start]
+Usage: restore.sh latest|<snapshot id> [--prefix /opt/mailexpert] [--host <restic host>] [--no-start]
 
 On a fresh server: install.sh --version <the snapshot's version> --no-start, configure.sh with
 RESTIC_REPOSITORY, RESTIC_PASSWORD, AWS_ACCESS_KEY_ID and AWS_SECRET_ACCESS_KEY, then this.
---no-start   restore without starting the panel (rehearsal of a move); start it later with
-             install.sh --prefix <prefix>
+latest       the newest snapshot of any server in the repository
+--host       only snapshots of this restic host (restic snapshots lists them)
+--no-start   restore without starting the panel (rehearsal of a move); the server stays standby
 Exit codes: 0 restored, 1 failure, 2 invalid input or not a fresh server (no data changed).
 EOF
 }
@@ -101,6 +105,19 @@ restore_redis() {
   log "redis: dump.rdb restored"
 }
 
+# pick_snapshot <latest|id> <host or ''>: prints "<id> <host> <time>" of the snapshot to restore:
+# the newest one (by time, whatever the time zone of the server that made it) or the one named.
+pick_snapshot() {
+  local -a filter=()
+  if [ -n "$2" ]; then filter=(--host "$2"); fi
+  if [ "$1" != latest ]; then filter+=("$1"); fi
+  restic_run -- snapshots --json "${filter[@]}" | jq -r '
+    def epoch: capture("^(?<d>[0-9-]+T[0-9:]+)(?<f>[.][0-9]+)?(?<z>Z|[+-][0-9]{2}:[0-9]{2})$")
+      | (.d + "Z" | fromdateiso8601)
+        - (if .z == "Z" then 0 else (.z[0:1] + "1" | tonumber) * ((.z[1:3] | tonumber) * 3600 + (.z[4:6] | tonumber) * 60) end);
+    if length == 0 then empty else max_by([(.time | epoch), .time]) | "\(.id) \(.hostname) \(.time)" end'
+}
+
 # check_restored <counts json>: verify-restore.mjs in the backend image against the restored
 # database, with the restored ENCRYPTION_KEY: no pending migration, every credential decrypts.
 check_restored() {
@@ -115,12 +132,17 @@ check_restored() {
 }
 
 main() {
-  local prefix=/opt/mailexpert snapshot='' no_start=0 started files version counts f
+  local prefix=/opt/mailexpert snapshot='' host='' no_start=0 started files version counts f picked id from at
   while [ $# -gt 0 ]; do
     case $1 in
       --prefix)
         if [ $# -lt 2 ] || [ -z "$2" ]; then die "--prefix needs a value" 2; fi
         prefix=$2
+        shift 2
+        ;;
+      --host)
+        if [ $# -lt 2 ] || [ -z "$2" ]; then die "--host needs a value" 2; fi
+        host=$2
         shift 2
         ;;
       --no-start) no_start=1 && shift ;;
@@ -133,7 +155,8 @@ main() {
         ;;
     esac
   done
-  [[ $snapshot =~ ^(latest|[0-9a-f]{8,64})$ ]] || die "usage: restore.sh latest|<snapshot id> [--prefix <prefix>] [--no-start]" 2
+  [[ $snapshot =~ ^(latest|[0-9a-f]{8,64})$ ]] || die "usage: restore.sh latest|<snapshot id> [--prefix <prefix>] [--host <restic host>] [--no-start]" 2
+  if [ -n "$host" ]; then restic_host_ok "$host" || die "--host: not a restic host name" 2; fi
   [ "$(id -u)" = 0 ] || die "run restore.sh as root"
   load_install "$prefix"
   backup_configured "$ENV_FILE" ||
@@ -153,7 +176,11 @@ main() {
   load_restic_env
   ensure_image "$RESTIC_IMAGE"
   started=$SECONDS
-  restic_run -v "$WORK:/restore" -- restore "$snapshot" --host "$RESTIC_HOST" --target /restore >/dev/null
+  picked=$(pick_snapshot "$snapshot" "$host") || die "restic could not list $snapshot: no such snapshot, or the repository is unreachable"
+  [ -n "$picked" ] || die "no snapshot $snapshot${host:+ of host $host} in the repository" 2
+  read -r id from at <<<"$picked"
+  log "restoring snapshot ${id:0:8} of host $from, made at $at"
+  restic_run -v "$WORK:/restore" -- restore "$id" --target /restore >/dev/null
   files=$WORK/backup
   for f in db.dump counts.json env install.conf; do
     [ -f "$files/$f" ] || die "snapshot $snapshot has no $f"
@@ -169,9 +196,12 @@ main() {
   check_restored "$counts"
   rm -rf "$WORK"
   WORK=''
-  log "snapshot $snapshot restored in $((SECONDS - started))s"
+  log "snapshot ${id:0:8} of host $from ($at) restored in $((SECONDS - started))s"
   if [ "$no_start" = 1 ]; then
-    log "standby: the panel is not started (--no-start). To go live: $APP_DIR/scripts/deploy/install.sh --prefix $OPT_PREFIX"
+    # Never point to install.sh here: a panel started from a rehearsal would back up into the
+    # shared repository next to the live one.
+    log "standby: the panel is not started (--no-start). After a rehearsal remove it: docker compose -p $CFG_PROJECT down -v"
+    log "for the move itself, once the old server is frozen and its final backup made: $APP_DIR/scripts/deploy/restore.sh <snapshot of the move> --prefix $OPT_PREFIX"
     return 0
   fi
   bash "$APP_DIR/scripts/deploy/install.sh" --prefix "$OPT_PREFIX"

@@ -7,9 +7,10 @@
 # ensure_backup_repo relies on; a pinned image gives every server and the e2e test the same restic.
 # shellcheck disable=SC2034 # read by the deploy scripts and e2e.sh
 RESTIC_IMAGE=restic/restic:0.18.0
-# One restic host name for every server of this panel: after a move the new server continues the
-# same snapshot history, and `latest` is the latest backup of the panel wherever it ran.
-RESTIC_HOST=mailexpert-panel
+# The restic host of this server's snapshots: generated once per server (load_restic_host), so
+# retention (`forget --host`) only ever thins out this server's own snapshots. Two servers that
+# share the repository, the old and the new one around a move, can never evict each other's.
+RESTIC_HOST=''
 RESTIC_KEYS=(RESTIC_REPOSITORY RESTIC_PASSWORD AWS_ACCESS_KEY_ID AWS_SECRET_ACCESS_KEY)
 # The health check fails when the last backup is older: nightly at 03:30 plus slack.
 BACKUP_MAX_AGE=$((26 * 3600))
@@ -96,6 +97,30 @@ backup_age_problem() {
 
 backup_tag_ok() {
   [[ $1 =~ ^[a-z0-9][a-z0-9-]{0,31}$ ]]
+}
+
+# restic_host_ok <name>: a restic host name: letters, digits, '.', '_' and '-', no leading '-'.
+restic_host_ok() {
+  [[ $1 =~ ^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$ ]]
+}
+
+# load_restic_host: RESTIC_HOST from state/restic-host, which is written once, the first time it
+# is needed (install.sh, or the first backup.sh of a server installed before the file existed),
+# and never replaced: state/ describes this server and is not part of a snapshot, so a server
+# restored from another one's snapshot keeps its own host. The first writer wins (ln fails on an
+# existing file), so two scripts starting at once agree on one name.
+load_restic_host() {
+  local file=$STATE_DIR/restic-host tmp host
+  if [ ! -e "$file" ]; then
+    tmp=$(mktemp "$file.XXXXXX")
+    chmod 600 "$tmp"
+    printf 'mailexpert-%s\n' "$(gen_hex 8)" >"$tmp"
+    if ln "$tmp" "$file" 2>/dev/null; then log "backups: the restic host of this server is $(<"$file")"; fi
+    rm -f "$tmp"
+  fi
+  host=$(<"$file")
+  restic_host_ok "$host" || die "$file does not hold a restic host name; restore it (restic snapshots lists the hosts) instead of deleting it"
+  RESTIC_HOST=$host
 }
 
 # backup_repo_action <exit code of `restic cat config`>: what ensure_backup_repo does next.

@@ -132,3 +132,48 @@ config' ]]
 snapshots' ]]
   [[ $out != *timeout* ]]
 }
+
+@test "restic_host_ok: a restic host name without spaces or slashes" {
+  restic_host_ok mailexpert-0123abcd
+  restic_host_ok mailexpert-panel
+  run restic_host_ok ''
+  [ "$status" -eq 1 ]
+  run restic_host_ok 'two words'
+  [ "$status" -eq 1 ]
+  run restic_host_ok a/b
+  [ "$status" -eq 1 ]
+  run restic_host_ok -leading-dash
+  [ "$status" -eq 1 ]
+}
+
+@test "load_restic_host: generated once per server, then read back unchanged" {
+  STATE_DIR=$BATS_TEST_TMPDIR
+  load_restic_host 2>/dev/null
+  local first=$RESTIC_HOST
+  [[ $first =~ ^mailexpert-[0-9a-f]{16}$ ]]
+  [ "$(cat "$STATE_DIR/restic-host")" = "$first" ]
+  [ "$(stat -c %a "$STATE_DIR/restic-host")" = 600 ]
+  RESTIC_HOST=''
+  load_restic_host
+  [ "$RESTIC_HOST" = "$first" ]
+}
+
+@test "load_restic_host: another server generates another host" {
+  STATE_DIR=$BATS_TEST_TMPDIR/a
+  mkdir -p "$STATE_DIR"
+  load_restic_host 2>/dev/null
+  local a=$RESTIC_HOST
+  STATE_DIR=$BATS_TEST_TMPDIR/b
+  mkdir -p "$STATE_DIR"
+  load_restic_host 2>/dev/null
+  [ "$RESTIC_HOST" != "$a" ]
+}
+
+@test "load_restic_host: a damaged file is an error, never replaced" {
+  STATE_DIR=$BATS_TEST_TMPDIR
+  printf 'bad host\n' >"$STATE_DIR/restic-host"
+  run load_restic_host
+  [ "$status" -eq 1 ]
+  [[ $output == *restic-host* ]]
+  [ "$(cat "$STATE_DIR/restic-host")" = 'bad host' ]
+}

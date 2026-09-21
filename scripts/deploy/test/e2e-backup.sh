@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Backup, restore, update and rollback scenario of the deploy e2e test. Runs inside the throwaway
 # Docker-in-Docker container started by e2e.sh and must never run on a host with real data.
-# Server A is the compose project me-e2e-a in /e2e/a; server B, installed after A is wiped, is
+# Server A is the compose project me-e2e-a in /e2e/a; server B, installed once A is frozen, is
 # me-e2e-b in /e2e/b; MinIO in the project me-e2e-s3 stands in for the S3 provider. Everything it
 # creates is removed at exit.
 # shellcheck source-path=SCRIPTDIR
@@ -99,9 +99,11 @@ credential() {
     e2e-credential.mjs "$2" 2>/dev/null | tail -n 1
 }
 
-# snapshots_here [restic filter...]: the panel's snapshots as JSON (inside `on`).
+# snapshots_here [restic filter...]: the snapshots of that server's restic host as JSON (inside
+# `on`).
 snapshots_here() {
   load_restic_env
+  load_restic_host
   restic_run -- snapshots --json --host "$RESTIC_HOST" "$@"
 }
 
@@ -215,12 +217,14 @@ mv -f "$A/.env.keep" "$A/.env"
 [[ $OUT == *"failed the check"* ]] || fail "a key that does not decrypt was not detected"
 pass "verify detects a key that does not decrypt the data"
 
-# 8. The nightly backup (default tag): a restic check, or on Sunday a verify. From here on it is
-# the latest snapshot.
+# 8. The nightly backup (default tag): a restic check, or on Sunday a verify.
 expect_exit 0 deploy backup.sh --prefix "$A"
 [[ $OUT == *"restic check of 5% of the data passed"* || $OUT == *"counts match"* ]] || fail "nightly check"
 [ "$(jq -r .tag "$A/state/backup-last.json")" = nightly ] || fail "nightly tag"
-pass "nightly backup"
+a_host=$(<"$A/state/restic-host")
+[[ $a_host =~ ^mailexpert-[0-9a-f]{16}$ ]] || fail "A's restic host: $a_host"
+[ "$(on "$A" snapshots_here | jq -r 'map(.hostname) | unique | join(" ")')" = "$a_host" ] || fail "A's snapshots are not under its own host"
+pass "nightly backup, every snapshot of A under A's own restic host"
 
 # 9. Health of A: healthy after its backups; a stale backup and a stopped service are problems
 # the output names. The disk threshold is 0 here: CI runners' disks are often more than 85%
@@ -245,14 +249,24 @@ done
 expect_exit 0 deploy healthcheck.sh --prefix "$A"
 pass "health check: healthy, stale backup, stopped service"
 
-# 10. Server A is lost: containers, volumes and files. The owner kept the recovery key and the
-# S3 keys (the variables above); A's generated keys are noted only to compare after the move.
+# 10. The move starts: A is frozen (backend and frontend stop) and makes the final backup. After it
+# A is standby: its nightly backup and health check skip, so it neither pages the owner nor keeps
+# writing snapshots of the frozen database next to the new server's. A's generated keys are noted
+# only to compare after the move.
 a_key=$(env_get "$A/.env" ENCRYPTION_KEY)
 a_db=$(env_get "$A/.env" DB_PASSWORD)
 a_vapid=$(env_get "$A/.env" VAPID_PUBLIC_KEY)
-remove_project "$A_PROJECT"
-rm -rf "$A"
-pass "server A wiped"
+on "$A" app_compose stop backend frontend >/dev/null 2>&1
+expect_exit 0 deploy backup.sh --prefix "$A" --tag move
+[ -f "$A/state/standby" ] || fail "A is not standby after the move backup"
+[[ $OUT == *"standby now"* && $OUT == *"install.sh --prefix $A"* ]] || fail "the move backup did not explain standby and its undo"
+a_move=$(jq -r .snapshot "$A/state/backup-last.json")
+expect_exit 0 deploy backup.sh --prefix "$A"
+[[ $OUT == *"backup skipped"* ]] || fail "A's nightly backup ran after the move backup"
+expect_exit 0 deploy healthcheck.sh --prefix "$A"
+[[ $OUT == *"standby server"* ]] || fail "A's health check ran after the move backup"
+a_snapshots=$(on "$A" snapshots_here | jq -r 'map(.id) | sort | join(" ")')
+pass "the move backup leaves A standby: its nightly backup and health check skip"
 
 # 11. Server B, prepared for the move: the same version, --no-start. Standby: the timers' scripts
 # skip it. Its generated keys differ from A's; configure.sh refuses A's ENCRYPTION_KEY and names
@@ -276,9 +290,17 @@ set -e
 if [ "$code" != 2 ] || [[ $out != *restore.sh* ]]; then fail "configure.sh with A's ENCRYPTION_KEY: exit $code"; fi
 pass "server B prepared: standby, its own keys, configure.sh points to restore.sh"
 
-# 12. The rehearsal: restore the latest snapshot without starting. A's generated keys replace
-# B's; B keeps its project and port; the database and the credential check pass.
+# 12. The rehearsal: restore the latest snapshot without starting: the newest of any host, here
+# A's move snapshot, and the output names its host. A host without snapshots is refused. A's
+# generated keys replace B's; B keeps its project and port; the database and the credential check
+# pass; the hint never points to install.sh (a started rehearsal would back up next to A).
+b_host=$(<"$B/state/restic-host")
+[ "$b_host" != "$a_host" ] || fail "B got A's restic host"
+expect_exit 2 deploy restore.sh latest --prefix "$B" --host mailexpert-none --no-start
+[[ $OUT == *"no snapshot latest of host mailexpert-none"* ]] || fail "restore.sh --host without snapshots"
 expect_exit 0 deploy restore.sh latest --prefix "$B" --no-start
+[[ $OUT == *"restoring snapshot ${a_move:0:8} of host $a_host"* ]] || fail "restore.sh did not pick and name A's move snapshot"
+[[ $OUT == *"down -v"* && $OUT != *"install.sh --prefix"* ]] || fail "the rehearsal hint"
 [ "$(env_get "$B/.env" ENCRYPTION_KEY)" = "$a_key" ] || fail "ENCRYPTION_KEY was not restored"
 [ "$(env_get "$B/.env" DB_PASSWORD)" = "$a_db" ] || fail "DB_PASSWORD was not restored"
 [ "$(env_get "$B/.env" VAPID_PUBLIC_KEY)" = "$a_vapid" ] || fail "the VAPID keys were not restored"
@@ -300,9 +322,16 @@ expect_exit 0 deploy install.sh --prefix "$B"
 [ "$(on "$B" app_psql <<<"SELECT count(*) FROM users WHERE username = 'e2e-owner';")" = 1 ] || fail "the user did not move"
 pass "B runs with A's data and keys"
 
-# 14. B backs up into the same repository and its verify passes; a second restore is refused and
-# changes nothing.
+# 14. B backs up into the same repository under its own host and its verify passes; its retention
+# leaves every snapshot of A in place (one shared host would have kept only the newest of the
+# day); a second restore is refused and changes nothing. Server A is wiped afterwards.
 expect_exit 0 deploy backup.sh --prefix "$B" --tag manual --verify
+[ "$(on "$B" snapshots_here | jq -r 'map(.hostname) | unique | join(" ")')" = "$b_host" ] || fail "B's snapshot is not under B's host"
+[ "$(on "$A" snapshots_here | jq -r 'map(.id) | sort | join(" ")')" = "$a_snapshots" ] || fail "B's retention removed snapshots of A"
+expect_exit 0 deploy backup.sh --prefix "$B" --tag manual
+[ "$(on "$A" snapshots_here | jq -r 'map(.id) | sort | join(" ")')" = "$a_snapshots" ] || fail "B's second backup removed snapshots of A"
+remove_project "$A_PROJECT"
+rm -rf "$A"
 expect_exit 2 deploy restore.sh latest --prefix "$B"
 [[ $OUT == *"_postgres_data exists"* ]] || fail "restore.sh did not refuse a server with a database"
 [ "$(credential "$B" check)" = match ] || fail "the refused restore changed B"

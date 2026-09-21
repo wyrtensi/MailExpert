@@ -5,8 +5,9 @@
 # with RESTIC_PASSWORD, kept on the server and by the owner (the recovery key).
 #
 # Nightly by mailexpert-backup.timer; by hand; by update.sh (--tag pre-update --keep-dump); before
-# a move, once the panel is stopped (--with-redis --tag move). Pings BACKUP_PING_URL (or
-# HEALTHCHECK_PING_URL) at the start, on success and on failure.
+# a move, once the panel is stopped (--with-redis --tag move; the server then turns standby, see
+# mark_moved_away). Pings BACKUP_PING_URL (or HEALTHCHECK_PING_URL) at the start, on success and
+# on failure.
 #
 # Exit codes: 0 done (or skipped on a standby server), 1 failure, 2 invalid input.
 # shellcheck source-path=SCRIPTDIR
@@ -37,7 +38,8 @@ Usage: backup.sh [--prefix /opt/mailexpert] [--tag nightly] [--verify] [--with-r
                  [--keep-dump <absolute path>]
        backup.sh [--prefix /opt/mailexpert] --show-recovery-key
 
---tag           restic tag: nightly (default, the timer), manual, pre-update, move, ...
+--tag           restic tag: nightly (default, the timer), manual, pre-update, move, ...;
+                after a successful move backup this server turns standby (its timers stop)
 --verify        after the backup, restore it into a scratch database and check it; the nightly
                 backup does this on Sundays and a restic check of 5% of the data on other days
 --with-redis    also Redis (sessions, idempotency keys): for a move, once the panel is stopped
@@ -76,8 +78,9 @@ stage_files() {
 }
 
 # forget_old <weekday> <tag>: the last 5 pre-update snapshots; otherwise 7 daily, 4 weekly and 6
-# monthly, and every pre-update and move snapshot outside that policy. The nightly run on Sunday
-# also prunes, which frees the space of forgotten snapshots.
+# monthly, and every pre-update and move snapshot outside that policy. Only this server's own
+# snapshots (--host), so a server never thins out another one's history in a shared repository.
+# The nightly run on Sunday also prunes, which frees the space of forgotten snapshots.
 forget_old() {
   local -a prune=()
   if prune_today "$1" "$2"; then prune=(--prune); fi
@@ -199,6 +202,7 @@ main() {
 
   stage_files "$STAGING" "$redis"
   load_restic_env
+  load_restic_host
   ensure_image "$RESTIC_IMAGE"
   snapshot=$(restic_run -v "$STAGING:/backup:ro" -- backup --json --host "$RESTIC_HOST" --tag "$tag" /backup |
     jq -r 'select(.message_type == "summary") | .snapshot_id')
@@ -217,6 +221,18 @@ main() {
   write_backup_last "$snapshot" "$tag" "$bytes" "$seconds" "$counts" "$VERIFY_SECONDS"
   send_ping "$PING_URL" success "snapshot ${snapshot:0:8} ($tag): dump $bytes bytes in ${seconds}s${VERIFY_SECONDS:+, verified, restored in ${VERIFY_SECONDS}s}"
   log "backup done"
+  if [ "$tag" = move ]; then mark_moved_away "$snapshot"; fi
+}
+
+# mark_moved_away <snapshot>: after the final backup of a move this server is the old one. It
+# becomes standby, so its timers stop: its nightly backups of the frozen database would land in the
+# repository next to the new server's, and its health check would page about a panel stopped on
+# purpose.
+mark_moved_away() {
+  set_standby
+  log "move: snapshot ${1:0:8} is the one to restore on the new server: restore.sh ${1:0:8} --prefix <prefix>"
+  log "move: this server is standby now, its nightly backup and health check are skipped"
+  log "move: if the move is called off, run the panel here again with: $APP_DIR/scripts/deploy/install.sh --prefix $OPT_PREFIX (it clears the standby marker)"
 }
 
 # One line: bash has read it whole before main runs (update.sh checks out other commits).

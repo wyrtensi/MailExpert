@@ -317,6 +317,7 @@ main() {
   [ "$(id -u)" = 0 ] || die "run install.sh as root"
   prepare_dirs
   lock_install
+  load_restic_host
   if [ "$CFG_SYSTEM" = 1 ]; then
     check_os
     check_resources

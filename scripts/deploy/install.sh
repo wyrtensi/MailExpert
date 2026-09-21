@@ -200,7 +200,7 @@ app_up() {
 }
 
 edge_up() {
-  local services service
+  local services service existed=0 applied=$STATE_DIR/caddyfile.applied
   local -a targets=()
   [ "$CFG_EDGE" = 1 ] || return 0
   services=$(edge_services)
@@ -209,13 +209,23 @@ edge_up() {
       edge_compose --profile caddy --profile tunnel rm --stop --force "$service" >/dev/null
     fi
   done
-  if grep -qx caddy <<<"$services"; then targets+=(caddy); fi
+  if grep -qx caddy <<<"$services"; then
+    targets+=(caddy)
+    if [ -n "$(edge_compose ps --all --quiet caddy)" ]; then existed=1; fi
+  else
+    rm -f "$applied"
+  fi
   if grep -qx cloudflared <<<"$services" && [ "$OPT_START" = 1 ]; then targets+=(cloudflared); fi
   [ "${#targets[@]}" -gt 0 ] || return 0
   edge_compose up -d --quiet-pull "${targets[@]}"
-  if [ "$EDGE_CADDYFILE_CHANGED" = 1 ] && grep -qx caddy <<<"$services"; then
+  grep -qx caddy <<<"$services" || return 0
+  # Caddy's admin API is off: a changed Caddyfile is loaded by a restart. The record of what Caddy
+  # loaded is written only afterwards, so a run that stops earlier leaves the restart to a rerun.
+  if caddy_restart_needed "$EDGE_DIR/Caddyfile" "$applied" "$existed"; then
+    log "restarting caddy to load the changed Caddyfile"
     edge_compose restart caddy >/dev/null
   fi
+  caddy_record_applied "$EDGE_DIR/Caddyfile" "$applied"
 }
 
 wait_ready() {

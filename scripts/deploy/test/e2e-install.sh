@@ -163,7 +163,24 @@ if [ "$code" != 1 ] || [[ $out != *DB_PASSWORD* ]]; then fail "lost DB_PASSWORD 
 [ "$(containers_state)" = "$state_before" ] || fail "the refused run touched containers"
 pass "a lost DB_PASSWORD is refused"
 
-# 6. Tunnel modes are rendered and parsed only: the test has no real tunnel token.
+# 6. A run that rewrites the Caddyfile and stops before Caddy restarts (exit 3 here) leaves the
+# restart to the next run: Caddy then answers the new host.
+NEW_HOST=panel2.example.test
+secret=$(env_get "$PREFIX/.env" AUTH_GOOGLE_CLIENT_SECRET)
+sed -i '/^AUTH_GOOGLE_CLIENT_SECRET=/d' "$PREFIX/.env"
+set +e
+install_run --prefix "$PREFIX" --direct-host "$NEW_HOST" >/dev/null 2>&1
+code=$?
+set -e
+[ "$code" = 3 ] || fail "the run without AUTH_GOOGLE_CLIENT_SECRET exited $code, expected 3"
+grep -q "@app host $NEW_HOST" "$PREFIX/edge/Caddyfile" || fail "the Caddyfile was not rewritten for $NEW_HOST"
+printf 'AUTH_GOOGLE_CLIENT_SECRET=%s\n' "$secret" | bash "$DEPLOY_DIR/configure.sh" --prefix "$PREFIX" >/dev/null 2>&1
+install_run --prefix "$PREFIX"
+curl -fsS -o /dev/null --cacert "$root" --resolve "$NEW_HOST:443:127.0.0.1" "https://$NEW_HOST/api/health" ||
+  fail "Caddy does not answer $NEW_HOST after the rerun"
+pass "a Caddyfile change from an interrupted run is applied by the next run"
+
+# 7. Tunnel modes are rendered and parsed only: the test has no real tunnel token.
 for mode in cf both; do
   (
     install_defaults

@@ -38,7 +38,6 @@ setup() {
 
 @test "write_edge_files lays out the edge directory once" {
   write_edge_files "$REPO_DIR" "$E" local.invalid/mailexpert-edge:sha-0123456789ab
-  [ "$EDGE_CADDYFILE_CHANGED" = 1 ]
   cmp "$REPO_DIR/deploy/edge/compose.yml" "$E/compose.yml"
   [ "$(stat -c %a "$E")" = 700 ]
   [ "$(env_get "$E/.env" COMPOSE_PROJECT_NAME)" = edge ]
@@ -47,7 +46,6 @@ setup() {
   grep -q '@app host panel.example.com' "$E/Caddyfile"
   before=$(cat "$E/.env" "$E/Caddyfile" "$E/compose.yml" | sha256sum)
   write_edge_files "$REPO_DIR" "$E" local.invalid/mailexpert-edge:sha-0123456789ab
-  [ "$EDGE_CADDYFILE_CHANGED" = 0 ]
   [ "$(cat "$E/.env" "$E/Caddyfile" "$E/compose.yml" | sha256sum)" = "$before" ]
 }
 
@@ -59,5 +57,28 @@ setup() {
   [ "$(env_get "$E/.env" TUNNEL_TOKEN)" = abc ]
   [ "$(env_get "$E/.env" COMPOSE_PROFILES)" = tunnel ]
   [ ! -e "$E/Caddyfile" ]
-  [ "$EDGE_CADDYFILE_CHANGED" = 0 ]
+}
+
+@test "caddy_restart_needed survives an interrupted run until the applied Caddyfile is recorded" {
+  S=$BATS_TEST_TMPDIR/state/caddyfile.applied
+  mkdir -p "$BATS_TEST_TMPDIR/state"
+  write_edge_files "$REPO_DIR" "$E" local.invalid/mailexpert-edge:sha-0123456789ab
+  # A container created by this run has loaded the current file: nothing to restart.
+  run caddy_restart_needed "$E/Caddyfile" "$S" 0
+  [ "$status" -eq 1 ]
+  # A running container without a record (an install from before the record existed) restarts once.
+  caddy_restart_needed "$E/Caddyfile" "$S" 1
+  caddy_record_applied "$E/Caddyfile" "$S"
+  [ "$(stat -c %a "$S")" = 600 ]
+  run caddy_restart_needed "$E/Caddyfile" "$S" 1
+  [ "$status" -eq 1 ]
+  # The Caddyfile changes and the run stops before Caddy restarts: every later run still restarts.
+  CFG_DIRECT_HOST=other.example.com
+  write_edge_files "$REPO_DIR" "$E" local.invalid/mailexpert-edge:sha-0123456789ab
+  caddy_restart_needed "$E/Caddyfile" "$S" 1
+  write_edge_files "$REPO_DIR" "$E" local.invalid/mailexpert-edge:sha-0123456789ab
+  caddy_restart_needed "$E/Caddyfile" "$S" 1
+  caddy_record_applied "$E/Caddyfile" "$S"
+  run caddy_restart_needed "$E/Caddyfile" "$S" 1
+  [ "$status" -eq 1 ]
 }

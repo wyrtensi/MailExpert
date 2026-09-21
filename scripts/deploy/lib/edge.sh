@@ -32,12 +32,10 @@ render_caddyfile() {
   printf '%s\n' "$text"
 }
 
-# write_edge_files <app dir> <edge dir> <edge image>: sets EDGE_CADDYFILE_CHANGED to 1 when the
-# Caddyfile was written anew.
-# shellcheck disable=SC2034 # read by install.sh
+# write_edge_files <app dir> <edge dir> <edge image>. Whether Caddy has loaded the Caddyfile is
+# decided by caddy_restart_needed, not here: a run can stop between writing and restarting.
 write_edge_files() {
   local app_dir=$1 edge_dir=$2 image=$3 env=$2/.env new
-  EDGE_CADDYFILE_CHANGED=0
   mkdir -p "$edge_dir"
   chmod 700 "$edge_dir"
   cp "$app_dir/deploy/edge/compose.yml" "$edge_dir/compose.yml"
@@ -49,7 +47,26 @@ write_edge_files() {
     new=$(render_caddyfile "$app_dir/deploy/edge/Caddyfile.tmpl")
     if [ ! -f "$edge_dir/Caddyfile" ] || [ "$new" != "$(<"$edge_dir/Caddyfile")" ]; then
       printf '%s\n' "$new" >"$edge_dir/Caddyfile"
-      EDGE_CADDYFILE_CHANGED=1
     fi
   fi
+}
+
+# caddy_restart_needed <Caddyfile> <applied record> <container existed before up 0|1>: status 0
+# when the running Caddy may still serve an older Caddyfile. The record holds the hash of the
+# Caddyfile that Caddy last loaded and is written only after a successful start or restart, so
+# a run that stops in between leaves the restart to the next run.
+caddy_restart_needed() {
+  local file=$1 record=$2 existed=$3 applied
+  [ "$existed" = 1 ] || return 1
+  applied=$(cat "$record" 2>/dev/null) || return 0
+  [ "$applied" != "$(sha256sum <"$file")" ]
+}
+
+# caddy_record_applied <Caddyfile> <applied record>
+caddy_record_applied() {
+  local file=$1 record=$2 tmp
+  tmp=$(mktemp "$record.XXXXXX")
+  chmod 600 "$tmp"
+  sha256sum <"$file" >"$tmp"
+  mv -f "$tmp" "$record"
 }

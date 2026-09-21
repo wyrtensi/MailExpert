@@ -10,10 +10,17 @@ const router = Router();
 // Placeholder sent instead of a stored client secret; posting it back keeps the stored value.
 const REDACTED_SECRET = '••••••••';
 
-// Mirror the stored Google callback URL into process.env. Client credentials live in
-// google_oauth_apps, so only the redirect URI is kept in integration_config.
+// GOOGLE_REDIRECT_URI as the process started with it (docker-compose.yml passes it through).
+// Captured once: applyGoogleEnv overwrites process.env, and the startup value must stay the
+// fallback for a stored google row without a callback URL (rows written before PR 8a).
+const STARTUP_GOOGLE_REDIRECT_URI = process.env.GOOGLE_REDIRECT_URI || null;
+
+// Mirror the stored Google callback URL into process.env, falling back to the startup value.
+// Client credentials live in google_oauth_apps, so only the redirect URI is kept in
+// integration_config.
 function applyGoogleEnv(config) {
-  if (config?.redirectUri) process.env.GOOGLE_REDIRECT_URI = config.redirectUri;
+  const redirectUri = config?.redirectUri || STARTUP_GOOGLE_REDIRECT_URI;
+  if (redirectUri) process.env.GOOGLE_REDIRECT_URI = redirectUri;
   else delete process.env.GOOGLE_REDIRECT_URI;
 }
 

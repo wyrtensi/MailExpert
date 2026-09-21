@@ -20,6 +20,8 @@ SCRIPT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 . "$SCRIPT_DIR/lib/system.sh"
 # shellcheck source=lib/app.sh
 . "$SCRIPT_DIR/lib/app.sh"
+# shellcheck source=lib/backup.sh
+. "$SCRIPT_DIR/lib/backup.sh"
 
 exit_on_unexpected_failure
 
@@ -284,6 +286,22 @@ admin_notice() {
   fi
 }
 
+# setup_backups: with the restic keys in .env the repository is opened (created when it does not
+# exist yet), the start of backups recorded for the health check and the recovery key shown once.
+# Without the keys the panel runs without backups: a warning here, and the health check fails
+# until the owner adds them.
+setup_backups() {
+  if ! backup_configured "$ENV_FILE"; then
+    warn "backups are off: add RESTIC_REPOSITORY, RESTIC_PASSWORD, AWS_ACCESS_KEY_ID and AWS_SECRET_ACCESS_KEY with configure.sh, then run install.sh again"
+    return 0
+  fi
+  load_restic_env
+  ensure_image "$RESTIC_IMAGE"
+  ensure_backup_repo
+  if [ ! -f "$STATE_DIR/backup-since" ]; then date +%s >"$STATE_DIR/backup-since"; fi
+  show_recovery_key_once
+}
+
 main() {
   local edge_image
   parse_install_args "$@"
@@ -335,6 +353,7 @@ main() {
     verify_edge
   fi
   admin_notice
+  setup_backups
   if [ "$CFG_SYSTEM" = 1 ]; then install_timers; fi
   log "done"
 }

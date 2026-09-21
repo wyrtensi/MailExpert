@@ -6,6 +6,7 @@
 #
 #   scripts/deploy/test/e2e.sh --version sha-<12> --image-prefix local.invalid
 #
+# --only install|backup runs one scenario (default: both).
 # The images <prefix>/mailexpert-{backend,frontend,edge}:<version> must be built from HEAD, and
 # the tracked files must match HEAD: the test installs HEAD from a git bundle.
 # shellcheck source-path=SCRIPTDIR
@@ -15,17 +16,25 @@ DIND_IMAGE=docker:29.8.1-dind
 TEST_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 # shellcheck source=../lib/common.sh
 . "$TEST_DIR/../lib/common.sh"
+# shellcheck source=../lib/backup.sh
+. "$TEST_DIR/../lib/backup.sh"
 
-VERSION='' IMAGE_PREFIX=''
+# Stands in for the S3 provider inside the test; pinned like every other image. Docker Hub
+# minio/minio needs a login; MinIO publishes the same tags on quay.io.
+MINIO_IMAGE=quay.io/minio/minio:RELEASE.2025-04-22T22-12-26Z
+
+VERSION='' IMAGE_PREFIX='' ONLY=''
 while [ $# -gt 0 ]; do
   case $1 in
     --version) VERSION=$2 && shift 2 ;;
     --image-prefix) IMAGE_PREFIX=$2 && shift 2 ;;
+    --only) ONLY=$2 && shift 2 ;;
     *) die "unknown option: $1" 2 ;;
   esac
 done
 [[ $VERSION =~ ^sha-[0-9a-f]{12}$ ]] || die "--version sha-<12 hex characters> is required" 2
 [ -n "$IMAGE_PREFIX" ] || die "--image-prefix is required" 2
+case $ONLY in '' | install | backup) ;; *) die "--only must be install or backup" 2 ;; esac
 head=$(git -C "$TEST_DIR" rev-parse HEAD)
 [ "${head:0:12}" = "${VERSION#sha-}" ] || die "--version $VERSION is not HEAD ($head)" 2
 [ -z "$(git -C "$TEST_DIR" status --porcelain --untracked-files=no)" ] ||
@@ -46,7 +55,7 @@ cleanup() {
 trap cleanup EXIT
 
 IMAGES=("$IMAGE_PREFIX/mailexpert-backend:$VERSION" "$IMAGE_PREFIX/mailexpert-frontend:$VERSION"
-  "$IMAGE_PREFIX/mailexpert-edge:$VERSION" postgres:16-alpine redis:7-alpine)
+  "$IMAGE_PREFIX/mailexpert-edge:$VERSION" postgres:16-alpine redis:7-alpine "$RESTIC_IMAGE" "$MINIO_IMAGE")
 for image in "${IMAGES[@]}"; do
   if docker image inspect "$image" >/dev/null 2>&1; then continue; fi
   case $image in
@@ -72,6 +81,12 @@ docker save "${IMAGES[@]}" | docker exec -i "$NAME" docker load --quiet >/dev/nu
 MSYS_NO_PATHCONV=1 docker exec "$NAME" mkdir -p /e2e
 git -C "$TEST_DIR" bundle create - HEAD 2>/dev/null | docker exec -i "$NAME" sh -c 'cat >/e2e/repo.bundle'
 MSYS_NO_PATHCONV=1 docker exec "$NAME" git clone --quiet /e2e/repo.bundle /e2e/src
-MSYS_NO_PATHCONV=1 docker exec "$NAME" bash /e2e/src/scripts/deploy/test/e2e-install.sh \
-  --version "$VERSION" --image-prefix "$IMAGE_PREFIX" --repo-url /e2e/repo.bundle
+if [ "$ONLY" != backup ]; then
+  MSYS_NO_PATHCONV=1 docker exec "$NAME" bash /e2e/src/scripts/deploy/test/e2e-install.sh \
+    --version "$VERSION" --image-prefix "$IMAGE_PREFIX" --repo-url /e2e/repo.bundle
+fi
+if [ "$ONLY" != install ]; then
+  MSYS_NO_PATHCONV=1 docker exec "$NAME" bash /e2e/src/scripts/deploy/test/e2e-backup.sh \
+    --version "$VERSION" --image-prefix "$IMAGE_PREFIX" --repo-url /e2e/repo.bundle --minio-image "$MINIO_IMAGE"
+fi
 log "deploy e2e passed"

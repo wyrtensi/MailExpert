@@ -88,3 +88,127 @@ backup_age_problem() {
 backup_tag_ok() {
   [[ $1 =~ ^[a-z0-9][a-z0-9-]{0,31}$ ]]
 }
+
+# --- The functions below run Docker and need app.sh (load_install or set_install_paths). ---
+
+# load_restic_env: exports the restic keys from .env. The values stay in the environment of this
+# process and its children; restic_run hands containers the names, never the values.
+load_restic_env() {
+  local key value
+  for key in "${RESTIC_KEYS[@]}" AWS_DEFAULT_REGION; do
+    value=$(env_get "$ENV_FILE" "$key") || value=
+    if [ -n "$value" ]; then
+      export "$key=$value"
+    else
+      unset "$key"
+    fi
+  done
+}
+
+# restic_run [-v <host path>:<container path>[:ro]]... -- <restic arguments>: restic in its
+# pinned container on the host network (the repository may be on the loopback), with its cache
+# in state/restic-cache.
+restic_run() {
+  local -a mounts=()
+  while [ "${1:-}" = -v ]; do
+    mounts+=(-v "$2")
+    shift 2
+  done
+  [ "${1:-}" = -- ] || die "restic_run: -- expected before the restic arguments"
+  shift
+  mkdir -p "$STATE_DIR/restic-cache"
+  docker run --rm --network host \
+    -e RESTIC_REPOSITORY -e RESTIC_PASSWORD -e AWS_ACCESS_KEY_ID -e AWS_SECRET_ACCESS_KEY -e AWS_DEFAULT_REGION \
+    -e RESTIC_CACHE_DIR=/cache -v "$STATE_DIR/restic-cache:/cache" "${mounts[@]}" "$RESTIC_IMAGE" "$@"
+}
+
+# ensure_backup_repo: opens the repository, creating it (format v2, compressed) only when restic
+# reports that it does not exist. A password that does not open an existing repository is never
+# answered with a new repository.
+ensure_backup_repo() {
+  local code=0
+  restic_run -- cat config >/dev/null 2>&1 || code=$?
+  case $code in
+    0) log "backups: the restic repository opens" ;;
+    10)
+      log "backups: creating the restic repository"
+      restic_run -- init --repository-version 2 >/dev/null
+      ;;
+    12) die "RESTIC_PASSWORD does not open the repository in RESTIC_REPOSITORY; configure.sh never replaces it: correct it in $ENV_FILE by hand" ;;
+    *) die "the restic repository is not reachable (restic exit $code): check RESTIC_REPOSITORY and the S3 keys" ;;
+  esac
+}
+
+# print_recovery_key: the one place a secret is printed, on stderr, at the owner's request or
+# once at install time in a terminal.
+print_recovery_key() {
+  local repository password
+  repository=$(env_get "$ENV_FILE" RESTIC_REPOSITORY)
+  password=$(env_get "$ENV_FILE" RESTIC_PASSWORD)
+  {
+    printf '\n[mailexpert] RECOVERY KEY. Store it outside this server, for example in a password manager.\n'
+    printf '[mailexpert] With it and the S3 access key (AWS_ACCESS_KEY_ID, AWS_SECRET_ACCESS_KEY) the backups\n'
+    printf '[mailexpert] restore on any server; without it nobody can read them.\n\n'
+    printf '  RESTIC_REPOSITORY=%s\n  RESTIC_PASSWORD=%s\n\n' "$repository" "$password"
+  } >&2
+}
+
+# show_recovery_key_once: prints the recovery key the first time, and only to a terminal:
+# cloud-init and CI logs must not keep it.
+show_recovery_key_once() {
+  local marker=$STATE_DIR/recovery-key.shown
+  [ ! -f "$marker" ] || return 0
+  if [ -t 2 ]; then
+    print_recovery_key
+    : >"$marker"
+  else
+    log "the recovery key has not been shown yet (no terminal); show it with: $APP_DIR/scripts/deploy/backup.sh --prefix $OPT_PREFIX --show-recovery-key"
+  fi
+}
+
+# backup_ping_url: BACKUP_PING_URL when the owner keeps a separate daily check for backups,
+# otherwise HEALTHCHECK_PING_URL; empty when neither is set.
+backup_ping_url() {
+  local url
+  url=$(env_get "$ENV_FILE" BACKUP_PING_URL) || url=
+  if [ -z "$url" ]; then url=$(env_get "$ENV_FILE" HEALTHCHECK_PING_URL) || url=; fi
+  printf '%s\n' "$url"
+}
+
+# send_ping <base url> <start|success|fail> [text]: tells the monitoring service; never fails the
+# caller. The URL carries the check's key, so it reaches curl through a config on a file
+# descriptor, not through argv; curl's own messages are dropped for the same reason.
+send_ping() {
+  local base=$1 kind=$2 body=${3:-} target
+  [ -n "$base" ] || return 0
+  target=$(ping_target "$base" "$kind") || return 0
+  if ! printf '%s' "$body" | curl -fsS -m 10 --retry 2 -o /dev/null --data-binary @- \
+    -K <(printf 'url = "%s"\n' "$target") 2>/dev/null; then
+    warn "could not reach the monitoring service ($kind ping)"
+  fi
+}
+
+# dump_database <dir>: <dir>/db.dump (pg_dump custom format, uncompressed: restic compresses and
+# deduplicates across days) and <dir>/counts.json, from one database snapshot, by a one-off
+# container of the postgres service. LIB_DIR is the caller's scripts/deploy/lib.
+dump_database() {
+  app_compose run --rm --no-deps -T -v "$1:/out" -v "$LIB_DIR/pg-dump.sh:/pg-dump.sh:ro" \
+    -v "$LIB_DIR/counts.sql:/counts.sql:ro" --entrypoint sh postgres /pg-dump.sh >/dev/null
+}
+
+# write_backup_last <snapshot> <tag> <dump bytes> <dump seconds> <counts json> <restore seconds or ''>:
+# state/backup-last.json for healthcheck.sh (age), update.sh (free space) and the owner (the
+# expected downtime of a move).
+write_backup_last() {
+  local file=$STATE_DIR/backup-last.json tmp now
+  now=$(date +%s)
+  tmp=$(mktemp "$file.XXXXXX")
+  jq -cn --arg snapshot "$1" --arg tag "$2" --argjson dump_bytes "$3" --argjson dump_seconds "$4" \
+    --argjson counts "$5" --arg restore "$6" --argjson now "$now" \
+    '{finished_epoch: $now, finished_at: ($now | todate), snapshot: $snapshot, tag: $tag,
+      dump_bytes: $dump_bytes, dump_seconds: $dump_seconds, counts: $counts,
+      verified: ($restore != ""),
+      restore_seconds: (if $restore == "" then null else ($restore | tonumber) end)}' >"$tmp"
+  chmod 600 "$tmp"
+  mv -f "$tmp" "$file"
+}

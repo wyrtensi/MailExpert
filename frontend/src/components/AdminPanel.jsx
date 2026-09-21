@@ -36,7 +36,9 @@ import MailboxSyncSettings from './MailboxSyncSettings.jsx';
 import AuditLogTab from './AuditLogTab.jsx';
 import { isGoogleAuthMode } from '../utils/authMode.js';
 import GoogleAppsSection from './GoogleAppsSection.jsx';
-import GmailConnectCard from './GmailConnectCard.jsx';
+import AddAccountPicker from './AddAccountPicker.jsx';
+import GmailAddForm from './GmailAddForm.jsx';
+import { addAccountOptions } from '../utils/addAccount.js';
 import { openOAuthWindow } from '../utils/oauthWindow.js';
 import { MICROSOFT_OAUTH_PATH, reconnectUrlFor } from '../utils/accountHealth.js';
 import { isGoogleReconnectRequired } from '../utils/googleOAuth.js';
@@ -77,7 +79,6 @@ const COLORS = [
 
 // ─── IMAP presets ─────────────────────────────────────────────────────────────
 const PRESETS = {
-  gmail:   { label: 'Gmail',   imap_host: 'imap.gmail.com',        imap_port: 993, smtp_host: 'smtp.gmail.com',        smtp_port: 587 },
   yahoo:   { label: 'Yahoo',   imap_host: 'imap.mail.yahoo.com',   imap_port: 993, smtp_host: 'smtp.mail.yahoo.com',   smtp_port: 587 },
   icloud:  { label: 'iCloud',  imap_host: 'imap.mail.me.com',      imap_port: 993, smtp_host: 'smtp.mail.me.com',      smtp_port: 587 },
   custom:  { label: 'Custom' },
@@ -152,7 +153,7 @@ function AccountForm({ initial, onSave, onCancel }) {
         <div style={{ display: 'flex', gap: 6, marginBottom: 18, flexWrap: 'wrap' }}>
           {Object.entries(PRESETS).map(([key]) => {
             const active = selectedPreset === key;
-            const presetLabel = key === 'gmail' ? t('admin.accounts.presetGmail') : key === 'yahoo' ? t('admin.accounts.presetYahoo') : key === 'icloud' ? t('admin.accounts.presetIcloud') : t('admin.accounts.presetCustom');
+            const presetLabel = key === 'yahoo' ? t('admin.accounts.presetYahoo') : key === 'icloud' ? t('admin.accounts.presetIcloud') : t('admin.accounts.presetCustom');
             return (
               <button key={key} onClick={() => handlePreset(key)} style={{
                 padding: '5px 12px', borderRadius: 20, fontSize: 12, fontWeight: 500,
@@ -492,6 +493,18 @@ function AccountsTab() {
   const [foldersSaving, setFoldersSaving] = useState(false);
   const [confirmDialog, setConfirmDialog] = useState(null);
 
+  // "Add account": first the way (utils/addAccount.js decides which are offered), then its form.
+  const [addKind, setAddKind] = useState(null);
+  const [googleStatus, setGoogleStatus] = useState(null);
+  useEffect(() => {
+    if (subview !== 'add') return;
+    setGoogleStatus(null);
+    api.getIntegrationsStatus()
+      .then((data) => setGoogleStatus(data?.google || { configured: false, available: false }))
+      .catch(() => setGoogleStatus({ configured: false, available: false }));
+  }, [subview]);
+  const closeAdd = useCallback(() => { setAddKind(null); setSubview('list'); }, []);
+
   // Alias form state
   const [aliasFormMode, setAliasFormMode] = useState(null); // null | 'add' | 'edit'
   const [aliasFormData, setAliasFormData] = useState({ name: '', email: '', reply_to: '', signature: '' });
@@ -502,7 +515,7 @@ function AccountsTab() {
   const handleAdd = async (form) => {
     const account = await api.addAccount(form);
     setAccounts([...accounts, account]);
-    setSubview('list');
+    closeAdd();
   };
 
   const handleEdit = async (form) => {
@@ -723,9 +736,15 @@ function AccountsTab() {
   };
 
   if (subview === 'add') {
+    // One form per way to add a mailbox; PR 9 adds `domain` here and in ADD_ACCOUNT_KINDS.
+    const ADD_FORMS = {
+      gmail: () => <GmailAddForm accounts={accounts} onDone={closeAdd} />,
+      manual: () => <AccountForm onSave={handleAdd} onCancel={closeAdd} />,
+    };
+    const renderForm = addKind ? ADD_FORMS[addKind] : null;
     return (
       <div>
-        <button onClick={() => setSubview('list')} style={{
+        <button onClick={() => (renderForm ? setAddKind(null) : closeAdd())} style={{
           display: 'flex', alignItems: 'center', gap: 6,
           background: 'none', border: 'none', color: 'var(--text-secondary)',
           cursor: 'pointer', fontSize: 13, padding: '0 0 16px 0',
@@ -733,12 +752,14 @@ function AccountsTab() {
           <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
             <polyline points="15 18 9 12 15 6"/>
           </svg>
-          {t('sidebar.backToAccounts')}
+          {renderForm ? t('admin.accounts.add.backToOptions') : t('sidebar.backToAccounts')}
         </button>
         <div style={{ fontSize: 15, fontWeight: 600, color: 'var(--text-primary)', marginBottom: 20 }}>
           {t('admin.accounts.addTitle')}
         </div>
-        <AccountForm onSave={handleAdd} onCancel={() => setSubview('list')} />
+        {renderForm
+          ? renderForm()
+          : <AddAccountPicker options={addAccountOptions({ isAdmin, googleStatus })} onPick={setAddKind} />}
       </div>
     );
   }
@@ -2786,7 +2807,6 @@ function IntegrationsTab() {
           </div>
 
           {isAdmin && <GoogleAppsSection />}
-          <GmailConnectCard />
         </div>
       )}
         </div>

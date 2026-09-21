@@ -42,14 +42,6 @@ function lookup(map, code, fallback) {
   return typeof code === 'string' && Object.hasOwn(map, code) ? map[code] : fallback;
 }
 
-// Same-origin URL that starts the Google consent flow. `loginHint` preselects
-// the Google account (used by "Reconnect Gmail").
-export function buildGoogleConnectUrl({ loginHint } = {}) {
-  const hint = typeof loginHint === 'string' ? loginHint.trim() : '';
-  if (!hint) return GOOGLE_OAUTH_PATH;
-  return `${GOOGLE_OAUTH_PATH}?${new URLSearchParams({ login_hint: hint }).toString()}`;
-}
-
 // Same-origin URL that reconnects one Google mailbox. The server looks the address up by id, so
 // it never travels in a MailExpert URL. Adding a mailbox starts from the "Add account" dialog.
 export function buildGoogleReconnectUrl(accountId) {

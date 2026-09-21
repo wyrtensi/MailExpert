@@ -26,12 +26,13 @@ See [CONTRIBUTING.md](CONTRIBUTING.md) for how changes are made; external pull r
 
 ## Development status
 
-Implemented: full dependency modernization (Express 5, ImapFlow 2, Nodemailer 10, React 19 and more), Google OAuth 2.0 for Gmail with automatic token refresh on every IMAP/SMTP path, a mailbox filter and per-mailbox connection health in the sidebar. Still planned: deployment and Google OAuth runbooks, the 100-mailbox Gmail scale test, and the later Postfix/Dovecot/EOP mail node.
+Implemented: full dependency modernization (Express 5, ImapFlow 2, Nodemailer 10, React 19 and more), Google OAuth 2.0 for Gmail spread over several Google Cloud projects with automatic token refresh on every IMAP/SMTP path, one "Add account" entry, a mailbox filter and per-mailbox connection health in the sidebar. Still planned: the deployment runbook, the 100-mailbox Gmail scale test, and the later Postfix/Dovecot/EOP mail node.
 
 - [Codebase map](docs/architecture/codebase-file-map.md)
 - [Target architecture](docs/architecture/team-mail-system-handoff.md)
 - [Upstream PR assessment](docs/architecture/upstream-pr-assessment.md)
 - [Gmail MVP implementation plan](docs/superpowers/plans/2026-09-11-mailexpert-shared-gmail-mvp.md)
+- [Google apps for Gmail mailboxes](docs/operations/google-oauth.md) (in Russian)
 
 
 ## Features
@@ -160,8 +161,9 @@ settings panel → Users tab.
 
 ### 5. Add your email accounts
 
-In the settings panel → Accounts → Add Account.
-Select a preset (Gmail, iCloud) or Custom for any IMAP server.
+In the settings panel → Accounts → Add Account, pick **Gmail mailbox** (Google sign-in,
+see [Gmail](#gmail)) or, as an administrator, **Other server, set up manually** with a preset
+(Yahoo, iCloud) or Custom for any IMAP server.
 
 ---
 
@@ -329,20 +331,24 @@ sudo systemctl restart mailexpert   # or: pm2 restart mailexpert
 
 ### Gmail
 
-The current upstream-derived account form uses an **App Password** (not your normal password). MailExpert's required Google OAuth flow is specified in the implementation plan but is not available in this bootstrap yet.
+Gmail mailboxes connect only through Google OAuth 2.0; app passwords are not a supported
+way in. An administrator first sets up one or more Google apps under **Settings →
+Integrations → Email Providers → Google apps**: each app is its own Google Cloud project
+with an OAuth client of type "Web application", audience External, published In
+Production, scopes `openid email profile https://mail.google.com/`, and the callback URL
+shown on that screen (`https://<your-mailexpert-host>/oauth/google/callback`, one per
+public host) as an authorized redirect URI. An unverified project accepts at most 100
+Google accounts for its whole life, so MailExpert spreads mailboxes over the apps and
+tracks the seats.
 
-1. Enable 2-step verification on your Google account
-2. Go to [myaccount.google.com/apppasswords](https://myaccount.google.com/apppasswords)
-3. Create a new App Password — name it "MailExpert"
-4. Use the 16-character password in the MailExpert account form
+Any signed-in user then adds a mailbox with **Add account → Gmail mailbox**: enter the
+address, continue to Google, pass the "unverified app" warning and grant access. A
+mailbox whose access was revoked or whose app was disabled shows **Reconnect** in the
+sidebar and the Accounts tab.
 
-| Setting | Value |
-|---|---|
-| IMAP Host | `imap.gmail.com` |
-| IMAP Port | `993` |
-| SMTP Host | `smtp.gmail.com` |
-| SMTP Port | `587` |
-| Username | your Gmail address |
+Setup, app states, error codes, secret rotation, moving mailboxes between apps and the
+risks are described in [docs/operations/google-oauth.md](docs/operations/google-oauth.md)
+(in Russian).
 
 ### iCloud / Apple Mail
 

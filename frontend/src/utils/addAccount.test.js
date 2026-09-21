@@ -11,6 +11,7 @@ import {
   gmailStartErrorKey,
   mailboxSuggestion,
   moveSuggestionHighlight,
+  pickHighlightedSuggestion,
   shouldFetchKnownEmails,
   suggestionAction,
 } from './addAccount.js';
@@ -166,6 +167,30 @@ describe('suggestionAction', () => {
     assert.equal(suggestionAction({ email: 'a@gmail.com', kind: 'connected', reconnectUrl: null }), null);
     assert.equal(suggestionAction({ email: 'a@gmail.com', kind: 'disabled', reconnectUrl: null }), null);
     assert.equal(suggestionAction(null), null);
+  });
+});
+
+describe('pickHighlightedSuggestion', () => {
+  const known = { email: 'old@gmail.com', kind: 'known', reconnectUrl: null };
+  const reconnect = { email: 'a@gmail.com', kind: 'reconnect', reconnectUrl: '/oauth/google?account=acc-1' };
+  const connected = { email: 'b@gmail.com', kind: 'connected', reconnectUrl: null };
+  const disabled = { email: 'c@gmail.com', kind: 'disabled', reconnectUrl: null };
+  const rows = [known, reconnect, connected, disabled];
+
+  it('returns the highlighted row when it is actionable', () => {
+    assert.equal(pickHighlightedSuggestion(rows, 0, true), known);
+    assert.equal(pickHighlightedSuggestion(rows, 1, true), reconnect);
+  });
+
+  it('falls through to submit (returns null) for a non-actionable highlighted row', () => {
+    assert.equal(pickHighlightedSuggestion(rows, 2, true), null);
+    assert.equal(pickHighlightedSuggestion(rows, 3, true), null);
+  });
+
+  it('falls through to submit when the list is closed or nothing is highlighted', () => {
+    assert.equal(pickHighlightedSuggestion(rows, 0, false), null);
+    assert.equal(pickHighlightedSuggestion(rows, -1, true), null);
+    assert.equal(pickHighlightedSuggestion(rows, 99, true), null);
   });
 });
 

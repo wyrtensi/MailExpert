@@ -136,6 +136,16 @@ export function suggestionAction(row) {
   return null;
 }
 
+// What Enter should pick from the open list: the highlighted row, but only when it is actionable
+// (a journal address to fill, or a broken mailbox to reconnect). Null means Enter falls through to
+// the normal submit path, whether because nothing is highlighted, the list is closed, or the
+// highlighted row is a connected/disabled mailbox that cannot be picked.
+export function pickHighlightedSuggestion(rows, highlight, listOpen) {
+  if (!listOpen || highlight < 0) return null;
+  const row = rows?.[highlight];
+  return row && suggestionAction(row) ? row : null;
+}
+
 // Own-property lookup so codes like "toString" fall back to the generic message.
 export function gmailStartErrorKey(code) {
   return typeof code === 'string' && Object.hasOwn(START_ERROR_KEYS, code) ? START_ERROR_KEYS[code] : START_ERROR_FALLBACK_KEY;

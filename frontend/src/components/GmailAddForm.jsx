@@ -12,6 +12,7 @@ import {
   exactMailboxMatch,
   gmailStartErrorKey,
   moveSuggestionHighlight,
+  pickHighlightedSuggestion,
   shouldFetchKnownEmails,
   suggestionAction,
 } from '../utils/addAccount.js';
@@ -86,6 +87,7 @@ export default function GmailAddForm({ accounts, onDone }) {
     if (!action) return;
     if (action.type === 'fill') {
       setEmail(action.email);
+      setErrorKey(null);
       closeList();
     } else {
       openOAuthWindow(action.url);
@@ -123,7 +125,8 @@ export default function GmailAddForm({ accounts, onDone }) {
     }
     if (e.key === 'Enter') {
       e.preventDefault();
-      if (listOpen && highlight >= 0 && rows[highlight]) choose(rows[highlight]);
+      const row = pickHighlightedSuggestion(rows, highlight, listOpen);
+      if (row) choose(row);
       else start();
     }
   };

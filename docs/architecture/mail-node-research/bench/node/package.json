@@ -1,0 +1,9 @@
+{
+  "name": "me-bench-node",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "dependencies": {
+    "imapflow": "2.0.3"
+  }
+}

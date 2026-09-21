@@ -733,8 +733,9 @@ export default function MailApp() {
   }, []); // eslint-disable-line react-hooks/exhaustive-deps
 
   // Google OAuth results posted back by a popup (App.jsx forwards them). MailApp is
-  // mounted wherever the flow was started (Integrations card or a "Reconnect Gmail"
-  // action), so the toast and account refresh live here exactly once. Microsoft
+  // mounted wherever the flow was started (the Gmail form of "Add account" or a
+  // "Reconnect" action in the sidebar or the Accounts tab), so the toast and account
+  // refresh live here exactly once. Microsoft
   // popup messages stay with the Integrations tab listener.
   useEffect(() => {
     const handleMessage = (e) => {

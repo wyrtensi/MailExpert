@@ -144,10 +144,72 @@ expect_invalid() {
   [ "$(ufw_allowed_ports 22 | paste -sd' ' -)" = "22/tcp" ]
 }
 
-@test "ssh_ports keeps 22 and adds the configured and the current session ports" {
-  [ "$(ssh_ports "" "" | paste -sd' ' -)" = 22 ]
-  [ "$(ssh_ports $'2222\n22' "203.0.113.5 50000 198.51.100.7 2200" | paste -sd' ' -)" = "22 2200 2222" ]
-  [ "$(ssh_ports "not-a-port" "" | paste -sd' ' -)" = 22 ]
+@test "ssh_ports keeps 22 and adds the listening, configured and current session ports" {
+  [ "$(ssh_ports "" "" "" | paste -sd' ' -)" = 22 ]
+  [ "$(ssh_ports "" $'2222\n22' "203.0.113.5 50000 198.51.100.7 2200" | paste -sd' ' -)" = "22 2200 2222" ]
+  [ "$(ssh_ports $'4022\n4023' "" "" | paste -sd' ' -)" = "22 4022 4023" ]
+  [ "$(ssh_ports "not-a-port" "not-a-port" "" | paste -sd' ' -)" = 22 ]
+}
+
+@test "ss_ssh_ports reads the ports sshd listens on from ss" {
+  ss_out='LISTEN 0      128    0.0.0.0:2222 0.0.0.0:* users:(("sshd",pid=4025,fd=3))
+LISTEN 0      128       [::]:2222    [::]:* users:(("sshd",pid=4025,fd=4))
+LISTEN 0      4096   [::]:4022 [::]:* users:(("systemd",pid=1,fd=50),("sshd",pid=900,fd=3))
+LISTEN 0      4096   0.0.0.0:80 0.0.0.0:* users:(("caddy",pid=11,fd=7))
+LISTEN 0      4096   0.0.0.0:2200 0.0.0.0:* users:(("sshd-session",pid=12,fd=7))
+LISTEN 0      4096   127.0.0.1:8080 0.0.0.0:*'
+  [ "$(ss_ssh_ports <<<"$ss_out" | paste -sd' ' -)" = "2222 4022" ]
+  [ -z "$(ss_ssh_ports <<<'')" ]
+}
+
+@test "socket_listen_ports reads ssh.socket ListenStream ports" {
+  [ "$(socket_listen_ports <<<'[::]:22 (Stream)')" = 22 ]
+  [ "$(socket_listen_ports <<<$'0.0.0.0:2222 (Stream)\n[::]:2222 (Stream)' | paste -sd' ' -)" = 2222 ]
+  [ "$(socket_listen_ports <<<'Listen=[::]:4022 (Stream) 0.0.0.0:22 (Stream)' | paste -sd' ' -)" = "22 4022" ]
+  [ "$(socket_listen_ports <<<'2200 (Stream)')" = 2200 ]
+  [ -z "$(socket_listen_ports <<<'/run/sshd.sock (Stream)')" ]
+  [ -z "$(socket_listen_ports <<<'')" ]
+}
+
+@test "ufw_enable_safe needs an allowed port with an SSH listener unless ufw is active" {
+  ufw_enable_safe 0 $'22\n2222' 22 2222
+  ufw_enable_safe 0 2222 22 2222
+  run ufw_enable_safe 0 '' 22
+  [ "$status" -eq 1 ]
+  run ufw_enable_safe 0 4022 22 2222
+  [ "$status" -eq 1 ]
+  ufw_enable_safe 1 '' 22
+}
+
+@test "ufw_rules_cover_port finds any rule for the port in ufw status and ufw show added" {
+  status_out='Status: active
+
+To                         Action      From
+--                         ------      ----
+2222/tcp                   ALLOW       203.0.113.5
+80,443/tcp                 ALLOW       Anywhere
+OpenSSH                    ALLOW       Anywhere
+3000:3100/tcp              ALLOW       Anywhere
+198.51.100.1 2200/tcp      ALLOW       Anywhere
+80,443/tcp (v6)            ALLOW       Anywhere (v6)'
+  ufw_rules_cover_port 2222 <<<"$status_out"
+  ufw_rules_cover_port 22 <<<"$status_out"
+  ufw_rules_cover_port 3050 <<<"$status_out"
+  ufw_rules_cover_port 2200 <<<"$status_out"
+  ufw_rules_cover_port 443 <<<"$status_out"
+  run ufw_rules_cover_port 4022 <<<"$status_out"
+  [ "$status" -eq 1 ]
+  run ufw_rules_cover_port 203 <<<"$status_out"
+  [ "$status" -eq 1 ]
+  added_out="Added user rules (see 'ufw status' for running firewall):
+ufw allow from 203.0.113.5 to any port 2222 proto tcp
+ufw limit 4022/tcp"
+  ufw_rules_cover_port 2222 <<<"$added_out"
+  ufw_rules_cover_port 4022 <<<"$added_out"
+  run ufw_rules_cover_port 22 <<<"$added_out"
+  [ "$status" -eq 1 ]
+  run ufw_rules_cover_port 22 <<<'Status: inactive'
+  [ "$status" -eq 1 ]
 }
 
 @test "port_conflicts ignores the edge's own caddy" {

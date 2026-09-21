@@ -72,19 +72,52 @@ enable_unattended_upgrades() {
   fi
 }
 
+# ssh_listening_ports: the TCP ports an SSH daemon listens on now: sshd itself (ss) and, when
+# sshd is socket-activated (Ubuntu 24.04), the ListenStream ports of an active ssh.socket.
+ssh_listening_ports() {
+  local ss_out listen=''
+  ss_out=$(ss -ltnpH 2>/dev/null) || ss_out=''
+  if systemctl is-active --quiet ssh.socket 2>/dev/null; then
+    listen=$(systemctl show -p Listen --value ssh.socket 2>/dev/null) || listen=''
+  fi
+  { ss_ssh_ports <<<"$ss_out"; socket_listen_ports <<<"$listen"; } | sort -nu
+}
+
 # apply_ufw: deny incoming except SSH and, when Caddy runs, 80/443. Docker publishes ports past
 # ufw, which is why the panel publishes only on 127.0.0.1.
+#
+# SSH ports: 22, the ports an SSH daemon listens on, the ports of `sshd -T` (it fails without
+# /run/sshd before ssh.service first ran; then only the others count) and the server port of
+# $SSH_CONNECTION (sudo and cloud-init drop it). ufw is not enabled when none of them has an SSH
+# listener: that would lock the owner out. A port some ufw rule already names (for example
+# `allow from <ADMIN_IP> to any port 22`) gets no extra rule, so a rerun never widens it.
 apply_ufw() {
-  local conf rule
-  local -a ports rules
+  local conf listening status existing port active=0
+  local -a ports add rules
+  listening=$(ssh_listening_ports)
   conf=$(sshd -T 2>/dev/null | awk '$1 == "port" {print $2}') || conf=''
-  mapfile -t ports < <(ssh_ports "$conf" "${SSH_CONNECTION:-}")
-  mapfile -t rules < <(ufw_allowed_ports "${ports[@]}")
+  mapfile -t ports < <(ssh_ports "$listening" "$conf" "${SSH_CONNECTION:-}")
+  status=$(ufw status 2>/dev/null) || status=''
+  if [[ $status == 'Status: active'* ]]; then active=1; fi
+  if ! ufw_enable_safe "$active" "$listening" "${ports[@]}"; then
+    warn "ufw: left disabled, no SSH daemon listens on ${ports[*]}; enabling it could lock you out. Allow your SSH port with ufw and enable it by hand"
+    return 0
+  fi
+  existing=$({ ufw show added; printf '%s\n' "$status"; } 2>/dev/null) || existing=$status
+  add=()
+  for port in "${ports[@]}"; do
+    if ufw_rules_cover_port "$port" <<<"$existing"; then
+      log "ufw: port $port/tcp keeps its existing rules"
+    else
+      add+=("$port")
+    fi
+  done
+  mapfile -t rules < <(ufw_allowed_ports "${add[@]}")
   ufw default deny incoming >/dev/null
   ufw default allow outgoing >/dev/null
   for rule in "${rules[@]}"; do ufw allow "$rule" >/dev/null; done
-  ufw --force enable >/dev/null
-  log "ufw: allowed ${rules[*]}"
+  if [ "$active" = 0 ]; then ufw --force enable >/dev/null; fi
+  log "ufw: enabled, SSH ports ${ports[*]}${rules[*]:+, allowed now: ${rules[*]}}"
 }
 
 # install_timers: a timer is enabled only when its script exists in the checked-out commit.

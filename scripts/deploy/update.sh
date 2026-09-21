@@ -151,7 +151,7 @@ main() {
         set_update_status rolled-back
         send_ping "$url" fail "the update to $target failed; $old runs again"
         log "not updated: $old runs again; the reason is in the backend log of $target above"
-        return 4
+        exit 4
       fi
       set_update_status needs-rollback
       send_ping "$url" fail "the update to $target failed and $old did not start again"
@@ -163,7 +163,7 @@ main() {
       send_ping "$url" fail "the update to $target applied migrations and did not become ready; the panel is stopped"
       warn "$target applied migrations (schema_migrations: $before -> $after) and did not become ready; backend and frontend are stopped"
       log "back to $old with the database from before the update (what was written since is lost): $APP_DIR/scripts/deploy/rollback.sh --prefix $OPT_PREFIX"
-      return 5
+      exit 5
       ;;
   esac
 }

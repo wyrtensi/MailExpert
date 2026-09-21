@@ -93,6 +93,104 @@ export async function setGoogleAppStatus(appId, status) {
   });
 }
 
+const PUBLIC_APP_COLUMNS = 'id, label, client_id, project_number, user_limit, status, created_at';
+const LABEL_MAX = 100;
+
+function normalizeLabel(label) {
+  const value = typeof label === 'string' ? label.trim() : '';
+  if (!value || value.length > LABEL_MAX) throw new GoogleAppError('label_invalid');
+  return value;
+}
+
+function normalizeUserLimit(userLimit) {
+  if (!Number.isInteger(userLimit) || userLimit <= 0) throw new GoogleAppError('user_limit_invalid');
+  return userLimit;
+}
+
+// Apps for the admin screen, oldest first, with the seats Google has counted and the mailboxes
+// bound to each. The secret is never selected.
+export async function listGoogleApps() {
+  const { rows } = await query(
+    `SELECT a.id, a.label, a.client_id, a.project_number, a.user_limit, a.status, a.created_at,
+            (SELECT count(*) FROM google_oauth_grants g WHERE g.app_id = a.id)::int AS grants_count,
+            (SELECT count(*) FROM email_accounts e WHERE e.oauth_app_id = a.id)::int AS accounts_count
+     FROM google_oauth_apps a ORDER BY a.created_at, a.id`,
+  );
+  return rows;
+}
+
+// One app per Google Cloud project: clients of one project share its user cap, so a second
+// client of the same project would only pretend to add seats.
+export async function createGoogleApp({ label, clientId, clientSecret, userLimit = 100 }) {
+  const normalizedLabel = normalizeLabel(label);
+  const projectNumber = parseGoogleClientId(clientId);
+  if (!projectNumber) throw new GoogleAppError('client_id_invalid');
+  if (typeof clientSecret !== 'string' || !clientSecret.trim()) throw new GoogleAppError('client_secret_required');
+  const limit = normalizeUserLimit(userLimit);
+  const normalizedClientId = clientId.trim();
+
+  return withTransaction(async (client) => {
+    await client.query("SELECT pg_advisory_xact_lock(hashtext('google-oauth-app-import'))");
+    const same = await client.query('SELECT id FROM google_oauth_apps WHERE client_id = $1', [normalizedClientId]);
+    if (same.rows.length) throw new GoogleAppError('app_exists');
+    const project = await client.query('SELECT id FROM google_oauth_apps WHERE project_number = $1', [projectNumber]);
+    if (project.rows.length) throw new GoogleAppError('app_same_project');
+    const inserted = await client.query(
+      `INSERT INTO google_oauth_apps (label, client_id, client_secret, project_number, user_limit)
+       VALUES ($1, $2, $3, $4, $5) RETURNING ${PUBLIC_APP_COLUMNS}`,
+      [normalizedLabel, normalizedClientId, encrypt(clientSecret.trim()), projectNumber, limit],
+    );
+    return inserted.rows[0];
+  });
+}
+
+// The client ID never changes: another client ID is another app. A missing or empty secret
+// keeps the stored one. Status changes go through setGoogleAppStatus.
+export async function updateGoogleApp(appId, { label, clientSecret, userLimit } = {}) {
+  const newLabel = label === undefined ? null : normalizeLabel(label);
+  const newLimit = userLimit === undefined ? null : normalizeUserLimit(userLimit);
+  const newSecret = typeof clientSecret === 'string' && clientSecret.trim() ? encrypt(clientSecret.trim()) : null;
+  const { rows } = await query(
+    `UPDATE google_oauth_apps SET
+       label = COALESCE($2, label), client_secret = COALESCE($3, client_secret),
+       user_limit = COALESCE($4, user_limit), updated_at = NOW()
+     WHERE id = $1 RETURNING ${PUBLIC_APP_COLUMNS}`,
+    [appId, newLabel, newSecret, newLimit],
+  );
+  if (!rows.length) throw new GoogleAppError('app_not_found');
+  return rows[0];
+}
+
+// Only an app without mailboxes can go: a bound mailbox's refresh token works with no other
+// client. Its grant journal goes with it (ON DELETE CASCADE).
+export async function deleteGoogleApp(appId) {
+  await withTransaction(async (client) => {
+    const bound = await client.query(
+      'SELECT count(*)::int AS n FROM email_accounts WHERE oauth_app_id = $1',
+      [appId],
+    );
+    if (bound.rows[0].n > 0) throw new GoogleAppError('app_in_use');
+    const deleted = await client.query('DELETE FROM google_oauth_apps WHERE id = $1', [appId]);
+    if (!deleted.rowCount) throw new GoogleAppError('app_not_found');
+  });
+}
+
+const KNOWN_EMAILS_LIMIT = 8;
+
+// Addresses Google has issued tokens to that no mailbox uses any more, for the "connected
+// before" hint of the Gmail form. Addresses only: no apps, no dates.
+export async function findKnownGoogleEmails(q) {
+  const pattern = String(q).trim().toLowerCase().replace(/[\\%_]/g, '\\$&');
+  const { rows } = await query(
+    `SELECT DISTINCT g.email FROM google_oauth_grants g
+     WHERE g.email LIKE '%' || $1 || '%' ESCAPE '\\'
+       AND NOT EXISTS (SELECT 1 FROM email_accounts e WHERE lower(e.email_address) = g.email)
+     ORDER BY g.email LIMIT ${KNOWN_EMAILS_LIMIT}`,
+    [pattern],
+  );
+  return rows.map((row) => row.email);
+}
+
 // One-time import of the single-app settings (Settings → Integrations, or the
 // GOOGLE_CLIENT_ID and GOOGLE_CLIENT_SECRET environment) as the first app. Runs at every
 // startup and does nothing once any app exists.

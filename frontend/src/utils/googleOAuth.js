@@ -31,6 +31,9 @@ const GOOGLE_ERROR_KEYS = {
   missing_refresh_token: 'admin.integrations.google.errorMissingRefreshToken',
   scope_missing: 'admin.integrations.google.errorScopeMissing',
   authentication_failed: 'admin.integrations.google.errorAuthenticationFailed',
+  already_connected: 'admin.integrations.google.errorAlreadyConnected',
+  account_mismatch: 'admin.integrations.google.errorAccountMismatch',
+  no_app_capacity: 'admin.integrations.google.errorNoAppCapacity',
 };
 const GOOGLE_ERROR_FALLBACK_KEY = 'admin.integrations.google.errorGeneric';
 

@@ -1475,6 +1475,9 @@
         "errorMissingRefreshToken": "Google did not grant offline access. Remove MailExpert from your Google account permissions and connect again.",
         "errorScopeMissing": "Full Gmail access was not granted. Connect again and allow access to Gmail.",
         "errorAuthenticationFailed": "Google authorization failed. Please try again.",
+        "errorAlreadyConnected": "This Gmail address is already connected.",
+        "errorAccountMismatch": "You signed in to Google with a different account than the one you asked to connect. Try again and choose the right account.",
+        "errorNoAppCapacity": "No Google app has room for another Gmail address. Ask an administrator to add one.",
         "errorGeneric": "Could not connect the Gmail mailbox. Please try again."
       },
       "oauthGenericSuccess": "Account connected.",

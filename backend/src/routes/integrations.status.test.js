@@ -36,6 +36,10 @@ vi.mock('../services/oauth/googleApps.js', () => {
     importLegacyGoogleConfig: vi.fn(async () => null),
   };
 });
+const capacity = vi.hoisted(() => ({ value: true }));
+vi.mock('../services/oauth/googleAppSelection.js', () => ({
+  googleHasCapacity: vi.fn(async () => capacity.value),
+}));
 
 import express from 'express';
 import integrationsRoutes, { loadIntegrationConfigs } from './integrations.js';
@@ -84,6 +88,7 @@ afterEach(() => {
   for (const k of GOOGLE_VARS) delete process.env[k];
   authState.admin = false;
   googleApps.config = null;
+  capacity.value = true;
   query.mockReset();
   query.mockImplementation(async () => ({ rows: [] }));
   getDefaultGoogleApp.mockReset();
@@ -102,13 +107,13 @@ describe('GET /api/integrations/status (non-admin capability check)', () => {
     process.env.MS_CLIENT_ID = 'some-client-id';
     const res = await fetch(`${base}/api/integrations/status`);
     expect(res.status).toBe(200);
-    expect(await res.json()).toEqual({ microsoft: { configured: true }, google: { configured: false } });
+    expect(await res.json()).toEqual({ microsoft: { configured: true }, google: { configured: false, available: false } });
   });
 
   it('reports configured=false when MS_CLIENT_ID is unset', async () => {
     const res = await fetch(`${base}/api/integrations/status`);
     expect(res.status).toBe(200);
-    expect(await res.json()).toEqual({ microsoft: { configured: false }, google: { configured: false } });
+    expect(await res.json()).toEqual({ microsoft: { configured: false }, google: { configured: false, available: false } });
   });
 
   it('never leaks credentials in the response', async () => {
@@ -129,11 +134,26 @@ describe('GET /api/integrations/status (non-admin capability check)', () => {
 
   it('reports google configured when a Google app resolves', async () => {
     let res = await fetch(`${base}/api/integrations/status`);
-    expect((await res.json()).google).toEqual({ configured: false });
+    expect((await res.json()).google).toEqual({ configured: false, available: false });
 
     googleApps.config = { appId: 'app-1', clientId: 'x', clientSecret: 'y', redirectUri: 'https://mail.example.com/oauth/google/callback' };
     res = await fetch(`${base}/api/integrations/status`);
-    expect((await res.json()).google).toEqual({ configured: true });
+    expect((await res.json()).google).toEqual({ configured: true, available: true });
+  });
+
+  it('reports whether a new Gmail can be connected, without any credential', async () => {
+    googleApps.config = { appId: 'app-1', clientId: CLIENT_ID, clientSecret: 's', redirectUri: REDIRECT_URI };
+    capacity.value = false;
+    const body = await (await fetch(`${base}/api/integrations/status`)).json();
+    expect(body.google).toEqual({ configured: true, available: false });
+    expect(JSON.stringify(body)).not.toContain(CLIENT_ID);
+  });
+
+  it('is never available while Google is not configured', async () => {
+    googleApps.config = null;
+    capacity.value = true;
+    const body = await (await fetch(`${base}/api/integrations/status`)).json();
+    expect(body.google).toEqual({ configured: false, available: false });
   });
 });
 

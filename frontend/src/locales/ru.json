@@ -1497,6 +1497,9 @@
         "errorMissingRefreshToken": "Google не выдал офлайн-доступ. Удалите MailExpert из разрешений аккаунта Google и подключитесь заново.",
         "errorScopeMissing": "Полный доступ к Gmail не предоставлен. Подключитесь заново и разрешите доступ к Gmail.",
         "errorAuthenticationFailed": "Авторизация Google не удалась. Повторите попытку.",
+        "errorAlreadyConnected": "Этот адрес Gmail уже подключён.",
+        "errorAccountMismatch": "Вы вошли в Google не тем аккаунтом, который подключали. Повторите и выберите нужный аккаунт.",
+        "errorNoAppCapacity": "Ни в одном Google-приложении нет места для нового адреса Gmail. Попросите администратора добавить приложение.",
         "errorGeneric": "Не удалось подключить ящик Gmail. Повторите попытку."
       },
       "oauthGenericSuccess": "Аккаунт подключён.",

@@ -10,7 +10,6 @@
 # the tracked files must match HEAD: the test installs HEAD from a git bundle.
 # shellcheck source-path=SCRIPTDIR
 set -euo pipefail
-export MSYS_NO_PATHCONV=1 # Git Bash on Windows: pass /e2e paths to docker.exe unchanged
 
 DIND_IMAGE=docker:29.8.1-dind
 TEST_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
@@ -66,9 +65,13 @@ docker exec "$NAME" docker info >/dev/null 2>&1 || die "the inner docker daemon 
 docker exec "$NAME" apk add --no-cache --quiet bash curl jq iproute2 >/dev/null
 log "loading images into $NAME"
 docker save "${IMAGES[@]}" | docker exec -i "$NAME" docker load --quiet >/dev/null
-docker exec "$NAME" mkdir -p /e2e
+# MSYS_NO_PATHCONV=1 on these docker exec calls only: Git Bash on Windows rewrites a bare
+# absolute-looking argument such as /e2e into a host path before it reaches docker.exe, which
+# would corrupt a path meant for the container. Scoped to each call so it never reaches git,
+# whose own /-style arguments (above and below) need MSYS's translation to resolve on Windows.
+MSYS_NO_PATHCONV=1 docker exec "$NAME" mkdir -p /e2e
 git -C "$TEST_DIR" bundle create - HEAD 2>/dev/null | docker exec -i "$NAME" sh -c 'cat >/e2e/repo.bundle'
-docker exec "$NAME" git clone --quiet /e2e/repo.bundle /e2e/src
-docker exec "$NAME" bash /e2e/src/scripts/deploy/test/e2e-install.sh \
+MSYS_NO_PATHCONV=1 docker exec "$NAME" git clone --quiet /e2e/repo.bundle /e2e/src
+MSYS_NO_PATHCONV=1 docker exec "$NAME" bash /e2e/src/scripts/deploy/test/e2e-install.sh \
   --version "$VERSION" --image-prefix "$IMAGE_PREFIX" --repo-url /e2e/repo.bundle
 log "deploy e2e passed"

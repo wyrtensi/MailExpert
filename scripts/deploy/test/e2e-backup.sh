@@ -161,7 +161,7 @@ cipher=$(credential "$A" encrypt)
 [[ $cipher == enc:v1:* ]] || fail "encrypt: $cipher"
 on "$A" app_psql >/dev/null <<SQL
 WITH owner AS (INSERT INTO users (username, is_admin) VALUES ('e2e-owner', true) RETURNING id)
-INSERT INTO email_accounts (user_id, name, email_address, auth_user, auth_pass, enabled)
+INSERT INTO email_accounts (added_by, name, email_address, auth_user, auth_pass, enabled)
 SELECT id, 'E2E box', '$E2E_EMAIL', '$E2E_EMAIL', '$cipher', false FROM owner;
 SQL
 [ "$(credential "$A" check)" = match ] || fail "the stored credential does not decrypt on A"

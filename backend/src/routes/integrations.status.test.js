@@ -155,6 +155,20 @@ describe('GET /api/integrations/status (non-admin capability check)', () => {
     const body = await (await fetch(`${base}/api/integrations/status`)).json();
     expect(body.google).toEqual({ configured: false, available: false });
   });
+
+  it('reports available: false, without failing, when googleHasCapacity rejects (Redis down)', async () => {
+    process.env.MS_CLIENT_ID = 'some-client-id';
+    googleApps.config = { appId: 'app-1', clientId: CLIENT_ID, clientSecret: 's', redirectUri: REDIRECT_URI };
+    const { googleHasCapacity } = await import('../services/oauth/googleAppSelection.js');
+    googleHasCapacity.mockRejectedValueOnce(Object.assign(new Error('connect ECONNREFUSED'), { name: 'AggregateError' }));
+    const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+    const res = await fetch(`${base}/api/integrations/status`);
+    errorSpy.mockRestore();
+    expect(res.status).toBe(200);
+    const body = await res.json();
+    expect(body).toEqual({ microsoft: { configured: true }, google: { configured: true, available: false } });
+    expect(JSON.stringify(errorSpy.mock.calls)).not.toMatch(/ECONNREFUSED/);
+  });
 });
 
 describe('GET /api/integrations (config read) stays admin-only', () => {

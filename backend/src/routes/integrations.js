@@ -69,6 +69,18 @@ router.get('/', requireAdmin, async (req, res) => {
 // the connect buttons, while the config read/write/delete endpoints stay admin-only.
 // The OAuth connect routes already require only an authenticated session and bind the
 // resulting mailbox to that user, so no privilege is granted here. (#315)
+// A Redis error from googleHasCapacity must not fail the whole response: Microsoft's
+// configured flag has nothing to do with Google's capacity check.
+async function googleAvailable(configured) {
+  if (!configured) return false;
+  try {
+    return await googleHasCapacity();
+  } catch (err) {
+    console.error(`Google OAuth capacity check failed: ${err?.name || 'Error'}`);
+    return false;
+  }
+}
+
 router.get('/status', async (req, res) => {
   const configured = !!(await resolveGoogleConfig());
   res.json({
@@ -78,7 +90,7 @@ router.get('/status', async (req, res) => {
     google: {
       configured,
       // Whether an active app still has a free seat: the Gmail option is offered only then.
-      available: configured && await googleHasCapacity(),
+      available: await googleAvailable(configured),
     },
   });
 });

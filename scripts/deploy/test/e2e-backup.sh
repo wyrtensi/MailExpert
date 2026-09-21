@@ -203,4 +203,27 @@ expect_exit 0 deploy backup.sh --prefix "$A"
 [ "$(jq -r .tag "$A/state/backup-last.json")" = nightly ] || fail "nightly tag"
 pass "nightly backup"
 
+# 9. Health of A: healthy after its backups; a stale backup and a stopped service are problems
+# the output names. The disk threshold is 0 here: CI runners' disks are often more than 85%
+# full; disk_problem itself is covered by bats.
+export MAILEXPERT_MIN_FREE_PCT=0
+expect_exit 0 deploy healthcheck.sh --prefix "$A"
+[[ $OUT == *healthy* ]] || fail "health output"
+cp -p "$A/state/backup-last.json" "$A/state/backup-last.keep"
+stale=$(($(date +%s) - 27 * 3600))
+jq -c --argjson t "$stale" '.finished_epoch = $t' "$A/state/backup-last.keep" >"$A/state/backup-last.json"
+expect_exit 1 deploy healthcheck.sh --prefix "$A"
+[[ $OUT == *"problem: backup: the last successful backup is 27 hours old"* ]] || fail "a stale backup was not reported"
+mv -f "$A/state/backup-last.keep" "$A/state/backup-last.json"
+on "$A" app_compose stop redis >/dev/null 2>&1
+expect_exit 1 deploy healthcheck.sh --prefix "$A"
+[[ $OUT == *"problem: containers: redis is exited"* && $OUT == *"problem: ready:"* ]] || fail "a stopped redis was not reported"
+on "$A" app_compose start redis >/dev/null 2>&1
+for _ in $(seq 60); do
+  if on "$A" panel_ready; then break; fi
+  sleep 2
+done
+expect_exit 0 deploy healthcheck.sh --prefix "$A"
+pass "health check: healthy, stale backup, stopped service"
+
 pass "backup e2e passed"

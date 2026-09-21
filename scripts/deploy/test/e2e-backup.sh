@@ -19,13 +19,14 @@ DEPLOY_DIR=$(cd "$TEST_DIR/.." && pwd)
 . "$DEPLOY_DIR/lib/app.sh"
 # shellcheck source=../lib/backup.sh
 . "$DEPLOY_DIR/lib/backup.sh"
+# shellcheck source=../lib/ops.sh
+. "$DEPLOY_DIR/lib/ops.sh"
 # shellcheck source=e2e-lib.sh
 . "$TEST_DIR/e2e-lib.sh"
 
 A_PROJECT=me-e2e-a B_PROJECT=me-e2e-b S3_PROJECT=me-e2e-s3
 A=/e2e/a B=/e2e/b ORIGIN=/e2e/origin.git WORK=/e2e/work STAGE=/e2e/stage
-# B_PORT=18082 is declared by the restore scenario, the later task that installs server B.
-A_PORT=18081 S3_PORT=19000
+A_PORT=18081 B_PORT=18082 S3_PORT=19000
 BUCKET=me-e2e-backups
 VERSION='' IMAGE_PREFIX='' REPO_URL='' MINIO_IMAGE=''
 
@@ -225,5 +226,68 @@ for _ in $(seq 60); do
 done
 expect_exit 0 deploy healthcheck.sh --prefix "$A"
 pass "health check: healthy, stale backup, stopped service"
+
+# 10. Server A is lost: containers, volumes and files. The owner kept the recovery key and the
+# S3 keys (the variables above); A's generated keys are noted only to compare after the move.
+a_key=$(env_get "$A/.env" ENCRYPTION_KEY)
+a_db=$(env_get "$A/.env" DB_PASSWORD)
+a_vapid=$(env_get "$A/.env" VAPID_PUBLIC_KEY)
+remove_project "$A_PROJECT"
+rm -rf "$A"
+pass "server A wiped"
+
+# 11. Server B, prepared for the move: the same version, --no-start. Standby: the timers' scripts
+# skip it. Its generated keys differ from A's; configure.sh refuses A's ENCRYPTION_KEY and names
+# restore.sh.
+expect_exit 0 deploy install.sh --prefix "$B" --version "$VERSION" --image-prefix "$IMAGE_PREFIX" \
+  --repo-url "$ORIGIN" --project "$B_PROJECT" --http-port "$B_PORT" --no-system --no-edge --local-auth \
+  --signin direct --direct-host b.example.test --no-start
+[ -f "$B/state/standby" ] || fail "install.sh --no-start did not mark B as standby"
+[ -z "$(labelled ps "$B_PROJECT")" ] || fail "install.sh --no-start started containers"
+[ "$(env_get "$B/.env" ENCRYPTION_KEY)" != "$a_key" ] || fail "B has A's key before the restore"
+expect_exit 0 deploy healthcheck.sh --prefix "$B"
+[[ $OUT == *"standby server"* ]] || fail "the health check did not skip a standby server"
+expect_exit 0 deploy backup.sh --prefix "$B"
+[[ $OUT == *"backup skipped"* ]] || fail "the backup did not skip a standby server"
+out=$(backup_keys | deploy configure.sh --prefix "$B" 2>&1)
+[[ $out != *"$RESTIC_PW"* ]] || fail "configure.sh printed RESTIC_PASSWORD"
+set +e
+out=$(printf 'ENCRYPTION_KEY=%s\n' "$a_key" | deploy configure.sh --prefix "$B" 2>&1)
+code=$?
+set -e
+if [ "$code" != 2 ] || [[ $out != *restore.sh* ]]; then fail "configure.sh with A's ENCRYPTION_KEY: exit $code"; fi
+pass "server B prepared: standby, its own keys, configure.sh points to restore.sh"
+
+# 12. The rehearsal: restore the latest snapshot without starting. A's generated keys replace
+# B's; B keeps its project and port; the database and the credential check pass.
+expect_exit 0 deploy restore.sh latest --prefix "$B" --no-start
+[ "$(env_get "$B/.env" ENCRYPTION_KEY)" = "$a_key" ] || fail "ENCRYPTION_KEY was not restored"
+[ "$(env_get "$B/.env" DB_PASSWORD)" = "$a_db" ] || fail "DB_PASSWORD was not restored"
+[ "$(env_get "$B/.env" VAPID_PUBLIC_KEY)" = "$a_vapid" ] || fail "the VAPID keys were not restored"
+[ "$(env_get "$B/.env" COMPOSE_PROJECT_NAME)" = "$B_PROJECT" ] || fail "COMPOSE_PROJECT_NAME changed"
+[ "$(env_get "$B/.env" APP_HTTP_PORT)" = "$B_PORT" ] || fail "APP_HTTP_PORT changed"
+[ "$(stat -c %a "$B/.env.pre-restore")" = 600 ] || fail ".env.pre-restore"
+[[ $OUT == *'"failed":0'* && $OUT != *"$E2E_PLAIN"* && $OUT != *"$a_key"* ]] || fail "restore output"
+[ -f "$B/state/standby" ] || fail "B left standby before it started"
+[ -z "$(docker ps -q --filter "label=com.docker.compose.project=$B_PROJECT" --filter label=com.docker.compose.service=backend)" ] ||
+  fail "the backend runs after --no-start"
+[ ! -e "$B/state/restore" ] || fail "restored files were left behind"
+pass "restore --no-start (rehearsal)"
+
+# 13. Going live: install.sh starts B; the mailbox password decrypts with the restored key.
+expect_exit 0 deploy install.sh --prefix "$B"
+[ ! -f "$B/state/standby" ] || fail "B is still standby"
+[ "$(curl -fsS "http://127.0.0.1:$B_PORT/api/health/ready" | jq -r .status)" = ready ] || fail "B is not ready"
+[ "$(credential "$B" check)" = match ] || fail "the credential does not decrypt on B"
+[ "$(on "$B" app_psql <<<"SELECT count(*) FROM users WHERE username = 'e2e-owner';")" = 1 ] || fail "the user did not move"
+pass "B runs with A's data and keys"
+
+# 14. B backs up into the same repository and its verify passes; a second restore is refused and
+# changes nothing.
+expect_exit 0 deploy backup.sh --prefix "$B" --tag manual --verify
+expect_exit 2 deploy restore.sh latest --prefix "$B"
+[[ $OUT == *"_postgres_data exists"* ]] || fail "restore.sh did not refuse a server with a database"
+[ "$(credential "$B" check)" = match ] || fail "the refused restore changed B"
+pass "B backs up; restore.sh refuses a server with a database"
 
 pass "backup e2e passed"

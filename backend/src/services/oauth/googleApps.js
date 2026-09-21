@@ -107,16 +107,25 @@ function normalizeUserLimit(userLimit) {
   return userLimit;
 }
 
-// Apps for the admin screen, oldest first, with the seats Google has counted and the mailboxes
-// bound to each. The secret is never selected.
+// Shared by listGoogleApps and getGoogleAppSummary: the seats Google has counted and the
+// mailboxes bound to each app. The secret is never selected.
+const APPS_WITH_COUNTS_SELECT = `
+  SELECT a.id, a.label, a.client_id, a.project_number, a.user_limit, a.status, a.created_at,
+         (SELECT count(*) FROM google_oauth_grants g WHERE g.app_id = a.id)::int AS grants_count,
+         (SELECT count(*) FROM email_accounts e WHERE e.oauth_app_id = a.id)::int AS accounts_count
+  FROM google_oauth_apps a`;
+
+// Apps for the admin screen, oldest first.
 export async function listGoogleApps() {
-  const { rows } = await query(
-    `SELECT a.id, a.label, a.client_id, a.project_number, a.user_limit, a.status, a.created_at,
-            (SELECT count(*) FROM google_oauth_grants g WHERE g.app_id = a.id)::int AS grants_count,
-            (SELECT count(*) FROM email_accounts e WHERE e.oauth_app_id = a.id)::int AS accounts_count
-     FROM google_oauth_apps a ORDER BY a.created_at, a.id`,
-  );
+  const { rows } = await query(`${APPS_WITH_COUNTS_SELECT} ORDER BY a.created_at, a.id`);
   return rows;
+}
+
+// One app with the same counted columns as listGoogleApps, for a fresh read after a write.
+// Null when the app is missing.
+export async function getGoogleAppSummary(appId) {
+  const { rows } = await query(`${APPS_WITH_COUNTS_SELECT} WHERE a.id = $1`, [appId]);
+  return rows[0] || null;
 }
 
 // One app per Google Cloud project: clients of one project share its user cap, so a second

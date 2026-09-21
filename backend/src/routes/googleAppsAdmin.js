@@ -4,6 +4,7 @@ import {
   GoogleAppError,
   createGoogleApp,
   deleteGoogleApp,
+  getGoogleAppSummary,
   listGoogleApps,
   setGoogleAppStatus,
   updateGoogleApp,
@@ -95,7 +96,7 @@ router.patch('/:id', async (req, res) => {
   if (error) return refuse(res, error);
   if (body.status !== undefined && !GOOGLE_APP_STATUSES.includes(body.status)) return refuse(res, 'app_status_invalid');
   try {
-    let row = await updateGoogleApp(req.params.id, { label: body.label, clientSecret: secret, userLimit: body.userLimit });
+    await updateGoogleApp(req.params.id, { label: body.label, clientSecret: secret, userLimit: body.userLimit });
     // Always applied when sent: setGoogleAppStatus is idempotent, and disabling again re-flags
     // mailboxes a previous disable may have left half done.
     if (body.status !== undefined) {
@@ -105,8 +106,11 @@ router.patch('/:id', async (req, res) => {
       for (const accountId of flagged) {
         Promise.resolve(manager?.disconnectAccount(accountId)).catch(() => {});
       }
-      row = { ...row, status: body.status };
     }
+    // Re-read so the response carries the grants/accounts counts as they stand now:
+    // updateGoogleApp's own return only has the columns it wrote.
+    const row = await getGoogleAppSummary(req.params.id);
+    if (!row) return refuse(res, 'app_not_found');
     res.json({ app: await toApi(row) });
   } catch (err) {
     return handleRegistryError(res, err);

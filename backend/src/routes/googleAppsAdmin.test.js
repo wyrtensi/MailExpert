@@ -2,6 +2,7 @@ import { describe, it, expect, vi, beforeAll, afterAll, beforeEach } from 'vites
 
 const registry = vi.hoisted(() => ({
   listGoogleApps: vi.fn(),
+  getGoogleAppSummary: vi.fn(),
   createGoogleApp: vi.fn(),
   updateGoogleApp: vi.fn(),
   deleteGoogleApp: vi.fn(),
@@ -37,6 +38,7 @@ afterAll(() => new Promise((resolve) => server.close(resolve)));
 beforeEach(() => {
   Object.values(registry).forEach((fn) => fn.mockReset());
   registry.setGoogleAppStatus.mockResolvedValue([]);
+  registry.getGoogleAppSummary.mockResolvedValue(ROW);
   manager.disconnectAccount.mockClear();
 });
 
@@ -89,8 +91,29 @@ describe('/api/admin/google-apps', () => {
     expect(registry.updateGoogleApp).toHaveBeenCalledWith(ID, { label: 'Renamed', clientSecret: null, userLimit: undefined });
   });
 
+  it('re-reads the app after the update so the response carries fresh counts, not the stale update result', async () => {
+    registry.updateGoogleApp.mockResolvedValue({ ...ROW, label: 'stale', grants_count: 0, accounts_count: 0 });
+    registry.getGoogleAppSummary.mockResolvedValue({ ...ROW, label: 'Renamed', grants_count: 2, accounts_count: 2, user_limit: 2 });
+    const res = await send('PATCH', `/${ID}`, { label: 'Renamed' });
+    expect(res.status).toBe(200);
+    const body = await res.json();
+    expect(body.app).toEqual({
+      id: ID, label: 'Renamed', clientId: ROW.client_id, projectNumber: '1', userLimit: 2, status: 'active',
+      grantsCount: 2, reservedCount: 1, accountsCount: 2, full: true, createdAt: ROW.created_at,
+    });
+    expect(registry.getGoogleAppSummary).toHaveBeenCalledWith(ID);
+  });
+
+  it('reports app_not_found when the app is gone by the time it re-reads', async () => {
+    registry.updateGoogleApp.mockResolvedValue(ROW);
+    registry.getGoogleAppSummary.mockResolvedValue(null);
+    const res = await send('PATCH', `/${ID}`, { label: 'Renamed' });
+    expect(res.status).toBe(404);
+    expect(await res.json()).toMatchObject({ code: 'app_not_found' });
+  });
+
   it('disabling drops the IMAP connections of the flagged mailboxes', async () => {
-    registry.updateGoogleApp.mockResolvedValue({ ...ROW, status: 'disabled' });
+    registry.getGoogleAppSummary.mockResolvedValue({ ...ROW, status: 'disabled' });
     registry.setGoogleAppStatus.mockResolvedValue(['acc-1', 'acc-2']);
     const res = await send('PATCH', `/${ID}`, { status: 'disabled' });
     expect(res.status).toBe(200);

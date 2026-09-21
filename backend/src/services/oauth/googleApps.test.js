@@ -19,6 +19,7 @@ const {
   importLegacyGoogleConfig,
   saveDefaultGoogleAppCompat,
   listGoogleApps,
+  getGoogleAppSummary,
   createGoogleApp,
   updateGoogleApp,
   deleteGoogleApp,
@@ -378,6 +379,23 @@ describe('app registry for the admin screen', () => {
     const apps = await listGoogleApps();
     expect(apps).toEqual([{ id: 'app-1', grants_count: 3, accounts_count: 2 }]);
     expect(query.mock.calls[0][0]).not.toMatch(/client_secret/);
+  });
+
+  it('getGoogleAppSummary reads one app by id with the same counted columns, never the secret', async () => {
+    query.mockResolvedValueOnce({ rows: [{ id: 'app-1', grants_count: 3, accounts_count: 2 }] });
+    const app = await getGoogleAppSummary('app-1');
+    expect(app).toEqual({ id: 'app-1', grants_count: 3, accounts_count: 2 });
+    const [sql, params] = query.mock.calls[0];
+    expect(sql).not.toMatch(/client_secret/);
+    expect(sql).toMatch(/\(SELECT count\(\*\) FROM google_oauth_grants g WHERE g\.app_id = a\.id\)::int AS grants_count/);
+    expect(sql).toMatch(/\(SELECT count\(\*\) FROM email_accounts e WHERE e\.oauth_app_id = a\.id\)::int AS accounts_count/);
+    expect(sql).toMatch(/WHERE a\.id = \$1/);
+    expect(params).toEqual(['app-1']);
+  });
+
+  it('getGoogleAppSummary is null when the app is missing', async () => {
+    query.mockResolvedValueOnce({ rows: [] });
+    expect(await getGoogleAppSummary('gone')).toBeNull();
   });
 
   it('creates an app with an encrypted secret under the registry lock', async () => {

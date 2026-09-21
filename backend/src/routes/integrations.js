@@ -2,28 +2,13 @@ import { Router } from 'express';
 import { query } from '../services/db.js';
 import { requireAuth, requireAdmin } from '../middleware/auth.js';
 import { encrypt, decrypt, isEncrypted } from '../services/encryption.js';
-import {
-  GoogleAppError,
-  getDefaultGoogleApp,
-  importLegacyGoogleConfig,
-  resolveGoogleConfig,
-  saveDefaultGoogleAppCompat,
-  setGoogleAppStatus,
-} from '../services/oauth/googleApps.js';
+import { importLegacyGoogleConfig, resolveGoogleConfig } from '../services/oauth/googleApps.js';
 import { googleHasCapacity } from '../services/oauth/googleAppSelection.js';
 
 const router = Router();
 
 // Placeholder sent instead of a stored client secret; posting it back keeps the stored value.
 const REDACTED_SECRET = '••••••••';
-
-// HTTP status and message for registry errors the single-app Google card can trigger.
-const GOOGLE_APP_ERRORS = {
-  client_id_invalid: [400, 'Client ID is not a Google OAuth client ID'],
-  client_secret_required: [400, 'Client secret is required'],
-  app_same_project: [409, 'An app from this Google Cloud project is already added'],
-  app_in_use: [409, 'The current Google app still has connected mailboxes'],
-};
 
 // Mirror the stored Google callback URL into process.env. Client credentials live in
 // google_oauth_apps, so only the redirect URI is kept in integration_config.
@@ -32,7 +17,19 @@ function applyGoogleEnv(config) {
   else delete process.env.GOOGLE_REDIRECT_URI;
 }
 
-const stringField = (value) => (typeof value === 'string' ? value.trim() : '');
+// The shared Google callback URL: an absolute http(s) address, trimmed. Null for anything else,
+// so a relative path or a script URL never reaches process.env or the OAuth redirect.
+function parseRedirectUri(value) {
+  if (typeof value !== 'string') return null;
+  const trimmed = value.trim();
+  if (!trimmed) return null;
+  try {
+    const url = new URL(trimmed);
+    return url.protocol === 'https:' || url.protocol === 'http:' ? trimmed : null;
+  } catch {
+    return null;
+  }
+}
 
 router.use(requireAuth);
 
@@ -49,14 +46,14 @@ router.get('/', requireAdmin, async (req, res) => {
     if (cfg.clientSecret) cfg.clientSecret = REDACTED_SECRET;
     configs[row.provider] = { ...cfg, updated_at: row.updated_at };
   }
-  // The Google card shows the default app's client; any client fields left in the legacy
-  // row are ignored.
-  const googleApp = await getDefaultGoogleApp();
-  if (configs.google || googleApp) {
-    const stored = configs.google || {};
+  // Google clients live in google_oauth_apps (/api/admin/google-apps); only the shared
+  // callback URL is a setting here. Legacy client fields left in the row are never returned.
+  const stored = configs.google || {};
+  const redirectUri = stored.redirectUri || process.env.GOOGLE_REDIRECT_URI || null;
+  delete configs.google;
+  if (redirectUri || stored.updated_at) {
     configs.google = {
-      ...(googleApp ? { clientId: googleApp.client_id, clientSecret: REDACTED_SECRET } : {}),
-      ...(stored.redirectUri ? { redirectUri: stored.redirectUri } : {}),
+      ...(redirectUri ? { redirectUri } : {}),
       ...(stored.updated_at ? { updated_at: stored.updated_at } : {}),
     };
   }
@@ -106,28 +103,13 @@ router.post('/:provider', requireAdmin, async (req, res) => {
     && secret.includes('•');
 
   if (provider === 'google') {
-    const body = req.body || {};
-    const clientSecret = stringField(body.clientSecret);
-    // A secret that contains the redaction bullet but is not exactly the placeholder was typed
-    // into (or around) the redacted field; storing it would replace the real secret with junk.
-    if (isRedactionMix(clientSecret)) {
-      return res.status(400).json({
-        error: 'Client secret contains the redaction placeholder; enter the full secret',
-        code: 'client_secret_redacted',
-      });
+    // Only the shared callback URL is stored here: apps are managed at /api/admin/google-apps,
+    // so any client ID or secret in the body is ignored.
+    const redirectUri = parseRedirectUri(req.body?.redirectUri);
+    if (!redirectUri) {
+      return res.status(400).json({ error: 'Callback URL must be a full http or https address', code: 'redirect_uri_invalid' });
     }
-    try {
-      await saveDefaultGoogleAppCompat({
-        clientId: stringField(body.clientId),
-        clientSecret: clientSecret && clientSecret !== REDACTED_SECRET ? clientSecret : null,
-      });
-    } catch (err) {
-      const mapped = err instanceof GoogleAppError ? GOOGLE_APP_ERRORS[err.code] : null;
-      if (!mapped) throw err;
-      return res.status(mapped[0]).json({ error: mapped[1], code: err.code });
-    }
-    const redirectUri = stringField(body.redirectUri);
-    const googleConfig = redirectUri ? { redirectUri } : {};
+    const googleConfig = { redirectUri };
     await query(`
       INSERT INTO integration_config (provider, config)
       VALUES ($1, $2)
@@ -185,30 +167,18 @@ router.post('/:provider', requireAdmin, async (req, res) => {
   res.json({ ok: true });
 });
 
-// Delete integration config — admin only
+// Delete integration config — admin only. Google has no deletable settings any more: its apps
+// are disabled or removed at /api/admin/google-apps, and the callback URL is only replaced.
 router.delete('/:provider', requireAdmin, async (req, res) => {
+  if (req.params.provider !== 'microsoft') return res.status(400).json({ error: 'Unknown provider' });
   await query(
     'DELETE FROM integration_config WHERE provider = $1',
     [req.params.provider]
   );
-  if (req.params.provider === 'microsoft') {
-    delete process.env.MS_CLIENT_ID;
-    delete process.env.MS_CLIENT_SECRET;
-    delete process.env.MS_TENANT_ID;
-    delete process.env.MS_REDIRECT_URI;
-  } else if (req.params.provider === 'google') {
-    // The single-app card removes "the" Google app: disable it so its mailboxes ask for a
-    // reconnect, and drop their connections built from its tokens.
-    const app = await getDefaultGoogleApp();
-    if (app) {
-      const accountIds = await setGoogleAppStatus(app.id, 'disabled');
-      const manager = req.app.get('imapManager');
-      for (const accountId of accountIds) {
-        Promise.resolve(manager?.disconnectAccount(accountId)).catch(() => {});
-      }
-    }
-    applyGoogleEnv(null);
-  }
+  delete process.env.MS_CLIENT_ID;
+  delete process.env.MS_CLIENT_SECRET;
+  delete process.env.MS_TENANT_ID;
+  delete process.env.MS_REDIRECT_URI;
   res.json({ ok: true });
 });
 

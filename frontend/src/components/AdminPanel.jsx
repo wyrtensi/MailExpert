@@ -35,10 +35,11 @@ import AccessSyncPanel from './AccessSyncPanel.jsx';
 import MailboxSyncSettings from './MailboxSyncSettings.jsx';
 import AuditLogTab from './AuditLogTab.jsx';
 import { isGoogleAuthMode } from '../utils/authMode.js';
-import GoogleIntegrationSection, { openGoogleOAuth } from './GoogleIntegrationSection.jsx';
+import GoogleAppsSection from './GoogleAppsSection.jsx';
+import GmailConnectCard from './GmailConnectCard.jsx';
 import { openOAuthWindow } from '../utils/oauthWindow.js';
 import { MICROSOFT_OAUTH_PATH } from '../utils/accountHealth.js';
-import { isGoogleReconnectRequired } from '../utils/googleOAuth.js';
+import { buildGoogleConnectUrl, isGoogleReconnectRequired } from '../utils/googleOAuth.js';
 import { getEffectiveShortcuts, getGroupedActions, ACTION_DEFS, SPECIAL_KEY_LABELS, parseModKey, modLabel } from '../utils/defaultShortcuts.js';
 import { isValidForwardAddress } from '../utils/ruleActions.js';
 import { folderParentLabel } from '../utils/folderDisplay.js';
@@ -1089,7 +1090,7 @@ function AccountsTab() {
             </div>
             <div style={{ display: 'flex', gap: 6, flexShrink: 0, marginLeft: 'auto' }}>
               {isGoogleReconnectRequired(account) && (
-                <button onClick={() => openGoogleOAuth({ loginHint: account.email_address })} style={{
+                <button onClick={() => openOAuthWindow(buildGoogleConnectUrl({ loginHint: account.email_address }))} style={{
                   padding: '5px 10px', background: 'var(--accent)', border: 'none', borderRadius: 6,
                   color: 'var(--accent-text)', cursor: 'pointer', fontSize: 12, fontWeight: 500,
                 }}>
@@ -2784,7 +2785,8 @@ function IntegrationsTab() {
             )}
           </div>
 
-          <GoogleIntegrationSection isAdmin={isAdmin} />
+          {isAdmin && <GoogleAppsSection />}
+          <GmailConnectCard />
         </div>
       )}
         </div>
@@ -8115,6 +8117,7 @@ function makeSearchIndex(t) {
     // Integrations
     { label: t('admin.integrations.microsoft.title'), keywords: ['microsoft', 'outlook', '365', 'oauth', 'azure', 'client id', 'tenant', 'ms365', 'office'], tab: 'integrations', breadcrumb: tabLabel('integrations') },
     { label: t('admin.integrations.google.title'), keywords: ['google', 'gmail', 'oauth', 'client id', 'workspace'], tab: 'integrations', breadcrumb: tabLabel('integrations') },
+    { label: t('admin.integrations.googleApps.title'), keywords: ['google', 'gmail', 'oauth', 'client id', 'google cloud', 'project', 'callback', 'limit'], tab: 'integrations', adminOnly: true, breadcrumb: tabLabel('integrations') },
     { label: t('admin.ai.title'), keywords: ['ai', 'artificial intelligence', 'chatgpt', 'ollama', 'llm', 'language model', 'summarize', 'draft', 'compose assistant', 'openai', 'local ai', 'inference', 'gpt'], tab: 'ai', adminOnly: true, breadcrumb: tabLabel('ai') },
     { label: t('admin.plugins.title'), keywords: ['plugin', 'plugins', 'extension', 'extensions', 'add-on', 'addon', 'gtd', 'activate', 'enable feature', 'modules'], tab: 'plugins', breadcrumb: tabLabel('plugins') },
     { label: t('admin.categories.title'), keywords: ['categories', 'categorize', 'newsletter', 'promotion', 'social', 'automated', 'inbox tabs', 'sort emails', 'classify'], tab: 'categories', breadcrumb: tabLabel('categories') },

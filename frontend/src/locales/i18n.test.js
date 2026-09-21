@@ -124,7 +124,7 @@ const SAME_VALUE_ALLOWED = {
   'admin.integrations.microsoft.clientIdPh':'any', // xxxxxxxx-xxxx-…
   'admin.integrations.microsoft.title':     'any', // Microsoft 365 / Outlook.com
   'admin.integrations.google.title':        'any', // Google / Gmail — brand names
-  'admin.integrations.google.clientIdPh':   'any', // 1234567890-abc123.apps.googleusercontent.com
+  'admin.integrations.googleApps.clientIdPh': 'any', // 1234567890-abc123.apps.googleusercontent.com
   'admin.security.totpVerifyPh':            'any', // 000000
   'admin.sso.adminGroupClaimPh':            'any', // groups
   'admin.sso.adminGroupValuePh':            'any', // mailexpert-admins
@@ -461,19 +461,34 @@ describe('i18n locale files', () => {
       assert.equal(missing.length, 0, `OAuth result keys missing from locale files:\n${missing.join('\n')}`);
     });
 
-    it('every Google integration key used in GoogleIntegrationSection.jsx exists in every locale', () => {
-      // Notice keys are stored in state and translated later, so every quoted literal
-      // is collected, not only direct t() calls.
-      const source = readFileSync(resolve(dir, '../components/GoogleIntegrationSection.jsx'), 'utf8');
+    it('every Google key used by the temporary Gmail card exists in every locale', () => {
+      // Until PR 8c this card is the only way to add a Gmail mailbox over OAuth.
+      const source = readFileSync(resolve(dir, '../components/GmailConnectCard.jsx'), 'utf8');
       const keys = [...new Set([...source.matchAll(/'(admin\.integrations\.google\.[\w.]+)'/g)].map(m => m[1]))];
-      assert.ok(keys.length >= 20, `expected the Google section keys, found ${keys.length}`);
+      assert.ok(keys.length >= 6, `expected the Gmail card keys, found ${keys.length}`);
       const missing = [];
       for (const lang of langs) {
         for (const key of keys) {
           if (typeof locales[lang][key] !== 'string' || !locales[lang][key]) missing.push(`  - ${lang}: ${key}`);
         }
       }
-      assert.equal(missing.length, 0, `Google integration keys missing from locale files:\n${missing.join('\n')}`);
+      assert.equal(missing.length, 0, `Gmail card keys missing from locale files:\n${missing.join('\n')}`);
+    });
+
+    it('every Google apps key used by the admin screen exists in every locale', () => {
+      // State, action and error keys come from utils/googleApps.js and are translated through
+      // a variable, so every quoted literal of both files is collected.
+      const source = ['../components/GoogleAppsSection.jsx', '../utils/googleApps.js']
+        .map(file => readFileSync(resolve(dir, file), 'utf8')).join('\n');
+      const keys = [...new Set([...source.matchAll(/'(admin\.integrations\.googleApps\.[\w.]+)'/g)].map(m => m[1]))];
+      assert.ok(keys.length >= 40, `expected the Google apps keys, found ${keys.length}`);
+      const missing = [];
+      for (const lang of langs) {
+        for (const key of keys) {
+          if (typeof locales[lang][key] !== 'string' || !locales[lang][key]) missing.push(`  - ${lang}: ${key}`);
+        }
+      }
+      assert.equal(missing.length, 0, `Google apps keys missing from locale files:\n${missing.join('\n')}`);
     });
 
     it('every sidebar mailbox filter key used in Sidebar.jsx exists in every locale', () => {

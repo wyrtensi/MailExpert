@@ -308,6 +308,12 @@ export const api = {
     getAccessSync: () => request('GET', '/admin/access-sync'),
     saveAccessSync: (data) => request('PUT', '/admin/access-sync', data),
     runAccessSync: () => request('POST', '/admin/access-sync/run'),
+    googleApps: {
+      list: () => request('GET', '/admin/google-apps'),
+      create: (data) => request('POST', '/admin/google-apps', data),
+      update: (id, data) => request('PATCH', `/admin/google-apps/${id}`, data),
+      remove: (id) => request('DELETE', `/admin/google-apps/${id}`),
+    },
     oidc: {
       getProviders: () => request('GET', '/admin/oidc'),
       createProvider: (data) => request('POST', '/admin/oidc', data),

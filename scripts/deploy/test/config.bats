@@ -1,0 +1,180 @@
+#!/usr/bin/env bats
+# install.sh input: flags, install.conf, validation and what follows from the sign-in mode.
+
+bats_require_minimum_version 1.5.0
+
+setup() {
+  load helper
+  C=$BATS_TEST_TMPDIR/install.conf
+  install_defaults
+}
+
+configure() {
+  install_defaults
+  parse_install_args "$@"
+  resolve_install_config "$C"
+}
+
+keys_of() { awk '{print $2}' | sort | paste -sd' ' -; }
+
+@test "flags fill the configuration, hosts and emails are lowercased" {
+  configure --version sha-0123456789ab --signin direct --direct-host Panel.Example.com --admin-email 'Admin@Example.com, b@example.com'
+  [ "$CFG_VERSION" = sha-0123456789ab ]
+  [ "$CFG_SIGNIN" = direct ]
+  [ "$CFG_DIRECT_HOST" = panel.example.com ]
+  [ "$CFG_ADMIN_EMAILS" = admin@example.com,b@example.com ]
+  [ "$CFG_PROJECT" = mailexpert ] && [ "$CFG_EDGE_PROJECT" = edge ] && [ "$CFG_HTTP_PORT" = 8080 ]
+  [ "$CFG_EDGE" = 1 ] && [ "$CFG_EDGE_TLS" = acme ] && [ "$CFG_SYSTEM" = 1 ] && [ "$CFG_LOCAL_AUTH" = 0 ]
+  [ "$CFG_IMAGE_PREFIX" = ghcr.io/wyrtensi ]
+  [ "$OPT_PREFIX" = /opt/mailexpert ] && [ "$OPT_START" = 1 ]
+}
+
+@test "unknown flags and missing values exit 2" {
+  run parse_install_args --bogus
+  [ "$status" -eq 2 ]
+  run parse_install_args --version
+  [ "$status" -eq 2 ]
+  run parse_install_args --version --signin cf
+  [ "$status" -eq 2 ]
+  [[ $output == *"--version needs a value"* ]]
+}
+
+@test "install.conf supplies what the flags omit, flags win" {
+  printf 'VERSION=sha-0123456789ab\nSIGNIN=cf\nCF_HOST=cf.example.com\nHTTP_PORT=18080\n' >"$C"
+  configure --signin both --direct-host panel.example.com
+  [ "$CFG_VERSION" = sha-0123456789ab ]
+  [ "$CFG_SIGNIN" = both ]
+  [ "$CFG_CF_HOST" = cf.example.com ]
+  [ "$CFG_DIRECT_HOST" = panel.example.com ]
+  [ "$CFG_HTTP_PORT" = 18080 ]
+}
+
+@test "install.conf round-trips and never stores --prefix or --no-start" {
+  configure --version sha-0123456789ab --signin direct --direct-host panel.example.com --local-auth --no-system --no-start --prefix /srv/me
+  [ "$OPT_PREFIX" = /srv/me ] && [ "$OPT_START" = 0 ]
+  write_install_conf "$C"
+  run env_get "$C" PREFIX
+  [ "$status" -eq 1 ]
+  run env_get "$C" START
+  [ "$status" -eq 1 ]
+  configure
+  [ "$CFG_SIGNIN" = direct ] && [ "$CFG_LOCAL_AUTH" = 1 ] && [ "$CFG_SYSTEM" = 0 ] && [ "$OPT_START" = 1 ]
+}
+
+@test "a complete install validates" {
+  configure --version sha-0123456789ab --signin both --cf-host cf.example.com --direct-host panel.example.com --admin-email admin@example.com
+  validate_install_config
+  configure --version sha-0123456789ab --signin direct --direct-host panel.example.com --local-auth
+  validate_install_config
+}
+
+expect_invalid() {
+  local msg=$1
+  shift
+  configure "$@"
+  run validate_install_config
+  [ "$status" -eq 2 ] || { echo "accepted: $*"; return 1; }
+  [[ $output == *"$msg"* ]] || { echo "unexpected message: $output"; return 1; }
+}
+
+@test "invalid input is reported with the flag to fix" {
+  local ok=(--signin direct --direct-host panel.example.com --admin-email admin@example.com)
+  expect_invalid "--version" --version sha-0123 "${ok[@]}"
+  expect_invalid "--version" --version v3.3.0 "${ok[@]}"
+  expect_invalid "--signin" --version sha-0123456789ab --signin tunnel --admin-email admin@example.com
+  expect_invalid "--cf-host" --version sha-0123456789ab --signin cf --admin-email admin@example.com
+  expect_invalid "--direct-host" --version sha-0123456789ab --signin direct --direct-host https://panel.example.com --admin-email admin@example.com
+  expect_invalid "--direct-host" --version sha-0123456789ab --signin direct --direct-host bad_host.example.com --admin-email admin@example.com
+  expect_invalid "must differ" --version sha-0123456789ab --signin both --cf-host a.example.com --direct-host a.example.com --admin-email admin@example.com
+  expect_invalid "--admin-email is required" --version sha-0123456789ab --signin direct --direct-host panel.example.com
+  expect_invalid "not an email" --version sha-0123456789ab --signin direct --direct-host panel.example.com --admin-email nobody
+  expect_invalid "--http-port" --version sha-0123456789ab "${ok[@]}" --http-port 80
+  expect_invalid "--project" --version sha-0123456789ab "${ok[@]}" --project MailExpert
+  expect_invalid "must differ" --version sha-0123456789ab "${ok[@]}" --project edge
+  expect_invalid "--edge-tls" --version sha-0123456789ab "${ok[@]}" --edge-tls letsencrypt
+  expect_invalid "--prefix" --version sha-0123456789ab "${ok[@]}" --prefix relative/dir
+}
+
+@test "app_settings per sign-in mode" {
+  configure --version sha-0123456789ab --signin cf --cf-host cf.example.com --admin-email admin@example.com
+  run app_settings
+  [[ $output == *$'\nAPP_URL=https://cf.example.com\nAPP_ALT_URLS=\nAUTH_MODE=google\n'* ]]
+  [[ $output == *"GOOGLE_REDIRECT_URI=https://cf.example.com/oauth/google/callback"* ]]
+  [[ $output == *"MAILEXPERT_VERSION=sha-0123456789ab"* ]]
+  [[ $output == *"COMPOSE_PROJECT_NAME=mailexpert"* && $output == *"APP_HTTP_PORT=8080"* ]]
+  configure --version sha-0123456789ab --signin both --cf-host cf.example.com --direct-host panel.example.com --admin-email admin@example.com
+  run app_settings
+  [[ $output == *$'APP_URL=https://cf.example.com\nAPP_ALT_URLS=https://panel.example.com\n'* ]]
+  configure --version sha-0123456789ab --signin direct --direct-host panel.example.com --local-auth
+  run app_settings
+  [[ $output == *"APP_URL=https://panel.example.com"* && $output == *"AUTH_MODE=local"* ]]
+}
+
+@test "owner secrets required per mode" {
+  configure --signin cf
+  [ "$(required_owner_secrets | keys_of)" = "CF_ACCESS_AUDIENCE CF_ACCESS_ISSUER TUNNEL_TOKEN" ]
+  configure --signin direct
+  [ "$(required_owner_secrets | keys_of)" = "AUTH_GOOGLE_CLIENT_ID AUTH_GOOGLE_CLIENT_SECRET DNS_API_TOKEN" ]
+  configure --signin direct --edge-tls internal
+  [ "$(required_owner_secrets | keys_of)" = "AUTH_GOOGLE_CLIENT_ID AUTH_GOOGLE_CLIENT_SECRET" ]
+  configure --signin both
+  [ "$(required_owner_secrets | keys_of)" = "AUTH_GOOGLE_CLIENT_ID AUTH_GOOGLE_CLIENT_SECRET CF_ACCESS_AUDIENCE CF_ACCESS_ISSUER DNS_API_TOKEN TUNNEL_TOKEN" ]
+  configure --signin both --local-auth
+  [ "$(required_owner_secrets | keys_of)" = "DNS_API_TOKEN TUNNEL_TOKEN" ]
+  configure --signin both --local-auth --no-edge
+  [ -z "$(required_owner_secrets)" ]
+  configure --signin cf --no-edge
+  [ "$(required_owner_secrets | keys_of)" = "CF_ACCESS_AUDIENCE CF_ACCESS_ISSUER" ]
+  [ "$(required_owner_secrets | awk '$2 == "TUNNEL_TOKEN" || $2 == "DNS_API_TOKEN" {print $1}' | sort -u)" = "" ]
+  configure --signin both
+  [ "$(required_owner_secrets | awk '$2 ~ /TOKEN$/ {print $1}' | sort -u)" = edge ]
+}
+
+@test "edge services, profiles and firewall per mode" {
+  configure --signin direct
+  [ "$(edge_services | paste -sd' ' -)" = caddy ] && [ "$(edge_profiles)" = caddy ]
+  [ "$(ufw_allowed_ports 22 | paste -sd' ' -)" = "22/tcp 80/tcp 443/tcp 443/udp" ]
+  configure --signin cf
+  [ "$(edge_services | paste -sd' ' -)" = cloudflared ] && [ "$(edge_profiles)" = tunnel ]
+  [ "$(ufw_allowed_ports 22 2222 | paste -sd' ' -)" = "22/tcp 2222/tcp" ]
+  configure --signin both
+  [ "$(edge_services | paste -sd' ' -)" = "caddy cloudflared" ] && [ "$(edge_profiles)" = caddy,tunnel ]
+  configure --signin both --no-edge
+  [ -z "$(edge_services)" ] && [ -z "$(edge_profiles)" ]
+  [ "$(ufw_allowed_ports 22 | paste -sd' ' -)" = "22/tcp" ]
+}
+
+@test "ssh_ports keeps 22 and adds the configured and the current session ports" {
+  [ "$(ssh_ports "" "" | paste -sd' ' -)" = 22 ]
+  [ "$(ssh_ports $'2222\n22' "203.0.113.5 50000 198.51.100.7 2200" | paste -sd' ' -)" = "22 2200 2222" ]
+  [ "$(ssh_ports "not-a-port" "" | paste -sd' ' -)" = 22 ]
+}
+
+@test "port_conflicts ignores the edge's own caddy" {
+  ss_out='LISTEN 0 4096 0.0.0.0:80 0.0.0.0:* users:(("nginx",pid=10,fd=6))
+LISTEN 0 4096 [::]:443 [::]:* users:(("caddy",pid=11,fd=7))
+LISTEN 0 100 0.0.0.0:25 0.0.0.0:* users:(("docker-proxy",pid=12,fd=4))
+LISTEN 0 4096 127.0.0.1:8080 0.0.0.0:*'
+  [ "$(port_conflicts 80 443 <<<"$ss_out")" = "80 nginx" ]
+  [ "$(port_conflicts 25 <<<"$ss_out")" = "25 docker-proxy" ]
+  [ "$(port_conflicts 8080 <<<"$ss_out")" = "8080 unknown" ]
+  [ -z "$(port_conflicts 443 993 <<<"$ss_out")" ]
+}
+
+@test "resource_shortfalls" {
+  [ -z "$(resource_shortfalls 4 8000000 50000000)" ]
+  [ -z "$(resource_shortfalls 2 3900000 21000000)" ]
+  [ "$(resource_shortfalls 1 2000000 1000000 | wc -l)" -eq 3 ]
+}
+
+@test "version_matches compares the tag with the full sha" {
+  version_matches sha-0123456789ab 0123456789abcdef0123456789abcdef01234567
+  run ! version_matches sha-0123456789ab 1123456789abcdef0123456789abcdef01234567
+  run ! version_matches sha-0123456789ab dev
+  run ! version_matches latest 0123456789abcdef0123456789abcdef01234567
+}
+
+@test "render_unit substitutes the prefix" {
+  printf 'ExecStart=@PREFIX@/app/x.sh --prefix @PREFIX@\n' >"$BATS_TEST_TMPDIR/u.service"
+  [ "$(render_unit "$BATS_TEST_TMPDIR/u.service" /opt/mailexpert)" = "ExecStart=/opt/mailexpert/app/x.sh --prefix /opt/mailexpert" ]
+}

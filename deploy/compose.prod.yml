@@ -1,0 +1,45 @@
+# Production overlay for a single host (4 vCPU / 8 GB, next to a mail node).
+#
+#   docker compose --env-file /opt/mailexpert/.env \
+#     -f docker-compose.yml -f deploy/compose.prod.yml up -d
+#
+# Requires Docker Compose 2.24.4+ (!override, !reset).
+#
+# - Images come from GHCR, tagged sha-<first 12 characters of the commit>; MAILEXPERT_VERSION
+#   must name the commit that is checked out next to this file.
+# - build is removed on purpose: with both build and image, a failed pull silently falls back
+#   to building on the host. Emergency build from source: `docker build -f backend/Dockerfile
+#   -t <image>:<MAILEXPERT_VERSION> .` (same for frontend/Dockerfile), then `up` uses the local
+#   image.
+# - The frontend serves plain HTTP on loopback only; the edge (Caddy or cloudflared) terminates
+#   TLS and sends X-Forwarded-Proto. PostgreSQL and Redis publish no host ports.
+
+services:
+  frontend:
+    image: ${MAILEXPERT_IMAGE_PREFIX:-ghcr.io/wyrtensi}/mailexpert-frontend:${MAILEXPERT_VERSION:?set MAILEXPERT_VERSION to the sha-<commit> image tag}
+    build: !reset null
+    ports: !override
+      - "127.0.0.1:${APP_HTTP_PORT:-8080}:80"
+
+  backend:
+    image: ${MAILEXPERT_IMAGE_PREFIX:-ghcr.io/wyrtensi}/mailexpert-backend:${MAILEXPERT_VERSION:?set MAILEXPERT_VERSION to the sha-<commit> image tag}
+    build: !reset null
+    mem_limit: 1536m
+    environment:
+      NODE_OPTIONS: --max-old-space-size=1024
+
+  postgres:
+    mem_limit: 2g
+    command:
+      - postgres
+      - -c
+      - shared_buffers=1GB
+      - -c
+      - effective_cache_size=3GB
+      - -c
+      - random_page_cost=1.1
+
+  redis:
+    # The base command plus a memory cap. noeviction: sessions must never be dropped silently;
+    # at the cap Redis refuses writes instead.
+    command: redis-server --save 60 1 --loglevel warning --maxmemory 256mb --maxmemory-policy noeviction

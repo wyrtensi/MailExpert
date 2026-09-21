@@ -13,7 +13,7 @@ services:
         VITE_EMAIL_DIV_RENDER: ${VITE_EMAIL_DIV_RENDER:-false}
         VITE_DEMO_MODE: ${VITE_DEMO_MODE:-false}
         NGINX_BASE: ${NGINX_BASE:-nginx:alpine}
-    container_name: mailexpert-frontend
+    container_name: ${COMPOSE_PROJECT_NAME:-mailexpert}-frontend
     restart: unless-stopped
     ports:
       - "${APP_PORT:-443}:443"
@@ -39,7 +39,7 @@ services:
       dockerfile: backend/Dockerfile
       args:
         BUILD_SHA: ${GIT_SHA:-dev}
-    container_name: mailexpert-backend
+    container_name: ${COMPOSE_PROJECT_NAME:-mailexpert}-backend
     restart: unless-stopped
     environment:
       NODE_ENV: production
@@ -85,7 +85,7 @@ services:
   # ── PostgreSQL ───────────────────────────────────────────────────────────────
   postgres:
     image: postgres:16-alpine
-    container_name: mailexpert-postgres
+    container_name: ${COMPOSE_PROJECT_NAME:-mailexpert}-postgres
     restart: unless-stopped
     # PUID/PGID default to 0:0 (root), identical to the image's normal behaviour.
     # Set them (e.g. 99:100 on Unraid) only when bind-mounting POSTGRES_DATA to a host
@@ -113,7 +113,7 @@ services:
   # ── Redis (sessions + caching) ───────────────────────────────────────────────
   redis:
     image: redis:7-alpine
-    container_name: mailexpert-redis
+    container_name: ${COMPOSE_PROJECT_NAME:-mailexpert}-redis
     restart: unless-stopped
     user: "${PUID:-0}:${PGID:-0}"
     command: redis-server --save 60 1 --loglevel warning
@@ -135,7 +135,7 @@ services:
   caddy:
     profiles: ["https"]
     image: caddy:2-alpine
-    container_name: mailexpert-caddy
+    container_name: ${COMPOSE_PROJECT_NAME:-mailexpert}-caddy
     restart: unless-stopped
     ports:
       - "80:80"

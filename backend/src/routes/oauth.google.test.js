@@ -41,6 +41,12 @@ vi.mock('../services/oauth/googleOAuth.js', async (importOriginal) => {
   return { ...actual, exchangeGoogleCode: vi.fn(), verifyGoogleIdToken: vi.fn() };
 });
 
+const launch = vi.hoisted(() => ({ url: null }));
+vi.mock('../services/oauth/googleLaunch.js', async (importOriginal) => ({
+  ...(await importOriginal()),
+  consumeGoogleLaunch: vi.fn(async ({ userId }) => (userId === '11111111-1111-1111-1111-111111111111' ? launch.url : null)),
+}));
+
 import express from 'express';
 import oauthRoutes from './oauth.js';
 import { imapManager } from '../index.js';
@@ -182,6 +188,26 @@ describe('GET /oauth/google', () => {
   it('ignores a malformed login_hint', async () => {
     const { location } = await startFlow(`?login_hint=${encodeURIComponent('not an email')}`);
     expect(location.searchParams.has('login_hint')).toBe(false);
+  });
+});
+
+describe('GET /oauth/google/launch', () => {
+  it('requires a session', async () => {
+    const res = await get(`/oauth/google/launch?flow=${'F'.repeat(43)}`, { user: null });
+    expect(res.status).toBe(401);
+  });
+
+  it('forwards to the stored Google URL', async () => {
+    launch.url = `https://accounts.google.com/o/oauth2/v2/auth?client_id=${CLIENT_ID}`;
+    const res = await get(`/oauth/google/launch?flow=${'F'.repeat(43)}`);
+    expect(res.status).toBe(302);
+    expect(res.headers.get('location')).toBe(launch.url);
+  });
+
+  it('sends an unknown, used or foreign flow back with invalid_state', async () => {
+    launch.url = null;
+    const res = await get(`/oauth/google/launch?flow=${'F'.repeat(43)}`);
+    expect(res.headers.get('location')).toBe('/?oauth_error=invalid_state&oauth_provider=google');
   });
 });
 

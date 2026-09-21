@@ -12,6 +12,7 @@ import {
 } from '../services/oauth/googleOAuth.js';
 import { recordGoogleGrant, resolveGoogleConfig } from '../services/oauth/googleApps.js';
 import { createOAuthState, consumeOAuthState } from '../services/oauth/oauthState.js';
+import { consumeGoogleLaunch } from '../services/oauth/googleLaunch.js';
 import { allowedRequestOrigin } from '../utils/publicOrigins.js';
 
 // Mounted at /oauth/google. Redirect targets carry only stable codes — never provider
@@ -63,6 +64,14 @@ router.get('/', async (req, res) => {
     console.error(`Google OAuth start failed: ${err?.name || 'Error'}`);
     res.redirect(errorRedirect('authentication_failed'));
   }
+});
+
+// Step 1b of the Gmail form: follow the one-time path created by POST /api/oauth/google/start.
+router.get('/launch', async (req, res) => {
+  if (!req.session?.userId) return res.status(401).json({ error: 'Not authenticated' });
+  const flow = typeof req.query.flow === 'string' ? req.query.flow : '';
+  const url = await consumeGoogleLaunch({ flow, userId: req.session.userId });
+  res.redirect(url || errorRedirect('invalid_state'));
 });
 
 // Step 2: Google redirects back with a code (or an error) and the state.

@@ -303,13 +303,13 @@ describe('GET /oauth/google/callback', () => {
     expect(insertSql).toMatch(/'imap\.gmail\.com', 993, true/);
     expect(insertSql).toMatch(/'smtp\.gmail\.com', 465, 'SSL'/);
     expect(insertSql).toMatch(/'google'/);
-    expect(insertSql).toMatch(/include_in_unified_inbox,\s*oauth_app_id, oauth_subject/);
-    expect(insertSql).toMatch(/false, false, false,\s*\$8, \$9\)\s*RETURNING id/);
+    expect(insertSql).toMatch(/include_in_unified_inbox,\s*oauth_app_id, oauth_subject, thread_mode/);
+    expect(insertSql).toMatch(/false, false, false,\s*\$8, \$9, \$10\)\s*RETURNING id/);
     expect(insertParams).toContain('enc(access-tok)');
     expect(insertParams).toContain('enc(refresh-tok)');
     expect(insertParams).not.toContain('access-tok');
     expect(insertParams).not.toContain('refresh-tok');
-    expect(insertParams.slice(7)).toEqual([APP_ID, 'sub-1']);
+    expect(insertParams.slice(7)).toEqual([APP_ID, 'sub-1', 'gmail']);
     expect(recordGoogleGrant).toHaveBeenCalledWith({ appId: APP_ID, email: 'user@gmail.com', sub: 'sub-1' });
 
     expect(imapManager.connectAccount).toHaveBeenCalledWith(expect.objectContaining({ id: 'new-acc' }));
@@ -336,6 +336,8 @@ describe('GET /oauth/google/callback', () => {
     expect(updateParams[1]).toBeNull();
     expect(updateSql).toMatch(/oauth_app_id = \$4, oauth_subject = \$5/);
     expect(updateParams.slice(3)).toEqual([APP_ID, 'sub-1', ACCOUNT_ID]);
+    // An existing mailbox keeps the threading mode it has; only a new one starts in gmail mode.
+    expect(updateSql).not.toMatch(/thread_mode/);
     expect(sqlCall(/^\s*INSERT INTO email_accounts/)).toBeUndefined();
     await vi.waitFor(() => expect(imapManager.connectAccount).toHaveBeenCalled());
     expectCooldownClearedBeforeConnect(ACCOUNT_ID);

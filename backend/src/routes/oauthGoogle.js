@@ -17,6 +17,7 @@ import { GoogleAppSelectionError, releaseGoogleSeat, selectGoogleApp } from '../
 import { consumeGoogleLaunch } from '../services/oauth/googleLaunch.js';
 import { allowedRequestOrigin } from '../utils/publicOrigins.js';
 import { isUuid } from '../utils/uuid.js';
+import { THREAD_MODE_GMAIL } from '../services/threading/threadId.js';
 
 // Mounted at /oauth/google. Redirect targets carry only stable codes — never provider
 // error text, authorization codes or tokens.
@@ -242,6 +243,10 @@ async function saveGoogleAccount(pending, identity, tokens, appId) {
     } else {
       if (!encryptedRefresh) throw new CallbackError('missing_refresh_token');
       const color = ACCOUNT_COLORS[Math.floor(Math.random() * ACCOUNT_COLORS.length)];
+      // A new Gmail mailbox threads by Gmail's own thread number from its first sync: the sync
+      // stores X-GM-THRID for every message of a Gmail host, and rows the app appends itself are
+      // rekeyed by the provider id backfill. Existing mailboxes keep their mode (owner decision
+      // 2026-09-21); switching one is the admin's threading action.
       const inserted = await client.query(`
         INSERT INTO email_accounts (
           added_by, name, email_address, color, protocol,
@@ -250,16 +255,16 @@ async function saveGoogleAccount(pending, identity, tokens, appId) {
           auth_user,
           oauth_provider, oauth_access_token, oauth_refresh_token, oauth_token_expiry,
           oauth_public_client, oauth_reconnect_required, include_in_unified_inbox,
-          oauth_app_id, oauth_subject
+          oauth_app_id, oauth_subject, thread_mode
         ) VALUES ($1, $2, $3, $4, 'imap',
           'imap.gmail.com', 993, true,
           'smtp.gmail.com', 465, 'SSL',
           $3,
           'google', $5, $6, $7,
           false, false, false,
-          $8, $9)
+          $8, $9, $10)
         RETURNING id
-      `, [pending.userId, identity.name || email, email, color, encryptedAccess, encryptedRefresh, tokens.expiresAt, appId, identity.sub]);
+      `, [pending.userId, identity.name || email, email, color, encryptedAccess, encryptedRefresh, tokens.expiresAt, appId, identity.sub, THREAD_MODE_GMAIL]);
       accountId = inserted.rows[0].id;
       result = 'created';
     }

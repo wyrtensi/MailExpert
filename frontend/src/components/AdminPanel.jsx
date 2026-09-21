@@ -483,7 +483,7 @@ function threadingBlockedMessage(err, t) {
 
 function AccountsTab() {
   const { t } = useTranslation();
-  const { accounts, setAccounts, updateAccount, setUnreadCounts, addNotification, backfillProgress, user } = useStore();
+  const { accounts, setAccounts, updateAccount, setUnreadCounts, addNotification, backfillProgress, user, addAccountRequested, clearAddAccountRequest } = useStore();
   const isAdmin = !!user?.isAdmin;
   const [subview, setSubview] = useState('list'); // 'list' | 'add' | 'edit' | 'folders' | 'aliases'
   const [editTarget, setEditTarget] = useState(null);
@@ -504,6 +504,13 @@ function AccountsTab() {
       .catch(() => setGoogleStatus({ configured: false, available: false }));
   }, [subview]);
   const closeAdd = useCallback(() => { setAddKind(null); setSubview('list'); }, []);
+
+  useEffect(() => {
+    if (!addAccountRequested) return;
+    clearAddAccountRequest();
+    setAddKind(null);
+    setSubview('add');
+  }, [addAccountRequested, clearAddAccountRequest]);
 
   // Alias form state
   const [aliasFormMode, setAliasFormMode] = useState(null); // null | 'add' | 'edit'

@@ -68,6 +68,11 @@ const ICONS = {
       <path d="M19.4 15a1.65 1.65 0 00.33 1.82l.06.06a2 2 0 010 2.83 2 2 0 01-2.83 0l-.06-.06a1.65 1.65 0 00-1.82-.33 1.65 1.65 0 00-1 1.51V21a2 2 0 01-4 0v-.09A1.65 1.65 0 009 19.4a1.65 1.65 0 00-1.82.33l-.06.06a2 2 0 01-2.83-2.83l.06-.06A1.65 1.65 0 004.68 15a1.65 1.65 0 00-1.51-1H3a2 2 0 010-4h.09A1.65 1.65 0 004.6 9a1.65 1.65 0 00-.33-1.82l-.06-.06a2 2 0 012.83-2.83l.06.06A1.65 1.65 0 009 4.68a1.65 1.65 0 001-1.51V3a2 2 0 014 0v.09a1.65 1.65 0 001 1.51 1.65 1.65 0 001.82-.33l.06-.06a2 2 0 012.83 2.83l-.06.06A1.65 1.65 0 0019.4 9a1.65 1.65 0 001.51 1H21a2 2 0 010 4h-.09a1.65 1.65 0 00-1.51 1z"/>
     </svg>
   ),
+  addAccount: (
+    <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.75">
+      <line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/>
+    </svg>
+  ),
   compose: (
     <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.75">
       <path d="M11 4H4a2 2 0 00-2 2v14a2 2 0 002 2h14a2 2 0 002-2v-7"/>
@@ -265,7 +270,7 @@ export default function Sidebar() {
   const uiScale = useUiScale();
   const {
     accounts, unreadCounts, selectedAccountId, selectedFolder,
-    setSelectedAccount, setShowAdmin, setAdminTab, openCompose,
+    setSelectedAccount, setShowAdmin, setAdminTab, openCompose, openAddAccount,
     folders, setFolders, setAccounts, user, setUser, lockScreen, sidebarCollapsed: sidebarCollapsedPref, toggleSidebar,
     blockRemoteImages, setBlockRemoteImages, setMobileSidebarOpen, addNotification,
     searchAllFolders, setSearchAllFolders,
@@ -1838,6 +1843,22 @@ export default function Sidebar() {
             <span style={{ flex: 1, fontSize: 13, color: 'var(--text-primary)' }}>{t('profile.editProfile')}</span>
           </div>
 
+          {/* Add account */}
+          <div
+            onClick={() => { openAddAccount(); setMobileSidebarOpen(false); }}
+            style={{
+              display: 'flex', alignItems: 'center', gap: 10,
+              padding: '8px 14px', cursor: 'pointer',
+              WebkitTapHighlightColor: 'transparent',
+            }}
+            onTouchStart={e => e.currentTarget.style.background = 'var(--bg-tertiary)'}
+            onTouchEnd={e => e.currentTarget.style.background = ''}
+            onTouchCancel={e => e.currentTarget.style.background = ''}
+          >
+            <span style={{ color: 'var(--text-tertiary)', display: 'flex', flexShrink: 0 }}>{ICONS.addAccount}</span>
+            <span style={{ flex: 1, fontSize: 13, color: 'var(--text-primary)' }}>{t('sidebar.addAccount')}</span>
+          </div>
+
           {/* Settings */}
           <div
             onClick={() => { setAdminTab('accounts'); setShowAdmin(true); setMobileSidebarOpen(false); }}
@@ -2103,6 +2124,8 @@ export default function Sidebar() {
           )}
           <CtxMenuItem icon={<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.75"><path d="M20 21v-2a4 4 0 00-4-4H8a4 4 0 00-4 4v2"/><circle cx="12" cy="7" r="4"/></svg>} label={t('profile.editProfile')}
             onClick={() => { setUserMenuOpen(false); setShowProfile(true); }} />
+          <CtxMenuItem icon={ICONS.addAccount} label={t('sidebar.addAccount')}
+            onClick={() => { setUserMenuOpen(false); openAddAccount(); }} />
           <CtxMenuItem icon={ICONS.settings} label={t('sidebar.settings')}
             onClick={() => { setAdminTab('accounts'); setShowAdmin(true); setUserMenuOpen(false); }} />
           {user?.hasLockPin && (

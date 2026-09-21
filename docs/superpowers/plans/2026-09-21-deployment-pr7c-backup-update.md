@@ -6,7 +6,7 @@
 
 **Architecture:** новые скрипты — тонкие оркестраторы над библиотеками `scripts/deploy/lib/*.sh`, как `install.sh` в 7b. Новые библиотеки: `app.sh` (установленная панель: `install.conf`, пути, compose, образы, база, маркер standby; вынесено из `install.sh`), `backup.sh` (restic в закреплённом контейнере, пинги, `backup-last.json`), `health.sh` (проверки здоровья), `ops.sh` (решения обновления, слияние ключей при восстановлении, состояние обновления). Внутриконтейнерные части — отдельные файлы, которые монтируются в контейнер: `lib/pg-dump.sh` (дамп и подсчёт строк в одном экспортированном снимке PostgreSQL), `lib/counts.sql`, `lib/verify-restore.mjs` (миграции и расшифровка в образе backend). restic работает в контейнере `restic/restic` с `--network host`; секреты попадают в контейнеры только как имена унаследованных переменных окружения. `update.sh`, `restore.sh` и `rollback.sh` делегируют переключение версии и запуск `install.sh` (checkout, образы, `up`, готовность, `exec` установщика нужного коммита). e2e — второй сценарий `e2e-backup.sh` в том же одноразовом dind-контейнере, что и 7b; S3 изображает MinIO внутри dind, «второй сервер» — другой compose-проект и префикс после полного удаления первого.
 
-**Tech Stack:** bash 5, Docker Engine + Compose ≥ 2.24.4, restic 0.18.0 (`restic/restic:0.18.0`, репозиторий v2), PostgreSQL 16 (`pg_dump --snapshot`, `pg_restore`), Node 22 (образ backend, `services/encryption.js`, `services/migrations.js`), MinIO (`minio/minio:RELEASE.2025-04-22T22-12-26Z`, только e2e), bats 1.14, shellcheck, actionlint, `docker:29.8.1-dind`, systemd timers.
+**Tech Stack:** bash 5, Docker Engine + Compose ≥ 2.24.4, restic 0.18.0 (`restic/restic:0.18.0`, репозиторий v2), PostgreSQL 16 (`pg_dump --snapshot`, `pg_restore`), Node 22 (образ backend, `services/encryption.js`, `services/migrations.js`), MinIO (`quay.io/minio/minio:RELEASE.2025-04-22T22-12-26Z`, только e2e), bats 1.14, shellcheck, actionlint, `docker:29.8.1-dind`, systemd timers.
 
 **Spec:** `docs/superpowers/specs/2026-09-21-deployment-design.md` — «3. Обновление», «4. Бэкап и восстановление», «5. Переезд панели» (шаги 1-5 и 8 в части скриптов), «7. Мониторинг», «8. Проверка скриптов», «Принятые решения» (restic, откат без миграций, проверка восстановлением, dead man's switch), «Уточнения, принятые при реализации 7a» и «… 7b» (ключи restic в `configure.sh` — 7c; печать ключа восстановления — 7c; таймер включается, только если скрипт есть в коммите; `HEALTHCHECK_PING_URL` → внешний сервис → Telegram, токена бота на сервере нет), «Открытые вопросы» (провайдер S3). Runbook — 7d.
 
@@ -15,7 +15,7 @@
 - Проза плана и спецификаций — по-русски; код, комментарии в коде, коммиты, тексты PR — по-английски. Без эмодзи.
 - Коммиты от имени настроенного пользователя git (`wyrtensi`), без строк атрибуции. Не пушить без команды контроллера. Все команды `gh pr` — с `--repo wyrtensi/MailExpert`.
 - В документах и тестах только заглушки: `<APP_HOST>`, `<CF_HOST>`, `<DIRECT_HOST>`, `<MAIL_HOST>`, `<TEAM>`, `<AUD>`, `<OWNER>`; в коде тестов — зарезервированные домены `example.com`, `example.test`, `.invalid`. Никаких реальных хостов, IP, секретов и названий S3-провайдеров. Имя репозитория `wyrtensi/MailExpert` и префикс `ghcr.io/wyrtensi` публичны и допустимы.
-- **Безопасность хоста (жёстко).** На хосте работают рабочие контейнеры `mailexpert-frontend`, `mailexpert-backend`, `mailexpert-postgres`, `mailexpert-redis` и контейнеры других проектов на хосте. Их не останавливать, не пересоздавать, не выполнять в них команды, не удалять; чужие контейнеры не перечислять и не называть. В 7c на демоне хоста **не выполняется ни одна** команда `docker compose up/down/restart/rm/run/exec` и ни один из скриптов `install.sh`, `backup.sh`, `restore.sh`, `update.sh`, `rollback.sh`, `healthcheck.sh` — они запускаются только внутри одноразового dind-контейнера e2e. Разрешено на хосте: `docker build` с тегами только под `local.invalid/`; `docker pull` публичных образов инструментов (`restic/restic:0.18.0`, `minio/minio:RELEASE.2025-04-22T22-12-26Z`, `bats/bats:1.14.0`, `koalaman/shellcheck:stable`, `rhysd/actionlint:latest`, `docker:29.8.1-dind`, `postgres:16-alpine`, `redis:7-alpine`); одноразовые `docker run --rm` инструментов (bats, shellcheck, actionlint); `docker compose ... config` (только чтение); один контейнер e2e `me-e2e-<id>`, который удаляется в конце. До и после каждого прогона e2e сравнить время старта запущенных контейнеров (`docker inspect -f '{{.Name}} {{.State.StartedAt}}'`, снимок только в `$SCRATCH`, не в отчёт) — ни одно не изменилось, ни один контейнер не пропал.
+- **Безопасность хоста (жёстко).** На хосте работают рабочие контейнеры `mailexpert-frontend`, `mailexpert-backend`, `mailexpert-postgres`, `mailexpert-redis` и контейнеры других проектов на хосте. Их не останавливать, не пересоздавать, не выполнять в них команды, не удалять; чужие контейнеры не перечислять и не называть. В 7c на демоне хоста **не выполняется ни одна** команда `docker compose up/down/restart/rm/run/exec` и ни один из скриптов `install.sh`, `backup.sh`, `restore.sh`, `update.sh`, `rollback.sh`, `healthcheck.sh` — они запускаются только внутри одноразового dind-контейнера e2e. Разрешено на хосте: `docker build` с тегами только под `local.invalid/`; `docker pull` публичных образов инструментов (`restic/restic:0.18.0`, `quay.io/minio/minio:RELEASE.2025-04-22T22-12-26Z`, `bats/bats:1.14.0`, `koalaman/shellcheck:stable`, `rhysd/actionlint:latest`, `docker:29.8.1-dind`, `postgres:16-alpine`, `redis:7-alpine`); одноразовые `docker run --rm` инструментов (bats, shellcheck, actionlint); `docker compose ... config` (только чтение); один контейнер e2e `me-e2e-<id>`, который удаляется в конце. До и после каждого прогона e2e сравнить время старта запущенных контейнеров (`docker inspect -f '{{.Name}} {{.State.StartedAt}}'`, снимок только в `$SCRATCH`, не в отчёт) — ни одно не изменилось, ни один контейнер не пропал.
 - **`restore.sh` работает только на сервере без базы:** если существует том `<проект>_postgres_data` или у compose-проекта есть контейнеры, он завершается с кодом 2, ничего не меняя. Это и защита от запуска на живом сервере, и условие, при котором замена сгенерированных ключей безопасна (ими ещё ничего не зашифровано).
 - Секреты никогда не передаются флагами и аргументами — ни скриптам, ни `docker run` (`-e KEY=value` запрещено, только `-e KEY` с унаследованной переменной или префикс `KEY=value docker ...`, который попадает в окружение, а не в argv), ни `curl` (URL пинга содержит ключ проверки и передаётся через `-K <(...)`). Сообщения об ошибках называют ключ, но не значение. Единственный санкционированный вывод секрета — ключ восстановления (`RESTIC_REPOSITORY`, `RESTIC_PASSWORD`): `install.sh` печатает его в stderr один раз и только в терминал (`[ -t 2 ]`), `backup.sh --show-recovery-key` — по явной команде владельца.
 - Сгенерированные ключи (`SESSION_SECRET`, `ENCRYPTION_KEY`, `DB_PASSWORD`, `VAPID_PUBLIC_KEY`, `VAPID_PRIVATE_KEY`) и `RESTIC_PASSWORD` `configure.sh` пишет только в отсутствующие или пустые ключи и никогда не перезаписывает. Сгенерированные ключи заменяет только `restore.sh` — значениями из снимка и только при условии из пункта выше.
@@ -1587,7 +1587,7 @@ cipher=$(credential "$A" encrypt)
 [[ $cipher == enc:v1:* ]] || fail "encrypt: $cipher"
 on "$A" app_psql >/dev/null <<SQL
 WITH owner AS (INSERT INTO users (username, is_admin) VALUES ('e2e-owner', true) RETURNING id)
-INSERT INTO email_accounts (user_id, name, email_address, auth_user, auth_pass, enabled)
+INSERT INTO email_accounts (added_by, name, email_address, auth_user, auth_pass, enabled)
 SELECT id, 'E2E box', '$E2E_EMAIL', '$E2E_EMAIL', '$cipher', false FROM owner;
 SQL
 [ "$(credential "$A" check)" = match ] || fail "the stored credential does not decrypt on A"
@@ -1643,7 +1643,7 @@ pass "backup e2e passed"
 . "$TEST_DIR/../lib/backup.sh"
 
 # Stands in for the S3 provider inside the test; pinned like every other image.
-MINIO_IMAGE=minio/minio:RELEASE.2025-04-22T22-12-26Z
+MINIO_IMAGE=quay.io/minio/minio:RELEASE.2025-04-22T22-12-26Z
 ```
 
 2. `VERSION='' IMAGE_PREFIX=''` заменить на `VERSION='' IMAGE_PREFIX='' ONLY=''`, в разбор аргументов добавить
@@ -1679,7 +1679,7 @@ fi
 
 - [ ] **Step 8: Проверки и commit**
 
-Run: `MSYS_NO_PATHCONV=1 docker run --rm restic/restic:0.18.0 version; docker pull --quiet minio/minio:RELEASE.2025-04-22T22-12-26Z`
+Run: `MSYS_NO_PATHCONV=1 docker run --rm restic/restic:0.18.0 version; docker pull --quiet quay.io/minio/minio:RELEASE.2025-04-22T22-12-26Z`
 Expected: `restic 0.18.0 …` и имя образа MinIO. Если какой-то тег недоступен — остановиться и доложить (не подбирать другой молча).
 
 Run: `git add -A && git add --chmod=+x scripts/deploy/backup.sh scripts/deploy/test/e2e-backup.sh && SC; echo "exit $?"`

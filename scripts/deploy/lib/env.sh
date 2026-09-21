@@ -16,19 +16,22 @@ env_value_ok() {
   return 0
 }
 
-# env_get <file> <key>: prints the value; status 1 when the file or the key is absent.
+# env_get <file> <key>: prints the value; status 1 when the file or the key is absent. A key that
+# appears more than once resolves like a shell or `docker compose --env-file` would read it: the
+# last line wins.
 env_get() {
-  local file=$1 key=$2 line
+  local file=$1 key=$2 line value found=0
   [ -f "$file" ] || return 1
   while IFS= read -r line || [ -n "$line" ]; do
     case $line in
       "$key="*)
-        printf '%s\n' "${line#"$key="}"
-        return 0
+        value=${line#"$key="}
+        found=1
         ;;
     esac
   done <"$file"
-  return 1
+  [ "$found" = 1 ] || return 1
+  printf '%s\n' "$value"
 }
 
 # env_set <file> <key> <value>: adds or replaces one key, other lines stay as they are. The file

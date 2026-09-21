@@ -1,21 +1,19 @@
 #!/usr/bin/env bash
 # Updates the panel to another commit (image tag sha-<12>):
-#   1. checks: no rollback pending, the panel ready, the commit exists, the images pulled before
-#      anything stops, free space for twice the last dump;
+#   1. checks: the panel ready, the commit exists, the images pulled before anything stops, free
+#      space for the last dump;
 #   2. a pre-update backup: backups/pre-update-<old>.dump (the last 3 are kept) and, with the
 #      restic keys, a snapshot tagged pre-update;
 #   3. install.sh --version <new>: checkout, MAILEXPERT_VERSION, up, migrations at start, the
-#      readiness and version checks (MAILEXPERT_READY_TIMEOUT, 600 s by default here);
-#   4. ready: done. Not ready and no migration applied: install.sh --version <old> by itself
-#      (exit 4). Not ready after migrations were applied: backend and frontend stop and the
-#      rollback is left to a person (exit 5): rollback.sh restores the pre-update dump and loses
-#      what was written since, which only a person may decide.
+#      readiness and version checks (MAILEXPERT_READY_TIMEOUT, 600 s by default here).
+# A version that does not become ready is left as it is: going back is a decision for a person
+# (the runbook's "Откат обновления": stop, restore the pre-update dump, install.sh --version <old>),
+# because anything written after the update would be lost.
 #
 #   update.sh sha-<commit> [--prefix /opt/mailexpert]
 #
 # Exit codes: 0 updated (or already at that version), 1 failure, 2 invalid input or a state that
-# forbids an update (nothing changed), 4 not updated: the previous version runs again,
-# 5 stopped after migrations: run rollback.sh.
+# forbids an update (nothing changed).
 # shellcheck source-path=SCRIPTDIR
 set -euo pipefail
 
@@ -42,11 +40,9 @@ usage() {
 Usage: update.sh sha-<first 12 characters of the commit> [--prefix /opt/mailexpert]
 
 Backs up, switches to the new version with install.sh and checks it. A version that does not
-become ready is replaced by the previous one automatically when it applied no migrations
-(exit 4); otherwise the panel is stopped and rollback.sh is left to you (exit 5).
+become ready is left as it is and the way back is printed: see the runbook, "Откат обновления".
 MAILEXPERT_READY_TIMEOUT: seconds to wait for readiness (default 600).
-Exit codes: 0 updated, 1 failure, 2 invalid input or state (nothing changed), 4 not updated,
-the previous version runs again, 5 stopped after migrations: run rollback.sh.
+Exit codes: 0 updated, 1 failure, 2 invalid input or state (nothing changed).
 EOF
 }
 
@@ -82,7 +78,7 @@ run_install() {
 }
 
 main() {
-  local prefix=/opt/mailexpert target='' old before after status=0 outcome dump free_kb bytes problem since url
+  local prefix=/opt/mailexpert target='' old dump free_kb bytes problem since url
   while [ $# -gt 0 ]; do
     case $1 in
       --prefix)
@@ -109,10 +105,7 @@ main() {
     return 0
   fi
   if is_standby; then die "standby server: the panel does not run here; install.sh --version sets its version" 2; fi
-  take_lock "$STATE_DIR/update.lock" 10 "another update.sh, rollback.sh or restore.sh"
-  if [ "$(update_status)" = needs-rollback ]; then
-    die "the last update stopped after migrations: run $APP_DIR/scripts/deploy/rollback.sh --prefix $OPT_PREFIX first" 2
-  fi
+  take_lock "$STATE_DIR/update.lock" 10 "another update.sh or restore.sh"
   panel_ready || die "the panel is not ready now; fix that before updating" 2
   git -C "$APP_DIR" fetch --quiet origin
   git -C "$APP_DIR" rev-parse --verify --quiet "${target#sha-}^{commit}" >/dev/null ||
@@ -124,48 +117,24 @@ main() {
   problem=$(space_problem "$free_kb" "$bytes")
   [ -z "$problem" ] || die "$problem" 2
 
-  before=$(migration_count)
   dump=$BACKUP_DIR/pre-update-$old.dump
   log "backup before the update"
   bash "$SCRIPT_DIR/backup.sh" --prefix "$OPT_PREFIX" --tag pre-update --keep-dump "$dump" ||
     die "the backup before the update failed; nothing was changed"
   prune_local_dumps
-  write_update_state "$old" "$target" "$before" "$dump" running
   since=$(date -u +%Y-%m-%dT%H:%M:%SZ)
   url=$(env_get "$ENV_FILE" HEALTHCHECK_PING_URL) || url=
   log "updating $old -> $target"
-  run_install "$target" || status=$?
-  after=$(migration_count) || after=unknown
-  outcome=$(update_outcome "$status" "$before" "$after")
-  case $outcome in
-    done)
-      check_index_warning "$since"
-      set_update_status "done"
-      send_ping "$url" success "updated to $target"
-      log "updated to $target. Back to $old with the database from before the update: $APP_DIR/scripts/deploy/rollback.sh --prefix $OPT_PREFIX"
-      return 0
-      ;;
-    auto-rollback)
-      warn "$target did not become ready and applied no migrations: returning to $old"
-      if run_install "$old"; then
-        set_update_status rolled-back
-        send_ping "$url" fail "the update to $target failed; $old runs again"
-        log "not updated: $old runs again; the reason is in the backend log of $target above"
-        exit 4
-      fi
-      set_update_status needs-rollback
-      send_ping "$url" fail "the update to $target failed and $old did not start again"
-      die "$old did not start again either: run $APP_DIR/scripts/deploy/rollback.sh --prefix $OPT_PREFIX"
-      ;;
-    manual-rollback)
-      app_compose stop backend frontend >/dev/null 2>&1 || true
-      set_update_status needs-rollback
-      send_ping "$url" fail "the update to $target applied migrations and did not become ready; the panel is stopped"
-      warn "$target applied migrations (schema_migrations: $before -> $after) and did not become ready; backend and frontend are stopped"
-      log "back to $old with the database from before the update (what was written since is lost): $APP_DIR/scripts/deploy/rollback.sh --prefix $OPT_PREFIX"
-      exit 5
-      ;;
-  esac
+  if ! run_install "$target"; then
+    send_ping "$url" fail "the update to $target did not become ready"
+    warn "$target did not become ready; nothing was rolled back"
+    log "the backend log: docker compose -p $CFG_PROJECT logs backend"
+    log "to go back to $old (what was written since the update is lost): stop backend and frontend, restore $dump into the database, then run install.sh --prefix $OPT_PREFIX --version $old (runbook: \"Откат обновления\")"
+    exit 1
+  fi
+  check_index_warning "$since"
+  send_ping "$url" success "updated to $target"
+  log "updated to $target; the pre-update dump is $dump"
 }
 
 # One line: install.sh checks out another commit, which rewrites this file while it runs.

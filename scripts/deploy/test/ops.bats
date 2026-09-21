@@ -1,5 +1,5 @@
 #!/usr/bin/env bats
-# Decisions of restore.sh, update.sh and rollback.sh.
+# Decisions of restore.sh and update.sh.
 
 bats_require_minimum_version 1.5.0
 
@@ -42,15 +42,6 @@ setup() {
 @test "merge_restored_keys refuses an unknown mode" {
   run merge_restored_keys "$D" "$S" replace ENCRYPTION_KEY
   [ "$status" -eq 2 ]
-}
-
-@test "update_outcome" {
-  [ "$(update_outcome 0 66 67)" = done ]
-  [ "$(update_outcome 1 66 66)" = auto-rollback ]
-  [ "$(update_outcome 124 66 66)" = auto-rollback ]
-  [ "$(update_outcome 1 66 67)" = manual-rollback ]
-  [ "$(update_outcome 1 66 unknown)" = manual-rollback ]
-  [ "$(update_outcome 3 '' '')" = manual-rollback ]
 }
 
 @test "space_problem: twice the last dump must be free" {

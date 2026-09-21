@@ -38,7 +38,7 @@ the target architecture is [docs/architecture/team-mail-system-handoff.md](docs/
 
 ## Later
 
-- Owned-domain mailboxes delivered through a separate Postfix/Dovecot mail node behind Microsoft EOP. The mail node is its own project with its own readiness criteria; MailExpert only connects to it as an ordinary IMAP/SMTP server.
+- Owned-domain mailboxes delivered through a separate Postfix/Dovecot mail node behind Microsoft EOP. The mail node is its own project with its own readiness criteria. MailExpert connects to it as an ordinary IMAP/SMTP server and creates, disables and re-enables mailboxes through the node's API. Platform choice, server sizing and adaptive quotas are researched in [docs/architecture/mail-node-research](docs/architecture/mail-node-research/README.md).
 - Individual manager identities and mailbox membership, if per-person accountability becomes a requirement on top of the audit log.
 
 Have a request or found a bug? [Open an issue](https://github.com/wyrtensi/MailExpert/issues).

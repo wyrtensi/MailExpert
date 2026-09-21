@@ -38,8 +38,8 @@ import { isGoogleAuthMode } from '../utils/authMode.js';
 import GoogleAppsSection from './GoogleAppsSection.jsx';
 import GmailConnectCard from './GmailConnectCard.jsx';
 import { openOAuthWindow } from '../utils/oauthWindow.js';
-import { MICROSOFT_OAUTH_PATH } from '../utils/accountHealth.js';
-import { buildGoogleConnectUrl, isGoogleReconnectRequired } from '../utils/googleOAuth.js';
+import { MICROSOFT_OAUTH_PATH, reconnectUrlFor } from '../utils/accountHealth.js';
+import { isGoogleReconnectRequired } from '../utils/googleOAuth.js';
 import { getEffectiveShortcuts, getGroupedActions, ACTION_DEFS, SPECIAL_KEY_LABELS, parseModKey, modLabel } from '../utils/defaultShortcuts.js';
 import { isValidForwardAddress } from '../utils/ruleActions.js';
 import { folderParentLabel } from '../utils/folderDisplay.js';
@@ -1090,7 +1090,7 @@ function AccountsTab() {
             </div>
             <div style={{ display: 'flex', gap: 6, flexShrink: 0, marginLeft: 'auto' }}>
               {isGoogleReconnectRequired(account) && (
-                <button onClick={() => openOAuthWindow(buildGoogleConnectUrl({ loginHint: account.email_address }))} style={{
+                <button onClick={() => openOAuthWindow(reconnectUrlFor(account))} style={{
                   padding: '5px 10px', background: 'var(--accent)', border: 'none', borderRadius: 6,
                   color: 'var(--accent-text)', cursor: 'pointer', fontSize: 12, fontWeight: 500,
                 }}>

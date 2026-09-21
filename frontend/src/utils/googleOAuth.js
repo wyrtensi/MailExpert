@@ -50,6 +50,14 @@ export function buildGoogleConnectUrl({ loginHint } = {}) {
   return `${GOOGLE_OAUTH_PATH}?${new URLSearchParams({ login_hint: hint }).toString()}`;
 }
 
+// Same-origin URL that reconnects one Google mailbox. The server looks the address up by id, so
+// it never travels in a MailExpert URL. Adding a mailbox starts from the "Add account" dialog.
+export function buildGoogleReconnectUrl(accountId) {
+  const id = typeof accountId === 'string' ? accountId.trim() : '';
+  if (!id) return null;
+  return `${GOOGLE_OAUTH_PATH}?${new URLSearchParams({ account: id }).toString()}`;
+}
+
 // Exact redirect URI the admin must register in Google Cloud Console.
 export function buildGoogleRedirectUri(location) {
   const origin = String(location?.origin || '').replace(/\/+$/, '');

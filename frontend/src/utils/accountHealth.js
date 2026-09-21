@@ -5,7 +5,7 @@
 // This module mirrors that rule so the client can recompute a provisional code after
 // WebSocket account events. Both test suites read
 // backend/src/services/accountHealth.fixtures.json to keep the two rules in parity.
-import { buildGoogleConnectUrl } from './googleOAuth.js';
+import { buildGoogleReconnectUrl } from './googleOAuth.js';
 
 export const STALE_AFTER_MS = 15 * 60 * 1000;
 
@@ -69,7 +69,7 @@ export function accountEventPatch(type, data) {
 // Same-origin URL that re-runs the provider consent flow for a reconnect-required
 // account, or null when the account has no OAuth provider.
 export function reconnectUrlFor(account) {
-  if (account?.oauth_provider === 'google') return buildGoogleConnectUrl({ loginHint: account.email_address });
+  if (account?.oauth_provider === 'google') return buildGoogleReconnectUrl(account.id);
   if (account?.oauth_provider === 'microsoft') return MICROSOFT_OAUTH_PATH;
   return null;
 }

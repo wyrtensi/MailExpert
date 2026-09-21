@@ -13,8 +13,8 @@ test('opens the consent route through a temporary anchor with rel="opener"', () 
     body: { appendChild: (el) => body.add(el), removeChild: (el) => body.delete(el) },
   };
   try {
-    openOAuthWindow('/oauth/google?login_hint=a%40gmail.com');
-    assert.deepEqual(clicked, [{ href: '/oauth/google?login_hint=a%40gmail.com', target: '_blank', rel: 'opener', attached: true }]);
+    openOAuthWindow('/oauth/google?account=acc-1');
+    assert.deepEqual(clicked, [{ href: '/oauth/google?account=acc-1', target: '_blank', rel: 'opener', attached: true }]);
     assert.equal(body.size, 0, 'the anchor is removed again');
   } finally {
     delete globalThis.document;

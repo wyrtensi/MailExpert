@@ -405,6 +405,10 @@ export const api = {
   deleteIntegration: (provider) => request('DELETE', `/integrations/${provider}`),
   startMsDeviceFlow: () => directApi.startMsDeviceFlow(),
   pollMsDeviceFlow: () => directApi.pollMsDeviceFlow(),
+  // Gmail by address: start answers a one-time /oauth/google/launch path (the address stays out
+  // of MailExpert URLs); known-emails lists addresses connected before that have no mailbox now.
+  startGoogleOAuth: (email) => request('POST', '/oauth/google/start', { email }),
+  knownGoogleEmails: (q) => request('GET', `/oauth/google/known-emails?${new URLSearchParams({ q })}`),
 
   // Sync
   // Manual sync is per mailbox: the server answers { ok, skipped } and rejects a request without one.

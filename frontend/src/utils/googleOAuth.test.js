@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 import {
   GOOGLE_OAUTH_PATH,
   buildGoogleConnectUrl,
+  buildGoogleReconnectUrl,
   buildGoogleRedirectUri,
   isGoogleReconnectRequired,
   oauthMessageToSearchParams,
@@ -42,6 +43,23 @@ describe('buildGoogleConnectUrl', () => {
 
   it('trims surrounding whitespace from the hint', () => {
     assert.equal(buildGoogleConnectUrl({ loginHint: '  a@gmail.com ' }), '/oauth/google?login_hint=a%40gmail.com');
+  });
+});
+
+describe('buildGoogleReconnectUrl', () => {
+  it('names the mailbox by id and never carries its address', () => {
+    assert.equal(buildGoogleReconnectUrl('22222222-2222-2222-2222-222222222222'),
+      '/oauth/google?account=22222222-2222-2222-2222-222222222222');
+  });
+
+  it('encodes the id', () => {
+    const url = buildGoogleReconnectUrl('a b&c');
+    assert.equal(new URL(url, 'https://mail.example').searchParams.get('account'), 'a b&c');
+    assert.deepEqual([...new URL(url, 'https://mail.example').searchParams.keys()], ['account']);
+  });
+
+  it('is null without an id', () => {
+    for (const id of [undefined, null, '', '   ', 42]) assert.equal(buildGoogleReconnectUrl(id), null);
   });
 });
 

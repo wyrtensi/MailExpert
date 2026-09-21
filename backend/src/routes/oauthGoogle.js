@@ -78,7 +78,10 @@ router.get('/', async (req, res) => {
   let target = null;
   try {
     target = await resolveStartTarget(req);
-    selected = await selectGoogleApp({ email: target.email, account: target.account });
+    // The legacy login_hint add path (compat until 8c) is a plain GET, so a cross-site
+    // top-level link could hold a seat for 10 minutes; only POST /api/oauth/google/start,
+    // which the CSRF check covers, reserves one. Reconnect and upsert keep reserving.
+    selected = await selectGoogleApp({ email: target.email, account: target.account, reserve: target.mode !== 'add' });
     const config = await resolveGoogleConfig({ appId: selected.appId, origin: allowedRequestOrigin(req) });
     if (!config) throw new CallbackError('not_configured');
     const { state, codeChallenge } = await createOAuthState({

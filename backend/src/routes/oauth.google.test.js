@@ -222,6 +222,11 @@ describe('GET /oauth/google', () => {
     const { location } = await startFlow(`?login_hint=${encodeURIComponent('not an email')}`);
     expect(location.searchParams.has('login_hint')).toBe(false);
   });
+
+  it('selects without reserving a seat on the legacy login_hint add path (compat until 8c)', async () => {
+    await startFlow('?login_hint=user%40gmail.com'); // no mailbox for this address -> mode 'add'
+    expect(selectGoogleApp).toHaveBeenCalledWith({ email: 'user@gmail.com', account: null, reserve: false });
+  });
 });
 
 describe('GET /oauth/google/launch', () => {
@@ -505,7 +510,8 @@ describe('reconnect by mailbox id', () => {
     expect(location.searchParams.get('login_hint')).toBe('user@gmail.com');
     const saved = JSON.parse([...redisStore.values()][0]);
     expect(saved).toMatchObject({ mode: 'reconnect', email: 'user@gmail.com', accountId: ACCOUNT_ID, appId: APP_ID });
-    expect(selectGoogleApp).toHaveBeenCalledWith({ email: 'user@gmail.com', account: expect.objectContaining({ id: ACCOUNT_ID }) });
+    // A reconnect keeps reserving as before: only the legacy login_hint add path skips it.
+    expect(selectGoogleApp).toHaveBeenCalledWith({ email: 'user@gmail.com', account: expect.objectContaining({ id: ACCOUNT_ID }), reserve: true });
   });
 
   it.each([

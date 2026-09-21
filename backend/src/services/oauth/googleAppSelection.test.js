@@ -127,6 +127,26 @@ describe('selectGoogleApp', () => {
     await expect(selectGoogleApp()).resolves.toEqual({ appId: 'a1', reserved: false });
     expect(zsets.get(key('a1'))?.size ?? 0).toBe(0);
   });
+
+  it('reserve: false picks the first app with room and leaves Redis untouched', async () => {
+    installApps([app('a1', { user_limit: 1, grants: 1 }), app('a2')]);
+    await expect(selectGoogleApp({ email: 'x@gmail.com', reserve: false })).resolves.toEqual({ appId: 'a2', reserved: false });
+    expect(zsets.get(key('a1'))?.size ?? 0).toBe(0);
+    expect(zsets.get(key('a2'))?.size ?? 0).toBe(0);
+  });
+
+  it('reserve: false still reports no_app_capacity when no active app has grant room', async () => {
+    installApps([app('a1', { user_limit: 1, grants: 1 })]);
+    await expect(selectGoogleApp({ email: 'x@gmail.com', reserve: false })).rejects.toMatchObject({ code: 'no_app_capacity' });
+  });
+
+  it('reserve: false returns an app with an existing live reservation without extending it', async () => {
+    installApps([app('a1', { user_limit: 1 })]);
+    await selectGoogleApp({ email: 'x@gmail.com' }); // reserved: true, sets the TTL
+    const before = zsets.get(key('a1')).get(googleEmailDigest('x@gmail.com'));
+    await expect(selectGoogleApp({ email: 'x@gmail.com', reserve: false })).resolves.toEqual({ appId: 'a1', reserved: false });
+    expect(zsets.get(key('a1')).get(googleEmailDigest('x@gmail.com'))).toBe(before);
+  });
 });
 
 describe('reservations', () => {

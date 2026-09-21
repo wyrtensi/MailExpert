@@ -324,6 +324,7 @@ API: `GET /api/admin/audit?account=&user=&action=&from=&to=&before=` (тольк
 - Ключ перехода хранит готовый URL Google; `launch` отдаёт только URL, начинающийся с адреса авторизации Google.
 - `GET /api/integrations/status` в 8a отдаёт `google.available`; `domainMail.configured` появится в PR 9.
 - Бронь снимается после записи в журнал, а не до обмена кода: иначе на время обмена место выглядит свободным и приложение может выйти за лимит.
+- Старый путь `GET /oauth/google?login_hint=` для адреса без ящика (совместимость до 8c) приложение выбирает без брони: бронирование только через `POST /api/oauth/google/start`, где действует CSRF-проверка.
 
 ## Проверка
 

@@ -67,7 +67,10 @@ async function hasFreeSeat(app, now) {
   return app.grants + await countGoogleReservations(app.id, now) < app.user_limit;
 }
 
-export async function selectGoogleApp({ email = null, account = null } = {}) {
+// `reserve: false` picks an app the same way but never touches Redis: an existing live
+// reservation still wins the app (without extending its TTL), and a free seat is judged by
+// grants alone. For the legacy GET add path, which a cross-site top-level link can trigger.
+export async function selectGoogleApp({ email = null, account = null, reserve = true } = {}) {
   return withTransaction(async (client) => {
     await client.query(SELECTION_LOCK);
     const { rows } = await client.query(APPS_WITH_SEATS, [email]);
@@ -87,14 +90,16 @@ export async function selectGoogleApp({ email = null, account = null } = {}) {
     if (email) {
       for (const app of active) {
         if (await hasLiveReservation(app.id, email, now)) {
+          if (!reserve) return { appId: app.id, reserved: false };
           await reserveSeat(app.id, email, now);
           return { appId: app.id, reserved: true };
         }
       }
     }
     for (const app of active) {
-      if (await hasFreeSeat(app, now)) {
-        if (!email) return { appId: app.id, reserved: false };
+      const free = reserve ? await hasFreeSeat(app, now) : app.grants < app.user_limit;
+      if (free) {
+        if (!email || !reserve) return { appId: app.id, reserved: false };
         await reserveSeat(app.id, email, now);
         return { appId: app.id, reserved: true };
       }

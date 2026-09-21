@@ -52,8 +52,9 @@ async function reserveSeat(appId, email, now) {
   await redisClient.expire(key, OAUTH_STATE_TTL_SECONDS);
 }
 
-// Called on the callback whatever its outcome, before the grant is journaled, so one email is
-// never counted both as a reservation and as a grant.
+// Called on the callback once the grant is journaled (so a seat never looks free while the code
+// exchange is in flight), on every callback path that ends before that, and by a start that fails
+// after reserving. A brief double count (reservation + grant) is intended.
 export async function releaseGoogleSeat(appId, email) {
   if (!appId || !email) return;
   try {
@@ -67,10 +68,12 @@ async function hasFreeSeat(app, now) {
   return app.grants + await countGoogleReservations(app.id, now) < app.user_limit;
 }
 
-// `reserve: false` picks an app the same way but never touches Redis: an existing live
-// reservation still wins the app (without extending its TTL), and a free seat is judged by
-// grants alone. For the legacy GET add path, which a cross-site top-level link can trigger.
-export async function selectGoogleApp({ email = null, account = null, reserve = true } = {}) {
+// Picks the app for one address and, when that costs a new seat, reserves it. Every caller names
+// the address: adding goes through POST /api/oauth/google/start (under the CSRF check), and a
+// reconnect names the mailbox. Returns { appId, reserved }; `reserved` tells the caller to release
+// the seat if it gives up before the callback.
+export async function selectGoogleApp({ email, account = null } = {}) {
+  if (!email) throw new TypeError('selectGoogleApp needs an email');
   return withTransaction(async (client) => {
     await client.query(SELECTION_LOCK);
     const { rows } = await client.query(APPS_WITH_SEATS, [email]);
@@ -82,24 +85,20 @@ export async function selectGoogleApp({ email = null, account = null, reserve = 
     if (own) return { appId: own.id, reserved: false };
 
     // Google already counted this email in that app: going back there costs no seat.
-    const known = email ? usable.find((app) => app.granted) : null;
+    const known = usable.find((app) => app.granted);
     if (known) return { appId: known.id, reserved: false };
 
     const now = Date.now();
     const active = usable.filter((app) => app.status === 'active');
-    if (email) {
-      for (const app of active) {
-        if (await hasLiveReservation(app.id, email, now)) {
-          if (!reserve) return { appId: app.id, reserved: false };
-          await reserveSeat(app.id, email, now);
-          return { appId: app.id, reserved: true };
-        }
+    // A repeated start for the same email keeps its app and refreshes its one reservation.
+    for (const app of active) {
+      if (await hasLiveReservation(app.id, email, now)) {
+        await reserveSeat(app.id, email, now);
+        return { appId: app.id, reserved: true };
       }
     }
     for (const app of active) {
-      const free = reserve ? await hasFreeSeat(app, now) : app.grants < app.user_limit;
-      if (free) {
-        if (!email || !reserve) return { appId: app.id, reserved: false };
+      if (await hasFreeSeat(app, now)) {
         await reserveSeat(app.id, email, now);
         return { appId: app.id, reserved: true };
       }

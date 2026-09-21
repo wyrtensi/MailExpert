@@ -15,9 +15,9 @@ function stateKey(provider, state) {
 
 // Create a single-use state plus a PKCE S256 pair. The verifier stays in Redis; only
 // the state and the challenge leave the server. `appId` pins the Google app whose client
-// must finish the flow; a sign-in flow has no user yet. `mode` (`add`, `reconnect`,
-// `upsert`) and `email` tell the callback what to check; `accountId` names which
-// mailbox is being reconnected.
+// must finish the flow; a sign-in flow has no user yet. `mode` (`add` from the Gmail
+// form, `reconnect` by mailbox id) and `email` tell the callback what to check;
+// `accountId` names which mailbox is being reconnected.
 export async function createOAuthState({
   provider, userId = null, loginHint = null, appId = null, mode = null, email = null, accountId = null,
 }) {

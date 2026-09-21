@@ -14,7 +14,7 @@ import {
 import { recordGoogleGrant, resolveGoogleConfig } from '../services/oauth/googleApps.js';
 import { createOAuthState, consumeOAuthState } from '../services/oauth/oauthState.js';
 import { GoogleAppSelectionError, releaseGoogleSeat, selectGoogleApp } from '../services/oauth/googleAppSelection.js';
-import { GOOGLE_EMAIL_PATTERN, consumeGoogleLaunch } from '../services/oauth/googleLaunch.js';
+import { consumeGoogleLaunch } from '../services/oauth/googleLaunch.js';
 import { allowedRequestOrigin } from '../utils/publicOrigins.js';
 import { isUuid } from '../utils/uuid.js';
 
@@ -30,6 +30,7 @@ const CALLBACK_ERROR_CODES = new Set([
   'already_connected', 'account_mismatch', 'no_app_capacity',
 ]);
 const ACCOUNT_COLORS = ['#ea4335', '#4285f4', '#34a853', '#fbbc05'];
+const FLOW_MODES = new Set(['add', 'reconnect']);
 
 class CallbackError extends Error {
   constructor(code) {
@@ -40,48 +41,30 @@ class CallbackError extends Error {
 
 const errorRedirect = (code) => `/?oauth_error=${code}&oauth_provider=${PROVIDER}`;
 
-// What a start request asks for. `?account=<id>` reconnects that mailbox. Until the new
-// "Add account" dialog ships, the old entry points keep working: `?login_hint=<email>` reconnects
-// the Gmail mailbox with that address or adds it, and no parameter at all adds or updates
-// whichever account the user picks at Google.
-async function resolveStartTarget(req) {
-  if (req.query.account !== undefined) {
-    const id = typeof req.query.account === 'string' ? req.query.account : '';
-    if (!isUuid(id)) throw new CallbackError('invalid_state');
-    const { rows } = await query(
-      'SELECT id, email_address, oauth_provider, oauth_app_id FROM email_accounts WHERE id = $1',
-      [id],
-    );
-    const account = rows[0];
-    if (!account || account.oauth_provider !== PROVIDER) throw new CallbackError('invalid_state');
-    return { mode: 'reconnect', email: account.email_address.toLowerCase(), account };
-  }
-
-  const rawHint = typeof req.query.login_hint === 'string' ? req.query.login_hint.trim() : '';
-  if (!GOOGLE_EMAIL_PATTERN.test(rawHint)) return { mode: 'upsert', email: null, account: null };
-  const email = rawHint.toLowerCase();
+// `?account=<id>` names the Gmail mailbox to reconnect; nothing else starts a flow here. Adding a
+// mailbox goes through POST /api/oauth/google/start, where the CSRF check covers the seat it
+// reserves, and the address never travels in a MailExpert URL.
+async function resolveReconnectTarget(req) {
+  const id = typeof req.query.account === 'string' ? req.query.account : '';
+  if (!isUuid(id)) throw new CallbackError('invalid_state');
   const { rows } = await query(
-    `SELECT id, email_address, oauth_provider, oauth_app_id FROM email_accounts
-     WHERE lower(email_address) = $1 ORDER BY created_at LIMIT 1`,
-    [email],
+    'SELECT id, email_address, oauth_provider, oauth_app_id FROM email_accounts WHERE id = $1',
+    [id],
   );
   const account = rows[0];
-  if (account?.oauth_provider === PROVIDER) return { mode: 'reconnect', email, account };
-  return { mode: 'add', email, account: null };
+  if (!account || account.oauth_provider !== PROVIDER) throw new CallbackError('invalid_state');
+  return { email: account.email_address.toLowerCase(), account };
 }
 
-// Step 1: pick the app, create state + PKCE and send the user to Google's consent screen.
+// Step 1 of a reconnect: pick the app, create state + PKCE and send the user to Google.
 router.get('/', async (req, res) => {
   if (!req.session?.userId) return res.status(401).json({ error: 'Not authenticated' });
 
   let selected = null;
   let target = null;
   try {
-    target = await resolveStartTarget(req);
-    // The legacy login_hint add path (compat until 8c) is a plain GET, so a cross-site
-    // top-level link could hold a seat for 10 minutes; only POST /api/oauth/google/start,
-    // which the CSRF check covers, reserves one. Reconnect and upsert keep reserving.
-    selected = await selectGoogleApp({ email: target.email, account: target.account, reserve: target.mode !== 'add' });
+    target = await resolveReconnectTarget(req);
+    selected = await selectGoogleApp({ email: target.email, account: target.account });
     const config = await resolveGoogleConfig({ appId: selected.appId, origin: allowedRequestOrigin(req) });
     if (!config) throw new CallbackError('not_configured');
     const { state, codeChallenge } = await createOAuthState({
@@ -89,9 +72,9 @@ router.get('/', async (req, res) => {
       userId: req.session.userId,
       loginHint: target.email,
       appId: config.appId,
-      mode: target.mode,
+      mode: 'reconnect',
       email: target.email,
-      accountId: target.account?.id ?? null,
+      accountId: target.account.id,
     });
     res.redirect(buildGoogleAuthorizationUrl({
       clientId: config.clientId,
@@ -137,6 +120,9 @@ router.get('/callback', async (req, res) => {
     if (!pending || !req.session?.userId || req.session.userId !== pending.userId) {
       throw new CallbackError('invalid_state');
     }
+    // Only the two flows this version starts: a state issued before the update (the removed
+    // upsert mode) or without an address cannot say what to check, so it is refused.
+    if (!FLOW_MODES.has(pending.mode) || !pending.email) throw new CallbackError('invalid_state');
     // Finish with the app chosen at start: its client is the one Google issued the code to.
     const config = await resolveGoogleConfig({ appId: pending.appId, origin: allowedRequestOrigin(req) });
     if (!config) throw new CallbackError('not_configured');
@@ -157,16 +143,16 @@ router.get('/callback', async (req, res) => {
     // Now that the journal has the email, the reservation can go. A brief double count
     // (reservation + grant) is intended: it is only more conservative than the alternative of
     // releasing before the exchange, which would let the seat look free while it is in flight.
-    if (pending.appId && pending.email) {
+    if (pending.appId) {
       await releaseGoogleSeat(pending.appId, pending.email);
       released = true;
     }
     // The user may pick another Google account on Google's page than the one asked for.
-    if (pending.email && identity.email.toLowerCase() !== pending.email) throw new CallbackError('account_mismatch');
+    if (identity.email.toLowerCase() !== pending.email) throw new CallbackError('account_mismatch');
     if (!hasGoogleMailScope(tokens.scope)) throw new CallbackError('scope_missing');
 
     const { account, result, previousAppId, previousRefreshToken } =
-      await upsertGoogleAccount(pending, identity, tokens, config.appId);
+      await saveGoogleAccount(pending, identity, tokens, config.appId);
     issued = null; // the tokens are stored now: nothing to revoke
     recordGoogleConsent({ userId: pending.userId, account, result, previousAppId, appId: config.appId });
     if (result === 'updated' && previousAppId && previousAppId !== config.appId) {
@@ -204,11 +190,11 @@ async function revokeRefusedGrant({ appId, tokens, email }) {
   }
 }
 
-// Create or update the Gmail mailbox with this address under a transaction-scoped advisory
-// lock so racing callbacks for one mailbox cannot insert duplicates. Mailboxes are shared, so
-// the address alone names one; userId only records who added it. The account is bound to the
-// app whose client issued the tokens.
-async function upsertGoogleAccount(pending, identity, tokens, appId) {
+// Create the mailbox of an `add` flow or refresh the one a `reconnect` names, under a
+// transaction-scoped advisory lock so racing callbacks for one address cannot insert duplicates.
+// Mailboxes are shared, so the address alone names one; userId only records who added it. The
+// account is bound to the app whose client issued the tokens.
+async function saveGoogleAccount(pending, identity, tokens, appId) {
   const email = identity.email.toLowerCase();
   const encryptedAccess = encrypt(tokens.accessToken);
   const encryptedRefresh = tokens.refreshToken ? encrypt(tokens.refreshToken) : null;

@@ -44,12 +44,11 @@ panel_ready() {
   curl -fs -m 5 -o /dev/null "http://127.0.0.1:$CFG_HTTP_PORT/api/health/ready"
 }
 
-# app_psql [database]: psql in the postgres container as the panel's database user, SQL on
-# stdin, tuples only and unaligned. Without a name: the panel's own database.
+# app_psql: psql in the postgres container on the panel's database as its user, SQL on stdin,
+# tuples only and unaligned.
 app_psql() {
   # shellcheck disable=SC2016 # expanded by the shell inside the container
-  app_compose exec -T postgres sh -c \
-    'exec psql -X -q -A -t -v ON_ERROR_STOP=1 -U "$POSTGRES_USER" -d "${1:-$POSTGRES_DB}"' sh "${1:-}"
+  app_compose exec -T postgres sh -c 'exec psql -X -q -A -t -v ON_ERROR_STOP=1 -U "$POSTGRES_USER" -d "$POSTGRES_DB"'
 }
 
 # migration_count: rows in schema_migrations of the panel's database.

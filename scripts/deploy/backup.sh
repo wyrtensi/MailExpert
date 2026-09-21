@@ -51,7 +51,7 @@ Exit codes: 0 done or skipped on a standby server, 1 failure, 2 invalid input.
 EOF
 }
 
-# shellcheck disable=SC2329 # invoked only through `trap finish EXIT` in main, not called directly
+# shellcheck disable=SC2317,SC2329 # invoked only through `trap finish EXIT` in main, not called directly
 finish() {
   local status=$?
   if [ -n "$VERIFY_CONTAINER" ]; then docker rm -fv "$VERIFY_CONTAINER" >/dev/null 2>&1 || true; fi

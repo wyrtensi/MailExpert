@@ -53,7 +53,7 @@ Exit codes: 0 restored, 1 failure, 2 invalid input or not a fresh server (no dat
 EOF
 }
 
-# shellcheck disable=SC2329 # invoked only through `trap cleanup EXIT` in main, not called directly
+# shellcheck disable=SC2317,SC2329 # invoked only through `trap cleanup EXIT` in main, not called directly
 cleanup() {
   local status=$?
   if [ -n "$WORK" ]; then rm -rf "$WORK"; fi

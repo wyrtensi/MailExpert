@@ -367,10 +367,12 @@ describe('GET /oauth/google/callback', () => {
   });
 
   it('rejects a state issued to a different MailExpert user', async () => {
-    const { state } = await startFlow();
+    const { state } = await startFlow('?login_hint=user%40gmail.com');
     const res = await callback({ code: 'c', state }, { user: '22222222-2222-2222-2222-222222222222' });
     expect(res.headers.get('location')).toBe(errorLocation('invalid_state'));
     expect(exchangeGoogleCode).not.toHaveBeenCalled();
+    expect(releaseGoogleSeat).toHaveBeenCalledWith(APP_ID, 'user@gmail.com');
+    expect(releaseGoogleSeat).toHaveBeenCalledTimes(1);
   });
 
   it('redirects with not_configured when the integration was removed mid-flow', async () => {
@@ -383,10 +385,12 @@ describe('GET /oauth/google/callback', () => {
 
   it('maps a failed code exchange to authentication_failed without leaking the code', async () => {
     exchangeGoogleCode.mockRejectedValue(new GoogleOAuthError('authentication_failed', { oauthError: 'invalid_grant' }));
-    const { state } = await startFlow();
+    const { state } = await startFlow('?login_hint=user%40gmail.com');
     const res = await callback({ code: 'secret-auth-code', state });
     expect(res.headers.get('location')).toBe(errorLocation('authentication_failed'));
     expect(loggedText()).not.toMatch(/secret-auth-code|client-secret-value/);
+    expect(releaseGoogleSeat).toHaveBeenCalledWith(APP_ID, 'user@gmail.com');
+    expect(releaseGoogleSeat).toHaveBeenCalledTimes(1);
   });
 
   it('maps an unexpected exception to authentication_failed without logging its message', async () => {
@@ -404,6 +408,7 @@ describe('GET /oauth/google/callback', () => {
     expect(res.headers.get('location')).toBe(errorLocation('scope_missing'));
     expect(recordGoogleGrant).toHaveBeenCalledWith({ appId: APP_ID, email: 'user@gmail.com', sub: 'sub-1' });
     expect(withTransaction).not.toHaveBeenCalled();
+    expect(revokeGoogleToken).toHaveBeenCalledWith('refresh-tok');
   });
 
   it('rejects an unverified Google email', async () => {
@@ -519,6 +524,24 @@ describe('reconnect by mailbox id', () => {
     const res = await get(`/oauth/google?account=${ACCOUNT_ID}`);
     expect(res.headers.get('location')).toBe(`/?oauth_error=${code}&oauth_provider=google`);
   });
+
+  it('frees a reserved seat when the resolved app is not configured', async () => {
+    selection.result = { appId: APP_ID, reserved: true };
+    query.mockResolvedValueOnce({ rows: [{ id: ACCOUNT_ID, email_address: 'user@gmail.com', oauth_provider: 'google', oauth_app_id: null }] });
+    googleApps.byId = {};
+    const res = await get(`/oauth/google?account=${ACCOUNT_ID}`);
+    expect(res.headers.get('location')).toBe('/?oauth_error=not_configured&oauth_provider=google');
+    expect(releaseGoogleSeat).toHaveBeenCalledWith(APP_ID, 'user@gmail.com');
+  });
+
+  it('reports invalid_state when the reconnect target mailbox is gone by callback', async () => {
+    query.mockResolvedValueOnce({ rows: [{ id: ACCOUNT_ID, email_address: 'user@gmail.com', oauth_provider: 'google', oauth_app_id: APP_ID }] });
+    const { state } = await startFlow(`?account=${ACCOUNT_ID}`);
+    installDb({ existing: null });
+    mockSuccessfulGoogle();
+    const res = await callback({ code: 'c', state });
+    expect(res.headers.get('location')).toBe(errorLocation('invalid_state'));
+  });
 });
 
 describe('callback refusals after Google issued tokens', () => {
@@ -540,12 +563,16 @@ describe('callback refusals after Google issued tokens', () => {
     expect(revokeGoogleToken).not.toHaveBeenCalled();
   });
 
-  it('reports already_connected when the mailbox appeared between start and callback', async () => {
+  it('reports already_connected when the mailbox appeared between start and callback, and does not revoke it', async () => {
     const { state } = await startFlow('?login_hint=user%40gmail.com'); // add
     installDb({ existing: { id: 'acc-1', oauth_provider: 'google', oauth_refresh_token: 'enc(old)', oauth_app_id: APP_ID, oauth_subject: 'sub-1' } });
     mockSuccessfulGoogle();
+    // The address that raced us to `already_connected` has a mailbox on this app: revoking the
+    // fresh token would cut that mailbox off too.
+    query.mockImplementation(async (sql) => (/oauth_app_id = \$2/.test(sql) ? { rows: [{ '?column?': 1 }] } : { rows: [] }));
     const res = await callback({ code: 'c', state });
     expect(res.headers.get('location')).toBe(errorLocation('already_connected'));
+    expect(revokeGoogleToken).not.toHaveBeenCalled();
   });
 
   it('refuses a reconnect signed in as another Google identity of the same address', async () => {
@@ -558,17 +585,20 @@ describe('callback refusals after Google issued tokens', () => {
     expect(res.headers.get('location')).toBe(errorLocation('account_mismatch'));
   });
 
-  it('releases the reservation on every outcome, before the grant is journaled', async () => {
+  it('releases the reservation once the grant is journaled on success, and still exactly once on a refusal', async () => {
     const { state } = await startFlow('?login_hint=user%40gmail.com');
     mockSuccessfulGoogle();
     await callback({ code: 'c', state });
     expect(releaseGoogleSeat).toHaveBeenCalledWith(APP_ID, 'user@gmail.com');
-    expect(releaseGoogleSeat.mock.invocationCallOrder[0]).toBeLessThan(recordGoogleGrant.mock.invocationCallOrder[0]);
+    expect(releaseGoogleSeat).toHaveBeenCalledTimes(1);
+    expect(recordGoogleGrant.mock.invocationCallOrder[0]).toBeLessThan(releaseGoogleSeat.mock.invocationCallOrder[0]);
 
     releaseGoogleSeat.mockClear();
+    recordGoogleGrant.mockClear();
     const second = await startFlow('?login_hint=user%40gmail.com');
     await callback({ state: second.state, error: 'access_denied' });
     expect(releaseGoogleSeat).toHaveBeenCalledWith(APP_ID, 'user@gmail.com');
+    expect(releaseGoogleSeat).toHaveBeenCalledTimes(1);
   });
 });
 

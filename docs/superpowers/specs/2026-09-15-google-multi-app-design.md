@@ -87,7 +87,7 @@ CREATE INDEX IF NOT EXISTS idx_email_accounts_lower_email
 
 ## Занятые места и брони
 
-Занято у приложения = записи журнала + действующие брони. Бронь снимается на callback до записи в журнал, поэтому один email не считается дважды.
+Занято у приложения = записи журнала + действующие брони. Бронь снимается на callback после записи в журнал, а при отказе до выдачи токенов — перед ответом. Короткий двойной счёт email (бронь и запись журнала) безопасен: он только консервативнее, а снятие до обмена кода открывало бы окно, в котором место выглядит свободным.
 
 Бронь ставится при старте подключения, когда выбрано приложение, где у email ещё нет записи:
 - Redis sorted set `oauth:google:reservations:<appId>`, member — SHA-256 от email в нижнем регистре, score — время истечения (сейчас + `OAUTH_STATE_TTL_SECONDS`).
@@ -125,11 +125,11 @@ CREATE INDEX IF NOT EXISTS idx_email_accounts_lower_email
 
 ### Callback `GET /oauth/google/callback`
 
-1. Потребить state (как сейчас: одноразовый, та же сессия). Снять бронь `(appId, email)`.
+1. Потребить state (как сейчас: одноразовый, та же сессия).
 2. Ошибка от Google — `access_denied` или `authentication_failed`, как сейчас.
 3. Загрузить приложение `appId`. Если его нет — `authentication_failed`.
 4. Обменять код через `client_id`/`client_secret` этого приложения. Проверить ID token с `audience = client_id`, `email_verified = true`.
-5. Записать в журнал `(appId, lower(identity.email), identity.sub)`: `ON CONFLICT (app_id, email) DO UPDATE SET google_sub = COALESCE(google_oauth_grants.google_sub, EXCLUDED.google_sub)`.
+5. Записать в журнал `(appId, lower(identity.email), identity.sub)`: `ON CONFLICT (app_id, email) DO UPDATE SET google_sub = COALESCE(google_oauth_grants.google_sub, EXCLUDED.google_sub)`. Снять бронь `(appId, email)`.
 6. Проверки, по первой неудачной — отказ:
    - `lower(identity.email) ≠ email` → `account_mismatch`;
    - нет scope `https://mail.google.com/` → `scope_missing`;

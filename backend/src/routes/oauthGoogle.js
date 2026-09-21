@@ -117,12 +117,15 @@ router.get('/launch', async (req, res) => {
 router.get('/callback', async (req, res) => {
   const { code, state, error } = req.query;
   let issued = null;
+  let pending = null;
+  // Kept reserved until the grant is journaled, so a concurrent start never sees this seat as
+  // free while the code exchange is in flight; released as soon as the journal write lands, or
+  // in the catch below on any path that ends before that.
+  let released = false;
 
   try {
-    // Consume first so a state is burned whatever the outcome, and free the seat reserved at
-    // start before the grant is journaled so one email never counts twice.
-    const pending = await consumeOAuthState({ provider: PROVIDER, state });
-    if (pending?.appId && pending.email) await releaseGoogleSeat(pending.appId, pending.email);
+    // Consume first so a state is burned whatever the outcome.
+    pending = await consumeOAuthState({ provider: PROVIDER, state });
 
     if (error !== undefined) {
       throw new CallbackError(error === 'access_denied' ? 'access_denied' : 'authentication_failed');
@@ -148,6 +151,13 @@ router.get('/callback', async (req, res) => {
     // Google counts this account against the app's user cap once it issued tokens, even if
     // the consent is refused below.
     await recordGoogleGrant({ appId: config.appId, email: identity.email, sub: identity.sub });
+    // Now that the journal has the email, the reservation can go. A brief double count
+    // (reservation + grant) is intended: it is only more conservative than the alternative of
+    // releasing before the exchange, which would let the seat look free while it is in flight.
+    if (pending.appId && pending.email) {
+      await releaseGoogleSeat(pending.appId, pending.email);
+      released = true;
+    }
     // The user may pick another Google account on Google's page than the one asked for.
     if (pending.email && identity.email.toLowerCase() !== pending.email) throw new CallbackError('account_mismatch');
     if (!hasGoogleMailScope(tokens.scope)) throw new CallbackError('scope_missing');
@@ -169,6 +179,7 @@ router.get('/callback', async (req, res) => {
       : 'authentication_failed';
     // Log the stable code and error class only; messages may carry provider details.
     console.error(`Google OAuth callback failed: ${stable} (${err?.name || 'Error'})`);
+    if (pending?.appId && pending.email && !released) await releaseGoogleSeat(pending.appId, pending.email);
     if (issued) await revokeRefusedGrant(issued);
     res.redirect(errorRedirect(stable));
   }

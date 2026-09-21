@@ -6,6 +6,11 @@
 # creates is removed at exit.
 # shellcheck source-path=SCRIPTDIR
 set -euo pipefail
+# A failure inside a `$(...)` command substitution (derive_version's git calls, run as
+# `V_OK=$(derive_version ...)`) would otherwise only abort the script if it were the
+# substitution's last command; inherit_errexit makes -e apply inside command substitutions too,
+# so a failing git call there stops the whole run instead of being silently swallowed.
+shopt -s inherit_errexit
 
 TEST_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 DEPLOY_DIR=$(cd "$TEST_DIR/.." && pwd)
@@ -116,7 +121,13 @@ E2E_PLAIN=e2e-mailbox-password-$(gen_hex 4)
 RESTIC_PW=$(gen_hex 24)
 
 # 1. MinIO stands in for the S3 provider (restic creates the bucket); a bare origin repository
-# lets the update stages add commits.
+# lets the update stages add commits. `$REPO_URL` is a bundle of the host checkout's HEAD, which
+# may itself be a shallow clone (locally, or from a CI checkout with a shallow default) — cloning
+# it leaves `$ORIGIN` with a detached HEAD and no branch, so a later `git push` out of it has
+# nothing to negotiate against and walks the full (possibly incomplete, beyond the shallow
+# boundary) history instead of just the new commits. Giving it a real branch at that same commit
+# makes every later push self-contained: negotiation only ever needs objects at or after this
+# tip, never anything from the host clone's own ancestry.
 docker run -d --name me-e2e-s3 --label "com.docker.compose.project=$S3_PROJECT" -p "127.0.0.1:$S3_PORT:9000" \
   -e MINIO_ROOT_USER -e MINIO_ROOT_PASSWORD "$MINIO_IMAGE" server /data >/dev/null
 for _ in $(seq 60); do
@@ -127,6 +138,8 @@ curl -fs -o /dev/null "http://127.0.0.1:$S3_PORT/minio/health/live" || fail "Min
 git clone --bare --quiet "$REPO_URL" "$ORIGIN"
 HEAD_SHA=$(git -C "$ORIGIN" rev-parse HEAD)
 [ "sha-${HEAD_SHA:0:12}" = "$VERSION" ] || fail "the bundle's HEAD is not $VERSION"
+git -C "$ORIGIN" update-ref refs/heads/main "$HEAD_SHA"
+git -C "$ORIGIN" symbolic-ref HEAD refs/heads/main
 pass "MinIO and the origin repository"
 
 # 2. Server A without restic keys: the panel runs, install.sh warns that backups are off.
@@ -315,7 +328,7 @@ derive_version() {
   done
   git -C "$WORK" -c user.name=e2e -c user.email=e2e@example.test commit --quiet --allow-empty -m "e2e: $name"
   sha=$(git -C "$WORK" rev-parse HEAD)
-  git -C "$WORK" push --quiet origin "HEAD:refs/heads/e2e-$name"
+  git -C "$WORK" push --quiet origin "HEAD:refs/heads/e2e-$name" || fail "derive_version $name: push to e2e-$name failed"
   tag=sha-${sha:0:12}
   cid=$(docker create "$IMAGE_PREFIX/mailexpert-backend:$VERSION")
   for f in "$@"; do docker cp "$f" "$cid:/app/migrations/${f##*/}"; done

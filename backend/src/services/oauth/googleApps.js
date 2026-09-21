@@ -102,8 +102,14 @@ function normalizeLabel(label) {
   return value;
 }
 
+// Postgres' integer column caps at 2147483647 (int32); a larger value would fail the write
+// with a 500 instead of a validation error.
+const USER_LIMIT_MAX = 2147483647;
+
 function normalizeUserLimit(userLimit) {
-  if (!Number.isInteger(userLimit) || userLimit <= 0) throw new GoogleAppError('user_limit_invalid');
+  if (!Number.isInteger(userLimit) || userLimit <= 0 || userLimit > USER_LIMIT_MAX) {
+    throw new GoogleAppError('user_limit_invalid');
+  }
   return userLimit;
 }
 

@@ -347,6 +347,7 @@ describe('app registry for the admin screen', () => {
     [{ label: 'G', clientId: CLIENT_ID, clientSecret: '' }, 'client_secret_required'],
     [{ label: 'G', clientId: CLIENT_ID, clientSecret: 's', userLimit: 0 }, 'user_limit_invalid'],
     [{ label: 'G', clientId: CLIENT_ID, clientSecret: 's', userLimit: 1.5 }, 'user_limit_invalid'],
+    [{ label: 'G', clientId: CLIENT_ID, clientSecret: 's', userLimit: 2147483648 }, 'user_limit_invalid'],
   ])('rejects %j with %s before touching the database', async (input, code) => {
     await expect(createGoogleApp(input)).rejects.toMatchObject({ code });
     expect(withTransaction).not.toHaveBeenCalled();
@@ -382,6 +383,11 @@ describe('app registry for the admin screen', () => {
     query.mockResolvedValueOnce({ rows: [] });
     await expect(updateGoogleApp('app-9', { clientSecret: 'new' })).rejects.toMatchObject({ code: 'app_not_found' });
     expect(query.mock.calls[0][1]).toEqual(['app-9', null, 'enc(new)', null]);
+  });
+
+  it('rejects a user limit above the int32 range on update, without touching the database', async () => {
+    await expect(updateGoogleApp('app-1', { userLimit: 2147483648 })).rejects.toMatchObject({ code: 'user_limit_invalid' });
+    expect(query).not.toHaveBeenCalled();
   });
 
   it('deletes only an app without mailboxes', async () => {

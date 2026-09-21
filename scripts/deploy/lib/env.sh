@@ -1,0 +1,132 @@
+# shellcheck shell=bash
+# KEY=VALUE files: <prefix>/.env, <prefix>/edge/.env and <prefix>/install.conf. They are parsed,
+# never sourced. A value is one token (no whitespace, quotes, '$', '#' or backslash), so docker
+# compose reads it verbatim.
+
+# Generated on the host, written once, never replaced: ENCRYPTION_KEY decrypts stored mailbox
+# credentials, DB_PASSWORD is baked into the PostgreSQL volume, the VAPID pair backs every push
+# subscription, SESSION_SECRET signs sessions.
+# shellcheck disable=SC2034 # read by install.sh and tests
+GENERATED_SECRET_KEYS=(SESSION_SECRET ENCRYPTION_KEY DB_PASSWORD VAPID_PUBLIC_KEY VAPID_PRIVATE_KEY)
+
+env_value_ok() {
+  case $1 in
+    *[[:space:]]* | *[\'\"\$\#\\]*) return 1 ;;
+  esac
+  return 0
+}
+
+# env_get <file> <key>: prints the value; status 1 when the file or the key is absent.
+env_get() {
+  local file=$1 key=$2 line
+  [ -f "$file" ] || return 1
+  while IFS= read -r line || [ -n "$line" ]; do
+    case $line in
+      "$key="*)
+        printf '%s\n' "${line#"$key="}"
+        return 0
+        ;;
+    esac
+  done <"$file"
+  return 1
+}
+
+# env_set <file> <key> <value>: adds or replaces one key, other lines stay as they are. The file
+# is replaced atomically and keeps mode 0600.
+env_set() {
+  local file=$1 key=$2 value=$3 tmp line found=0 current
+  env_value_ok "$value" || die "$key: the value must be one token without spaces, quotes, \$, # or backslash"
+  if current=$(env_get "$file" "$key") && [ "$current" = "$value" ]; then
+    return 0
+  fi
+  tmp=$(mktemp "$file.XXXXXX") || die "cannot write next to $file"
+  chmod 600 "$tmp"
+  if [ -f "$file" ]; then
+    while IFS= read -r line || [ -n "$line" ]; do
+      case $line in
+        "$key="*)
+          if [ "$found" = 0 ]; then
+            printf '%s=%s\n' "$key" "$value"
+            found=1
+          fi
+          ;;
+        *) printf '%s\n' "$line" ;;
+      esac
+    done <"$file" >"$tmp"
+  fi
+  if [ "$found" = 0 ]; then
+    printf '%s=%s\n' "$key" "$value" >>"$tmp"
+  fi
+  mv -f "$tmp" "$file"
+}
+
+# env_ensure_secret <file> <key> <value>: writes only an absent or empty key. The same value is
+# a no-op; a different value returns 2 and leaves the file untouched.
+env_ensure_secret() {
+  local file=$1 key=$2 value=$3 current
+  current=$(env_get "$file" "$key") || current=
+  if [ -z "$current" ]; then
+    env_set "$file" "$key" "$value"
+    return 0
+  fi
+  [ "$current" = "$value" ] && return 0
+  log "$key already has a different value in $file; generated secrets are never replaced"
+  return 2
+}
+
+# env_fill_missing <file> <key> <generator...>: runs the generator only for an absent or empty
+# key and stores its output.
+env_fill_missing() {
+  local file=$1 key=$2 current value
+  shift 2
+  current=$(env_get "$file" "$key") || current=
+  [ -z "$current" ] || return 0
+  value=$("$@") || die "could not generate $key"
+  [ -n "$value" ] || die "could not generate $key"
+  env_set "$file" "$key" "$value"
+  log "generated $key"
+}
+
+# env_missing <file> <key...>: prints each key that is absent or empty.
+env_missing() {
+  local file=$1 key value
+  shift
+  for key in "$@"; do
+    value=$(env_get "$file" "$key") || value=
+    [ -n "$value" ] || printf '%s\n' "$key"
+  done
+}
+
+# gen_vapid_pair: "<public> <private>" from web-push inside the backend image ($BACKEND_IMAGE),
+# without network access. Tests replace this function.
+gen_vapid_pair() {
+  docker run --rm --network none --entrypoint node "$BACKEND_IMAGE" -e \
+    "const k = require('web-push').generateVAPIDKeys(); console.log(k.publicKey + ' ' + k.privateKey)"
+}
+
+# ensure_vapid <file>: generates the pair when both keys are missing. One key without the other
+# is an error: half a pair is restored from a backup, never regenerated.
+ensure_vapid() {
+  local file=$1 pub priv pair
+  pub=$(env_get "$file" VAPID_PUBLIC_KEY) || pub=
+  priv=$(env_get "$file" VAPID_PRIVATE_KEY) || priv=
+  if [ -n "$pub" ] && [ -n "$priv" ]; then return 0; fi
+  if [ -n "$pub" ] || [ -n "$priv" ]; then
+    die "$file has only one of VAPID_PUBLIC_KEY and VAPID_PRIVATE_KEY; restore the pair from a backup"
+  fi
+  pair=$(gen_vapid_pair) || die "could not generate VAPID keys"
+  read -r pub priv <<<"$pair"
+  if [ -z "$pub" ] || [ -z "$priv" ]; then die "could not generate VAPID keys"; fi
+  env_set "$file" VAPID_PUBLIC_KEY "$pub"
+  env_set "$file" VAPID_PRIVATE_KEY "$priv"
+  log "generated VAPID_PUBLIC_KEY and VAPID_PRIVATE_KEY"
+}
+
+# generate_app_secrets <file>: every generated secret that is still missing.
+generate_app_secrets() {
+  local file=$1
+  env_fill_missing "$file" SESSION_SECRET gen_hex 32
+  env_fill_missing "$file" ENCRYPTION_KEY gen_hex 32
+  env_fill_missing "$file" DB_PASSWORD gen_hex 24
+  ensure_vapid "$file"
+}

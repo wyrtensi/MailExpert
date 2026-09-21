@@ -1,0 +1,28 @@
+# Rendered by scripts/deploy/install.sh from deploy/edge/Caddyfile.tmpl; edits here are
+# overwritten on the next run. The admin API is off: a restart of the caddy container applies
+# a changed file.
+{
+	admin off
+	@GLOBAL_EMAIL@
+}
+
+@SITE@ {
+	tls {
+		@TLS_ISSUER@
+	}
+
+	@app host @DIRECT_HOST@
+	handle @app {
+		reverse_proxy 127.0.0.1:@HTTP_PORT@
+	}
+
+	# Any other name covered by the certificate: drop the connection.
+	handle {
+		abort
+	}
+
+	# The panel is stopped for an update or a move.
+	handle_errors 502 503 504 {
+		respond "MailExpert is being updated or moved. Try again in a few minutes." 503
+	}
+}

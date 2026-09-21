@@ -1,0 +1,36 @@
+# Edge of a MailExpert host: Caddy terminates TLS for <DIRECT_HOST>, cloudflared connects the
+# Cloudflare tunnel for <CF_HOST>. Both use the host network and reach the panel on
+# 127.0.0.1:<APP_HTTP_PORT>.
+#
+# A compose project of its own (default name "edge"): it outlives panel updates and, on a
+# single server, will also front the mail node. install.sh copies this file to <prefix>/edge/
+# and writes <prefix>/edge/.env: COMPOSE_PROJECT_NAME, COMPOSE_PROFILES (caddy, tunnel),
+# EDGE_IMAGE (pinned by digest), and the secrets from configure.sh (DNS_API_TOKEN,
+# TUNNEL_TOKEN). The public hostname of the tunnel (<CF_HOST> -> http://127.0.0.1:<port>) is
+# set in Cloudflare Zero Trust, not here.
+
+services:
+  caddy:
+    profiles: ["caddy"]
+    image: ${EDGE_IMAGE:?set EDGE_IMAGE; install.sh pins it}
+    restart: unless-stopped
+    network_mode: host
+    environment:
+      DNS_API_TOKEN: ${DNS_API_TOKEN:-}
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data
+      - caddy_config:/config
+
+  cloudflared:
+    profiles: ["tunnel"]
+    image: cloudflare/cloudflared:2026.9.1
+    restart: unless-stopped
+    network_mode: host
+    command: ["tunnel", "--no-autoupdate", "run"]
+    environment:
+      TUNNEL_TOKEN: ${TUNNEL_TOKEN:-}
+
+volumes:
+  caddy_data:
+  caddy_config:

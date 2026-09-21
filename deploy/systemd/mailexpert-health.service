@@ -1,0 +1,8 @@
+[Unit]
+Description=MailExpert health check
+Wants=docker.service
+After=docker.service
+
+[Service]
+Type=oneshot
+ExecStart=@PREFIX@/app/scripts/deploy/healthcheck.sh --prefix @PREFIX@

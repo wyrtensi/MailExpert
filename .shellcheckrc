@@ -1,0 +1,4 @@
+# Follow `source` directives to files that are not on the command line, relative to the
+# sourcing script's directory (scripts/deploy/lib from scripts/deploy/*.sh).
+external-sources=true
+source-path=SCRIPTDIR

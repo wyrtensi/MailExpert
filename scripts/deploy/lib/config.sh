@@ -1,0 +1,295 @@
+# shellcheck shell=bash
+# install.sh input: flags, <prefix>/install.conf, validation and everything derived from the
+# sign-in mode. Pure functions: no Docker, no network, no writes except the file passed in.
+
+# install.conf keys, in the order they are written. --prefix and --no-start are per run.
+INSTALL_CONF_KEYS=(VERSION SIGNIN CF_HOST DIRECT_HOST ADMIN_EMAILS LOCAL_AUTH EDGE EDGE_TLS
+  ACME_EMAIL PROJECT EDGE_PROJECT HTTP_PORT IMAGE_PREFIX REPO_URL SYSTEM)
+declare -gA INSTALL_ARGS=()
+
+# shellcheck disable=SC2034 # the CFG_* and OPT_* globals are read by install.sh and edge.sh
+install_defaults() {
+  CFG_VERSION='' CFG_SIGNIN='' CFG_CF_HOST='' CFG_DIRECT_HOST='' CFG_ADMIN_EMAILS='' CFG_ACME_EMAIL=''
+  CFG_LOCAL_AUTH=0 CFG_EDGE=1 CFG_EDGE_TLS=acme CFG_SYSTEM=1
+  CFG_PROJECT=mailexpert CFG_EDGE_PROJECT=edge CFG_HTTP_PORT=8080
+  CFG_IMAGE_PREFIX=ghcr.io/wyrtensi CFG_REPO_URL=https://github.com/wyrtensi/MailExpert.git
+  OPT_PREFIX=/opt/mailexpert OPT_START=1
+}
+
+# flag_key --cf-host -> CF_HOST; --admin-email -> ADMIN_EMAILS
+flag_key() {
+  local key=${1#--}
+  key=${key//-/_}
+  key=${key^^}
+  if [ "$key" = ADMIN_EMAIL ]; then key=ADMIN_EMAILS; fi
+  printf '%s\n' "$key"
+}
+
+parse_install_args() {
+  INSTALL_ARGS=()
+  while [ $# -gt 0 ]; do
+    case $1 in
+      --version | --signin | --cf-host | --direct-host | --admin-email | --acme-email | --edge-tls | \
+        --project | --edge-project | --http-port | --image-prefix | --repo-url | --prefix)
+        if [ $# -lt 2 ] || [ -z "$2" ] || [[ $2 == --* ]]; then die "$1 needs a value" 2; fi
+        INSTALL_ARGS[$(flag_key "$1")]=$2
+        shift 2
+        ;;
+      --local-auth) INSTALL_ARGS[LOCAL_AUTH]=1 && shift ;;
+      --no-edge) INSTALL_ARGS[EDGE]=0 && shift ;;
+      --no-system) INSTALL_ARGS[SYSTEM]=0 && shift ;;
+      --no-start) INSTALL_ARGS[START]=0 && shift ;;
+      -h | --help) INSTALL_ARGS[HELP]=1 && shift ;;
+      *) die "unknown option: $1 (see --help)" 2 ;;
+    esac
+  done
+}
+
+# resolve_install_config <install.conf>: defaults, then the file, then the flags.
+resolve_install_config() {
+  local conf=$1 key value
+  install_defaults
+  for key in "${INSTALL_CONF_KEYS[@]}"; do
+    if [ -n "${INSTALL_ARGS[$key]+set}" ]; then
+      value=${INSTALL_ARGS[$key]}
+    elif ! value=$(env_get "$conf" "$key"); then
+      continue
+    fi
+    printf -v "CFG_$key" '%s' "$value"
+  done
+  for key in PREFIX START; do
+    if [ -n "${INSTALL_ARGS[$key]+set}" ]; then printf -v "OPT_$key" '%s' "${INSTALL_ARGS[$key]}"; fi
+  done
+  CFG_CF_HOST=${CFG_CF_HOST,,}
+  CFG_DIRECT_HOST=${CFG_DIRECT_HOST,,}
+  CFG_ADMIN_EMAILS=${CFG_ADMIN_EMAILS,,}
+  CFG_ADMIN_EMAILS=${CFG_ADMIN_EMAILS// /}
+  CFG_ACME_EMAIL=${CFG_ACME_EMAIL,,}
+}
+
+write_install_conf() {
+  local file=$1 key var
+  for key in "${INSTALL_CONF_KEYS[@]}"; do
+    var=CFG_$key
+    env_set "$file" "$key" "${!var}"
+  done
+}
+
+# validate_install_config: prints every problem, returns 2 if there is any.
+validate_install_config() {
+  local -a errors=() emails=()
+  local email
+  [[ $CFG_VERSION =~ ^sha-[0-9a-f]{12}$ ]] ||
+    errors+=("--version must be sha-<first 12 hex characters of the commit>")
+  case $CFG_SIGNIN in
+    cf | direct | both) ;;
+    *) errors+=("--signin must be cf, direct or both") ;;
+  esac
+  if [[ $CFG_SIGNIN == cf || $CFG_SIGNIN == both ]] && ! is_hostname "$CFG_CF_HOST"; then
+    errors+=("--cf-host must be a host name such as app.example.com")
+  fi
+  if [[ $CFG_SIGNIN == direct || $CFG_SIGNIN == both ]] && ! is_hostname "$CFG_DIRECT_HOST"; then
+    errors+=("--direct-host must be a host name such as app.example.com")
+  fi
+  if [ "$CFG_SIGNIN" = both ] && [ -n "$CFG_CF_HOST" ] && [ "$CFG_CF_HOST" = "$CFG_DIRECT_HOST" ]; then
+    errors+=("--cf-host and --direct-host must differ")
+  fi
+  if [ -n "$CFG_ADMIN_EMAILS" ]; then
+    IFS=, read -r -a emails <<<"$CFG_ADMIN_EMAILS"
+    for email in "${emails[@]}"; do
+      is_email "$email" || errors+=("--admin-email: '$email' is not an email address")
+    done
+  elif [ "$CFG_LOCAL_AUTH" != 1 ]; then
+    errors+=("--admin-email is required with Google sign-in: these accounts become the first admins")
+  fi
+  if [ -n "$CFG_ACME_EMAIL" ] && ! is_email "$CFG_ACME_EMAIL"; then
+    errors+=("--acme-email: not an email address")
+  fi
+  case $CFG_EDGE_TLS in
+    acme | internal) ;;
+    *) errors+=("--edge-tls must be acme or internal") ;;
+  esac
+  [[ $CFG_LOCAL_AUTH =~ ^[01]$ && $CFG_EDGE =~ ^[01]$ && $CFG_SYSTEM =~ ^[01]$ ]] ||
+    errors+=("install.conf: LOCAL_AUTH, EDGE and SYSTEM must be 0 or 1")
+  is_name "$CFG_PROJECT" || errors+=("--project must be lowercase letters, digits, '-' or '_'")
+  is_name "$CFG_EDGE_PROJECT" || errors+=("--edge-project must be lowercase letters, digits, '-' or '_'")
+  [ "$CFG_PROJECT" != "$CFG_EDGE_PROJECT" ] || errors+=("--project and --edge-project must differ")
+  is_port "$CFG_HTTP_PORT" || errors+=("--http-port must be a port from 1024 to 65535")
+  [[ $CFG_IMAGE_PREFIX =~ ^[a-z0-9][a-z0-9._:/-]*[a-z0-9]$ ]] || errors+=("--image-prefix is not an image repository prefix")
+  if [ -z "$CFG_REPO_URL" ] || ! env_value_ok "$CFG_REPO_URL"; then errors+=("--repo-url is empty or has spaces"); fi
+  [[ $OPT_PREFIX =~ ^/[A-Za-z0-9._/-]+$ ]] || errors+=("--prefix must be an absolute path without spaces")
+  if [ "${#errors[@]}" -gt 0 ]; then
+    printf '[mailexpert] error: %s\n' "${errors[@]}" >&2
+    return 2
+  fi
+}
+
+# app_settings: the non-secret .env keys install.sh owns, as KEY=VALUE lines. They follow the
+# configuration on every run.
+app_settings() {
+  local url='' alt='' auth=google
+  case $CFG_SIGNIN in
+    cf) url=https://$CFG_CF_HOST ;;
+    direct) url=https://$CFG_DIRECT_HOST ;;
+    both) url=https://$CFG_CF_HOST alt=https://$CFG_DIRECT_HOST ;;
+  esac
+  if [ "$CFG_LOCAL_AUTH" = 1 ]; then auth=local; fi
+  printf '%s\n' \
+    "MAILEXPERT_VERSION=$CFG_VERSION" \
+    "MAILEXPERT_IMAGE_PREFIX=$CFG_IMAGE_PREFIX" \
+    "COMPOSE_PROJECT_NAME=$CFG_PROJECT" \
+    "APP_HTTP_PORT=$CFG_HTTP_PORT" \
+    "APP_URL=$url" \
+    "APP_ALT_URLS=$alt" \
+    "AUTH_MODE=$auth" \
+    "BOOTSTRAP_ADMIN_EMAILS=$CFG_ADMIN_EMAILS" \
+    "GOOGLE_REDIRECT_URI=$url/oauth/google/callback"
+}
+
+# edge_services: the edge services this install runs, one per line.
+edge_services() {
+  [ "$CFG_EDGE" = 1 ] || return 0
+  case $CFG_SIGNIN in
+    direct) echo caddy ;;
+    cf) echo cloudflared ;;
+    both) printf '%s\n' caddy cloudflared ;;
+  esac
+}
+
+# edge_profiles: COMPOSE_PROFILES for deploy/edge/compose.yml.
+edge_profiles() {
+  edge_services | sed 's/^cloudflared$/tunnel/' | paste -sd, -
+}
+
+# required_owner_secrets: "<app|edge> <KEY>" lines that configure.sh must provide.
+required_owner_secrets() {
+  local caddy=0 tunnel=0
+  if [ "$CFG_EDGE" = 1 ]; then
+    case $CFG_SIGNIN in
+      direct) caddy=1 ;;
+      cf) tunnel=1 ;;
+      both) caddy=1 tunnel=1 ;;
+    esac
+  fi
+  if [ "$tunnel" = 1 ]; then echo "edge TUNNEL_TOKEN"; fi
+  if [ "$caddy" = 1 ] && [ "$CFG_EDGE_TLS" = acme ]; then echo "edge DNS_API_TOKEN"; fi
+  if [ "$CFG_LOCAL_AUTH" != 1 ]; then
+    if [[ $CFG_SIGNIN == cf || $CFG_SIGNIN == both ]]; then
+      printf '%s\n' "app CF_ACCESS_ISSUER" "app CF_ACCESS_AUDIENCE"
+    fi
+    if [[ $CFG_SIGNIN == direct || $CFG_SIGNIN == both ]]; then
+      printf '%s\n' "app AUTH_GOOGLE_CLIENT_ID" "app AUTH_GOOGLE_CLIENT_SECRET"
+    fi
+  fi
+  return 0
+}
+
+# ssh_ports <listening SSH ports> <ports from `sshd -T`> <$SSH_CONNECTION>: 22, the ports an SSH
+# daemon listens on, the configured sshd ports and the server port of the current SSH session.
+# Enabling ufw without them locks the owner out.
+ssh_ports() {
+  {
+    echo 22
+    tr -s ' \t' '\n' <<<"$1"
+    tr -s ' \t' '\n' <<<"$2"
+    if [ -n "$3" ]; then echo "${3##* }"; fi
+  } | grep -E '^[0-9]{1,5}$' | sort -nu
+}
+
+# ss_ssh_ports: reads `ss -ltnpH` on stdin and prints each port a process named sshd listens on
+# (also when it shares the socket with systemd).
+ss_ssh_ports() {
+  local laddr rest
+  while read -r _ _ _ laddr _ rest; do
+    [[ $rest == *'("sshd",'* ]] || continue
+    printf '%s\n' "${laddr##*:}"
+  done | grep -E '^[0-9]{1,5}$' | sort -nu || true
+}
+
+# socket_listen_ports: reads the Listen property of ssh.socket (`systemctl show -p Listen`, with
+# or without --value) on stdin and prints its TCP ports. Unix sockets are skipped.
+socket_listen_ports() {
+  grep -oE '[^[:space:]=]+ \(Stream\)' | sed -E 's/ \(Stream\)$//; s/.*://' |
+    grep -E '^[0-9]{1,5}$' | sort -nu || true
+}
+
+# ufw_enable_safe <ufw active 0|1> <listening SSH ports> <allowed SSH port...>: status 0 when
+# ufw may be enabled: it is active already, or one of the allowed ports has an SSH listener.
+ufw_enable_safe() {
+  local active=$1 listening=$2 port
+  shift 2
+  [ "$active" = 1 ] && return 0
+  for port in "$@"; do
+    grep -qx "$port" <<<"$listening" && return 0
+  done
+  return 1
+}
+
+# ufw_rules_cover_port <port>: reads `ufw status` and/or `ufw show added` on stdin; status 0 when
+# any rule names the port, alone, in a list or in a range (the OpenSSH profile counts as 22).
+ufw_rules_cover_port() {
+  local port=$1 line token item
+  local -a tokens
+  while read -r line; do
+    case $line in 'Status:'* | 'Added user rules'* | 'To '* | '--'*) continue ;; esac
+    read -r -a tokens <<<"$line"
+    for token in "${tokens[@]}"; do
+      [ "$token" = OpenSSH ] && token=22
+      token=${token%/tcp}
+      token=${token%/udp}
+      [[ $token =~ ^[0-9:,]+$ ]] || continue
+      for item in ${token//,/ }; do
+        if [[ $item =~ ^([0-9]{1,5}):([0-9]{1,5})$ ]]; then
+          ((10#${BASH_REMATCH[1]} <= port && port <= 10#${BASH_REMATCH[2]})) && return 0
+        elif [[ $item =~ ^[0-9]{1,5}$ ]]; then
+          ((10#$item == port)) && return 0
+        fi
+      done
+    done
+  done
+  return 1
+}
+
+# ufw_allowed_ports <ssh port...>: inbound ufw rules, one per line.
+ufw_allowed_ports() {
+  local port
+  for port in "$@"; do printf '%s/tcp\n' "$port"; done
+  if edge_services | grep -qx caddy; then printf '%s\n' 80/tcp 443/tcp 443/udp; fi
+}
+
+# port_conflicts <port...>: reads `ss -ltnpH` on stdin and prints "<port> <process>" for each
+# listed port held by anything but the edge's own caddy.
+port_conflicts() {
+  local want=" $* " laddr rest port proc
+  while read -r _ _ _ laddr _ rest; do
+    port=${laddr##*:}
+    case $want in
+      *" $port "*) ;;
+      *) continue ;;
+    esac
+    proc=$(sed -n 's/.*users:(("\([^"]*\)".*/\1/p' <<<"$rest")
+    [ "$proc" = caddy ] && continue
+    printf '%s %s\n' "$port" "${proc:-unknown}"
+  done
+}
+
+# resource_shortfalls <cpus> <MemTotal kB> <free disk kB>: one line per shortfall. A "4 GB"
+# server reports about 3.8-3.9 GB of MemTotal, hence the 3800 MB floor.
+resource_shortfalls() {
+  if [ "$1" -lt 2 ]; then echo "CPU: $1, at least 2 are needed"; fi
+  if [ "$2" -lt $((3800 * 1024)) ]; then echo "memory: $(($2 / 1024)) MB, at least 4 GB is needed"; fi
+  if [ "$3" -lt $((20 * 1024 * 1024)) ]; then echo "free disk: $(($3 / 1024 / 1024)) GB, at least 20 GB is needed"; fi
+  return 0
+}
+
+# version_matches <sha-XXXXXXXXXXXX> <full sha from /api/version>
+version_matches() {
+  [[ $1 =~ ^sha-[0-9a-f]{12}$ ]] && [ "${2:0:12}" = "${1#sha-}" ]
+}
+
+# render_unit <template> <prefix>: a systemd unit with @PREFIX@ replaced.
+render_unit() {
+  local text
+  text=$(<"$1")
+  printf '%s\n' "${text//@PREFIX@/"$2"}"
+}

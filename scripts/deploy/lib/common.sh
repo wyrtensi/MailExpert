@@ -1,0 +1,77 @@
+# shellcheck shell=bash
+# Helpers shared by the deploy scripts. Sourced, never executed.
+
+log() { printf '[mailexpert] %s\n' "$*" >&2; }
+warn() { printf '[mailexpert] warning: %s\n' "$*" >&2; }
+
+# die <message> [exit code, default 1]
+die() {
+  printf '[mailexpert] error: %s\n' "$1" >&2
+  exit "${2:-1}"
+}
+
+# exit_on_unexpected_failure: a command that fails outside `die` ends the script with 1, whatever
+# its own status (git 128, apt-get 100, jq 2): callers branch on 2 (invalid input) and 3 (waiting
+# for secrets), which only the scripts themselves return. Only the location is printed, never the
+# command, whose arguments may hold secrets.
+exit_on_unexpected_failure() {
+  set -E
+  trap 'printf "[mailexpert] error: a command failed with status %s at %s:%s\n" "$?" "${BASH_SOURCE[0]##*/}" "$LINENO" >&2; exit 1' ERR
+}
+
+# take_install_lock <state dir> <seconds> <script name>: takes <state dir>/install.lock on fd 9,
+# shared by install.sh and configure.sh, waiting up to <seconds>. flock -n in a loop instead of
+# flock -w: BusyBox flock has no timeout.
+take_install_lock() {
+  local dir=$1 timeout=$2 name=$3 waited=0
+  command -v flock >/dev/null || die "flock is required"
+  exec 9>"$dir/install.lock"
+  until flock -n 9; do
+    if [ "$waited" -eq 0 ]; then log "$name: waiting for another install.sh or configure.sh to finish"; fi
+    [ "$waited" -lt "$timeout" ] ||
+      die "$name: another install.sh or configure.sh has held $dir/install.lock for ${timeout}s; try again when it finishes"
+    sleep 1
+    waited=$((waited + 1))
+  done
+}
+
+# version_ge <a> <b>: a >= b for dotted numeric versions. A leading "v" and a "-..." or
+# "+..." suffix are ignored, so 2.24.4-desktop.1 compares as 2.24.4.
+version_ge() {
+  local a=${1#v} b=${2#v} i x y
+  local -a av bv
+  a=${a%%[-+]*}
+  b=${b%%[-+]*}
+  [[ $a =~ ^[0-9]+(\.[0-9]+)*$ && $b =~ ^[0-9]+(\.[0-9]+)*$ ]] || return 1
+  IFS=. read -r -a av <<<"$a"
+  IFS=. read -r -a bv <<<"$b"
+  for i in 0 1 2 3; do
+    x=${av[i]:-0}
+    y=${bv[i]:-0}
+    if ((10#$x > 10#$y)); then return 0; fi
+    if ((10#$x < 10#$y)); then return 1; fi
+  done
+  return 0
+}
+
+# gen_hex <bytes>: random bytes as lowercase hex, two characters per byte.
+gen_hex() {
+  head -c "$1" /dev/urandom | od -A n -v -t x1 | tr -d ' \n'
+}
+
+is_hostname() {
+  [ "${#1}" -le 253 ] && [[ $1 =~ ^([a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z]{2,63}$ ]]
+}
+
+is_email() {
+  [[ $1 =~ ^[^[:space:]@,]+@([a-z0-9-]+\.)+[a-z]{2,63}$ ]]
+}
+
+is_port() {
+  [[ $1 =~ ^[0-9]{1,5}$ ]] && [ "$1" -ge 1024 ] && [ "$1" -le 65535 ]
+}
+
+# is_name <compose project name>
+is_name() {
+  [[ $1 =~ ^[a-z0-9][a-z0-9_-]{0,62}$ ]]
+}

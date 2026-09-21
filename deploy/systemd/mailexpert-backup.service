@@ -1,0 +1,10 @@
+[Unit]
+Description=MailExpert nightly backup
+Wants=docker.service
+After=docker.service network-online.target
+
+[Service]
+Type=oneshot
+ExecStart=@PREFIX@/app/scripts/deploy/backup.sh --prefix @PREFIX@
+Nice=10
+IOSchedulingClass=idle

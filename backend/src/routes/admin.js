@@ -18,6 +18,7 @@ import { countsAsActiveAdmin, lockAdminGuard, otherActiveAdminExists } from '../
 import { closeUserSockets } from '../services/websocket.js';
 import { destroyUserSessions } from './auth.js';
 import accessSyncRoutes from './accessSync.js';
+import googleAppsAdminRoutes from './googleAppsAdmin.js';
 import { requestAccessSync } from '../services/accessSync/index.js';
 import {
   FOLDER_SYNC_INTERVAL_KEY, SYNC_INTERVAL_KEY, loadSyncSettings, parseFolderSyncIntervalSec, parseSyncIntervalSec,
@@ -28,6 +29,7 @@ router.use(requireAdmin);
 // Reject a malformed :id (user UUID) with a 400 before it reaches a uuid-typed query.
 router.param('id', uuidParam('id'));
 router.use('/access-sync', accessSyncRoutes);
+router.use('/google-apps', googleAppsAdminRoutes);
 
 // ── Users ──────────────────────────────────────────────────────────────────────
 

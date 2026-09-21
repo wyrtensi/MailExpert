@@ -117,6 +117,18 @@ describe('parseOAuthResult', () => {
     });
   }
 
+  it('maps the multi-app callback codes to their own messages', () => {
+    const cases = {
+      already_connected: 'admin.integrations.google.errorAlreadyConnected',
+      account_mismatch: 'admin.integrations.google.errorAccountMismatch',
+      no_app_capacity: 'admin.integrations.google.errorNoAppCapacity',
+    };
+    for (const [code, key] of Object.entries(cases)) {
+      const parsed = parseOAuthResult(`?oauth_error=${code}&oauth_provider=google`);
+      assert.deepEqual(parsed, { provider: 'google', status: 'error', messageKey: key });
+    }
+  });
+
   it('maps an unknown Google error code to the generic Google failure key', () => {
     for (const q of [
       'oauth_error=invalid_grant&oauth_provider=google',

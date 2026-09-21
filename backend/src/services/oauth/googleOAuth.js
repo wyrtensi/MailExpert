@@ -11,6 +11,7 @@ export const GOOGLE_ISSUERS = ['https://accounts.google.com', 'accounts.google.c
 export const GOOGLE_MAIL_SCOPE = 'https://mail.google.com/';
 export const GOOGLE_SCOPES = `openid email profile ${GOOGLE_MAIL_SCOPE}`;
 export const GOOGLE_SIGN_IN_SCOPES = 'openid email';
+export const GOOGLE_REVOKE_URL = 'https://oauth2.googleapis.com/revoke';
 
 // Errors carry a stable `code` (safe to show and to put in redirect URLs) and, when the
 // provider returned one, its OAuth error code in `oauthError`. The message never includes
@@ -187,4 +188,23 @@ export async function refreshGoogleToken(account) {
   `, [encrypt(tokens.access_token), newRefreshToken ? encrypt(newRefreshToken) : null, expiry, account.id]);
 
   return { ...account, oauth_access_token: tokens.access_token, oauth_token_expiry: expiry };
+}
+
+// Revoke a token Google issued. Best effort: it never throws, and only the HTTP status or the
+// error class is logged, so neither the token nor Google's response ends up in the logs.
+export async function revokeGoogleToken(token) {
+  if (typeof token !== 'string' || !token) return false;
+  try {
+    const res = await fetch(GOOGLE_REVOKE_URL, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+      body: new URLSearchParams({ token }),
+      signal: AbortSignal.timeout(PROVIDER_FETCH_TIMEOUT_MS),
+    });
+    if (!res.ok) console.error(`Google token revoke failed: HTTP ${res.status}`);
+    return res.ok;
+  } catch (err) {
+    console.error(`Google token revoke failed: ${err?.name || 'Error'}`);
+    return false;
+  }
 }

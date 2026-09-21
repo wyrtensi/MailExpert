@@ -33,6 +33,8 @@ const {
   refreshGoogleToken,
   hasGoogleMailScope,
   GOOGLE_MAIL_SCOPE,
+  revokeGoogleToken,
+  GOOGLE_REVOKE_URL,
 } = await import('./googleOAuth.js');
 
 const CLIENT_ID = '123456789012-abc123def456.apps.googleusercontent.com';
@@ -326,5 +328,44 @@ describe('buildGoogleSignInUrl', () => {
       code_challenge_method: 'S256',
       state: 'st',
     });
+  });
+});
+
+describe('revokeGoogleToken', () => {
+  let errorSpy;
+  beforeEach(() => { errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {}); });
+  afterEach(() => { errorSpy.mockRestore(); vi.unstubAllGlobals(); });
+
+  it('posts the token in the form body, never in the URL', async () => {
+    const fetchMock = vi.fn().mockResolvedValue({ ok: true, status: 200 });
+    vi.stubGlobal('fetch', fetchMock);
+    await expect(revokeGoogleToken('tok-123')).resolves.toBe(true);
+    const [url, init] = fetchMock.mock.calls[0];
+    expect(url).toBe(GOOGLE_REVOKE_URL);
+    expect(url).not.toContain('tok-123');
+    expect(init.method).toBe('POST');
+    expect(String(init.body)).toBe('token=tok-123');
+  });
+
+  it('returns false and logs only the status when Google refuses', async () => {
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue({ ok: false, status: 400 }));
+    await expect(revokeGoogleToken('tok-123')).resolves.toBe(false);
+    const logged = JSON.stringify(errorSpy.mock.calls);
+    expect(logged).toContain('400');
+    expect(logged).not.toContain('tok-123');
+  });
+
+  it('never throws on a network failure', async () => {
+    vi.stubGlobal('fetch', vi.fn().mockRejectedValue(new TypeError('network down tok-123')));
+    await expect(revokeGoogleToken('tok-123')).resolves.toBe(false);
+    expect(JSON.stringify(errorSpy.mock.calls)).not.toContain('tok-123');
+  });
+
+  it('does not call Google without a token', async () => {
+    const fetchMock = vi.fn();
+    vi.stubGlobal('fetch', fetchMock);
+    await expect(revokeGoogleToken(null)).resolves.toBe(false);
+    await expect(revokeGoogleToken('')).resolves.toBe(false);
+    expect(fetchMock).not.toHaveBeenCalled();
   });
 });

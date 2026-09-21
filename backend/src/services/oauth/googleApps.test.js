@@ -18,6 +18,12 @@ const {
   setGoogleAppStatus,
   importLegacyGoogleConfig,
   saveDefaultGoogleAppCompat,
+  listGoogleApps,
+  getGoogleAppSummary,
+  createGoogleApp,
+  updateGoogleApp,
+  deleteGoogleApp,
+  findKnownGoogleEmails,
 } = await import('./googleApps.js');
 
 const CLIENT_ID = '123456789012-abc123def456.apps.googleusercontent.com';
@@ -364,5 +370,117 @@ describe('saveDefaultGoogleAppCompat', () => {
     const err = await saveDefaultGoogleAppCompat({ clientId: CLIENT_ID, clientSecret: 's' }).catch((e) => e);
     expect(err.code).toBe('app_same_project');
     expect(findCall(calls, /INSERT INTO google_oauth_apps/)).toBeUndefined();
+  });
+});
+
+describe('app registry for the admin screen', () => {
+  it('lists apps with seat and mailbox counts and never selects the secret', async () => {
+    query.mockResolvedValueOnce({ rows: [{ id: 'app-1', grants_count: 3, accounts_count: 2 }] });
+    const apps = await listGoogleApps();
+    expect(apps).toEqual([{ id: 'app-1', grants_count: 3, accounts_count: 2 }]);
+    expect(query.mock.calls[0][0]).not.toMatch(/client_secret/);
+  });
+
+  it('getGoogleAppSummary reads one app by id with the same counted columns, never the secret', async () => {
+    query.mockResolvedValueOnce({ rows: [{ id: 'app-1', grants_count: 3, accounts_count: 2 }] });
+    const app = await getGoogleAppSummary('app-1');
+    expect(app).toEqual({ id: 'app-1', grants_count: 3, accounts_count: 2 });
+    const [sql, params] = query.mock.calls[0];
+    expect(sql).not.toMatch(/client_secret/);
+    expect(sql).toMatch(/\(SELECT count\(\*\) FROM google_oauth_grants g WHERE g\.app_id = a\.id\)::int AS grants_count/);
+    expect(sql).toMatch(/\(SELECT count\(\*\) FROM email_accounts e WHERE e\.oauth_app_id = a\.id\)::int AS accounts_count/);
+    expect(sql).toMatch(/WHERE a\.id = \$1/);
+    expect(params).toEqual(['app-1']);
+  });
+
+  it('getGoogleAppSummary is null when the app is missing', async () => {
+    query.mockResolvedValueOnce({ rows: [] });
+    expect(await getGoogleAppSummary('gone')).toBeNull();
+  });
+
+  it('creates an app with an encrypted secret under the registry lock', async () => {
+    const { client, calls } = scriptedClient([
+      [/pg_advisory_xact_lock/, { rows: [] }],
+      [/WHERE client_id = \$1/, { rows: [] }],
+      [/WHERE project_number = \$1/, { rows: [] }],
+      [/INSERT INTO google_oauth_apps/, (p) => ({ rows: [{ id: 'app-2', label: p[0], client_id: p[1] }] })],
+    ]);
+    withTransaction.mockImplementation(async (fn) => fn(client));
+    const created = await createGoogleApp({ label: ' Google 2 ', clientId: CLIENT_ID, clientSecret: 's3cret' });
+    expect(created).toEqual({ id: 'app-2', label: 'Google 2', client_id: CLIENT_ID });
+    const insert = calls.find(([sql]) => /INSERT INTO google_oauth_apps/.test(sql));
+    expect(insert[1]).toEqual(['Google 2', CLIENT_ID, 'enc(s3cret)', '123456789012', 100]);
+    expect(insert[0]).not.toMatch(/RETURNING[^;]*client_secret/);
+  });
+
+  it.each([
+    [{ label: '', clientId: CLIENT_ID, clientSecret: 's' }, 'label_invalid'],
+    [{ label: 'x'.repeat(101), clientId: CLIENT_ID, clientSecret: 's' }, 'label_invalid'],
+    [{ label: 'G', clientId: 'nope', clientSecret: 's' }, 'client_id_invalid'],
+    [{ label: 'G', clientId: CLIENT_ID, clientSecret: '' }, 'client_secret_required'],
+    [{ label: 'G', clientId: CLIENT_ID, clientSecret: 's', userLimit: 0 }, 'user_limit_invalid'],
+    [{ label: 'G', clientId: CLIENT_ID, clientSecret: 's', userLimit: 1.5 }, 'user_limit_invalid'],
+  ])('rejects %j with %s before touching the database', async (input, code) => {
+    await expect(createGoogleApp(input)).rejects.toMatchObject({ code });
+    expect(withTransaction).not.toHaveBeenCalled();
+  });
+
+  it('refuses a client ID already added, then a second client of the same project', async () => {
+    let { client } = scriptedClient([
+      [/pg_advisory_xact_lock/, { rows: [] }],
+      [/WHERE client_id = \$1/, { rows: [{ id: 'app-1' }] }],
+    ]);
+    withTransaction.mockImplementation(async (fn) => fn(client));
+    await expect(createGoogleApp({ label: 'G', clientId: CLIENT_ID, clientSecret: 's' })).rejects.toMatchObject({ code: 'app_exists' });
+
+    ({ client } = scriptedClient([
+      [/pg_advisory_xact_lock/, { rows: [] }],
+      [/WHERE client_id = \$1/, { rows: [] }],
+      [/WHERE project_number = \$1/, { rows: [{ id: 'app-1' }] }],
+    ]));
+    withTransaction.mockImplementation(async (fn) => fn(client));
+    await expect(createGoogleApp({ label: 'G', clientId: '123456789012-other.apps.googleusercontent.com', clientSecret: 's' }))
+      .rejects.toMatchObject({ code: 'app_same_project' });
+  });
+
+  it('updates only the fields given and keeps the secret when none is sent', async () => {
+    query.mockResolvedValueOnce({ rows: [{ id: 'app-1', label: 'Renamed' }] });
+    await updateGoogleApp('app-1', { label: 'Renamed' });
+    const [sql, params] = query.mock.calls[0];
+    expect(sql).toMatch(/COALESCE\(\$3, client_secret\)/);
+    expect(params).toEqual(['app-1', 'Renamed', null, null]);
+  });
+
+  it('encrypts a new secret on update and reports a missing app', async () => {
+    query.mockResolvedValueOnce({ rows: [] });
+    await expect(updateGoogleApp('app-9', { clientSecret: 'new' })).rejects.toMatchObject({ code: 'app_not_found' });
+    expect(query.mock.calls[0][1]).toEqual(['app-9', null, 'enc(new)', null]);
+  });
+
+  it('deletes only an app without mailboxes', async () => {
+    let { client } = scriptedClient([
+      [/FROM email_accounts WHERE oauth_app_id = \$1/, { rows: [{ n: 1 }] }],
+    ]);
+    withTransaction.mockImplementation(async (fn) => fn(client));
+    await expect(deleteGoogleApp('app-1')).rejects.toMatchObject({ code: 'app_in_use' });
+
+    ({ client } = scriptedClient([
+      [/FROM email_accounts WHERE oauth_app_id = \$1/, { rows: [{ n: 0 }] }],
+      [/DELETE FROM google_oauth_apps/, { rows: [], rowCount: 0 }],
+    ]));
+    withTransaction.mockImplementation(async (fn) => fn(client));
+    await expect(deleteGoogleApp('app-9')).rejects.toMatchObject({ code: 'app_not_found' });
+  });
+});
+
+describe('findKnownGoogleEmails', () => {
+  it('searches grants without a mailbox, escaping LIKE wildcards', async () => {
+    query.mockResolvedValueOnce({ rows: [{ email: 'a_b@gmail.com' }] });
+    await expect(findKnownGoogleEmails('A_B%')).resolves.toEqual(['a_b@gmail.com']);
+    const [sql, params] = query.mock.calls[0];
+    expect(params).toEqual(['a\\_b\\%']);
+    expect(sql).toMatch(/NOT EXISTS/);
+    expect(sql).toMatch(/LIMIT 8/);
+    expect(sql).toMatch(/ESCAPE/);
   });
 });

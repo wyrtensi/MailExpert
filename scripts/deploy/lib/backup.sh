@@ -89,6 +89,21 @@ backup_tag_ok() {
   [[ $1 =~ ^[a-z0-9][a-z0-9-]{0,31}$ ]]
 }
 
+# backup_repo_action <exit code of `restic cat config`>: what ensure_backup_repo does next.
+# open: the repository already opens (0). wrong-password: RESTIC_PASSWORD does not open it (12,
+# "wrong password", documented since restic 0.17.1) — never answered with init. init: any other
+# code, whatever the reason (no repository yet: 10; a bucket that does not exist yet: 1 with a
+# storage-specific message; a transient failure) — `restic init` refuses to touch a repository
+# that already exists, so retrying with init is always safe, and the backend-specific exit code
+# for "not there yet" does not have to be enumerated here.
+backup_repo_action() {
+  case $1 in
+    0) echo open ;;
+    12) echo wrong-password ;;
+    *) echo init ;;
+  esac
+}
+
 # --- The functions below run Docker and need app.sh (load_install or set_install_paths). ---
 
 # load_restic_env: exports the restic keys from .env. The values stay in the environment of this
@@ -126,16 +141,17 @@ restic_run() {
 # reports that it does not exist. A password that does not open an existing repository is never
 # answered with a new repository.
 ensure_backup_repo() {
-  local code=0
-  restic_run -- cat config >/dev/null 2>&1 || code=$?
-  case $code in
-    0) log "backups: the restic repository opens" ;;
-    10)
+  local code=0 probe_err init_err init_code=0
+  probe_err=$(restic_run -- cat config 2>&1 >/dev/null) || code=$?
+  case $(backup_repo_action "$code") in
+    open) log "backups: the restic repository opens" ;;
+    wrong-password) die "RESTIC_PASSWORD does not open the repository in RESTIC_REPOSITORY; configure.sh never replaces it: correct it in $ENV_FILE by hand" ;;
+    init)
       log "backups: creating the restic repository"
-      restic_run -- init --repository-version 2 >/dev/null
+      init_err=$(restic_run -- init --repository-version 2 2>&1 >/dev/null) || init_code=$?
+      [ "$init_code" = 0 ] ||
+        die "the restic repository could not be opened or created; probe (restic exit $code): $(tail -n 1 <<<"$probe_err"); init (restic exit $init_code): $(tail -n 1 <<<"$init_err")"
       ;;
-    12) die "RESTIC_PASSWORD does not open the repository in RESTIC_REPOSITORY; configure.sh never replaces it: correct it in $ENV_FILE by hand" ;;
-    *) die "the restic repository is not reachable (restic exit $code): check RESTIC_REPOSITORY and the S3 keys" ;;
   esac
 }
 

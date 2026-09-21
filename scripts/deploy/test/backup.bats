@@ -85,3 +85,11 @@ setup() {
     [ "$status" -eq 1 ]
   done
 }
+
+@test "backup_repo_action: open only on 0, wrong-password only on 12 (restic's documented code since 0.17.1), otherwise init" {
+  [ "$(backup_repo_action 0)" = open ]
+  [ "$(backup_repo_action 12)" = wrong-password ]
+  for code in 1 2 3 10 11 99; do
+    [ "$(backup_repo_action "$code")" = init ]
+  done
+}

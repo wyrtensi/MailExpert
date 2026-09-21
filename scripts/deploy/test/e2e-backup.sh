@@ -166,16 +166,18 @@ expect_exit 0 deploy install.sh --prefix "$A"
   fail "a rerun: repository, recovery key or a re-init"
 pass "repository created; recovery key shown on request, then never again; a rerun does not re-init"
 
-# 3b. A wrong RESTIC_PASSWORD is refused without ever touching restic init: ensure_backup_repo
+# 3b. A wrong RESTIC_PASSWORD is reported without ever touching restic init: ensure_backup_repo
 # treats restic's wrong-password exit code (12) specially and never creates a repository it
-# cannot read the existing one of.
+# cannot read the existing one of. A is running already, so it is a warning, not a failure: a
+# rerun (or an update) never turns a running panel into a failed install over the repository.
 cp -p "$A/.env" "$A/.env.keep"
 env_set "$A/.env" RESTIC_PASSWORD "$(gen_hex 24)"
-expect_exit 1 deploy install.sh --prefix "$A"
+expect_exit 0 deploy install.sh --prefix "$A"
 mv -f "$A/.env.keep" "$A/.env"
-[[ $OUT == *RESTIC_PASSWORD* ]] || fail "a wrong RESTIC_PASSWORD was not reported"
+[[ $OUT == *"warning: backups: RESTIC_PASSWORD does not open"* ]] || fail "a wrong RESTIC_PASSWORD was not reported as a warning"
 [[ $OUT != *"creating the restic repository"* ]] || fail "a wrong RESTIC_PASSWORD triggered init"
-pass "a wrong RESTIC_PASSWORD is refused without touching the repository"
+on "$A" panel_ready || fail "A is not ready after the rerun with a wrong RESTIC_PASSWORD"
+pass "a wrong RESTIC_PASSWORD on a running server is a warning and leaves the repository alone"
 
 # 4. Test data: a user and a mailbox whose password is encrypted with A's ENCRYPTION_KEY.
 cipher=$(credential "$A" encrypt)

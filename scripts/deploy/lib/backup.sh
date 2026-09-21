@@ -23,6 +23,9 @@ BACKUP_MAX_AGE=$((26 * 3600))
 # a short hiccup (retries after about 1, 2, 4, 8 and 16 s) before a first install moves on to
 # `restic init`, which creates the bucket.
 RESTIC_PROBE_TIMEOUT=30
+# How long ensure_backup_repo's `restic init` may take: the same 15-minute retries apply to it.
+# Creating a repository is a handful of small writes.
+RESTIC_INIT_TIMEOUT=60
 
 # restic_repository_ok <url>: s3:https://<endpoint>/<bucket>[/<path>]; plain http only on the
 # loopback (MinIO in the e2e test).
@@ -138,6 +141,16 @@ backup_repo_action() {
   esac
 }
 
+# backup_setup_failure <repository set up here before 0|1> <panel running before this run 0|1>:
+# what a repository that neither opens nor can be created means for install.sh. fatal on the first
+# setup of a server that was not running (a new install: the owner is there to fix the keys);
+# otherwise a warning: the panel already runs (an update, a rollback, a rerun), and a storage
+# hiccup must not turn a ready panel into a rollback or a stopped one. The nightly backup and the
+# health check report a repository that stays broken.
+backup_setup_failure() {
+  if [ "$1" = 1 ] || [ "$2" = 1 ]; then echo warning; else echo fatal; fi
+}
+
 # restic_error_summary: one line of restic's stderr (on stdin) for an error message: the first
 # "returned error, retrying" line when restic retried, since it names the backend's own reason
 # where the last line of a run cut off by a timeout only says "context canceled"; else the last
@@ -194,19 +207,26 @@ restic_run() {
 
 # ensure_backup_repo: opens the repository, creating it (format v2, compressed) only when restic
 # reports that it does not exist. A password that does not open an existing repository is never
-# answered with a new repository. The probe is bounded by RESTIC_PROBE_TIMEOUT, so a bucket that
-# does not exist yet costs seconds instead of restic's 15 minutes of retries.
+# answered with a new repository. The probe and init are bounded by RESTIC_PROBE_TIMEOUT and
+# RESTIC_INIT_TIMEOUT, so a bucket that does not exist yet, or storage that does not answer, costs
+# seconds instead of restic's 15 minutes of retries. Status 1 with the problem on stdout when the
+# repository neither opens nor can be created: the caller decides whether that stops it.
 ensure_backup_repo() {
   local code=0 probe_err init_err init_code=0
   probe_err=$(restic_run -t "$RESTIC_PROBE_TIMEOUT" -- cat config 2>&1 >/dev/null) || code=$?
   case $(backup_repo_action "$code") in
     open) log "backups: the restic repository opens" ;;
-    wrong-password) die "RESTIC_PASSWORD does not open the repository in RESTIC_REPOSITORY; configure.sh never replaces it: correct it in $ENV_FILE by hand" ;;
+    wrong-password)
+      echo "RESTIC_PASSWORD does not open the repository in RESTIC_REPOSITORY; configure.sh never replaces it: correct it in $ENV_FILE by hand"
+      return 1
+      ;;
     init)
       log "backups: creating the restic repository"
-      init_err=$(restic_run -- init --repository-version 2 2>&1 >/dev/null) || init_code=$?
-      [ "$init_code" = 0 ] ||
-        die "the restic repository could not be opened or created; probe (restic exit $code): $(restic_error_summary <<<"$probe_err"); init (restic exit $init_code): $(restic_error_summary <<<"$init_err")"
+      init_err=$(restic_run -t "$RESTIC_INIT_TIMEOUT" -- init --repository-version 2 2>&1 >/dev/null) || init_code=$?
+      if [ "$init_code" != 0 ]; then
+        echo "the restic repository could not be opened or created; probe (restic exit $code): $(restic_error_summary <<<"$probe_err"); init (restic exit $init_code): $(restic_error_summary <<<"$init_err")"
+        return 1
+      fi
       ;;
   esac
 }

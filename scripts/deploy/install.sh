@@ -29,6 +29,9 @@ exit_on_unexpected_failure
 READY_TIMEOUT=${MAILEXPERT_READY_TIMEOUT:-180}
 EDGE_TIMEOUT=180
 LOCK_TIMEOUT=60
+# 1 when the panel already answered before this run changed anything (an update, a rollback, a
+# rerun): setup_backups then only warns about the repository.
+PANEL_WAS_RUNNING=0
 ORIG_ARGS=("$@")
 LOADED_HASH=$(cat "$SCRIPT_DIR/install.sh" "$SCRIPT_DIR"/lib/*.sh | sha256sum)
 
@@ -289,15 +292,24 @@ admin_notice() {
 # setup_backups: with the restic keys in .env the repository is opened (created when it does not
 # exist yet), the start of backups recorded for the health check and the recovery key shown once.
 # Without the keys the panel runs without backups: a warning here, and the health check fails
-# until the owner adds them.
+# until the owner adds them. A repository that neither opens nor can be created stops only a first
+# install (backup_setup_failure); on a server that ran already it is a warning, so an update or a
+# rollback that brought the panel up is not undone by a storage hiccup.
 setup_backups() {
+  local problem set_up=0
   if ! backup_configured "$ENV_FILE"; then
     warn "backups are off: add RESTIC_REPOSITORY, RESTIC_PASSWORD, AWS_ACCESS_KEY_ID and AWS_SECRET_ACCESS_KEY with configure.sh, then run install.sh again"
     return 0
   fi
   load_restic_env
   ensure_image "$RESTIC_IMAGE"
-  ensure_backup_repo
+  if ! problem=$(ensure_backup_repo); then
+    if [ -f "$STATE_DIR/backup-since" ]; then set_up=1; fi
+    [ "$(backup_setup_failure "$set_up" "$PANEL_WAS_RUNNING")" = warning ] || die "$problem"
+    warn "backups: $problem"
+    warn "backups: the panel runs; backups fail until this is fixed (the nightly backup and the health check report it); then run install.sh again"
+    return 0
+  fi
   if [ ! -f "$STATE_DIR/backup-since" ]; then date +%s >"$STATE_DIR/backup-since"; fi
   show_recovery_key_once
 }
@@ -318,6 +330,7 @@ main() {
   prepare_dirs
   lock_install
   load_restic_host
+  if panel_ready; then PANEL_WAS_RUNNING=1; fi
   if [ "$CFG_SYSTEM" = 1 ]; then
     check_os
     check_resources

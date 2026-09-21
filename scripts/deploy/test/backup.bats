@@ -177,3 +177,38 @@ snapshots' ]]
   [[ $output == *restic-host* ]]
   [ "$(cat "$STATE_DIR/restic-host")" = 'bad host' ]
 }
+
+@test "backup_setup_failure: fatal only on a first setup of a server that was not running" {
+  [ "$(backup_setup_failure 0 0)" = fatal ]
+  [ "$(backup_setup_failure 1 0)" = warning ]
+  [ "$(backup_setup_failure 0 1)" = warning ]
+  [ "$(backup_setup_failure 1 1)" = warning ]
+}
+
+@test "ensure_backup_repo: init runs under RESTIC_INIT_TIMEOUT; a failure is returned, not fatal" {
+  STATE_DIR=$BATS_TEST_TMPDIR
+  restic_run() {
+    printf '%s\n' "$*" >>"$BATS_TEST_TMPDIR/calls"
+    case $* in
+      *"cat config"*) return 10 ;;
+      *init*) echo 'Fatal: create repository: connection refused' >&2 && return 1 ;;
+    esac
+  }
+  RESTIC_INIT_TIMEOUT=7
+  run ensure_backup_repo
+  [ "$status" -eq 1 ]
+  [[ $output == *"could not be opened or created"* && $output == *"connection refused"* ]]
+  grep -qx -- "-t 7 -- init --repository-version 2" "$BATS_TEST_TMPDIR/calls"
+}
+
+@test "ensure_backup_repo: a wrong password is returned as a problem and never answered with init" {
+  STATE_DIR=$BATS_TEST_TMPDIR
+  restic_run() {
+    printf '%s\n' "$*" >>"$BATS_TEST_TMPDIR/calls"
+    return 12
+  }
+  run ensure_backup_repo
+  [ "$status" -eq 1 ]
+  [[ $output == *RESTIC_PASSWORD* ]]
+  ! grep -q init "$BATS_TEST_TMPDIR/calls"
+}

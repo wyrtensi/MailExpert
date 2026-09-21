@@ -93,3 +93,42 @@ setup() {
     [ "$(backup_repo_action "$code")" = init ]
   done
 }
+
+@test "restic_error_summary: the first retry line names the reason, else the last line" {
+  local cut_off
+  cut_off=$(printf '%s
+'     'Stat(<config/>) returned error, retrying after 659ms: Stat: The specified bucket does not exist'     'Stat(<config/>) returned error, retrying after 1.1s: Stat: The specified bucket does not exist'     'signal terminated received, cleaning up'     'Fatal: unable to open config file: context canceled'     'Is there a repository at the following location?'     's3:http://127.0.0.1:19000/b')
+  [ "$(restic_error_summary <<<"$cut_off")" =     'Stat(<config/>) returned error, retrying after 659ms: Stat: The specified bucket does not exist' ]
+  [ "$(printf 'created restic repository
+Fatal: repository master key and config already initialized
+
+' |
+    restic_error_summary)" = 'Fatal: repository master key and config already initialized' ]
+  [ "$(printf 'no newline at the end' | restic_error_summary)" = 'no newline at the end' ]
+  [ -z "$(restic_error_summary </dev/null)" ]
+}
+
+@test "restic_run: -t runs restic under the image's timeout, mounts stay in place" {
+  docker() { printf '%s
+' "$@"; }
+  STATE_DIR=$BATS_TEST_TMPDIR
+  local out
+  out=$(restic_run -t 30 -v /a:/b:ro -- cat config)
+  [[ $out == *$'/cache
+-v
+/a:/b:ro
+--entrypoint
+/usr/bin/timeout
+'"$RESTIC_IMAGE"$'
+30
+restic
+cat
+config' ]]
+  out=$(restic_run -v /a:/b -- snapshots)
+  [[ $out == *$'/cache
+-v
+/a:/b
+'"$RESTIC_IMAGE"$'
+snapshots' ]]
+  [[ $out != *timeout* ]]
+}

@@ -13,6 +13,15 @@ RESTIC_HOST=mailexpert-panel
 RESTIC_KEYS=(RESTIC_REPOSITORY RESTIC_PASSWORD AWS_ACCESS_KEY_ID AWS_SECRET_ACCESS_KEY)
 # The health check fails when the last backup is older: nightly at 03:30 plus slack.
 BACKUP_MAX_AGE=$((26 * 3600))
+# How long ensure_backup_repo's `restic cat config` may take. restic 0.18 retries a backend error
+# it does not know to be permanent with an exponential backoff for up to 15 minutes, and no option
+# changes that (cmd/restic/global.go: retry.New(be, 15*time.Minute, ...)). A bucket that does not
+# exist yet is such an error: the S3 backend counts only NoSuchKey, InvalidRange and AccessDenied
+# as permanent (internal/backend/s3/s3.go IsPermanentError), not NoSuchBucket, so every first
+# install would wait out the 15 minutes. A healthy probe is a few round trips; 30 s still rides out
+# a short hiccup (retries after about 1, 2, 4, 8 and 16 s) before a first install moves on to
+# `restic init`, which creates the bucket.
+RESTIC_PROBE_TIMEOUT=30
 
 # restic_repository_ok <url>: s3:https://<endpoint>/<bucket>[/<path>]; plain http only on the
 # loopback (MinIO in the e2e test).
@@ -92,16 +101,32 @@ backup_tag_ok() {
 # backup_repo_action <exit code of `restic cat config`>: what ensure_backup_repo does next.
 # open: the repository already opens (0). wrong-password: RESTIC_PASSWORD does not open it (12,
 # "wrong password", documented since restic 0.17.1) — never answered with init. init: any other
-# code, whatever the reason (no repository yet: 10; a bucket that does not exist yet: 1 with a
-# storage-specific message; a transient failure) — `restic init` refuses to touch a repository
-# that already exists, so retrying with init is always safe, and the backend-specific exit code
-# for "not there yet" does not have to be enumerated here.
+# code, whatever the reason (an empty bucket: 10; a bucket that does not exist yet: the probe
+# cut off by RESTIC_PROBE_TIMEOUT, 1 with "context canceled"; a transient failure) — `restic init`
+# refuses to touch a repository that already exists, so retrying with init is always safe, and the
+# backend-specific exit code for "not there yet" does not have to be enumerated here.
 backup_repo_action() {
   case $1 in
     0) echo open ;;
     12) echo wrong-password ;;
     *) echo init ;;
   esac
+}
+
+# restic_error_summary: one line of restic's stderr (on stdin) for an error message: the first
+# "returned error, retrying" line when restic retried, since it names the backend's own reason
+# where the last line of a run cut off by a timeout only says "context canceled"; else the last
+# non-empty line.
+restic_error_summary() {
+  local line last='' first_retry=''
+  while IFS= read -r line || [ -n "$line" ]; do
+    [ -n "$line" ] || continue
+    last=$line
+    if [ -z "$first_retry" ] && [[ $line == *" returned error, retrying after "* ]]; then
+      first_retry=$line
+    fi
+  done
+  printf '%s\n' "${first_retry:-$last}"
 }
 
 # --- The functions below run Docker and need app.sh (load_install or set_install_paths). ---
@@ -120,13 +145,18 @@ load_restic_env() {
   done
 }
 
-# restic_run [-v <host path>:<container path>[:ro]]... -- <restic arguments>: restic in its
-# pinned container on the host network (the repository may be on the loopback), with its cache
-# in state/restic-cache.
+# restic_run [-t <seconds>] [-v <host path>:<container path>[:ro]]... -- <restic arguments>:
+# restic in its pinned container on the host network (the repository may be on the loopback),
+# with its cache in state/restic-cache. -t: the image's BusyBox timeout sends restic SIGTERM after
+# <seconds>; restic cancels its requests and exits non-zero, and --rm removes the container.
 restic_run() {
-  local -a mounts=()
-  while [ "${1:-}" = -v ]; do
-    mounts+=(-v "$2")
+  local -a mounts=() run=("$RESTIC_IMAGE")
+  while :; do
+    case ${1:-} in
+      -v) mounts+=(-v "$2") ;;
+      -t) run=(--entrypoint /usr/bin/timeout "$RESTIC_IMAGE" "$2" restic) ;;
+      *) break ;;
+    esac
     shift 2
   done
   [ "${1:-}" = -- ] || die "restic_run: -- expected before the restic arguments"
@@ -134,15 +164,16 @@ restic_run() {
   mkdir -p "$STATE_DIR/restic-cache"
   docker run --rm --network host \
     -e RESTIC_REPOSITORY -e RESTIC_PASSWORD -e AWS_ACCESS_KEY_ID -e AWS_SECRET_ACCESS_KEY -e AWS_DEFAULT_REGION \
-    -e RESTIC_CACHE_DIR=/cache -v "$STATE_DIR/restic-cache:/cache" "${mounts[@]}" "$RESTIC_IMAGE" "$@"
+    -e RESTIC_CACHE_DIR=/cache -v "$STATE_DIR/restic-cache:/cache" "${mounts[@]}" "${run[@]}" "$@"
 }
 
 # ensure_backup_repo: opens the repository, creating it (format v2, compressed) only when restic
 # reports that it does not exist. A password that does not open an existing repository is never
-# answered with a new repository.
+# answered with a new repository. The probe is bounded by RESTIC_PROBE_TIMEOUT, so a bucket that
+# does not exist yet costs seconds instead of restic's 15 minutes of retries.
 ensure_backup_repo() {
   local code=0 probe_err init_err init_code=0
-  probe_err=$(restic_run -- cat config 2>&1 >/dev/null) || code=$?
+  probe_err=$(restic_run -t "$RESTIC_PROBE_TIMEOUT" -- cat config 2>&1 >/dev/null) || code=$?
   case $(backup_repo_action "$code") in
     open) log "backups: the restic repository opens" ;;
     wrong-password) die "RESTIC_PASSWORD does not open the repository in RESTIC_REPOSITORY; configure.sh never replaces it: correct it in $ENV_FILE by hand" ;;
@@ -150,7 +181,7 @@ ensure_backup_repo() {
       log "backups: creating the restic repository"
       init_err=$(restic_run -- init --repository-version 2 2>&1 >/dev/null) || init_code=$?
       [ "$init_code" = 0 ] ||
-        die "the restic repository could not be opened or created; probe (restic exit $code): $(tail -n 1 <<<"$probe_err"); init (restic exit $init_code): $(tail -n 1 <<<"$init_err")"
+        die "the restic repository could not be opened or created; probe (restic exit $code): $(restic_error_summary <<<"$probe_err"); init (restic exit $init_code): $(restic_error_summary <<<"$init_err")"
       ;;
   esac
 }

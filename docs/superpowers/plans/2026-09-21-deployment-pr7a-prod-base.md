@@ -20,7 +20,7 @@
 - Путь README (`docker compose up --build`, `--profile https`) должен работать как раньше; для checkout в каталоге `MailExpert` имена контейнеров остаются `mailexpert-*`.
 - `/api/health` не меняется ни по пути, ни по ответу (`{"status":"ok"}`): им пользуется healthcheck контейнера. `/api/health/ready` не отдаёт текстов ошибок, только `ok`/`error` по каждой зависимости.
 - Панель никогда не хранит IP почтового узла (ни в базе, ни в `.env`, ни через `extra_hosts`) — в 7a этого не касаемся, но и не добавляем.
-- **Не трогать запущенные контейнеры** `mailexpert-frontend`, `mailexpert-backend`, `mailexpert-postgres`, `mailexpert-redis`, `mailexpert-backend-test` и все `amnezia-*`: не останавливать, не пересоздавать, не выполнять в них команды. Любой тестовый стек compose поднимается только с `COMPOSE_PROJECT_NAME=me7a-smoke`, только с оверлеем (иначе frontend займёт 80/443 хоста) и портом `APP_HTTP_PORT=18080`; перед `up` проверить, что под этим именем проекта нет контейнеров и томов, после проверки — `down -v` только этого проекта. `docker compose up` без `COMPOSE_PROJECT_NAME` из рабочего дерева не запускать.
+- **Не трогать запущенные контейнеры** `mailexpert-frontend`, `mailexpert-backend`, `mailexpert-postgres`, `mailexpert-redis`, `mailexpert-backend-test` и контейнеры других проектов на хосте: не останавливать, не пересоздавать, не выполнять в них команды. Любой тестовый стек compose поднимается только с `COMPOSE_PROJECT_NAME=me7a-smoke`, только с оверлеем (иначе frontend займёт 80/443 хоста) и портом `APP_HTTP_PORT=18080`; перед `up` проверить, что под этим именем проекта нет контейнеров и томов, после проверки — `down -v` только этого проекта. `docker compose up` без `COMPOSE_PROJECT_NAME` из рабочего дерева не запускать.
 - Если чистое решение упирается в препятствие (чужой падающий тест, недоступный образ, неожиданное поведение Compose) — остановиться и доложить, не обходить (не отключать тесты и проверки, не ослаблять условия).
 
 ## Как запускать тесты
@@ -723,7 +723,7 @@ Run: `docker ps -a --filter label=com.docker.compose.project=me7a-smoke --format
 Expected: пусто. Если нет — остановиться и доложить (не удалять чужое).
 
 Run: `docker compose --env-file "$SMOKE" -f docker-compose.yml -f deploy/compose.prod.yml up -d --wait --wait-timeout 240`
-Expected: четыре контейнера `me7a-smoke-*` в состоянии healthy; `docker ps` по-прежнему показывает рабочие `mailexpert-*` и `amnezia-*` без изменений (сравнить `docker ps --format '{{.Names}} {{.Status}}'` до и после — их uptime не сбросился).
+Expected: четыре контейнера `me7a-smoke-*` в состоянии healthy; `docker ps` по-прежнему показывает рабочие `mailexpert-*` и контейнеры других проектов на хосте без изменений (сравнить `docker ps --format '{{.Names}} {{.Status}}'` до и после — их uptime не сбросился).
 
 Проверки:
 
@@ -1008,7 +1008,7 @@ docker images --format '{{.Repository}}:{{.Tag}}' | grep -- '-dryrun$' | xargs -
 docker rm -f mailexpert-backend-test-7
 ```
 
-Удалить `$SCRATCH/me7a-smoke.env`, `$SCRATCH/empty.env` и `$SCRATCH/me7a-config.yml`. Рабочие контейнеры `mailexpert-*`, `mailexpert-backend-test` и `amnezia-*` не трогать.
+Удалить `$SCRATCH/me7a-smoke.env`, `$SCRATCH/empty.env` и `$SCRATCH/me7a-config.yml`. Рабочие контейнеры `mailexpert-*`, `mailexpert-backend-test` и контейнеры других проектов на хосте не трогать.
 
 - [ ] **Step 4: Commit**
 

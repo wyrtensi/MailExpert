@@ -24,7 +24,7 @@
 - Совместимость до PR 8c: `GET /oauth/google` без параметров и с `?login_hint=<email>` продолжают работать (их вызывают `GoogleIntegrationSection.jsx` и `utils/accountHealth.js`). До PR 8b `POST/DELETE /api/integrations/google` работают как сейчас.
 - Доменный почтовый сервер (`domain_mail`, `kind: 'domain'`) в PR 8 не входит — перенесён в PR 9. Ограничение ручного добавления ящика администратором (`POST /api/accounts` без `kind`) делается в PR 8c вместе с новым диалогом, не здесь.
 - Монки-патчинг запрещён; глобальный `fetch` подменяется только через `vi.stubGlobal`, как в `googleOAuth.test.js`.
-- Не трогать запущенные контейнеры пользователя (`mailexpert-frontend`, `mailexpert-backend`, `mailexpert-postgres`, `mailexpert-redis`, `amnezia-*`).
+- Не трогать запущенные контейнеры пользователя (`mailexpert-frontend`, `mailexpert-backend`, `mailexpert-postgres`, `mailexpert-redis`, контейнеры других проектов на хосте).
 
 ## Как запускать тесты
 

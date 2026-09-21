@@ -178,3 +178,16 @@ LISTEN 0 4096 127.0.0.1:8080 0.0.0.0:*'
   printf 'ExecStart=@PREFIX@/app/x.sh --prefix @PREFIX@\n' >"$BATS_TEST_TMPDIR/u.service"
   [ "$(render_unit "$BATS_TEST_TMPDIR/u.service" /opt/mailexpert)" = "ExecStart=/opt/mailexpert/app/x.sh --prefix /opt/mailexpert" ]
 }
+
+@test "install.sh --help prints the usage" {
+  run bash "$DEPLOY_DIR/install.sh" --help
+  [ "$status" -eq 0 ]
+  [[ $output == *"Usage: install.sh"* ]]
+}
+
+@test "install.sh stops with 2 on invalid input before touching the host" {
+  run bash "$DEPLOY_DIR/install.sh" --prefix "$BATS_TEST_TMPDIR/p" --version bad --signin direct --direct-host panel.example.com --admin-email admin@example.com
+  [ "$status" -eq 2 ]
+  [[ $output == *"--version"* ]]
+  [ ! -e "$BATS_TEST_TMPDIR/p" ]
+}

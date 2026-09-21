@@ -3,4 +3,5 @@
 *.bats text eol=lf
 *.tmpl text eol=lf
 deploy/** text eol=lf
+scripts/deploy/** text eol=lf
 .shellcheckrc text eol=lf

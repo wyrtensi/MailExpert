@@ -18,10 +18,13 @@ SCRIPT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 . "$SCRIPT_DIR/lib/edge.sh"
 # shellcheck source=lib/system.sh
 . "$SCRIPT_DIR/lib/system.sh"
+# shellcheck source=lib/app.sh
+. "$SCRIPT_DIR/lib/app.sh"
 
 exit_on_unexpected_failure
 
-READY_TIMEOUT=180
+# update.sh raises it: long backfill migrations run before the backend listens.
+READY_TIMEOUT=${MAILEXPERT_READY_TIMEOUT:-180}
 EDGE_TIMEOUT=180
 LOCK_TIMEOUT=60
 ORIG_ARGS=("$@")
@@ -53,16 +56,6 @@ Exit codes: 0 done, 1 failure, 2 invalid input, 3 waiting for secrets from confi
 EOF
 }
 
-app_compose() {
-  docker compose -p "$CFG_PROJECT" --project-directory "$APP_DIR" --env-file "$ENV_FILE" \
-    -f "$APP_DIR/docker-compose.yml" -f "$APP_DIR/deploy/compose.prod.yml" "$@"
-}
-
-edge_compose() {
-  docker compose -p "$CFG_EDGE_PROJECT" --project-directory "$EDGE_DIR" --env-file "$EDGE_ENV" \
-    -f "$EDGE_DIR/compose.yml" "$@"
-}
-
 prepare_dirs() {
   # An existing --prefix keeps its mode: /tmp would lose its sticky bit, /root would open up.
   if [ ! -d "$OPT_PREFIX" ]; then
@@ -81,7 +74,7 @@ lock_install() {
 
 check_tools() {
   local tool
-  for tool in git curl jq ss sha256sum; do
+  for tool in git curl jq ss sha256sum timeout; do
     command -v "$tool" >/dev/null || die "$tool is required"
   done
 }
@@ -151,14 +144,7 @@ write_app_settings() {
   fi
 }
 
-ensure_image() {
-  if docker image inspect "$1" >/dev/null 2>&1; then return 0; fi
-  log "pulling $1"
-  docker pull --quiet "$1" >/dev/null || die "cannot pull $1 (emergency build from source: see deploy/compose.prod.yml)"
-}
-
 ensure_app_images() {
-  BACKEND_IMAGE=$CFG_IMAGE_PREFIX/mailexpert-backend:$CFG_VERSION
   ensure_image "$BACKEND_IMAGE"
   ensure_image "$CFG_IMAGE_PREFIX/mailexpert-frontend:$CFG_VERSION"
 }
@@ -181,7 +167,7 @@ pinned_edge_image() {
 
 guard_existing_database() {
   local missing
-  docker volume inspect "${CFG_PROJECT}_postgres_data" >/dev/null 2>&1 || return 0
+  db_volume_exists || return 0
   missing=$(env_missing "$ENV_FILE" DB_PASSWORD ENCRYPTION_KEY)
   [ -z "$missing" ] ||
     die "volume ${CFG_PROJECT}_postgres_data exists but $ENV_FILE has no $(paste -sd' ' - <<<"$missing"): new values would lock the data out; restore .env from a backup"
@@ -211,9 +197,14 @@ require_generated_secrets() {
     die "$ENV_FILE lost $(paste -sd' ' - <<<"$missing") during this run; the panel was not started, run install.sh again"
 }
 
+# app_up: `up` waits for the backend to be healthy before it starts the frontend, with no time
+# limit, and a backend that crashes at start (a failing migration) restarts forever without
+# ever turning unhealthy. The wait is bounded so that update.sh gets to its rollback.
 app_up() {
   log "starting the panel (compose project $CFG_PROJECT)"
-  app_compose up -d --quiet-pull
+  timeout "$READY_TIMEOUT" "${APP_COMPOSE[@]}" up -d --quiet-pull ||
+    die "the panel did not start within ${READY_TIMEOUT}s; see: docker compose -p $CFG_PROJECT logs backend"
+  clear_standby
 }
 
 edge_up() {
@@ -247,7 +238,7 @@ edge_up() {
 
 wait_ready() {
   local base=http://127.0.0.1:$CFG_HTTP_PORT deadline=$((SECONDS + READY_TIMEOUT)) sha
-  until curl -fs -o /dev/null "$base/api/health/ready"; do
+  until panel_ready; do
     [ "$SECONDS" -lt "$deadline" ] || die "the panel is not ready after ${READY_TIMEOUT}s; see: docker compose -p $CFG_PROJECT logs backend"
     sleep 3
   done
@@ -302,8 +293,8 @@ main() {
   fi
   resolve_install_config "${INSTALL_ARGS[PREFIX]:-/opt/mailexpert}/install.conf"
   validate_install_config || exit 2
-  APP_DIR=$OPT_PREFIX/app EDGE_DIR=$OPT_PREFIX/edge STATE_DIR=$OPT_PREFIX/state
-  ENV_FILE=$OPT_PREFIX/.env EDGE_ENV=$OPT_PREFIX/edge/.env
+  [[ $READY_TIMEOUT =~ ^[0-9]+$ ]] || die "MAILEXPERT_READY_TIMEOUT must be a number of seconds" 2
+  set_install_paths
 
   [ "$(id -u)" = 0 ] || die "run install.sh as root"
   prepare_dirs
@@ -336,7 +327,7 @@ main() {
   require_owner_secrets
   require_generated_secrets
 
-  if [ "$OPT_START" = 1 ]; then app_up; fi
+  if [ "$OPT_START" = 1 ]; then app_up; else set_standby; fi
   edge_up
   if [ "$CFG_SYSTEM" = 1 ]; then apply_ufw; fi
   if [ "$OPT_START" = 1 ]; then

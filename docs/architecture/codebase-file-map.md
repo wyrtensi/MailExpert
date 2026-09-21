@@ -40,7 +40,7 @@ Frontend не ходит к Gmail напрямую. Он обращается к
 | Файл | Назначение | Что учитывать в MailExpert |
 | --- | --- | --- |
 | `README.md` | Установка, функции и эксплуатация | Содержит upstream-инструкции; дополнен ссылкой на эту карту |
-| `.env.example` | Все runtime-переменные | Здесь появятся Google OAuth, лимиты IMAP и production-настройки |
+| `.env.example` | Все runtime-переменные | Google OAuth описан там как одноразовый импорт первого приложения и запасной callback; лимиты IMAP и production-настройки |
 | `docker-compose.yml` | Локальный HTTP/HTTPS stack | Backend, frontend, PostgreSQL и Redis на одном сервере |
 | `docker-compose.https.yml` | Профиль с публичным TLS | Для production всё равно предпочтителен внешний reverse proxy/Cloudflare Access |
 | `Caddyfile` | TLS/reverse proxy | Не смешивать с OAuth-логикой |
@@ -67,9 +67,11 @@ Frontend не ходит к Gmail напрямую. Он обращается к
 | `routes/auth.js` | Регистрация, login, MFA enrolment, password reset, preferences и сессии |
 | `routes/totp.js` | Отдельные TOTP-операции |
 | `routes/oauth.js` | Microsoft OAuth/device code; монтирует `routes/oauthGoogle.js` и реэкспортирует `refreshMicrosoftToken` из `services/oauth/microsoftOAuth.js` |
-| `routes/oauthGoogle.js` | Google OAuth: `GET /oauth/google` (state + PKCE в Redis) и callback с upsert Gmail-аккаунта |
+| `routes/oauthGoogle.js` | Google OAuth под `/oauth/google`: переподключение `GET /oauth/google?account=<id>`, одноразовый переход `/launch?flow=` и callback, который создаёт (`add`) или обновляет (`reconnect`) Gmail-ящик и пишет журнал мест |
+| `routes/oauthGoogleApi.js` | `/api/oauth/google`: `POST /start` формы Gmail (выбор приложения, бронь, ключ перехода) и `GET /known-emails` для подсказки |
+| `routes/googleAppsAdmin.js` | `/api/admin/google-apps`: список, добавление, правка, смена состояния и удаление Google-приложений; монтируется в `routes/admin.js` |
 | `routes/oidc.js` | Вход пользователей MailExpert через внешний OIDC/SSO; не путать с OAuth почтового аккаунта |
-| `routes/integrations.js` | Глобальные секреты/настройки интеграций |
+| `routes/integrations.js` | Глобальные секреты/настройки интеграций; для Google — только общий callback-адрес и `/status` (`google.configured`, `google.available`) |
 | `routes/mail.js` | Чтение, папки, move/delete/archive/snooze и вложения; 2286 строк |
 | `routes/send.js` | Отправка, reply/forward, MIME и Sent APPEND |
 | `routes/draft.js` | Сохранение и синхронизация черновиков |
@@ -84,7 +86,7 @@ Frontend не ходит к Gmail напрямую. Он обращается к
 | `routes/senderFavicons.js` | Прокси и кеш доменных иконок отправителя |
 | `routes/todoist.js` | Todoist integration |
 
-Файлы `*.test.js` рядом с маршрутами — contract/regression tests. Новые Google OAuth routes должны получить отдельный `oauth.google.test.js`, а не расширять только Microsoft refresh test.
+Файлы `*.test.js` рядом с маршрутами — contract/regression tests. У Google OAuth свои `oauth.google.test.js`, `oauthGoogleApi.test.js` и `googleAppsAdmin.test.js`.
 
 ### Почтовое ядро
 
@@ -130,13 +132,13 @@ Frontend не ходит к Gmail напрямую. Он обращается к
 - `0041–0046`: plugin data/config и перенос GTD в plugin architecture.
 - `0047–0051`: folder selectability, snippet retry state, OIDC matching, sender metadata и server folder status.
 
-Новая Google OAuth реализация не требует отдельных token-колонок: `email_accounts.oauth_*` provider-agnostic. Миграция потребуется только если мы сохраняем Google `sub`, PKCE pending grants или явное состояние reconnect в БД. Для одноразового state/PKCE предпочтителен Redis с TTL.
+Google OAuth хранит токены в provider-agnostic колонках `email_accounts.oauth_*`. Миграция `0053_google_oauth_apps.sql` добавила таблицы `google_oauth_apps` и `google_oauth_grants` (журнал мест) и колонки `email_accounts.oauth_app_id`, `oauth_subject`. Одноразовый state/PKCE, брони мест и ключи перехода живут в Redis с TTL.
 
 ### Plugin layer
 
 `backend/src/plugins/registry.js`, `loadPlugins.js`, `mailEngine.js`, `mailEngineFacade.js`, `storage.js` и `accountConfig.js` формируют расширяемую границу. GTD уже вынесен в `backend/src/plugins/gtd/*` и показывает рекомендуемый способ добавлять независимые функции.
 
-Google OAuth — не plugin уровня UI: он является credential provider для общего mail engine. Его разумно вынести в `services/oauth/googleOAuth.js` и `services/oauth/tokenManager.js`, оставив routes тонкими.
+Google OAuth — не plugin уровня UI: он является credential provider для общего mail engine и живёт в `services/oauth/`: `googleOAuth.js` (URL, обмен кода, ID token, обновление и отзыв токена), `googleApps.js` (реестр приложений, журнал мест, импорт старой настройки), `googleAppSelection.js` (выбор приложения и брони), `googleLaunch.js` (одноразовый ключ перехода), `tokenManager.js` (обновление для всех IMAP/SMTP-путей). Эксплуатация — [google-oauth.md](../operations/google-oauth.md).
 
 ## Frontend
 
@@ -153,7 +155,7 @@ Google OAuth — не plugin уровня UI: он является credential p
 
 | Файл | Размер | Роль и риск изменения |
 | --- | ---: | --- |
-| `AdminPanel.jsx` | 8621 строк | Все настройки в одном файле; Google integration следует вынести в отдельный компонент |
+| `AdminPanel.jsx` | 8621 строк | Все настройки в одном файле; Google-приложения и формы «Добавить аккаунт» вынесены в отдельные компоненты |
 | `MessageList.jsx` | 4714 | Список, threads, bulk actions; высокий риск гонок optimistic state |
 | `MessagePane.jsx` | 3420 | Рендеринг недоверенного email HTML и actions |
 | `ComposeModal.jsx` | 3304 | Редактор, aliases, attachments, reply/forward |
@@ -167,6 +169,8 @@ Google OAuth — не plugin уровня UI: он является credential p
 
 - `AuditLogTab.jsx` — экран журнала для администратора: фильтры и подгрузка по курсору; логика запроса и подписей в `utils/auditLog.js`.
 - `AccessSyncPanel.jsx` — вкладка синхронизации с Cloudflare Access в режиме `google`; логика формы и итога прогона в `utils/accessSync.js`.
+- `GoogleAppsSection.jsx` — экран «Google-приложения» в «Интеграции → Почтовые провайдеры» для администратора: callback-адрес, таблица приложений, добавление, правка, состояния; чистая логика в `utils/googleApps.js`.
+- `AddAccountPicker.jsx` и `GmailAddForm.jsx` — диалог «Добавить аккаунт»: выбор варианта и форма Gmail с подсказкой адресов; варианты, подсказка и ошибки старта в `utils/addAccount.js`, результаты callback и URL переподключения в `utils/googleOAuth.js` и `utils/accountHealth.js`.
 
 ### Utilities и тестируемая бизнес-логика
 
@@ -242,13 +246,13 @@ Production build предупреждает о нескольких chunks бо�
 2. Одновременное обновление major-зависимостей и перенос PR делает регрессии неразличимыми. Сначала dependency snapshot, потом Google provider.
 3. Один общий пользователь удобен, но не даёт атрибуции действий менеджерам.
 4. 100 Gmail создают provider/IP connection pressure; лимит проверяется измерениями, а не размером PostgreSQL.
-5. OAuth restricted scope требует организационной verification независимо от качества кода.
+5. Restricted scope `https://mail.google.com/` без verification ограничивает проект Google Cloud сотней пользователей за всё время; решение — несколько проектов, риски описаны в [google-oauth.md](../operations/google-oauth.md#риски).
 6. Native IDs и data paths нельзя переименовывать простым search/replace.
 
 ## Рекомендуемые границы будущих изменений
 
 - Google OAuth: новые `services/oauth/*`, тонкие routes, Redis TTL для pending state/PKCE.
 - Provider refresh: один `tokenManager` для Google/Microsoft, вызываемый всеми IMAP/SMTP путями.
-- UI Google integration: отдельный React component, подключённый к AdminPanel.
+- UI Google: отдельные компоненты `GoogleAppsSection.jsx` и `GmailAddForm.jsx`, подключённые к AdminPanel.
 - Mailbox filter: чистая utility + минимальная Sidebar integration.
 - EOP/Postfix/Dovecot: отдельный mail-node и отдельный план; не встраивать MTA в Express process.

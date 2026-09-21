@@ -16,16 +16,15 @@ the target architecture is [docs/architecture/team-mail-system-handoff.md](docs/
 - Mailbox audit log with an admin screen.
 - Local demo mode for showing the product without a real mailbox.
 - Gmail conversations threaded the way Gmail threads them: provider thread and message ids stored, no grouping by subject, a resumable backfill for already-cached mail, and a per-mailbox threading mode with preview, switch, rollback and a batched recompute.
-- Storage for several Google OAuth applications: the tables, the import of the configured application and token refresh through the application a mailbox belongs to. The flows on top of it are still to come — see Now.
+- Several Google OAuth applications end to end. An unverified Google Cloud project accepts at most 100 unique users for its lifetime and the count never goes down, so mailboxes are spread over several projects: application selection with seat reservations, the grant journal, token refresh through the application a mailbox belongs to, revoke of refused and replaced grants, and the admin screen with active, closed and disabled states.
+- One "Add account" entry: a Gmail address with suggestions of known addresses, and a manual IMAP/SMTP setup for administrators. Gmail mailboxes are reconnected from the sidebar and the Accounts tab.
+- Google OAuth operations guide ([docs/operations/google-oauth.md](docs/operations/google-oauth.md)): separate development and production Google Cloud projects, consent screen mode, redirect URIs per host, app states, secret rotation, moving mailboxes between apps, revoke and removal.
 - Sidebar mailbox filter and per-mailbox connection health.
 - Selected upstream MailFlow fixes (see [upstream PR assessment](docs/architecture/upstream-pr-assessment.md)).
 
 ## Now
 
-- Several Google OAuth applications end to end. An unverified Google Cloud project accepts at most 100 unique users for its lifetime and the count never goes down, so mailboxes are spread over several projects: application selection and reservation, the admin screen, revoke, and the connection flows built on them.
-- One "Add account" entry with three ways in: a Gmail address, a mailbox on the configured owned-domain server, and a manual IMAP/SMTP setup for administrators.
-- Connection settings for the owned-domain mail server, so a mailbox on it can be created from that same entry without typing hosts and ports.
-- Deployment and runbooks for both sign-in hosts, and Google OAuth operations: separate development and production Google Cloud projects, consent screen mode, redirect URIs, secret rotation, revoke and data removal.
+- Deployment and runbooks for both sign-in hosts.
 - Live OAuth lifecycle check on real accounts: consent, refresh after expiry, revoke, reconnect.
 - Clean deployment from the documentation with backup and restore of PostgreSQL together with the encryption key.
 
@@ -33,12 +32,12 @@ the target architecture is [docs/architecture/team-mail-system-handoff.md](docs/
 
 - Gmail scale test in waves of 10 → 25 → 50 → 100 mailboxes: memory, CPU, IMAP connections, provider errors and UI latency on the target server.
 - 24-hour stability run, controlled restart and restore.
-- Google OAuth app verification for production use with personal Gmail accounts.
 - Per-message threading diagnostics: the headers, the provider thread number, the reason a message landed in its conversation and the folders it lives in.
 
 ## Later
 
 - Owned-domain mailboxes delivered through a separate Postfix/Dovecot mail node behind Microsoft EOP. The mail node is its own project with its own readiness criteria. MailExpert connects to it as an ordinary IMAP/SMTP server and creates, disables and re-enables mailboxes through the node's API. Platform choice, server sizing and adaptive quotas are researched in [docs/architecture/mail-node-research](docs/architecture/mail-node-research/README.md).
+- A domain mailbox option in "Add account" with the mail node's connection settings, so a mailbox on it is created from that entry without typing hosts and ports. Its model and permissions get their own design together with the mail node.
 - Individual manager identities and mailbox membership, if per-person accountability becomes a requirement on top of the audit log.
 
 Have a request or found a bug? [Open an issue](https://github.com/wyrtensi/MailExpert/issues).

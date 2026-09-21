@@ -30,8 +30,9 @@ export async function getGoogleAppById(appId) {
   return rows[0] || null;
 }
 
-// The oldest app that is not disabled. Used by the legacy `GET /oauth/google` flow without a
-// selected app (until PR 8c) and by callers that do not pass an appId.
+// The oldest app that is not disabled. Used by resolveGoogleConfig() when no appId is given,
+// which only the `configured` check of GET /api/integrations/status does: every consent flow
+// names the app selectGoogleApp picked.
 export async function getDefaultGoogleApp() {
   const { rows } = await query(
     `SELECT ${APP_COLUMNS} FROM google_oauth_apps WHERE status <> 'disabled' ORDER BY created_at, id LIMIT 1`,

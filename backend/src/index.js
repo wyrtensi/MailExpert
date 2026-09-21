@@ -34,6 +34,7 @@ import { setMailEngine } from './plugins/mailEngine.js';
 import pluginsRoutes from './routes/plugins.js';
 import senderFaviconsRoutes from './routes/senderFavicons.js';
 import diagnosticsRoutes from './routes/diagnostics.js';
+import healthRoutes from './routes/health.js';
 import { encryptExistingCredentials, query } from './services/db.js';
 import { runMigrations } from './services/migrations.js';
 import { parseVCard } from './utils/vcard.js';
@@ -168,7 +169,7 @@ app.use('/api', (req, res, next) => {
 // needed to render the lock screen, unlock, or sign out; everything else returns
 // 423 Locked until the PIN is verified (routes/auth.js sets req.session.locked).
 // Matches the full path (minus query) so it can't fail open on mount-relative paths.
-const LOCK_ALLOWED = new Set(['/api/auth/unlock', '/api/auth/logout', '/api/auth/me', '/api/health', '/api/version']);
+const LOCK_ALLOWED = new Set(['/api/auth/unlock', '/api/auth/logout', '/api/auth/me', '/api/health', '/api/health/ready', '/api/version']);
 app.use('/api', (req, res, next) => {
   if (req.session?.locked && !LOCK_ALLOWED.has(req.originalUrl.split('?')[0])) {
     return res.status(423).json({ error: 'Locked', locked: true });
@@ -217,7 +218,7 @@ for (const plugin of pluginRegistry.list()) {
 app.use('/api/sender-favicons', senderFaviconsRoutes);
 app.use('/api/diagnostics', diagnosticsRoutes);
 
-app.get('/api/health', (req, res) => res.json({ status: 'ok' }));
+app.use('/api/health', healthRoutes);
 app.get('/api/version', (_req, res) => res.json({ version: APP_VERSION, sha: process.env.BUILD_SHA || 'dev' }));
 // Server-side update check (#261). Cached in updateCheck.js so repeated hits never
 // re-query GitHub; the browser only talks to MailExpert. Never throws into the response.

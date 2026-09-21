@@ -97,7 +97,7 @@ describe('identityGate', () => {
   });
 
   it('lets public paths through without an identity', async () => {
-    for (const path of ['/api/health', '/api/auth/config', '/api/auth/logout', '/oauth/login/google', '/oauth/login/google/callback?code=x']) {
+    for (const path of ['/api/health', '/api/health/ready', '/api/auth/config', '/api/auth/logout', '/oauth/login/google', '/oauth/login/google/callback?code=x']) {
       expect((await call(path)).status).toBe(200);
     }
   });

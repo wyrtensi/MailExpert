@@ -125,7 +125,9 @@ main() {
     printf '[mailexpert] problem: %s\n' "$line" >&2
   done <<<"$problems"
   send_ping "$url" fail "$problems"
-  return 1
+  # exit, not return: a nonzero return from main would trip the ERR trap and print a
+  # spurious "a command failed" line.
+  exit 1
 }
 
 main "$@"; exit $?

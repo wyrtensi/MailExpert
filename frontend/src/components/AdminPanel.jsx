@@ -35,6 +35,7 @@ import AccessSyncPanel from './AccessSyncPanel.jsx';
 import MailboxSyncSettings from './MailboxSyncSettings.jsx';
 import AuditLogTab from './AuditLogTab.jsx';
 import { isGoogleAuthMode } from '../utils/authMode.js';
+import GoogleAppsSection from './GoogleAppsSection.jsx';
 import GoogleIntegrationSection, { openGoogleOAuth } from './GoogleIntegrationSection.jsx';
 import { openOAuthWindow } from '../utils/oauthWindow.js';
 import { MICROSOFT_OAUTH_PATH } from '../utils/accountHealth.js';
@@ -2784,6 +2785,7 @@ function IntegrationsTab() {
             )}
           </div>
 
+          {isAdmin && <GoogleAppsSection />}
           <GoogleIntegrationSection isAdmin={isAdmin} />
         </div>
       )}
@@ -8115,6 +8117,7 @@ function makeSearchIndex(t) {
     // Integrations
     { label: t('admin.integrations.microsoft.title'), keywords: ['microsoft', 'outlook', '365', 'oauth', 'azure', 'client id', 'tenant', 'ms365', 'office'], tab: 'integrations', breadcrumb: tabLabel('integrations') },
     { label: t('admin.integrations.google.title'), keywords: ['google', 'gmail', 'oauth', 'client id', 'workspace'], tab: 'integrations', breadcrumb: tabLabel('integrations') },
+    { label: t('admin.integrations.googleApps.title'), keywords: ['google', 'gmail', 'oauth', 'client id', 'google cloud', 'project', 'callback', 'limit'], tab: 'integrations', adminOnly: true, breadcrumb: tabLabel('integrations') },
     { label: t('admin.ai.title'), keywords: ['ai', 'artificial intelligence', 'chatgpt', 'ollama', 'llm', 'language model', 'summarize', 'draft', 'compose assistant', 'openai', 'local ai', 'inference', 'gpt'], tab: 'ai', adminOnly: true, breadcrumb: tabLabel('ai') },
     { label: t('admin.plugins.title'), keywords: ['plugin', 'plugins', 'extension', 'extensions', 'add-on', 'addon', 'gtd', 'activate', 'enable feature', 'modules'], tab: 'plugins', breadcrumb: tabLabel('plugins') },
     { label: t('admin.categories.title'), keywords: ['categories', 'categorize', 'newsletter', 'promotion', 'social', 'automated', 'inbox tabs', 'sort emails', 'classify'], tab: 'categories', breadcrumb: tabLabel('categories') },

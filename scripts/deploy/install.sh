@@ -19,8 +19,11 @@ SCRIPT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 # shellcheck source=lib/system.sh
 . "$SCRIPT_DIR/lib/system.sh"
 
+exit_on_unexpected_failure
+
 READY_TIMEOUT=180
 EDGE_TIMEOUT=180
+LOCK_TIMEOUT=60
 ORIG_ARGS=("$@")
 LOADED_HASH=$(cat "$SCRIPT_DIR/install.sh" "$SCRIPT_DIR"/lib/*.sh | sha256sum)
 
@@ -61,15 +64,19 @@ edge_compose() {
 }
 
 prepare_dirs() {
-  mkdir -p "$OPT_PREFIX" "$APP_DIR" "$EDGE_DIR" "$OPT_PREFIX/backups" "$STATE_DIR"
-  chmod 755 "$OPT_PREFIX"
+  # An existing --prefix keeps its mode: /tmp would lose its sticky bit, /root would open up.
+  if [ ! -d "$OPT_PREFIX" ]; then
+    mkdir -p "$OPT_PREFIX"
+    chmod 755 "$OPT_PREFIX"
+  fi
+  mkdir -p "$APP_DIR" "$EDGE_DIR" "$OPT_PREFIX/backups" "$STATE_DIR"
   chmod 700 "$EDGE_DIR" "$OPT_PREFIX/backups" "$STATE_DIR"
 }
 
+# lock_install: one install.sh or configure.sh at a time per prefix: configure.sh takes the same
+# lock, so their read-modify-write updates of .env cannot overwrite each other.
 lock_install() {
-  command -v flock >/dev/null || die "flock is required"
-  exec 9>"$STATE_DIR/install.lock"
-  flock -n 9 || die "another install.sh is running"
+  take_install_lock "$STATE_DIR" "$LOCK_TIMEOUT" install.sh
 }
 
 check_tools() {
@@ -192,6 +199,16 @@ require_owner_secrets() {
   log "add them as KEY=VALUE lines: $APP_DIR/scripts/deploy/configure.sh --prefix $OPT_PREFIX < <file>"
   log "then run install.sh again"
   exit 3
+}
+
+# require_generated_secrets: the panel never starts with an empty DB_PASSWORD or ENCRYPTION_KEY:
+# the database volume would be created with it. Nothing is generated here; a rerun generates the
+# missing keys (guard_existing_database stops it when a database volume exists).
+require_generated_secrets() {
+  local missing
+  missing=$(env_missing "$ENV_FILE" "${GENERATED_SECRET_KEYS[@]}")
+  [ -z "$missing" ] ||
+    die "$ENV_FILE lost $(paste -sd' ' - <<<"$missing") during this run; the panel was not started, run install.sh again"
 }
 
 app_up() {
@@ -317,6 +334,7 @@ main() {
     write_edge_files "$APP_DIR" "$EDGE_DIR" "$edge_image"
   fi
   require_owner_secrets
+  require_generated_secrets
 
   if [ "$OPT_START" = 1 ]; then app_up; fi
   edge_up

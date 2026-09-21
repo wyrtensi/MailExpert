@@ -10,6 +10,31 @@ die() {
   exit "${2:-1}"
 }
 
+# exit_on_unexpected_failure: a command that fails outside `die` ends the script with 1, whatever
+# its own status (git 128, apt-get 100, jq 2): callers branch on 2 (invalid input) and 3 (waiting
+# for secrets), which only the scripts themselves return. Only the location is printed, never the
+# command, whose arguments may hold secrets.
+exit_on_unexpected_failure() {
+  set -E
+  trap 'printf "[mailexpert] error: a command failed with status %s at %s:%s\n" "$?" "${BASH_SOURCE[0]##*/}" "$LINENO" >&2; exit 1' ERR
+}
+
+# take_install_lock <state dir> <seconds> <script name>: takes <state dir>/install.lock on fd 9,
+# shared by install.sh and configure.sh, waiting up to <seconds>. flock -n in a loop instead of
+# flock -w: BusyBox flock has no timeout.
+take_install_lock() {
+  local dir=$1 timeout=$2 name=$3 waited=0
+  command -v flock >/dev/null || die "flock is required"
+  exec 9>"$dir/install.lock"
+  until flock -n 9; do
+    if [ "$waited" -eq 0 ]; then log "$name: waiting for another install.sh or configure.sh to finish"; fi
+    [ "$waited" -lt "$timeout" ] ||
+      die "$name: another install.sh or configure.sh has held $dir/install.lock for ${timeout}s; try again when it finishes"
+    sleep 1
+    waited=$((waited + 1))
+  done
+}
+
 # version_ge <a> <b>: a >= b for dotted numeric versions. A leading "v" and a "-..." or
 # "+..." suffix are ignored, so 2.24.4-desktop.1 compares as 2.24.4.
 version_ge() {

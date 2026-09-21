@@ -253,3 +253,18 @@ LISTEN 0 4096 127.0.0.1:8080 0.0.0.0:*'
   [[ $output == *"--version"* ]]
   [ ! -e "$BATS_TEST_TMPDIR/p" ]
 }
+
+@test "exit_on_unexpected_failure maps tool failures to 1 and keeps die and exit codes" {
+  common=$DEPLOY_DIR/lib/common.sh
+  run bash -c 'set -euo pipefail; . "$1"; exit_on_unexpected_failure; tool() { return 2; }; f() { tool; }; f; echo after' _ "$common"
+  [ "$status" -eq 1 ]
+  [[ $output == *"failed with status 2"* && $output != *after* ]]
+  run bash -c 'set -euo pipefail; . "$1"; exit_on_unexpected_failure; v=$(exit 128); echo after' _ "$common"
+  [ "$status" -eq 1 ]
+  run bash -c 'set -euo pipefail; . "$1"; exit_on_unexpected_failure; v=$(false) || v=x; [ -n "$(false)" ] || true; echo "$v"' _ "$common"
+  [ "$status" -eq 0 ] && [ "$output" = x ]
+  run bash -c 'set -euo pipefail; . "$1"; exit_on_unexpected_failure; die "bad input" 2' _ "$common"
+  [ "$status" -eq 2 ]
+  run bash -c 'set -euo pipefail; . "$1"; exit_on_unexpected_failure; f() { exit 3; }; f' _ "$common"
+  [ "$status" -eq 3 ]
+}

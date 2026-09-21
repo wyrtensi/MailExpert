@@ -5,7 +5,8 @@
 #
 #   ssh root@<host> /opt/mailexpert/app/scripts/deploy/configure.sh < secrets.env
 #
-# Exit codes: 0 stored, 2 nothing stored (every problem is listed).
+# Exit codes: 0 stored, 1 failure (for example install.sh held the lock too long), 2 invalid input,
+# nothing stored (every problem is listed).
 # shellcheck source-path=SCRIPTDIR
 set -euo pipefail
 
@@ -14,6 +15,11 @@ SCRIPT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 . "$SCRIPT_DIR/lib/common.sh"
 # shellcheck source=lib/env.sh
 . "$SCRIPT_DIR/lib/env.sh"
+exit_on_unexpected_failure
+
+# How long to wait for a running install.sh, which holds the lock for minutes on a first install.
+LOCK_TIMEOUT=${MAILEXPERT_LOCK_TIMEOUT:-600}
+[[ $LOCK_TIMEOUT =~ ^[0-9]+$ ]] || die "MAILEXPERT_LOCK_TIMEOUT must be a number of seconds" 2
 
 # Owner secrets, replaced when given again (rotation).
 APP_OWNER_KEYS=(CF_ACCESS_ISSUER CF_ACCESS_AUDIENCE AUTH_GOOGLE_CLIENT_ID AUTH_GOOGLE_CLIENT_SECRET HEALTHCHECK_PING_URL)
@@ -48,6 +54,13 @@ value_problem() {
     HEALTHCHECK_PING_URL) [[ $2 =~ ^https:// ]] || echo "must be an https:// URL" ;;
   esac
   return 0
+}
+
+# fail_on_errors <error...>: prints every error and exits 2 when there is any.
+fail_on_errors() {
+  [ "$#" -gt 0 ] || return 0
+  printf '[mailexpert] error: %s\n' "$@" >&2
+  die "nothing was written" 2
 }
 
 main() {
@@ -85,24 +98,24 @@ main() {
     fi
     problem=$(value_problem "$key" "$value")
     if [ -n "$problem" ]; then errors+=("$key: $problem"); continue; fi
-    if [ "$target" = generated ]; then
-      current=$(env_get "$prefix/.env" "$key") || current=
-      if [ -n "$current" ] && [ "$current" != "$value" ]; then
-        errors+=("$key: $prefix/.env already has a different value; generated secrets are never replaced")
-        continue
-      fi
-    fi
     keys+=("$key") values+=("$value") targets+=("$target")
   done
-
-  if [ "${#errors[@]}" -gt 0 ]; then
-    printf '[mailexpert] error: %s\n' "${errors[@]}" >&2
-    die "nothing was written" 2
-  fi
+  fail_on_errors "${errors[@]}"
   [ "${#keys[@]}" -gt 0 ] || die "no KEY=VALUE lines on stdin (see --help)" 2
 
-  mkdir -p "$prefix/edge"
-  chmod 700 "$prefix/edge"
+  # install.sh generates keys in the same .env: the checks and the writes below run under its lock.
+  mkdir -p "$prefix/edge" "$prefix/state"
+  chmod 700 "$prefix/edge" "$prefix/state"
+  take_install_lock "$prefix/state" "$LOCK_TIMEOUT" configure.sh
+  for i in "${!keys[@]}"; do
+    [ "${targets[i]}" = generated ] || continue
+    current=$(env_get "$prefix/.env" "${keys[i]}") || current=
+    if [ -n "$current" ] && [ "$current" != "${values[i]}" ]; then
+      errors+=("${keys[i]}: $prefix/.env already has a different value; generated secrets are never replaced")
+    fi
+  done
+  fail_on_errors "${errors[@]}"
+
   for i in "${!keys[@]}"; do
     if [ "${targets[i]}" = edge ]; then file=$prefix/edge/.env; else file=$prefix/.env; fi
     old=$(env_get "$file" "${keys[i]}") || old=

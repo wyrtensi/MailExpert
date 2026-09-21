@@ -104,3 +104,18 @@ EOF
   run bash "$CONFIGURE" --prefix "$P" </dev/null
   [ "$status" -eq 2 ]
 }
+
+@test "waits for install.sh's lock and gives up with exit 1 when it is held too long" {
+  mkdir -p "$P/state"
+  flock "$P/state/install.lock" sleep 4 &
+  sleep 0.5
+  MAILEXPERT_LOCK_TIMEOUT=1 run bash "$CONFIGURE" --prefix "$P" <<<"TUNNEL_TOKEN=locked-value"
+  [ "$status" -eq 1 ]
+  [[ $output == *"another install.sh or configure.sh"* && $output != *locked-value* ]]
+  [ ! -e "$P/edge/.env" ]
+  run bash "$CONFIGURE" --prefix "$P" <<<"TUNNEL_TOKEN=locked-value"
+  [ "$status" -eq 0 ]
+  [[ $output == *waiting* ]]
+  [ "$(env_get "$P/edge/.env" TUNNEL_TOKEN)" = locked-value ]
+  wait
+}

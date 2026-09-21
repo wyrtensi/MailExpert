@@ -140,7 +140,7 @@ main() {
   case $outcome in
     done)
       check_index_warning "$since"
-      set_update_status done
+      set_update_status "done"
       send_ping "$url" success "updated to $target"
       log "updated to $target. Back to $old with the database from before the update: $APP_DIR/scripts/deploy/rollback.sh --prefix $OPT_PREFIX"
       return 0

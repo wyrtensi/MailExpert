@@ -144,7 +144,9 @@ function changedConnectionFields(stored, updates) {
   });
 }
 
-router.post('/', async (req, res) => {
+// Manual server setup is an admin task: an ordinary user adds Gmail through the Google flow.
+// PR 9 opens this route to everyone for `kind: 'domain'` (a mailbox on the configured mail node).
+router.post('/', requireAdmin, async (req, res) => {
   const {
     name, sender_name = null, email_address, color = '#6366f1', protocol = 'imap',
     imap_host, imap_port = 993, imap_skip_tls_verify = false,

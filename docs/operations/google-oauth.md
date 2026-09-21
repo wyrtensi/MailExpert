@@ -47,7 +47,7 @@ OAuth-клиент для входа в сам MailExpert (`AUTH_GOOGLE_CLIENT_I
 - Если панель открыта через другой хост, экран показывает подсказку с callback этого хоста.
 - Запрос с хоста, которого нет в `APP_URL`/`APP_ALT_URLS`, получает сохранённый callback как есть.
 
-Переменная `GOOGLE_REDIRECT_URI` — только запасной вариант, если callback ни разу не сохраняли на экране: запись в `integration_config` имеет приоритет, а запись без callback при старте стирает значение переменной. `docker-compose.yml` не передаёт переменные `GOOGLE_*` в контейнер backend, поэтому в Docker callback задаётся только на экране.
+Переменная `GOOGLE_REDIRECT_URI` — запасной вариант, если callback ни разу не сохраняли на экране: сохранённый callback имеет приоритет, без него backend берёт значение переменной, с которым стартовал. `docker-compose.yml` передаёт в контейнер backend только `GOOGLE_REDIRECT_URI`; `GOOGLE_CLIENT_ID`/`GOOGLE_CLIENT_SECRET` действуют только при установке без Docker.
 
 ## Добавление приложения в MailExpert
 

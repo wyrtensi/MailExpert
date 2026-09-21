@@ -41,14 +41,20 @@ router.post('/start', async (req, res) => {
     return res.status(409).json({ error: 'Gmail cannot be connected now', code: 'not_configured' });
   }
 
-  const { state, codeChallenge } = await createOAuthState({
-    provider: PROVIDER, userId: req.session.userId, loginHint: email, appId: config.appId, mode: 'add', email,
-  });
-  const url = buildGoogleAuthorizationUrl({
-    clientId: config.clientId, state, codeChallenge, redirectUri: config.redirectUri, loginHint: email,
-  });
-  const flow = await createGoogleLaunch({ userId: req.session.userId, url });
-  res.json({ path: `/oauth/google/launch?flow=${flow}` });
+  try {
+    const { state, codeChallenge } = await createOAuthState({
+      provider: PROVIDER, userId: req.session.userId, loginHint: email, appId: config.appId, mode: 'add', email,
+    });
+    const url = buildGoogleAuthorizationUrl({
+      clientId: config.clientId, state, codeChallenge, redirectUri: config.redirectUri, loginHint: email,
+    });
+    const flow = await createGoogleLaunch({ userId: req.session.userId, url });
+    res.json({ path: `/oauth/google/launch?flow=${flow}` });
+  } catch (err) {
+    // A late failure here would otherwise leave the seat reserved for the full state TTL.
+    if (selected.reserved) await releaseGoogleSeat(selected.appId, email);
+    throw err;
+  }
 });
 
 router.get('/known-emails', async (req, res) => {

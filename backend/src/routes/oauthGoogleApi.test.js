@@ -119,6 +119,13 @@ describe('POST /api/oauth/google/start', () => {
     expect(await res.json()).toMatchObject({ code: 'not_configured' });
     expect(releaseGoogleSeat).toHaveBeenCalledWith('app-1', 'a@gmail.com');
   });
+
+  it('frees the reserved seat when createGoogleLaunch fails after the reservation', async () => {
+    createGoogleLaunch.mockRejectedValueOnce(new Error('redis down'));
+    const res = await start('A@Gmail.com');
+    expect(res.status).toBe(500);
+    expect(releaseGoogleSeat).toHaveBeenCalledWith('app-1', 'a@gmail.com');
+  });
 });
 
 describe('GET /api/oauth/google/known-emails', () => {

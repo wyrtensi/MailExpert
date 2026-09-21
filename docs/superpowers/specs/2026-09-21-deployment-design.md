@@ -1,6 +1,6 @@
 # Развёртывание и переезд панели и почтового узла
 
-> Статус: дизайн от 2026-09-21, PR 7 серии «Общие ящики» (`2026-09-15-shared-mailboxes-google-login-design.md`, раздел «Развёртывание»). Владелец поручил принять решения самостоятельно («продолжай все»), они перечислены в «Принятых решениях». Настройка Google Cloud описана отдельно в [google-oauth.md](../../operations/google-oauth.md).
+> Статус: дизайн от 2026-09-21, PR 7 серии «Общие ящики» (`2026-09-15-shared-mailboxes-google-login-design.md`, раздел «Развёртывание»). Владелец поручил принять решения самостоятельно («продолжай все»), они перечислены в «Принятых решениях». Настройка Google Cloud описана отдельно в [google-oauth.md](../../operations/google-oauth.md). PR 7a (основа прода и CI) реализован.
 
 ## Зачем
 
@@ -286,6 +286,13 @@ MailExpert в процессе ничего не меняет: имя то же,
 2. **7b. Установка и край.** `install.sh`, `configure.sh`, шаблоны Caddyfile и edge compose, таймеры, bats-тесты, e2e установки.
 3. **7c. Бэкап, восстановление, обновление.** `backup.sh`, `restore.sh`, `update.sh`, `rollback.sh`, `healthcheck.sh`, полный e2e.
 4. **7d. Runbook.** `docs/operations/deployment.md` (установка, режимы входа, обновление, откат, бэкап, ключ восстановления), `docs/operations/moving.md` (разделы 5 и 6 как пошаговые списки), ссылка на `google-oauth.md`; раздел README «Deployment» ссылается на них, старый ручной бэкап помечается как вариант без шифрования и проверки.
+
+### Уточнения, принятые при реализации 7a
+
+- `/api/health/ready` отвечает `{"status":"ready"|"not_ready","postgres":"ok"|"error","redis":"ok"|"error"}`, каждая проверка ограничена 2 с; тексты ошибок не отдаются. Путь публичный в режиме `google` и при заблокированном экране, как `/api/health`.
+- Прод-оверлей: образы `${MAILEXPERT_IMAGE_PREFIX:-ghcr.io/wyrtensi}/mailexpert-{frontend,backend}:${MAILEXPERT_VERSION}`; без `MAILEXPERT_VERSION` compose завершается ошибкой. `build` убран, порты frontend заменены целиком (`!override`).
+- Образ края собирается из `deploy/edge/Dockerfile` с закреплёнными версиями Caddy и `caddy-dns/cloudflare`; публикуется вместе с образами панели под тем же тегом `sha-*`.
+- CI собирает все три образа и на pull request (без публикации), публикует — только при push в `main` после `backend`, `frontend` и `shellcheck`. shellcheck проверяет `scripts/`, `deploy/` и `frontend/*.sh`.
 
 ## Открытые вопросы
 

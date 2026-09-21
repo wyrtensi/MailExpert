@@ -114,7 +114,7 @@ const SAME_VALUE_ALLOWED = {
   'admin.ai.subscriptionProviderChatgpt':    'any', // ChatGPT Plus/Pro (Codex Subscription) — product name, same everywhere
   'admin.categories.gtdReveal':             'any', // "GTD" — brand-like acronym, same everywhere
   'admin.accounts.imapHostPh':              'any', // imap.gmail.com
-  'admin.accounts.presetGmail':             'any', // Gmail
+  'admin.accounts.add.emailPh':              'any', // name@gmail.com
   'admin.accounts.presetIcloud':            'any', // iCloud
   'admin.accounts.presetYahoo':             'any', // Yahoo Mail
   'admin.accounts.smtpHostPh':              'any', // smtp.gmail.com
@@ -461,18 +461,20 @@ describe('i18n locale files', () => {
       assert.equal(missing.length, 0, `OAuth result keys missing from locale files:\n${missing.join('\n')}`);
     });
 
-    it('every Google key used by the temporary Gmail card exists in every locale', () => {
-      // Until PR 8c this card is the only way to add a Gmail mailbox over OAuth.
-      const source = readFileSync(resolve(dir, '../components/GmailConnectCard.jsx'), 'utf8');
-      const keys = [...new Set([...source.matchAll(/'(admin\.integrations\.google\.[\w.]+)'/g)].map(m => m[1]))];
-      assert.ok(keys.length >= 6, `expected the Gmail card keys, found ${keys.length}`);
+    it('every key used by the add-account dialog exists in every locale', () => {
+      // Option, badge and error keys come from utils/addAccount.js and reach t() through a
+      // variable, so every quoted literal of the dialog files is collected.
+      const source = ['../components/AddAccountPicker.jsx', '../components/GmailAddForm.jsx', '../utils/addAccount.js']
+        .map(file => readFileSync(resolve(dir, file), 'utf8')).join('\n');
+      const keys = [...new Set([...source.matchAll(/'((?:admin\.accounts\.add|admin\.integrations\.google)\.[\w.]+)'/g)].map(m => m[1]))];
+      assert.ok(keys.length >= 20, `expected the add-account keys, found ${keys.length}`);
       const missing = [];
       for (const lang of langs) {
         for (const key of keys) {
           if (typeof locales[lang][key] !== 'string' || !locales[lang][key]) missing.push(`  - ${lang}: ${key}`);
         }
       }
-      assert.equal(missing.length, 0, `Gmail card keys missing from locale files:\n${missing.join('\n')}`);
+      assert.equal(missing.length, 0, `Add-account keys missing from locale files:\n${missing.join('\n')}`);
     });
 
     it('every Google apps key used by the admin screen exists in every locale', () => {

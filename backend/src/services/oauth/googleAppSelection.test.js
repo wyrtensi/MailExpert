@@ -122,30 +122,21 @@ describe('selectGoogleApp', () => {
     await expect(selectGoogleApp({ email: 'x@gmail.com' })).rejects.toMatchObject({ code: 'not_configured' });
   });
 
-  it('without an email picks an app with room but reserves nothing', async () => {
+  it('requires an email: every flow names the address it connects', async () => {
     installApps([app('a1')]);
-    await expect(selectGoogleApp()).resolves.toEqual({ appId: 'a1', reserved: false });
-    expect(zsets.get(key('a1'))?.size ?? 0).toBe(0);
+    await expect(selectGoogleApp()).rejects.toThrow(TypeError);
+    await expect(selectGoogleApp({ email: '' })).rejects.toThrow(TypeError);
+    expect(withTransaction).not.toHaveBeenCalled();
   });
 
-  it('reserve: false picks the first app with room and leaves Redis untouched', async () => {
-    installApps([app('a1', { user_limit: 1, grants: 1 }), app('a2')]);
-    await expect(selectGoogleApp({ email: 'x@gmail.com', reserve: false })).resolves.toEqual({ appId: 'a2', reserved: false });
-    expect(zsets.get(key('a1'))?.size ?? 0).toBe(0);
-    expect(zsets.get(key('a2'))?.size ?? 0).toBe(0);
-  });
-
-  it('reserve: false still reports no_app_capacity when no active app has grant room', async () => {
-    installApps([app('a1', { user_limit: 1, grants: 1 })]);
-    await expect(selectGoogleApp({ email: 'x@gmail.com', reserve: false })).rejects.toMatchObject({ code: 'no_app_capacity' });
-  });
-
-  it('reserve: false returns an app with an existing live reservation without extending it', async () => {
+  it('a repeated start for the same email keeps its app and refreshes the one reservation', async () => {
     installApps([app('a1', { user_limit: 1 })]);
-    await selectGoogleApp({ email: 'x@gmail.com' }); // reserved: true, sets the TTL
+    await selectGoogleApp({ email: 'x@gmail.com' });
     const before = zsets.get(key('a1')).get(googleEmailDigest('x@gmail.com'));
-    await expect(selectGoogleApp({ email: 'x@gmail.com', reserve: false })).resolves.toEqual({ appId: 'a1', reserved: false });
-    expect(zsets.get(key('a1')).get(googleEmailDigest('x@gmail.com'))).toBe(before);
+    await new Promise((resolve) => setTimeout(resolve, 5));
+    await expect(selectGoogleApp({ email: 'x@gmail.com' })).resolves.toEqual({ appId: 'a1', reserved: true });
+    expect(zsets.get(key('a1')).size).toBe(1);
+    expect(zsets.get(key('a1')).get(googleEmailDigest('x@gmail.com'))).toBeGreaterThan(before);
   });
 });
 

@@ -1,8 +1,7 @@
 import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
 import {
-  GOOGLE_OAUTH_PATH,
-  buildGoogleConnectUrl,
+  buildGoogleReconnectUrl,
   buildGoogleRedirectUri,
   isGoogleReconnectRequired,
   oauthMessageToSearchParams,
@@ -11,37 +10,20 @@ import {
 
 const params = (query) => new URLSearchParams(query);
 
-describe('buildGoogleConnectUrl', () => {
-  it('returns the bare same-origin route without a hint', () => {
-    assert.equal(GOOGLE_OAUTH_PATH, '/oauth/google');
-    assert.equal(buildGoogleConnectUrl(), '/oauth/google');
-    assert.equal(buildGoogleConnectUrl({}), '/oauth/google');
+describe('buildGoogleReconnectUrl', () => {
+  it('names the mailbox by id and never carries its address', () => {
+    assert.equal(buildGoogleReconnectUrl('22222222-2222-2222-2222-222222222222'),
+      '/oauth/google?account=22222222-2222-2222-2222-222222222222');
   });
 
-  it('ignores blank and non-string hints', () => {
-    assert.equal(buildGoogleConnectUrl({ loginHint: '' }), '/oauth/google');
-    assert.equal(buildGoogleConnectUrl({ loginHint: '   ' }), '/oauth/google');
-    assert.equal(buildGoogleConnectUrl({ loginHint: null }), '/oauth/google');
-    assert.equal(buildGoogleConnectUrl({ loginHint: 42 }), '/oauth/google');
+  it('encodes the id', () => {
+    const url = buildGoogleReconnectUrl('a b&c');
+    assert.equal(new URL(url, 'https://mail.example').searchParams.get('account'), 'a b&c');
+    assert.deepEqual([...new URL(url, 'https://mail.example').searchParams.keys()], ['account']);
   });
 
-  it('adds an encoded login_hint', () => {
-    const url = buildGoogleConnectUrl({ loginHint: 'jane+work@gmail.com' });
-    assert.equal(url, '/oauth/google?login_hint=jane%2Bwork%40gmail.com');
-    assert.equal(new URL(url, 'https://mail.example').searchParams.get('login_hint'), 'jane+work@gmail.com');
-  });
-
-  it('encodes non-ASCII and query metacharacters so they cannot inject parameters', () => {
-    const url = buildGoogleConnectUrl({ loginHint: 'jöhn&prompt=none#x@gmail.com' });
-    const parsed = new URL(url, 'https://mail.example');
-    assert.equal(parsed.pathname, '/oauth/google');
-    assert.deepEqual([...parsed.searchParams.keys()], ['login_hint']);
-    assert.equal(parsed.searchParams.get('login_hint'), 'jöhn&prompt=none#x@gmail.com');
-    assert.equal(parsed.hash, '');
-  });
-
-  it('trims surrounding whitespace from the hint', () => {
-    assert.equal(buildGoogleConnectUrl({ loginHint: '  a@gmail.com ' }), '/oauth/google?login_hint=a%40gmail.com');
+  it('is null without an id', () => {
+    for (const id of [undefined, null, '', '   ', 42]) assert.equal(buildGoogleReconnectUrl(id), null);
   });
 });
 

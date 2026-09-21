@@ -542,6 +542,10 @@ export const useStore = create((set, get) => ({
   adminTab: 'accounts', // 'accounts' | 'appearance' | 'integrations' | 'users'
   setShowAdmin: (v) => set({ showAdmin: v }),
   setAdminTab: (t) => set({ adminTab: t }),
+  // Set by the sidebar's "Add account" item; the accounts tab opens its add view and clears it.
+  addAccountRequested: false,
+  openAddAccount: () => set({ showAdmin: true, adminTab: 'accounts', addAccountRequested: true }),
+  clearAddAccountRequest: () => set({ addAccountRequested: false }),
 
   // Contacts view
   showContacts: false,

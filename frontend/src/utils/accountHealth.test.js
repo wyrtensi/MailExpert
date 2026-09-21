@@ -91,9 +91,10 @@ describe('withProvisionalHealth', () => {
 });
 
 describe('reconnectUrlFor', () => {
-  it('starts the Google flow with the mailbox as login_hint', () => {
-    assert.equal(reconnectUrlFor({ oauth_provider: 'google', email_address: 'box+1@gmail.com' }),
-      '/oauth/google?login_hint=box%2B1%40gmail.com');
+  it('reconnects a Google mailbox by its id', () => {
+    assert.equal(reconnectUrlFor({ id: 'acc-1', oauth_provider: 'google', email_address: 'box+1@gmail.com' }),
+      '/oauth/google?account=acc-1');
+    assert.equal(reconnectUrlFor({ oauth_provider: 'google', email_address: 'box@gmail.com' }), null);
   });
 
   it('uses the existing Microsoft connect entry', () => {
@@ -127,7 +128,7 @@ describe('accountEventPatch', () => {
 
 describe('reconnectMenuAction', () => {
   it('offers the OAuth consent flow for a reconnect-required OAuth account', () => {
-    const google = { oauth_provider: 'google', email_address: 'a@gmail.com', health: 'oauth_reconnect_required' };
+    const google = { id: 'acc-1', oauth_provider: 'google', email_address: 'a@gmail.com', health: 'oauth_reconnect_required' };
     assert.deepEqual(reconnectMenuAction(google), { kind: 'oauth', url: reconnectUrlFor(google) });
     const microsoft = { oauth_provider: 'microsoft', health: 'oauth_reconnect_required' };
     assert.deepEqual(reconnectMenuAction(microsoft), { kind: 'oauth', url: MICROSOFT_OAUTH_PATH });

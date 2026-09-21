@@ -100,6 +100,11 @@ snapshots_here() {
   restic_run -- snapshots --json --host "$RESTIC_HOST" "$@"
 }
 
+# update_status_of <prefix>: the status in that panel's state/update.json.
+update_status_of() {
+  jq -r .status "$1/state/update.json"
+}
+
 backup_keys() {
   printf 'RESTIC_REPOSITORY=s3:http://127.0.0.1:%s/%s\nRESTIC_PASSWORD=%s\nAWS_ACCESS_KEY_ID=%s\nAWS_SECRET_ACCESS_KEY=%s\n' \
     "$S3_PORT" "$BUCKET" "$RESTIC_PW" "$MINIO_ROOT_USER" "$MINIO_ROOT_PASSWORD"
@@ -289,5 +294,92 @@ expect_exit 2 deploy restore.sh latest --prefix "$B"
 [[ $OUT == *"_postgres_data exists"* ]] || fail "restore.sh did not refuse a server with a database"
 [ "$(credential "$B" check)" = match ] || fail "the refused restore changed B"
 pass "B backs up; restore.sh refuses a server with a database"
+
+# 15. Versions to update to: commits on top of HEAD in the origin repository, and images for them
+# (HEAD's backend image plus the migrations and its own BUILD_SHA; HEAD's frontend retagged).
+# ok: one new migration that works; mig: one that works and one that fails; fail: only one that
+# fails (inside its transaction, so nothing is recorded).
+mkdir -p "$STAGE"
+printf 'CREATE TABLE e2e_update_marker (id integer);\n' >"$STAGE/9998_e2e_update_marker.sql"
+printf 'SELECT 1 / 0;\n' >"$STAGE/9999_e2e_update_fails.sql"
+git clone --quiet "$ORIGIN" "$WORK"
+
+# derive_version <name> <migration file...>: prints the sha-<12> tag of the new version.
+derive_version() {
+  local name=$1 sha tag cid f
+  shift
+  git -C "$WORK" checkout --quiet --detach "$HEAD_SHA"
+  for f in "$@"; do
+    cp "$f" "$WORK/backend/migrations/"
+    git -C "$WORK" add "backend/migrations/${f##*/}"
+  done
+  git -C "$WORK" -c user.name=e2e -c user.email=e2e@example.test commit --quiet --allow-empty -m "e2e: $name"
+  sha=$(git -C "$WORK" rev-parse HEAD)
+  git -C "$WORK" push --quiet origin "HEAD:refs/heads/e2e-$name"
+  tag=sha-${sha:0:12}
+  cid=$(docker create "$IMAGE_PREFIX/mailexpert-backend:$VERSION")
+  for f in "$@"; do docker cp "$f" "$cid:/app/migrations/${f##*/}"; done
+  docker commit --change "ENV BUILD_SHA=$sha" "$cid" "$IMAGE_PREFIX/mailexpert-backend:$tag" >/dev/null
+  docker rm "$cid" >/dev/null
+  docker tag "$IMAGE_PREFIX/mailexpert-frontend:$VERSION" "$IMAGE_PREFIX/mailexpert-frontend:$tag"
+  printf '%s\n' "$tag"
+}
+V_OK=$(derive_version ok "$STAGE/9998_e2e_update_marker.sql")
+V_MIG=$(derive_version mig "$STAGE/9998_e2e_update_marker.sql" "$STAGE/9999_e2e_update_fails.sql")
+V_FAIL=$(derive_version fail "$STAGE/9999_e2e_update_fails.sql")
+base=$(on "$B" migration_count)
+marker_gone() { [ "$(on "$B" app_psql <<<"SELECT to_regclass('public.e2e_update_marker') IS NULL;")" = t ]; }
+running_sha() { curl -fsS "http://127.0.0.1:$B_PORT/api/version" | jq -r .sha; }
+backend_running() { [ -n "$(docker ps -q --filter "label=com.docker.compose.project=$B_PROJECT" --filter label=com.docker.compose.service=backend)" ]; }
+pass "versions ok ($V_OK), mig ($V_MIG) and fail ($V_FAIL)"
+
+# 16. Update to ok: a pre-update backup (local dump and snapshot), the new migration, ready.
+expect_exit 0 deploy update.sh "$V_OK" --prefix "$B"
+sha=$(running_sha)
+[ "sha-${sha:0:12}" = "$V_OK" ] || fail "B runs $sha after the update"
+[ "$(on "$B" migration_count)" = $((base + 1)) ] || fail "the new migration was not applied"
+[ -f "$B/backups/pre-update-$VERSION.dump" ] || fail "no local pre-update dump"
+[ "$(on "$B" snapshots_here --tag pre-update | jq length)" = 1 ] || fail "no pre-update snapshot"
+[ "$(update_status_of "$B")" = "done" ] || fail "update.json status after the update"
+pass "update to a version with a new migration"
+
+# 17. rollback.sh: the pre-update dump and the previous version; the new table is gone, the
+# data is as before, the replaced database is kept.
+expect_exit 0 deploy rollback.sh --prefix "$B"
+[ "$(running_sha)" = "$HEAD_SHA" ] || fail "B does not run HEAD after the rollback"
+[ "$(on "$B" migration_count)" = "$base" ] || fail "schema_migrations after the rollback"
+marker_gone || fail "the new migration's table survived the rollback"
+[ "$(credential "$B" check)" = match ] || fail "the credential after the rollback"
+[ "$(on "$B" app_psql postgres <<<"SELECT count(*) FROM pg_database WHERE datname LIKE 'mailexpert_before_rollback_%';")" = 1 ] ||
+  fail "the replaced database was not kept"
+[ "$(update_status_of "$B")" = rolled-back ] || fail "update.json status after the rollback"
+expect_exit 2 deploy rollback.sh --prefix "$B"
+pass "rollback restores the pre-update dump and version; a second rollback is refused"
+
+# 18. Update to fail: its only migration fails inside its transaction, nothing is recorded, and
+# update.sh returns to the previous version by itself (exit 4). A shorter wait keeps the test fast.
+export MAILEXPERT_READY_TIMEOUT=90
+expect_exit 4 deploy update.sh "$V_FAIL" --prefix "$B"
+[[ $OUT == *"applied no migrations"* ]] || fail "no explanation of the automatic return"
+[ "$(running_sha)" = "$HEAD_SHA" ] || fail "B does not run HEAD after the automatic return"
+[ "$(on "$B" migration_count)" = "$base" ] || fail "schema_migrations after a failed update"
+[ "$(update_status_of "$B")" = rolled-back ] || fail "update.json status after the automatic return"
+pass "a failed update without migrations returns to the previous version by itself"
+
+# 19. Update to mig: one migration lands, the next fails: update.sh stops the panel and asks for
+# rollback.sh (exit 5); another update is refused until then; rollback.sh restores the dump.
+expect_exit 5 deploy update.sh "$V_MIG" --prefix "$B"
+[[ $OUT == *rollback.sh* ]] || fail "no rollback.sh command in the output"
+[ "$(on "$B" migration_count)" = $((base + 1)) ] || fail "mig: schema_migrations"
+! backend_running || fail "the backend still runs after exit 5"
+[ "$(update_status_of "$B")" = needs-rollback ] || fail "update.json status after exit 5"
+expect_exit 2 deploy update.sh "$V_OK" --prefix "$B"
+[[ $OUT == *"run "*rollback.sh*" first"* ]] || fail "update.sh did not refuse while a rollback is pending"
+expect_exit 0 deploy rollback.sh --prefix "$B"
+[ "$(running_sha)" = "$HEAD_SHA" ] || fail "B does not run HEAD after the second rollback"
+[ "$(on "$B" migration_count)" = "$base" ] || fail "schema_migrations after the second rollback"
+marker_gone || fail "the table of mig survived the rollback"
+[ "$(credential "$B" check)" = match ] || fail "the credential after the second rollback"
+pass "a failed update with migrations waits for rollback.sh, which restores the dump"
 
 pass "backup e2e passed"

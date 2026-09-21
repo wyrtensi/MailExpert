@@ -43,3 +43,22 @@ setup() {
   run merge_restored_keys "$D" "$S" replace ENCRYPTION_KEY
   [ "$status" -eq 2 ]
 }
+
+@test "update_outcome" {
+  [ "$(update_outcome 0 66 67)" = done ]
+  [ "$(update_outcome 1 66 66)" = auto-rollback ]
+  [ "$(update_outcome 124 66 66)" = auto-rollback ]
+  [ "$(update_outcome 1 66 67)" = manual-rollback ]
+  [ "$(update_outcome 1 66 unknown)" = manual-rollback ]
+  [ "$(update_outcome 3 '' '')" = manual-rollback ]
+}
+
+@test "space_problem: twice the last dump must be free" {
+  [ -z "$(space_problem $((2 * 1024 * 1024)) $((1024 * 1024 * 1024)))" ]
+  [ "$(space_problem $((1024 * 1024)) $((1024 * 1024 * 1024)))" = "free space: 1024 MB, the update needs 2048 MB (twice the last dump)" ]
+}
+
+@test "stale_local_dumps keeps the newest ones" {
+  [ "$(printf '%s\n' d5 d4 d3 d2 d1 | stale_local_dumps 3)" = $'d2\nd1' ]
+  [ -z "$(printf '%s\n' d2 d1 | stale_local_dumps 3)" ]
+}

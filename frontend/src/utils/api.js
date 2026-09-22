@@ -332,6 +332,16 @@ export const api = {
   // Accounts
   getAccounts: () => request('GET', '/accounts'),
   addAccount: (data) => request('POST', '/accounts', data),
+  // A mailbox on the mail node: the server picks the host and a password nobody sees.
+  addDomainMailbox: ({ localPart, domain, name }) => request('POST', '/accounts', { kind: 'domain', localPart, domain, name }),
+  mailNode: {
+    getConfig: () => request('GET', '/mail-node/config'),
+    saveConfig: (data) => request('PUT', '/mail-node/config', data),
+    listDomains: () => request('GET', '/mail-node/domains'),
+    addDomain: (data) => request('POST', '/mail-node/domains', data),
+    listMailboxes: () => request('GET', '/mail-node/mailboxes'),
+    setQuota: (accountId, quotaMb) => request('PUT', `/mail-node/mailboxes/${accountId}/quota`, { quotaMb }),
+  },
   updateAccount: (id, data) => request('PUT', `/accounts/${id}`, data),
   deleteAccount: (id) => request('DELETE', `/accounts/${id}`),
   reconnectAccount: (id) => request('POST', `/accounts/${id}/reconnect`),

@@ -33,6 +33,7 @@ Implemented: full dependency modernization (Express 5, ImapFlow 2, Nodemailer 10
 - [Upstream PR assessment](docs/architecture/upstream-pr-assessment.md)
 - [Gmail MVP implementation plan](docs/superpowers/plans/2026-09-11-mailexpert-shared-gmail-mvp.md)
 - [Google apps for Gmail mailboxes](docs/operations/google-oauth.md) (in Russian)
+- [Mail node for mailboxes on owned domains](docs/operations/mail-node.md) (in Russian)
 
 
 ## Features

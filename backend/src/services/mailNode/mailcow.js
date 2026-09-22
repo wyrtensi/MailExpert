@@ -1,0 +1,221 @@
+import { randomBytes } from 'node:crypto';
+import { query } from '../db.js';
+import { encrypt, decrypt } from '../encryption.js';
+import { safeFetch } from '../safeFetch.js';
+
+// The mail node: a mailcow server that MailExpert creates, disables and re-enables mailboxes on.
+// MailExpert stores only its host name (<MAIL_HOST>), never an IP: IMAP and SMTP of every mailbox
+// and the API at https://<MAIL_HOST>/api/v1 all go by that name, so moving the node is a DNS change.
+
+export const MAIL_NODE_PROVIDER = 'mail_node';
+// Quota of a new mailbox in MiB (mailcow's unit). A quota only caps a mailbox, it reserves no disk.
+export const DEFAULT_QUOTA_MB = 5120;
+// Highest quota an administrator can give one mailbox; also the domain's per-mailbox maximum.
+export const MAX_QUOTA_MB = 102400;
+export const DEFAULT_DOMAIN_MAILBOXES = 500;
+export const MAX_DOMAIN_MAILBOXES = 10000;
+const REQUEST_TIMEOUT_MS = 15000;
+
+const HOST_RE = /^(?=.{1,253}$)(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z]{2,63}$/;
+const LOCAL_PART_RE = /^[a-z0-9](?:[a-z0-9._-]{0,62}[a-z0-9])?$/;
+
+export class MailNodeError extends Error {
+  constructor(code, message) {
+    super(message);
+    this.name = 'MailNodeError';
+    this.code = code;
+  }
+}
+
+// A lowercase DNS name with at least one dot; null for anything else.
+export function parseHostName(value) {
+  if (typeof value !== 'string') return null;
+  const host = value.trim().toLowerCase();
+  return HOST_RE.test(host) ? host : null;
+}
+
+// The part before @: letters, digits, dot, dash, underscore, not starting or ending with a symbol.
+export function parseLocalPart(value) {
+  if (typeof value !== 'string') return null;
+  const local = value.trim().toLowerCase();
+  return LOCAL_PART_RE.test(local) && !local.includes('..') ? local : null;
+}
+
+export function parseWholeNumber(value, min, max) {
+  const n = typeof value === 'string' && value.trim() !== '' ? Number(value) : value;
+  return Number.isInteger(n) && n >= min && n <= max ? n : null;
+}
+
+// Random, never shown to anyone. The fixed tail satisfies mailcow password policies that ask for
+// upper and lower case, a digit and a symbol.
+export function generateMailboxPassword() {
+  return `${randomBytes(24).toString('base64url')}aA1!`;
+}
+
+// The stored node settings with the API key decrypted, or null until an administrator saves them.
+export async function getMailNodeConfig() {
+  const { rows } = await query('SELECT config FROM integration_config WHERE provider = $1', [MAIL_NODE_PROVIDER]);
+  const cfg = rows[0]?.config;
+  if (!cfg?.mailHost || !cfg?.apiKey) return null;
+  return {
+    mailHost: cfg.mailHost,
+    apiKey: decrypt(cfg.apiKey),
+    quotaMb: parseWholeNumber(cfg.quotaMb, 1, MAX_QUOTA_MB) ?? DEFAULT_QUOTA_MB,
+    diskPingUrl: cfg.diskPingUrl || null,
+  };
+}
+
+// An https URL for the disk check pings (a Healthchecks-style service); null for anything else.
+export function parsePingUrl(value) {
+  if (typeof value !== 'string') return null;
+  const trimmed = value.trim();
+  try {
+    return new URL(trimmed).protocol === 'https:' ? trimmed : null;
+  } catch {
+    return null;
+  }
+}
+
+export async function saveMailNodeConfig({ mailHost, apiKey, quotaMb, diskPingUrl = null }) {
+  await query(`
+    INSERT INTO integration_config (provider, config)
+    VALUES ($1, $2)
+    ON CONFLICT (provider) DO UPDATE
+    SET config = EXCLUDED.config, updated_at = NOW()
+  `, [MAIL_NODE_PROVIDER, { mailHost, apiKey: encrypt(apiKey), quotaMb, diskPingUrl }]);
+}
+
+// mailcow answers 200 even when it refuses: a write returns [{ type: 'success' | 'danger' |
+// 'error', msg }], so the body decides. The message names the refusal (e.g. 'object_exists').
+function refusal(body) {
+  const items = Array.isArray(body) ? body : [body];
+  const failed = items.find((item) => item && typeof item === 'object' && item.type && item.type !== 'success');
+  if (!failed) return null;
+  const msg = Array.isArray(failed.msg) ? failed.msg.join(' ') : String(failed.msg ?? '');
+  return msg || 'refused';
+}
+
+async function request(cfg, method, path, body) {
+  let res;
+  try {
+    // allowPrivate: on a one-server install <MAIL_HOST> resolves to this host's own address.
+    res = await safeFetch(`https://${cfg.mailHost}/api/v1/${path}`, {
+      method,
+      headers: {
+        'X-API-Key': cfg.apiKey,
+        Accept: 'application/json',
+        ...(body ? { 'Content-Type': 'application/json' } : {}),
+      },
+      body: body ? JSON.stringify(body) : undefined,
+      signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
+    }, { allowPrivate: true, requireHttps: true });
+  } catch (err) {
+    throw new MailNodeError('mail_node_unreachable', `The mail node is unreachable (${err?.code || err?.name || 'error'})`);
+  }
+  if (res.status === 401 || res.status === 403) {
+    throw new MailNodeError('mail_node_auth', 'The mail node refused the API key');
+  }
+  if (!res.ok) throw new MailNodeError('mail_node_failed', `The mail node answered HTTP ${res.status}`);
+  let data;
+  try {
+    data = await res.json();
+  } catch {
+    throw new MailNodeError('mail_node_failed', 'The mail node did not answer with JSON');
+  }
+  const refused = method === 'POST' ? refusal(data) : null;
+  if (refused) throw new MailNodeError('mail_node_refused', `The mail node refused: ${refused}`);
+  return data;
+}
+
+// get/<type>/all answers {} when there is nothing and an array otherwise.
+function asList(data) {
+  if (Array.isArray(data)) return data;
+  if (data && typeof data === 'object' && Object.keys(data).length) return [data];
+  return [];
+}
+
+export async function listDomains(cfg) {
+  return asList(await request(cfg, 'GET', 'get/domain/all')).map((d) => ({
+    domain: String(d.domain_name ?? d.domain ?? '').toLowerCase(),
+    active: Number(d.active_int ?? d.active) === 1,
+    maxMailboxes: Number(d.max_num_mboxes_for_domain ?? d.mailboxes ?? 0),
+    mailboxes: Number(d.mboxes_in_domain ?? 0),
+  })).filter((d) => d.domain);
+}
+
+// Every mailbox the domain may hold counts at the per-mailbox maximum in the domain total, so
+// mailcow's "sum of mailbox quotas <= domain quota" rule never refuses a mailbox or a quota raise.
+// The total is only a number: like any quota it reserves no disk.
+export async function addDomain(cfg, { domain, mailboxes }) {
+  await request(cfg, 'POST', 'add/domain', {
+    domain,
+    description: 'Added by MailExpert',
+    active: 1,
+    mailboxes,
+    aliases: 400,
+    defquota: cfg.quotaMb,
+    maxquota: MAX_QUOTA_MB,
+    quota: mailboxes * MAX_QUOTA_MB,
+    backupmx: 0,
+    relay_all_recipients: 0,
+  });
+}
+
+function mailboxInfo(m) {
+  return {
+    email: String(m.username ?? '').toLowerCase(),
+    active: Number(m.active_int ?? m.active) === 1,
+    quotaMb: Math.round(Number(m.quota ?? 0) / 1048576),
+    usedBytes: Number(m.quota_used ?? 0),
+  };
+}
+
+export async function getMailbox(cfg, email) {
+  const data = await request(cfg, 'GET', `get/mailbox/${encodeURIComponent(email)}`);
+  const item = Array.isArray(data) ? data[0] : data;
+  return item && item.username ? mailboxInfo(item) : null;
+}
+
+export async function listMailboxes(cfg) {
+  return asList(await request(cfg, 'GET', 'get/mailbox/all')).filter((m) => m.username).map(mailboxInfo);
+}
+
+function editMailbox(cfg, email, attr) {
+  return request(cfg, 'POST', 'edit/mailbox', { items: [email], attr });
+}
+
+// Creates the mailbox, or takes over one that already exists (disabled by a delete in MailExpert,
+// or made by hand in mailcow): it is enabled with a new password only MailExpert knows.
+export async function provisionMailbox(cfg, { localPart, domain, name }) {
+  const email = `${localPart}@${domain}`;
+  const password = generateMailboxPassword();
+  const existing = await getMailbox(cfg, email);
+  if (existing) {
+    await editMailbox(cfg, email, { active: 1, password, password2: password, force_pw_update: 0 });
+  } else {
+    await request(cfg, 'POST', 'add/mailbox', {
+      local_part: localPart, domain, name, password, password2: password,
+      quota: cfg.quotaMb, active: 1, force_pw_update: 0,
+    });
+  }
+  return { email, password, reused: !!existing };
+}
+
+// mailcow active 0: mail to it is refused as for an unknown recipient and nobody can sign in;
+// the letters already received stay on disk.
+export async function disableMailbox(cfg, email) {
+  await editMailbox(cfg, email, { active: 0 });
+}
+
+export async function setMailboxQuota(cfg, email, quotaMb) {
+  await editMailbox(cfg, email, { quota: quotaMb });
+}
+
+// The disk that holds the mail: mailcow reports sizes as df prints them ("41G") and the share
+// used as "28%".
+export async function getDiskStatus(cfg) {
+  const data = await request(cfg, 'GET', 'get/status/vmail');
+  const usedPercent = Number.parseInt(String(data?.used_percent ?? ''), 10);
+  if (!Number.isFinite(usedPercent)) throw new MailNodeError('mail_node_failed', 'The mail node did not report its disk');
+  return { usedPercent, used: String(data.used ?? ''), total: String(data.total ?? '') };
+}

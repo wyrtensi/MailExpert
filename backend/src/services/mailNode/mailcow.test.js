@@ -1,0 +1,199 @@
+import { beforeEach, describe, expect, it, vi } from 'vitest';
+
+vi.mock('../db.js', () => ({ query: vi.fn() }));
+vi.mock('../encryption.js', () => ({
+  encrypt: (v) => `enc:${v}`,
+  decrypt: (v) => (typeof v === 'string' && v.startsWith('enc:') ? v.slice(4) : v),
+}));
+vi.mock('../safeFetch.js', () => ({ safeFetch: vi.fn() }));
+
+import { query } from '../db.js';
+import { safeFetch } from '../safeFetch.js';
+import {
+  DEFAULT_QUOTA_MB,
+  MAX_QUOTA_MB,
+  MailNodeError,
+  addDomain,
+  disableMailbox,
+  generateMailboxPassword,
+  getDiskStatus,
+  getMailNodeConfig,
+  listDomains,
+  listMailboxes,
+  parseHostName,
+  parseLocalPart,
+  parsePingUrl,
+  provisionMailbox,
+  saveMailNodeConfig,
+  setMailboxQuota,
+} from './mailcow.js';
+
+const CFG = { mailHost: 'mail.example.com', apiKey: 'api-key-1', quotaMb: 5120 };
+
+// A fetch answer: mailcow's JSON with a status (200 unless given).
+function answer(body, status = 200) {
+  return { status, ok: status >= 200 && status < 300, json: async () => body };
+}
+const OK = [{ type: 'success', msg: ['done'] }];
+
+function calls() {
+  return safeFetch.mock.calls.map(([url, opts, guard]) => ({
+    url, method: opts.method, headers: opts.headers, body: opts.body ? JSON.parse(opts.body) : undefined, guard,
+  }));
+}
+
+beforeEach(() => {
+  safeFetch.mockReset();
+  query.mockReset();
+});
+
+describe('input parsing', () => {
+  it('accepts host names only, lowercased', () => {
+    expect(parseHostName(' Mail.Example.COM ')).toBe('mail.example.com');
+    for (const bad of ['localhost', '10.0.0.1', 'https://mail.example.com', 'mail.example.com/x', '-a.example.com', '', null]) {
+      expect(parseHostName(bad)).toBeNull();
+    }
+  });
+
+  it('accepts a local part of letters, digits, dot, dash and underscore', () => {
+    expect(parseLocalPart(' Info.Sales ')).toBe('info.sales');
+    expect(parseLocalPart('a')).toBe('a');
+    for (const bad of ['.a', 'a.', 'a..b', 'a@b', 'a b', 'a+b', '', 'x'.repeat(65)]) {
+      expect(parseLocalPart(bad)).toBeNull();
+    }
+  });
+
+  it('accepts only https ping URLs', () => {
+    expect(parsePingUrl(' https://hc.example.com/ping/abc ')).toBe('https://hc.example.com/ping/abc');
+    expect(parsePingUrl('http://hc.example.com/ping/abc')).toBeNull();
+    expect(parsePingUrl('not a url')).toBeNull();
+  });
+
+  it('generates a long random password with every character class', () => {
+    const a = generateMailboxPassword();
+    expect(a).not.toBe(generateMailboxPassword());
+    expect(a.length).toBeGreaterThanOrEqual(32);
+    expect(a).toMatch(/[a-z]/);
+    expect(a).toMatch(/[A-Z]/);
+    expect(a).toMatch(/[0-9]/);
+    expect(a).toMatch(/[^A-Za-z0-9]/);
+  });
+});
+
+describe('stored settings', () => {
+  it('is null until a host and a key are saved', async () => {
+    query.mockResolvedValueOnce({ rows: [] });
+    expect(await getMailNodeConfig()).toBeNull();
+  });
+
+  it('keeps the API key encrypted at rest and decrypts it on read', async () => {
+    query.mockResolvedValue({ rows: [] });
+    await saveMailNodeConfig({ mailHost: 'mail.example.com', apiKey: 'api-key-1', quotaMb: 2048 });
+    const stored = query.mock.calls[0][1][1];
+    expect(stored).toEqual({ mailHost: 'mail.example.com', apiKey: 'enc:api-key-1', quotaMb: 2048, diskPingUrl: null });
+
+    query.mockResolvedValueOnce({ rows: [{ config: stored }] });
+    expect(await getMailNodeConfig()).toEqual({ mailHost: 'mail.example.com', apiKey: 'api-key-1', quotaMb: 2048, diskPingUrl: null });
+  });
+
+  it('falls back to the default quota when the stored one is unusable', async () => {
+    query.mockResolvedValueOnce({ rows: [{ config: { mailHost: 'mail.example.com', apiKey: 'enc:k', quotaMb: 'x' } }] });
+    expect((await getMailNodeConfig()).quotaMb).toBe(DEFAULT_QUOTA_MB);
+  });
+});
+
+describe('API requests', () => {
+  it('calls https://<host>/api/v1 with the key header, allowing a private address', async () => {
+    safeFetch.mockResolvedValueOnce(answer([{ domain_name: 'Example.com', active: '1', max_num_mboxes_for_domain: 500, mboxes_in_domain: 3 }]));
+    expect(await listDomains(CFG)).toEqual([{ domain: 'example.com', active: true, maxMailboxes: 500, mailboxes: 3 }]);
+    const [call] = calls();
+    expect(call.url).toBe('https://mail.example.com/api/v1/get/domain/all');
+    expect(call.method).toBe('GET');
+    expect(call.headers['X-API-Key']).toBe('api-key-1');
+    expect(call.guard).toEqual({ allowPrivate: true, requireHttps: true });
+  });
+
+  it('reads an empty object as no domains', async () => {
+    safeFetch.mockResolvedValueOnce(answer({}));
+    expect(await listDomains(CFG)).toEqual([]);
+  });
+
+  it('turns a refusal inside a 200 answer into an error with the node message', async () => {
+    safeFetch.mockResolvedValueOnce(answer([{ type: 'danger', msg: ['domain_exists', 'example.com'] }]));
+    const err = await addDomain(CFG, { domain: 'example.com', mailboxes: 10 }).catch((e) => e);
+    expect(err).toBeInstanceOf(MailNodeError);
+    expect(err.code).toBe('mail_node_refused');
+    expect(err.message).toContain('domain_exists example.com');
+  });
+
+  it('reports a rejected key, an HTTP failure and an unreachable node separately', async () => {
+    safeFetch.mockResolvedValueOnce(answer({}, 401));
+    expect((await listDomains(CFG).catch((e) => e)).code).toBe('mail_node_auth');
+    safeFetch.mockResolvedValueOnce(answer({}, 500));
+    expect((await listDomains(CFG).catch((e) => e)).code).toBe('mail_node_failed');
+    safeFetch.mockRejectedValueOnce(Object.assign(new Error('connect'), { code: 'ECONNREFUSED' }));
+    const err = await listDomains(CFG).catch((e) => e);
+    expect(err.code).toBe('mail_node_unreachable');
+    expect(err.message).not.toContain('api-key-1');
+  });
+
+  it('creates a domain whose total fits every mailbox at the per-mailbox maximum', async () => {
+    safeFetch.mockResolvedValueOnce(answer(OK));
+    await addDomain(CFG, { domain: 'example.com', mailboxes: 10 });
+    const [call] = calls();
+    expect(call.url).toBe('https://mail.example.com/api/v1/add/domain');
+    expect(call.body).toMatchObject({
+      domain: 'example.com', active: 1, mailboxes: 10, defquota: 5120, maxquota: MAX_QUOTA_MB, quota: 10 * MAX_QUOTA_MB,
+    });
+  });
+
+  it('creates a missing mailbox with the configured quota and a generated password', async () => {
+    safeFetch.mockResolvedValueOnce(answer({})).mockResolvedValueOnce(answer(OK));
+    const created = await provisionMailbox(CFG, { localPart: 'info', domain: 'example.com', name: 'Info' });
+    expect(created.email).toBe('info@example.com');
+    expect(created.reused).toBe(false);
+    const [lookup, add] = calls();
+    expect(lookup.url).toBe('https://mail.example.com/api/v1/get/mailbox/info%40example.com');
+    expect(add.url).toBe('https://mail.example.com/api/v1/add/mailbox');
+    expect(add.body).toMatchObject({ local_part: 'info', domain: 'example.com', name: 'Info', quota: 5120, active: 1 });
+    expect(add.body.password).toBe(created.password);
+    expect(add.body.password2).toBe(created.password);
+  });
+
+  it('takes over an existing mailbox, disabled or not, by enabling it with a new password', async () => {
+    for (const active of ['0', '1']) {
+      safeFetch.mockReset();
+      safeFetch.mockResolvedValueOnce(answer({ username: 'info@example.com', active, quota: 5368709120 })).mockResolvedValueOnce(answer(OK));
+      const created = await provisionMailbox(CFG, { localPart: 'info', domain: 'example.com', name: 'Info' });
+      expect(created.reused).toBe(true);
+      const edit = calls()[1];
+      expect(edit.url).toBe('https://mail.example.com/api/v1/edit/mailbox');
+      expect(edit.body).toEqual({
+        items: ['info@example.com'],
+        attr: { active: 1, password: created.password, password2: created.password, force_pw_update: 0 },
+      });
+    }
+  });
+
+  it('disables a mailbox and sets its quota through edit/mailbox', async () => {
+    safeFetch.mockResolvedValue(answer(OK));
+    await disableMailbox(CFG, 'info@example.com');
+    await setMailboxQuota(CFG, 'info@example.com', 10240);
+    expect(calls().map((c) => c.body)).toEqual([
+      { items: ['info@example.com'], attr: { active: 0 } },
+      { items: ['info@example.com'], attr: { quota: 10240 } },
+    ]);
+  });
+
+  it('lists mailboxes with quota in MB and usage in bytes', async () => {
+    safeFetch.mockResolvedValueOnce(answer([{ username: 'Info@example.com', active_int: 1, active: '1', quota: 5368709120, quota_used: 1048576 }]));
+    expect(await listMailboxes(CFG)).toEqual([{ email: 'info@example.com', active: true, quotaMb: 5120, usedBytes: 1048576 }]);
+  });
+
+  it('reads the mail disk from status/vmail', async () => {
+    safeFetch.mockResolvedValueOnce(answer({ type: 'info', disk: '/dev/sda1', used: '11G', total: '41G', used_percent: '28%' }));
+    expect(await getDiskStatus(CFG)).toEqual({ usedPercent: 28, used: '11G', total: '41G' });
+    safeFetch.mockResolvedValueOnce(answer({ type: 'info' }));
+    expect((await getDiskStatus(CFG).catch((e) => e)).code).toBe('mail_node_failed');
+  });
+});

@@ -155,3 +155,18 @@ test('the demo audit log shows a stopped Access sync', async () => {
   assert.equal(entries[0].actorEmail, 'Cloudflare Access');
   assert.ok(entries[0].details.candidates.length > 0);
 });
+
+test('the demo mail node creates a domain mailbox and lists it with its quota', async () => {
+  assert.deepEqual((await demoRequest('GET', '/integrations/status')).domainMail, { configured: true });
+  const account = await demoRequest('POST', '/accounts', { kind: 'domain', localPart: 'Info', domain: 'demo.mailexpert.local', name: '' });
+  assert.equal(account.email_address, 'info@demo.mailexpert.local');
+  assert.equal(account.mail_node, true);
+  assert.ok((await demoRequest('GET', '/accounts')).some(a => a.id === account.id));
+  const { mailboxes, disk } = await demoRequest('GET', '/mail-node/mailboxes');
+  assert.equal(mailboxes.find(m => m.accountId === account.id).quotaMb, 5120);
+  assert.equal(typeof disk.usedPercent, 'number');
+  const { domains } = await demoRequest('GET', '/mail-node/domains');
+  assert.equal(domains[0].mailboxes, 2);
+  await demoRequest('PUT', `/mail-node/mailboxes/${account.id}/quota`, { quotaMb: 10240 });
+  assert.equal((await demoRequest('GET', '/mail-node/mailboxes')).mailboxes.find(m => m.accountId === account.id).quotaMb, 10240);
+});

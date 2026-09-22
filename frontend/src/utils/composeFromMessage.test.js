@@ -68,6 +68,27 @@ describe('openReplyFromMessage alias selection', () => {
     assert.equal(h.payload().aliasId, 'al1');
   });
 
+  it('prefers the alias the message was delivered to, like the reading pane', async () => {
+    const h = harness();
+    await openReplyFromMessage(
+      {
+        account_id: 'a', from_email: 'f@example.com',
+        to_addresses: [{ email: 'alias1@example.com' }], delivery_addresses: ['alias2@example.com'],
+      },
+      { accounts: [account], openCompose: h.openCompose, getMessageBody: h.getMessageBody },
+    );
+    assert.equal(h.payload().aliasId, 'al2');
+  });
+
+  it('matches a Delivered-To alias given as a JSON string (a list row)', async () => {
+    const h = harness();
+    await openReplyFromMessage(
+      { account_id: 'a', from_email: 'f@example.com', delivery_addresses: '["ALIAS1@example.com"]' },
+      { accounts: [account], openCompose: h.openCompose, getMessageBody: h.getMessageBody },
+    );
+    assert.equal(h.payload().aliasId, 'al1');
+  });
+
   it('is null when no alias matches', async () => {
     const h = harness();
     await openReplyFromMessage(
@@ -104,6 +125,17 @@ describe('openReplyFromMessage reply-all recipients', () => {
     });
     assert.deepEqual(h.payload().cc, []);
     assert.deepEqual(h.payload().allRecipients, [{ email: 'keep@example.com' }, { email: 'cckeep@example.com' }]);
+  });
+});
+
+describe('thread of the reply', () => {
+  it('passes the message thread id so the reply stays in its conversation', async () => {
+    const h = harness();
+    await openReplyFromMessage(
+      { account_id: 'a', from_email: 'f@example.com', thread_id: 'gm-123' },
+      { accounts: [], openCompose: h.openCompose, getMessageBody: h.getMessageBody },
+    );
+    assert.equal(h.payload().threadId, 'gm-123');
   });
 });
 

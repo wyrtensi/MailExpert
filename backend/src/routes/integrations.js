@@ -4,6 +4,7 @@ import { requireAuth, requireAdmin } from '../middleware/auth.js';
 import { encrypt, decrypt, isEncrypted } from '../services/encryption.js';
 import { importLegacyGoogleConfig, resolveGoogleConfig } from '../services/oauth/googleApps.js';
 import { googleHasCapacity } from '../services/oauth/googleAppSelection.js';
+import { getMailNodeConfig } from '../services/mailNode/mailcow.js';
 
 const router = Router();
 
@@ -95,6 +96,10 @@ router.get('/status', async (req, res) => {
       configured,
       // Whether an active app still has a free seat: the Gmail option is offered only then.
       available: await googleAvailable(configured),
+    },
+    // Whether the add-mailbox dialog offers a mailbox on the mail node.
+    domainMail: {
+      configured: !!(await getMailNodeConfig()),
     },
   });
 });

@@ -83,13 +83,13 @@ describe('GET /api/integrations/status (non-admin capability check)', () => {
     process.env.MS_CLIENT_ID = 'some-client-id';
     const res = await fetch(`${base}/api/integrations/status`);
     expect(res.status).toBe(200);
-    expect(await res.json()).toEqual({ microsoft: { configured: true }, google: { configured: false, available: false } });
+    expect(await res.json()).toEqual({ microsoft: { configured: true }, google: { configured: false, available: false }, domainMail: { configured: false } });
   });
 
   it('reports configured=false when MS_CLIENT_ID is unset', async () => {
     const res = await fetch(`${base}/api/integrations/status`);
     expect(res.status).toBe(200);
-    expect(await res.json()).toEqual({ microsoft: { configured: false }, google: { configured: false, available: false } });
+    expect(await res.json()).toEqual({ microsoft: { configured: false }, google: { configured: false, available: false }, domainMail: { configured: false } });
   });
 
   it('never leaks credentials in the response', async () => {
@@ -125,6 +125,14 @@ describe('GET /api/integrations/status (non-admin capability check)', () => {
     expect(JSON.stringify(body)).not.toContain(CLIENT_ID);
   });
 
+  it('reports the mail node as configured without its host or key', async () => {
+    query.mockResolvedValueOnce({ rows: [{ config: { mailHost: 'node.example.net', apiKey: 'enc:node-api-key' } }] });
+    const body = await (await fetch(`${base}/api/integrations/status`)).json();
+    expect(body.domainMail).toEqual({ configured: true });
+    expect(JSON.stringify(body)).not.toContain('node.example.net');
+    expect(JSON.stringify(body)).not.toContain('node-api-key');
+  });
+
   it('is never available while Google is not configured', async () => {
     googleApps.config = null;
     capacity.value = true;
@@ -142,7 +150,7 @@ describe('GET /api/integrations/status (non-admin capability check)', () => {
     errorSpy.mockRestore();
     expect(res.status).toBe(200);
     const body = await res.json();
-    expect(body).toEqual({ microsoft: { configured: true }, google: { configured: true, available: false } });
+    expect(body).toEqual({ microsoft: { configured: true }, google: { configured: true, available: false }, domainMail: { configured: false } });
     expect(JSON.stringify(errorSpy.mock.calls)).not.toMatch(/ECONNREFUSED/);
   });
 });

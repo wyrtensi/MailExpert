@@ -16,6 +16,10 @@ import { uuidParam } from '../utils/uuid.js';
 import { THREAD_MODE_GMAIL, THREAD_MODE_RFC } from '../services/threading/threadId.js';
 import { previewRecompute } from '../services/threading/recompute.js';
 import { providerThreadIndexState } from '../services/threading/providerThreadIndex.js';
+import {
+  MailNodeError, disableMailbox, getMailNodeConfig, listDomains, parseHostName, parseLocalPart, provisionMailbox,
+} from '../services/mailNode/mailcow.js';
+import { mailNodeFailure, refuse as refuseMailNode } from './mailNode.js';
 
 const THREAD_MODES = new Set([THREAD_MODE_RFC, THREAD_MODE_GMAIL]);
 
@@ -60,7 +64,7 @@ const SAFE_FIELDS = [
   'imap_host', 'imap_port', 'imap_skip_tls_verify',
   'smtp_host', 'smtp_port', 'smtp_tls',
   'auth_user', 'smtp_auth_user', 'oauth_provider', 'oauth_reconnect_required', 'enabled',
-  'include_in_unified_inbox',
+  'include_in_unified_inbox', 'mail_node',
   'last_sync', 'sync_error', 'sort_order', 'folder_mappings',
   'signature', 'created_at', 'categorization_enabled', 'thread_mode',
 ];
@@ -77,7 +81,7 @@ router.get('/', async (req, res) => {
             smtp_host, smtp_port, smtp_tls, auth_user, smtp_auth_user, oauth_provider, oauth_reconnect_required, enabled,
             include_in_unified_inbox,
             last_sync, sync_error, sort_order, folder_mappings, signature, created_at,
-            categorization_enabled, thread_mode
+            categorization_enabled, thread_mode, mail_node
      FROM email_accounts
      ORDER BY sort_order, created_at`
   );
@@ -144,9 +148,68 @@ function changedConnectionFields(stored, updates) {
   });
 }
 
-// Manual server setup is an admin task: an ordinary user adds Gmail through the Google flow.
-// PR 9 opens this route to everyone for `kind: 'domain'` (a mailbox on the configured mail node).
-router.post('/', requireAdmin, async (req, res) => {
+// A mailbox on the mail node, open to everyone signed in: the server picks the host, the ports and
+// a password only MailExpert knows, so nothing from the body reaches the connection settings.
+async function createDomainMailbox(req, res) {
+  const localPart = parseLocalPart(req.body?.localPart);
+  if (!localPart) return res.status(400).json({ error: 'The name before @ may hold letters, digits, dot, dash and underscore', code: 'local_part_invalid' });
+  const domain = parseHostName(req.body?.domain);
+  if (!domain) return refuseMailNode(res, 'domain_invalid');
+  const email = `${localPart}@${domain}`;
+  const name = typeof req.body?.name === 'string' && req.body.name.trim() ? req.body.name.trim().slice(0, 200) : email;
+  if (hasHeaderInjectionChars(name)) {
+    return res.status(400).json({ error: 'Name and email address cannot contain control characters' });
+  }
+  const cfg = await getMailNodeConfig();
+  if (!cfg) return refuseMailNode(res, 'mail_node_not_configured');
+
+  const taken = await query('SELECT 1 FROM email_accounts WHERE lower(email_address) = $1 LIMIT 1', [email]);
+  if (taken.rows.length) return res.status(409).json({ error: 'This mailbox is already in MailExpert', code: 'mailbox_exists' });
+
+  let created;
+  try {
+    const domains = await listDomains(cfg);
+    if (!domains.some((d) => d.domain === domain && d.active)) {
+      return res.status(400).json({ error: 'The mail node has no such active domain', code: 'domain_unknown' });
+    }
+    created = await provisionMailbox(cfg, { localPart, domain, name });
+  } catch (err) {
+    return mailNodeFailure(res, err);
+  }
+
+  let account;
+  try {
+    const result = await query(`
+      INSERT INTO email_accounts (
+        added_by, name, email_address, protocol,
+        imap_host, imap_port, imap_tls, imap_skip_tls_verify, smtp_host, smtp_port, smtp_tls,
+        auth_user, auth_pass, mail_node
+      ) VALUES ($1,$2,$3,'imap',$4,993,true,false,$4,587,'STARTTLS',$3,$5,true)
+      RETURNING *
+    `, [req.session.userId, name, email, cfg.mailHost, encrypt(created.password)]);
+    account = result.rows[0];
+  } catch (err) {
+    console.error('Domain mailbox insert error:', err);
+    // Nobody else knows the new password: leave the mailbox disabled rather than active and unused.
+    await disableMailbox(cfg, email).catch((e) => console.error(`Could not disable ${email} on the mail node: ${e.message}`));
+    return res.status(500).json({ error: 'Failed to add account' });
+  }
+
+  recordAudit({
+    actorUserId: req.session.userId,
+    accountId: account.id,
+    action: 'mailbox.added',
+    details: { protocol: 'imap', oauthProvider: null, mailNode: true, reused: created.reused },
+  });
+  imapManager.connectAccount(account).catch(console.error);
+  res.json(safeAccount(account));
+}
+
+// Manual server setup is an admin task: an ordinary user adds Gmail through the Google flow or a
+// mailbox on the mail node (`kind: 'domain'`).
+router.post('/', (req, res, next) => (
+  req.body?.kind === 'domain' ? createDomainMailbox(req, res) : next()
+), requireAdmin, async (req, res) => {
   const {
     name, sender_name = null, email_address, color = '#6366f1', protocol = 'imap',
     imap_host, imap_port = 993, imap_skip_tls_verify = false,
@@ -375,8 +438,21 @@ router.put('/:id', async (req, res) => {
 router.delete('/:id', async (req, res) => {
   try {
     const { id } = req.params;
-    const check = await query('SELECT id, email_address FROM email_accounts WHERE id = $1', [id]);
+    const check = await query('SELECT id, email_address, mail_node FROM email_accounts WHERE id = $1', [id]);
     if (!check.rows.length) return res.status(404).json({ error: 'Account not found' });
+
+    // A mail node mailbox is only disabled there. The row stays when that fails: deleting it would
+    // leave an active mailbox whose password nobody has.
+    if (check.rows[0].mail_node) {
+      const cfg = await getMailNodeConfig();
+      if (!cfg) return refuseMailNode(res, 'mail_node_not_configured');
+      try {
+        await disableMailbox(cfg, check.rows[0].email_address);
+      } catch (err) {
+        if (err instanceof MailNodeError) return mailNodeFailure(res, err);
+        throw err;
+      }
+    }
 
     // Delete from DB first (cascades to messages and folders immediately).
     // Disconnect IMAP afterward — fire-and-forget so a slow server logout

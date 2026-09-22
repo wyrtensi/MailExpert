@@ -17,6 +17,8 @@ import integrationsRoutes, { loadIntegrationConfigs } from './routes/integration
 import oauthGoogleApiRoutes from './routes/oauthGoogleApi.js';
 import authRoutes, { destroyUserSessions } from './routes/auth.js';
 import accountRoutes from './routes/accounts.js';
+import mailNodeRoutes from './routes/mailNode.js';
+import { startMailNodeDiskWatch } from './services/mailNode/diskWatch.js';
 import mailRoutes from './routes/mail.js';
 import searchRoutes from './routes/search.js';
 import adminRoutes from './routes/admin.js';
@@ -193,6 +195,7 @@ app.use('/oauth', oauthRoutes);
 app.use('/api/integrations', integrationsRoutes);
 app.use('/api/oauth/google', oauthGoogleApiRoutes);
 app.use('/api/accounts', accountRoutes);
+app.use('/api/mail-node', mailNodeRoutes);
 app.use('/api/mail', mailRoutes);
 app.use('/api/mail', sendRoutes);
 app.use('/api/mail', draftRoutes);
@@ -281,6 +284,9 @@ await loadIntegrationConfigs();
 
 // Start background snooze watcher — polls every 60 seconds to restore snoozed messages
 imapManager.startSnoozeWatcher();
+
+// Read the mail node's disk every 10 minutes and ping the administrator's check URL.
+startMailNodeDiskWatch();
 
 // Keep the Cloudflare Access policy in line with approved users; only google mode approves users.
 if (getAuthSettings().mode === 'google') {

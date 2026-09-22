@@ -560,7 +560,12 @@ function demoHeaders(id) {
 
 function demoThreadingDiagnostics(id) {
   const current = messageById(id);
-  if (!current) return null;
+  // The real route answers 404 { error: 'Message not found' } for an unknown id, which the
+  // real request() turns into a rejected promise (utils/api.js). Demo mode has no HTTP layer
+  // to carry a status code, so it rejects the same way: throwing here makes demoRequest's
+  // promise reject with the same message, and MessageHeaderModal's .catch() sees a real failure
+  // instead of a silently empty diagnostics object.
+  if (!current) throw new Error('Message not found');
   const override = THREADING_OVERRIDES[id] || {};
 
   // Same grouping the demo already uses for threads (threadId param of message(), defaulting

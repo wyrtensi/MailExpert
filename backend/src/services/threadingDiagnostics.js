@@ -10,10 +10,18 @@ import { parseReferences } from './threading/threadId.js';
 // { messageId, inReplyTo, references: [..], providerThreadId, providerMessageId, threadId,
 //   reason, mode, conversation: { total, folders: [{ folder, count }] } }, or null when the
 // message row does not exist (or was soft-deleted — same "not found" as the other message routes).
+//
+// conversation.total counts distinct letters, not rows: the same Gmail letter can live in
+// several folders as separate rows (e.g. INBOX and [Gmail]/All Mail), exactly like the thread
+// list (services/messageService.js's thread_totals, COUNT(DISTINCT message_id)) and
+// GET /thread/:threadId (DISTINCT ON (m.message_id)) already dedupe it. A row with no
+// message_id can't be matched to any duplicate, so it counts as its own letter.
+// conversation.folders stays row-based — it answers "where do the copies live", not "how many
+// letters".
 export async function threadingDiagnostics(messageId) {
   const found = await query(`
     SELECT m.message_id, m.in_reply_to, m.thread_references, m.provider_thread_id, m.provider_message_id,
-           m.thread_id, m.threading_reason, m.account_id, m.is_deleted, a.thread_mode
+           m.thread_id, m.thread_key, m.threading_reason, m.account_id, m.is_deleted, a.thread_mode
     FROM messages m
     JOIN email_accounts a ON a.id = m.account_id
     WHERE m.id = $1
@@ -21,21 +29,21 @@ export async function threadingDiagnostics(messageId) {
   if (!found.rows.length || found.rows[0].is_deleted) return null;
   const row = found.rows[0];
 
-  // The same key the stored thread_key column derives (COALESCE(thread_id, id::text)), so the
-  // grouping below matches idx_messages_thread_key_lookup (account_id, thread_key) exactly —
-  // no new index needed. A message with no thread_id (old rows synced before threading, or one
-  // with no Message-ID of its own) only ever groups with itself.
-  const threadKey = row.thread_id || messageId;
-
-  const { rows: folderRows } = await query(`
-    SELECT folder, count(*)::int AS count
-    FROM messages
-    WHERE account_id = $1 AND thread_key = $2 AND is_deleted = false
-    GROUP BY folder
-    ORDER BY count DESC, folder ASC
-  `, [row.account_id, threadKey]);
-
-  const total = folderRows.reduce((sum, r) => sum + r.count, 0);
+  const [{ rows: totalRows }, { rows: folderRows }] = await Promise.all([
+    query(`
+      SELECT count(DISTINCT message_id) FILTER (WHERE message_id IS NOT NULL)::int
+             + count(*) FILTER (WHERE message_id IS NULL)::int AS total
+      FROM messages
+      WHERE account_id = $1 AND thread_key = $2 AND is_deleted = false
+    `, [row.account_id, row.thread_key]),
+    query(`
+      SELECT folder, count(*)::int AS count
+      FROM messages
+      WHERE account_id = $1 AND thread_key = $2 AND is_deleted = false
+      GROUP BY folder
+      ORDER BY count DESC, folder ASC
+    `, [row.account_id, row.thread_key]),
+  ]);
 
   return {
     messageId: row.message_id,
@@ -47,7 +55,7 @@ export async function threadingDiagnostics(messageId) {
     reason: row.threading_reason,
     mode: row.thread_mode,
     conversation: {
-      total,
+      total: Number(totalRows[0]?.total) || 0,
       folders: folderRows.map((r) => ({ folder: r.folder, count: r.count })),
     },
   };

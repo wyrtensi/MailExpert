@@ -1,6 +1,6 @@
 # План реализации MailExpert для общей работы со 100 Gmail
 
-> Статус: bootstrap форка, ребрендинг, обновление зависимостей и Google OAuth (с несколькими Google-приложениями, PR 8a–8d серии `2026-09-15-shared-mailboxes-google-login-design.md`) реализованы; Google Cloud часть Task 6.2 описана в `docs/operations/google-oauth.md`.
+> Статус на 2026-09-22: Task 1–8 выполнены. Task 6 вышла шире плана: развёртывание описано в `docs/operations/deployment.md` (PR 7a–7d серии `2026-09-15-shared-mailboxes-google-login-design.md`) вместо `team-deployment.md`, настройка Google Cloud — в `docs/operations/google-oauth.md`. Google OAuth реализован с несколькими Google-приложениями (PR 8a–8d той же серии). Task 9 не начата: она требует живых Gmail-ящиков и целевого сервера. Доменные ящики, отнесённые ниже к «Что не входит», сделаны отдельным этапом через почтовый узел mailcow (PR 9 серии, `docs/operations/mail-node.md`).
 
 **Цель:** подготовить MailExpert — форк upstream-проекта [MailFlow](https://github.com/maathimself/mailflow), в котором один общий рабочий пользователь может подключить до 100 личных Gmail-ящиков через обязательный Google OAuth 2.0, выбирать конкретный ящик, читать и отправлять письма от его имени. Общая лента всех писем и разделение прав менеджеров в MVP не входят.
 
@@ -426,7 +426,7 @@ Backend возвращает код, а не локализованный тек
 - Create: `scripts/check-account-health.mjs`
 - Create: `scripts/check-account-health.test.mjs`
 - Create: `docs/operations/gmail-scale-test.md`
-- Update: `docs/operations/team-deployment.md`
+- Update: `docs/operations/deployment.md`
 
 ### 9.1. Проверить OAuth lifecycle
 

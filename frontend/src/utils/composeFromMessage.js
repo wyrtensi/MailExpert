@@ -1,3 +1,5 @@
+import { pickReplyAlias } from './replyAlias.js';
+
 function parseAddressField(raw) {
   try {
     const arr = Array.isArray(raw) ? raw : JSON.parse(raw || '[]');
@@ -21,25 +23,15 @@ export async function openReplyFromMessage(message, { accounts, openCompose, get
     ...(myAccount?.aliases || []).map(al => al.email.toLowerCase()),
   ]);
 
-  const replyAliasId = (() => {
-    const aliases = myAccount?.aliases || [];
-    if (!aliases.length) return null;
-    try {
-      const toArr = Array.isArray(message.to_addresses)
-        ? message.to_addresses
-        : JSON.parse(message.to_addresses || '[]');
-      const ccArr = Array.isArray(message.cc_addresses)
-        ? message.cc_addresses
-        : JSON.parse(message.cc_addresses || '[]');
-      const allEmails = [...toArr, ...ccArr].map(t => t.email?.toLowerCase()).filter(Boolean);
-      const fromEmail = (message.from_email || '').toLowerCase();
-      const match = aliases.find(al => {
-        const aliasEmail = al.email.toLowerCase();
-        return allEmails.includes(aliasEmail) || fromEmail === aliasEmail;
-      });
-      return match ? match.id : null;
-    } catch { return null; }
-  })();
+  // Delivered-To first, then the To/Cc/From scan: replying from the list or GTD triage picks
+  // the same alias as replying from the reading pane.
+  const replyAliasId = pickReplyAlias({
+    aliases: myAccount?.aliases || [],
+    deliveryAddresses: message.delivery_addresses,
+    toAddresses: message.to_addresses,
+    ccAddresses: message.cc_addresses,
+    fromEmail: message.from_email,
+  });
 
   const allRecipients = (() => {
     try {
@@ -87,6 +79,8 @@ export async function openReplyFromMessage(message, { accounts, openCompose, get
     isReplyAll: replyAll,
     originalFrom: sender,
     allRecipients,
+    // Keeps a reply sent from the list in its Gmail conversation, as the reading pane does.
+    threadId: message.thread_id,
   });
 }
 

@@ -913,6 +913,7 @@ export default function Sidebar() {
         <button
           onClick={isMobile ? () => setMobileSidebarOpen(false) : toggleSidebar}
           title={t('sidebar.toggleSidebar')}
+          aria-label={t('sidebar.toggleSidebar')}
           className="btn-press"
           style={{
             background: 'transparent', border: '1px solid transparent', color: 'var(--text-secondary)',
@@ -939,6 +940,8 @@ export default function Sidebar() {
       <div style={{ padding: '12px 10px' }}>
         <button
           onClick={() => openCompose({ accountId: selectedAccountId || undefined })}
+          title={t('sidebar.compose')}
+          aria-label={t('sidebar.compose')}
           className="btn-press"
           style={{
             width: '100%', padding: sidebarCollapsed ? '10px' : '10px 14px',
@@ -1181,9 +1184,11 @@ export default function Sidebar() {
         })()}
 
         {/* Mailbox filter: narrows only the rendered rows below, never the store's accounts,
-            the selection or unread counts. */}
+            the selection or unread counts. The "+" next to it is a second, more discoverable
+            entry point into the same add-account flow the user menu's "Add account" triggers
+            (openAddAccount sets addAccountRequested, which AdminPanel's AccountsTab consumes). */}
         {showAccountFilter && (
-          <div style={{ position: 'relative', margin: '2px 2px 6px' }}>
+          <div style={{ position: 'relative', margin: '2px 2px 6px', display: 'flex', alignItems: 'center', gap: 6 }}>
             <input
               type="search"
               value={accountFilter}
@@ -1201,12 +1206,27 @@ export default function Sidebar() {
               spellCheck={false}
               autoComplete="off"
               style={{
-                width: '100%', boxSizing: 'border-box', fontSize: 12,
+                flex: 1, minWidth: 0, boxSizing: 'border-box', fontSize: 12,
                 background: 'var(--bg-primary)', color: 'var(--text-primary)',
                 border: '1px solid var(--border-subtle)', borderRadius: 6,
                 padding: '5px 8px', outline: 'none',
               }}
             />
+            <button
+              onClick={openAddAccount}
+              aria-label={t('sidebar.addAccount')}
+              title={t('sidebar.addAccount')}
+              className="btn-press"
+              style={{
+                flexShrink: 0, background: 'transparent', border: '1px solid var(--border-subtle)',
+                borderRadius: 6, color: 'var(--text-secondary)', cursor: 'pointer',
+                padding: '5px 6px', display: 'flex', alignItems: 'center', justifyContent: 'center',
+              }}
+              onMouseEnter={e => { e.currentTarget.style.background = 'var(--bg-tertiary)'; e.currentTarget.style.color = 'var(--text-primary)'; }}
+              onMouseLeave={e => { e.currentTarget.style.background = 'transparent'; e.currentTarget.style.color = 'var(--text-secondary)'; }}
+            >
+              {ICONS.addAccount}
+            </button>
           </div>
         )}
 
@@ -1369,6 +1389,8 @@ export default function Sidebar() {
                       {/* Expand toggle */}
                       <button
                         onClick={e => { e.stopPropagation(); toggleAccount(account.id); }}
+                        aria-label={expanded ? t('sidebar.collapseAccount', { name: account.name || account.email_address }) : t('sidebar.expandAccount', { name: account.name || account.email_address })}
+                        title={expanded ? t('sidebar.collapseAccount', { name: account.name || account.email_address }) : t('sidebar.expandAccount', { name: account.name || account.email_address })}
                         style={{
                           background: 'none', border: 'none', padding: 2,
                           color: 'var(--text-tertiary)', cursor: 'pointer',
@@ -1569,6 +1591,8 @@ export default function Sidebar() {
                         {hasChildren ? (
                           <button
                             onClick={e => { e.stopPropagation(); toggleCollapsedFolder(account.id, folder.path); }}
+                            aria-label={isExpanded ? t('sidebar.collapseFolder', { name: folder.name }) : t('sidebar.expandFolder', { name: folder.name })}
+                            title={isExpanded ? t('sidebar.collapseFolder', { name: folder.name }) : t('sidebar.expandFolder', { name: folder.name })}
                             style={{
                               background: 'none', border: 'none', padding: 2, margin: 0, flexShrink: 0,
                               color: 'var(--text-tertiary)', cursor: 'pointer',
@@ -1779,6 +1803,10 @@ export default function Sidebar() {
                 try { await setBlockRemoteImages(!blockRemoteImages); }
                 catch { addNotification({ title: t('message.whitelistFail.title') }); }
               }}
+              role="switch"
+              aria-checked={blockRemoteImages}
+              aria-label={t('sidebar.blockImages')}
+              title={t('sidebar.blockImages')}
               style={{
                 width: 36, height: 20, borderRadius: 10, border: 'none', cursor: 'pointer',
                 background: blockRemoteImages ? 'var(--accent)' : 'var(--bg-tertiary)',
@@ -1808,6 +1836,10 @@ export default function Sidebar() {
             <span style={{ flex: 1, fontSize: 13, color: 'var(--text-primary)' }}>{t('sidebar.searchAllFolders')}</span>
             <button
               onClick={() => setSearchAllFolders(!searchAllFolders)}
+              role="switch"
+              aria-checked={searchAllFolders}
+              aria-label={t('sidebar.searchAllFolders')}
+              title={t('sidebar.searchAllFolders')}
               style={{
                 width: 36, height: 20, borderRadius: 10, border: 'none', cursor: 'pointer',
                 background: searchAllFolders ? 'var(--accent)' : 'var(--bg-tertiary)',
@@ -1953,6 +1985,7 @@ export default function Sidebar() {
             <button
               onClick={() => { setShowContacts(!showContacts); if (isMobile) setMobileSidebarOpen(false); }}
               title={t('contacts.title')}
+              aria-label={t('contacts.title')}
               style={{
                 ...(sidebarCollapsed
                   ? { width: 28, height: 28, justifyContent: 'center' }
@@ -1979,6 +2012,11 @@ export default function Sidebar() {
           <div
             ref={userMenuBtnRef}
             onClick={openUserMenu}
+            onKeyDown={activateOnKey(openUserMenu)}
+            role="button"
+            tabIndex={0}
+            aria-label={t('sidebar.userMenu')}
+            title={t('sidebar.userMenu')}
             style={{
               display: 'flex', alignItems: 'center',
               gap: 8, padding: sidebarCollapsed ? '7px' : '7px 10px',
@@ -2070,6 +2108,10 @@ export default function Sidebar() {
                 try { await setBlockRemoteImages(!blockRemoteImages); }
                 catch { addNotification({ title: t('message.whitelistFail.title') }); }
               }}
+              role="switch"
+              aria-checked={blockRemoteImages}
+              aria-label={t('sidebar.blockImages')}
+              title={t('sidebar.blockImages')}
               style={{
                 width: 36, height: 20, borderRadius: 10, border: 'none', cursor: 'pointer',
                 background: blockRemoteImages ? 'var(--accent)' : 'var(--bg-tertiary)',
@@ -2098,6 +2140,10 @@ export default function Sidebar() {
             </div>
             <button
               onClick={() => setSearchAllFolders(!searchAllFolders)}
+              role="switch"
+              aria-checked={searchAllFolders}
+              aria-label={t('sidebar.searchAllFolders')}
+              title={t('sidebar.searchAllFolders')}
               style={{
                 width: 36, height: 20, borderRadius: 10, border: 'none', cursor: 'pointer',
                 background: searchAllFolders ? 'var(--accent)' : 'var(--bg-tertiary)',

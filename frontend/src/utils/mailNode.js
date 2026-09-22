@@ -86,3 +86,13 @@ export function sizeParts(bytes) {
   if (n >= 1024 ** 3) return { value: (n / 1024 ** 3).toFixed(1), unitKey: 'admin.mailNode.unitGb' };
   return { value: String(Math.round(n / 1024 ** 2)), unitKey: 'admin.mailNode.unitMb' };
 }
+
+// The "Quota of a new mailbox, MB" field takes a plain MB number, which stops being legible
+// once it is thousands of MB. This reads it back in GB once it crosses a full GB (1024 MB),
+// so "5120" also shows as "5.0" for a "= 5.0 GB" hint under the field. Null below that, so the
+// hint stays hidden for small quotas where MB alone is already clear.
+export function quotaMbInGb(quotaMb) {
+  const n = Number(quotaMb);
+  if (!Number.isFinite(n) || n < 1024) return null;
+  return (n / 1024).toFixed(1);
+}

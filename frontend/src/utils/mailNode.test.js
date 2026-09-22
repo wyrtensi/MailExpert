@@ -5,6 +5,7 @@ import {
   mailNodeConfigError,
   mailNodeErrorDetail,
   mailNodeErrorKey,
+  quotaMbInGb,
   selectableDomains,
   sizeParts,
   usagePercent,
@@ -73,5 +74,20 @@ describe('usage', () => {
   it('shows megabytes below a gigabyte and gigabytes above', () => {
     assert.deepEqual(sizeParts(1048576 * 300), { value: '300', unitKey: 'admin.mailNode.unitMb' });
     assert.deepEqual(sizeParts(1024 ** 3 * 1.25), { value: '1.3', unitKey: 'admin.mailNode.unitGb' });
+  });
+});
+
+describe('quotaMbInGb', () => {
+  it('is null below a full gigabyte', () => {
+    assert.equal(quotaMbInGb(1023), null);
+    assert.equal(quotaMbInGb('700'), null);
+    assert.equal(quotaMbInGb(''), null);
+    assert.equal(quotaMbInGb('not a number'), null);
+  });
+
+  it('reads MB back in GB at and above a full gigabyte', () => {
+    assert.equal(quotaMbInGb(1024), '1.0');
+    assert.equal(quotaMbInGb('5120'), '5.0');
+    assert.equal(quotaMbInGb(102400), '100.0');
   });
 });

@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import { api } from '../utils/api.js';
 import { copyToClipboard } from '../utils/clipboard.js';
@@ -51,6 +51,11 @@ export default function GoogleAppsSection() {
   const [error, setError] = useState('');
   const [notice, setNotice] = useState('');
   const [confirmDialog, setConfirmDialog] = useState(null);
+  // The setup instructions default open only while there's no app yet to skip past them for;
+  // once that first load resolves, later app list changes (adding/removing an app) don't
+  // fight a manual expand/collapse the admin made in the meantime.
+  const [setupOpen, setSetupOpen] = useState(false);
+  const setupOpenInitialized = useRef(false);
 
   const suggestedCallback = buildGoogleRedirectUri(window.location);
 
@@ -73,6 +78,12 @@ export default function GoogleAppsSection() {
       })
       .catch(() => setCallback(suggestedCallback));
   }, []); // eslint-disable-line react-hooks/exhaustive-deps -- load once; reload/suggestedCallback are stable for the page
+
+  useEffect(() => {
+    if (apps === null || setupOpenInitialized.current) return;
+    setupOpenInitialized.current = true;
+    setSetupOpen(apps.length === 0);
+  }, [apps]);
 
   const act = async (action) => {
     setBusy(true);
@@ -187,18 +198,18 @@ export default function GoogleAppsSection() {
         )}
       </label>
 
-      <div style={noteBoxStyle}>
-        <div style={{ fontWeight: 600, color: 'var(--accent)', marginBottom: 6 }}>
+      <details style={noteBoxStyle} open={setupOpen} onToggle={(e) => setSetupOpen(e.currentTarget.open)}>
+        <summary style={{ fontWeight: 600, color: 'var(--accent)', cursor: 'pointer' }}>
           {t('admin.integrations.googleApps.setupTitle')}
-        </div>
-        <ol style={{ margin: 0, paddingLeft: 18 }}>
+        </summary>
+        <ol style={{ margin: '6px 0 0', paddingLeft: 18 }}>
           <li>{t('admin.integrations.googleApps.step1')}</li>
           <li>{t('admin.integrations.googleApps.step2')}</li>
           <li>{t('admin.integrations.googleApps.step3', { scopes: GOOGLE_APP_SCOPES })}</li>
           <li>{t('admin.integrations.googleApps.step4')}</li>
           <li>{t('admin.integrations.googleApps.step5')}</li>
         </ol>
-      </div>
+      </details>
 
       {!apps && (
         <div style={{ color: loadError ? 'var(--red)' : 'var(--text-tertiary)', fontSize: 13 }}>

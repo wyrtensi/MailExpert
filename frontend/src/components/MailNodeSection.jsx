@@ -10,6 +10,7 @@ import {
   mailNodeErrorDetail,
   mailNodeErrorKey,
   parseWholeNumber,
+  quotaMbInGb,
   sizeParts,
   usagePercent,
 } from '../utils/mailNode.js';
@@ -111,6 +112,7 @@ export default function MailNodeSection() {
   };
 
   const disk = overview?.disk;
+  const quotaGb = quotaMbInGb(form.quotaMb);
 
   return (
     <div style={{ border: '1px solid var(--border-subtle)', borderRadius: 12, padding: 16, marginBottom: 12 }}>
@@ -137,6 +139,7 @@ export default function MailNodeSection() {
             <span style={labelStyle}>{t('admin.mailNode.quotaLabel')}</span>
             <input inputMode="numeric" value={form.quotaMb} onChange={(e) => setForm({ ...form, quotaMb: e.target.value })} style={{ ...fieldStyle, maxWidth: 160 }} />
             <span style={hintStyle}>{t('admin.mailNode.quotaNote', { max: MAX_QUOTA_MB })}</span>
+            {quotaGb && <span style={hintStyle}>{t('admin.mailNode.quotaGb', { value: quotaGb })}</span>}
           </label>
           <label>
             <span style={labelStyle}>{t('admin.mailNode.pingLabel')}</span>
@@ -237,7 +240,9 @@ export default function MailNodeSection() {
                       <td style={cellStyle}>{m.email}</td>
                       <td style={cellStyle}>
                         {!m.onNode && <span style={{ color: 'var(--red)' }}>{t('admin.mailNode.notOnNode')}</span>}
-                        {m.onNode && percent != null && t('admin.mailNode.usage', { used: size(m.usedBytes), percent })}
+                        {m.onNode && percent != null && t('admin.mailNode.usage', {
+                          used: size(m.usedBytes), quota: size(m.quotaMb * 1048576), percent,
+                        })}
                       </td>
                       <td style={cellStyle}>
                         {m.onNode && (

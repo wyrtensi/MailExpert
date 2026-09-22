@@ -174,6 +174,8 @@ const LOCALE_SPECIFIC_KEYS_BY_LOCALE = {
     'admin.categories.fetchedOk_few', 'admin.categories.fetchedOk_many',
     'spam.failBodyBulk_few', 'spam.failBodyBulk_many',
     'contacts.count_few', 'contacts.count_many',
+    'message.senderHistory.summary_few', 'message.senderHistory.summary_many',
+    'message.senderHistory.more_few', 'message.senderHistory.more_many',
   ]),
 };
 const LOCALE_SPECIFIC_KEYS = new Set(

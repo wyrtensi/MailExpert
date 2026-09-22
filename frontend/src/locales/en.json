@@ -276,6 +276,17 @@
       "button": "Classify with AI",
       "done": "Classified as {{category}}",
       "error": "AI classification failed."
+    },
+    "senderHistory": {
+      "summary_one": "Earlier with {{email}}: {{count}} letter",
+      "summary_other": "Earlier with {{email}}: {{count}} letters",
+      "incoming": "From them",
+      "outgoing": "Our reply",
+      "noSubject": "(no subject)",
+      "more_one": "{{count}} more: search all letters from them",
+      "more_other": "{{count}} more: search all letters from them",
+      "allFrom": "Search all letters from them",
+      "openFailed": "Could not open the letter"
     }
   },
   "messageList": {

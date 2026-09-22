@@ -360,6 +360,7 @@ export const api = {
     return request('GET', `/mail/messages?${qs}`);
   },
   getMessage: (id) => request('GET', `/mail/messages/${id}`),
+  getSenderHistory: (id, limit) => request('GET', `/mail/messages/${id}/sender-history?limit=${limit}`),
   // Resolve a deep-link reference (stable Message-ID header, or a legacy UUID) to the
   // current message row — durable across folder moves (#270).
   resolveMessage: (ref, accountId) => {

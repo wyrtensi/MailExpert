@@ -14,6 +14,7 @@ import { getResults, removeResult } from '../aiResults.js';
 import { startRun, cancelRun, getAiState, subscribeRuns } from '../aiRuns.js';
 import { renderMarkdown } from '../utils/renderMarkdown.js';
 import { pickReplyAlias } from '../utils/replyAlias.js';
+import SenderHistory from './SenderHistory.jsx';
 import { measureContentHeight, createHeightController, forceEagerImages } from '../utils/emailFrameHeight.js';
 import { copyToClipboard } from '../utils/clipboard.js';
 import { folderMatchesQuery } from '../utils/folderDisplay.js';
@@ -1054,6 +1055,21 @@ export default function MessagePane({ windowMessageId = null, onWindowClose = nu
       el.removeEventListener('touchend', onEnd);
     };
   }, [isMobile, setSelectedMessage, resetPaneSwipeStyles]);
+
+  // A letter from the sender history may sit in another folder than the list shows: keep it
+  // in threadMessages (not cleared by the list) so the pane finds it, then open it as usual.
+  const openHistoryMessage = async (id) => {
+    try {
+      const msg = await api.getMessage(id);
+      useStore.getState().setThreadMessages(`__history_${msg.id}`, [msg]);
+      selectAndMarkRead(msg);
+    } catch (err) {
+      addNotification({ type: 'error', title: t('message.senderHistory.openFailed'), body: err.message });
+    }
+  };
+  const searchSender = (q) => {
+    if (q) useStore.getState().setSearchQuery(q);
+  };
 
   const handleReply = (replyAll = false) => {
     if (!message) return;
@@ -2608,6 +2624,8 @@ ${bodyContent}
           </div>
 
         </div>
+
+        <SenderHistory messageId={message.id} onOpen={openHistoryMessage} onSearch={searchSender} />
 
         {/* Attachments */}
         {attachments.length > 0 && (

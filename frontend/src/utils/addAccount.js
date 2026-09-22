@@ -4,9 +4,8 @@
 import { computeAccountHealth, reconnectUrlFor } from './accountHealth.js';
 
 // The ways to add a mailbox, in the order the dialog lists them. The dialog renders whatever
-// addAccountOptions returns through a kind -> form table, so the domain mailbox (PR 9) is one
-// entry here plus its form.
-export const ADD_ACCOUNT_KINDS = Object.freeze(['gmail', 'manual']);
+// addAccountOptions returns through a kind -> form table (AdminPanel.jsx).
+export const ADD_ACCOUNT_KINDS = Object.freeze(['gmail', 'domain', 'manual']);
 
 // Same check as POST /api/oauth/google/start (backend services/oauth/googleLaunch.js).
 export const GMAIL_EMAIL_PATTERN = /^[^\s@]{1,64}@[^\s@]{1,255}$/;
@@ -19,6 +18,7 @@ export const GOOGLE_LAUNCH_TTL_MS = 60 * 1000;
 
 const OPTION_KEYS = {
   gmail: { titleKey: 'admin.accounts.add.gmailTitle', descriptionKey: 'admin.accounts.add.gmailDescription' },
+  domain: { titleKey: 'admin.accounts.add.domainTitle', descriptionKey: 'admin.accounts.add.domainDescription' },
   manual: { titleKey: 'admin.accounts.add.manualTitle', descriptionKey: 'admin.accounts.add.manualDescription' },
 };
 
@@ -50,13 +50,21 @@ function gmailUnavailableHint(googleStatus) {
 
 // Options the dialog lists. Manual server setup is for administrators only (the server answers
 // 403 to anyone else). Gmail is listed for everyone but stays inactive, with the reason, while no
-// Google app can take a new address.
-export function addAccountOptions({ isAdmin = false, googleStatus = null } = {}) {
+// Google app can take a new address; the mailbox on the mail node likewise until an administrator
+// sets the node up. `domainStatus` is the `domainMail` part of GET /api/integrations/status.
+export function addAccountOptions({ isAdmin = false, googleStatus = null, domainStatus = null } = {}) {
   const options = [];
   for (const kind of ADD_ACCOUNT_KINDS) {
     if (kind === 'manual' && !isAdmin) continue;
-    const enabled = kind !== 'gmail' || googleStatus?.available === true;
-    const hintKey = kind === 'gmail' && !enabled ? gmailUnavailableHint(googleStatus) : null;
+    let enabled = true;
+    let hintKey = null;
+    if (kind === 'gmail') {
+      enabled = googleStatus?.available === true;
+      hintKey = enabled ? null : gmailUnavailableHint(googleStatus);
+    } else if (kind === 'domain') {
+      enabled = domainStatus?.configured === true;
+      hintKey = enabled || !domainStatus ? null : 'admin.accounts.add.domainNotConfigured';
+    }
     options.push({ kind, ...OPTION_KEYS[kind], enabled, hintKey });
   }
   return options;

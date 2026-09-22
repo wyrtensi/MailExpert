@@ -24,15 +24,22 @@ const mailbox = (email, extra = {}) => ({
 describe('addAccountOptions', () => {
   const available = { configured: true, available: true };
 
-  it('offers Gmail and manual setup to an administrator, in that order', () => {
-    assert.deepEqual(addAccountOptions({ isAdmin: true, googleStatus: available }), [
+  it('offers Gmail, the mail node and manual setup to an administrator, in that order', () => {
+    assert.deepEqual(addAccountOptions({ isAdmin: true, googleStatus: available, domainStatus: { configured: true } }), [
       { kind: 'gmail', titleKey: 'admin.accounts.add.gmailTitle', descriptionKey: 'admin.accounts.add.gmailDescription', enabled: true, hintKey: null },
+      { kind: 'domain', titleKey: 'admin.accounts.add.domainTitle', descriptionKey: 'admin.accounts.add.domainDescription', enabled: true, hintKey: null },
       { kind: 'manual', titleKey: 'admin.accounts.add.manualTitle', descriptionKey: 'admin.accounts.add.manualDescription', enabled: true, hintKey: null },
     ]);
   });
 
   it('hides manual setup from everyone else', () => {
-    assert.deepEqual(addAccountOptions({ isAdmin: false, googleStatus: available }).map((o) => o.kind), ['gmail']);
+    assert.deepEqual(addAccountOptions({ isAdmin: false, googleStatus: available }).map((o) => o.kind), ['gmail', 'domain']);
+  });
+
+  it('keeps the mail node listed but inactive until it is set up, silent while the status loads', () => {
+    const domain = (domainStatus) => addAccountOptions({ domainStatus }).find((o) => o.kind === 'domain');
+    assert.deepEqual([domain({ configured: false }).enabled, domain({ configured: false }).hintKey], [false, 'admin.accounts.add.domainNotConfigured']);
+    assert.deepEqual([domain(null).enabled, domain(null).hintKey], [false, null]);
   });
 
   it('keeps Gmail listed but inactive, with the reason, while no app can take an address', () => {
@@ -50,8 +57,8 @@ describe('addAccountOptions', () => {
     assert.equal(gmail.hintKey, null);
   });
 
-  it('lists only the kinds this version builds (the domain mailbox comes in PR 9)', () => {
-    assert.deepEqual([...ADD_ACCOUNT_KINDS], ['gmail', 'manual']);
+  it('lists the kinds in dialog order', () => {
+    assert.deepEqual([...ADD_ACCOUNT_KINDS], ['gmail', 'domain', 'manual']);
   });
 });
 

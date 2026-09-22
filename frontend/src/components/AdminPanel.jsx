@@ -36,6 +36,8 @@ import MailboxSyncSettings from './MailboxSyncSettings.jsx';
 import AuditLogTab from './AuditLogTab.jsx';
 import { isGoogleAuthMode } from '../utils/authMode.js';
 import GoogleAppsSection from './GoogleAppsSection.jsx';
+import MailNodeSection from './MailNodeSection.jsx';
+import DomainMailboxAddForm from './DomainMailboxAddForm.jsx';
 import AddAccountPicker from './AddAccountPicker.jsx';
 import GmailAddForm from './GmailAddForm.jsx';
 import { addAccountOptions } from '../utils/addAccount.js';
@@ -496,12 +498,20 @@ function AccountsTab() {
   // "Add account": first the way (utils/addAccount.js decides which are offered), then its form.
   const [addKind, setAddKind] = useState(null);
   const [googleStatus, setGoogleStatus] = useState(null);
+  const [domainStatus, setDomainStatus] = useState(null);
   useEffect(() => {
     if (subview !== 'add') return;
     setGoogleStatus(null);
+    setDomainStatus(null);
     api.getIntegrationsStatus()
-      .then((data) => setGoogleStatus(data?.google || { configured: false, available: false }))
-      .catch(() => setGoogleStatus({ configured: false, available: false }));
+      .then((data) => {
+        setGoogleStatus(data?.google || { configured: false, available: false });
+        setDomainStatus(data?.domainMail || { configured: false });
+      })
+      .catch(() => {
+        setGoogleStatus({ configured: false, available: false });
+        setDomainStatus({ configured: false });
+      });
   }, [subview]);
   const closeAdd = useCallback(() => { setAddKind(null); setSubview('list'); }, []);
 
@@ -546,9 +556,11 @@ function AccountsTab() {
   };
 
   const handleDelete = (id) => {
+    const onNode = accounts.find(a => a.id === id)?.mail_node;
     setConfirmDialog({
       title: t('admin.accounts.deleteTitle'),
-      message: t('admin.accounts.deleteMessage'),
+      // A mailbox on the mail node is only disabled there; creating it again enables it back.
+      message: onNode ? t('admin.accounts.deleteMailNodeMessage') : t('admin.accounts.deleteMessage'),
       confirmLabel: t('common.remove'),
       onConfirm: async () => {
         await api.deleteAccount(id);
@@ -743,9 +755,10 @@ function AccountsTab() {
   };
 
   if (subview === 'add') {
-    // One form per way to add a mailbox; PR 9 adds `domain` here and in ADD_ACCOUNT_KINDS.
+    // One form per way to add a mailbox, keyed like ADD_ACCOUNT_KINDS.
     const ADD_FORMS = {
       gmail: () => <GmailAddForm accounts={accounts} onDone={closeAdd} />,
+      domain: () => <DomainMailboxAddForm onCreated={(account) => { setAccounts([...accounts, account]); closeAdd(); }} />,
       manual: () => <AccountForm onSave={handleAdd} onCancel={closeAdd} />,
     };
     const renderForm = addKind ? ADD_FORMS[addKind] : null;
@@ -766,7 +779,7 @@ function AccountsTab() {
         </div>
         {renderForm
           ? renderForm()
-          : <AddAccountPicker options={addAccountOptions({ isAdmin, googleStatus })} onPick={setAddKind} />}
+          : <AddAccountPicker options={addAccountOptions({ isAdmin, googleStatus, domainStatus })} onPick={setAddKind} />}
       </div>
     );
   }
@@ -2814,6 +2827,7 @@ function IntegrationsTab() {
           </div>
 
           {isAdmin && <GoogleAppsSection />}
+          {isAdmin && <MailNodeSection />}
         </div>
       )}
         </div>

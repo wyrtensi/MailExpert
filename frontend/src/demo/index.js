@@ -516,6 +516,81 @@ function demoSenderHistory(id) {
   };
 }
 
+function demoMessageIdFor(id) {
+  return `<${id}@demo.mailexpert.local>`;
+}
+
+// Per-message threading diagnostics (GET /mail/messages/:id/threading), same shape the server
+// answers: one fixture is a reply in its chain, one is a provisional ancestor whose root never
+// synced, one is an old row with no recorded reason, everything else reads as its own thread.
+const THREADING_OVERRIDES = {
+  'demo-005': {
+    inReplyTo: demoMessageIdFor('demo-001'),
+    references: [demoMessageIdFor('demo-001')],
+    reason: 'rfc-root',
+    threadId: demoMessageIdFor('demo-001'),
+  },
+  'demo-004': {
+    inReplyTo: '<checklist-kickoff@vendor.example>',
+    references: ['<checklist-kickoff@vendor.example>'],
+    reason: 'rfc-provisional',
+    threadId: '<checklist-kickoff@vendor.example>',
+  },
+  'demo-009': { reason: null, threadIdNull: true },
+};
+
+// Full raw headers (GET /mail/messages/:id/headers), built the same way the server falls back
+// to buildHeadersFromMessage when it cannot re-fetch the original ones from IMAP. Pre-existing
+// gap: the generic demo fallback answered { headers: [] } here, an array MessageHeaderModal's
+// headers.split('\n') cannot handle, crashing the modal on every open in demo mode.
+function demoHeaders(id) {
+  const current = messageById(id);
+  if (!current) return null;
+  const override = THREADING_OVERRIDES[id] || {};
+  const lines = [];
+  lines.push(`From: ${current.from_name} <${current.from_email}>`);
+  if (current.to_addresses?.length) lines.push(`To: ${current.to_addresses.join(', ')}`);
+  if (current.subject) lines.push(`Subject: ${current.subject}`);
+  lines.push(`Message-ID: ${current.message_id}`);
+  if (current.date) lines.push(`Date: ${new Date(current.date).toUTCString()}`);
+  if (override.inReplyTo) lines.push(`In-Reply-To: ${override.inReplyTo}`);
+  if (override.references?.length) lines.push(`References: ${override.references.join(' ')}`);
+  return { headers: lines.join('\r\n'), subject: current.subject };
+}
+
+function demoThreadingDiagnostics(id) {
+  const current = messageById(id);
+  // The real route answers 404 { error: 'Message not found' } for an unknown id, which the
+  // real request() turns into a rejected promise (utils/api.js). Demo mode has no HTTP layer
+  // to carry a status code, so it rejects the same way: throwing here makes demoRequest's
+  // promise reject with the same message, and MessageHeaderModal's .catch() sees a real failure
+  // instead of a silently empty diagnostics object.
+  if (!current) throw new Error('Message not found');
+  const override = THREADING_OVERRIDES[id] || {};
+
+  // Same grouping the demo already uses for threads (threadId param of message(), defaulting
+  // to the message's own id) — not the display strings above, which only decorate one row.
+  const threadKey = current.thread_id || current.id;
+  const sameThread = messages.filter(m => m.account_id === current.account_id && (m.thread_id || m.id) === threadKey);
+  const byFolder = new Map();
+  for (const m of sameThread) byFolder.set(m.folder, (byFolder.get(m.folder) || 0) + 1);
+  const folders = [...byFolder.entries()]
+    .map(([folder, count]) => ({ folder, count }))
+    .sort((a, b) => b.count - a.count || a.folder.localeCompare(b.folder));
+
+  return {
+    messageId: current.message_id,
+    inReplyTo: override.inReplyTo ?? null,
+    references: override.references ?? [],
+    providerThreadId: null,
+    providerMessageId: null,
+    threadId: override.threadIdNull ? null : (override.threadId ?? current.message_id),
+    reason: 'reason' in override ? override.reason : 'new-root',
+    mode: 'rfc',
+    conversation: { total: sameThread.length, folders },
+  };
+}
+
 export async function demoRequest(method, path, body = {}) {
   const verb = method.toUpperCase();
   const url = parsePath(path);
@@ -556,6 +631,13 @@ export async function demoRequest(method, path, body = {}) {
   // Earlier letters with the same person in the same mailbox, as the server answers it.
   const historyMatch = pathname.match(/^\/mail\/messages\/([^/]+)\/sender-history$/);
   if (verb === 'GET' && historyMatch) return clone(demoSenderHistory(decodeURIComponent(historyMatch[1])));
+
+  // Why this letter is in its conversation, as the server answers it.
+  const threadingMatch = pathname.match(/^\/mail\/messages\/([^/]+)\/threading$/);
+  if (verb === 'GET' && threadingMatch) return clone(demoThreadingDiagnostics(decodeURIComponent(threadingMatch[1])));
+
+  const headersMatch = pathname.match(/^\/mail\/messages\/([^/]+)\/headers$/);
+  if (verb === 'GET' && headersMatch) return clone(demoHeaders(decodeURIComponent(headersMatch[1])));
 
   const bodyMatch = pathname.match(/^\/mail\/messages\/([^/]+)\/body$/);
   if (verb === 'GET' && bodyMatch) {
@@ -775,7 +857,6 @@ export async function demoRequest(method, path, body = {}) {
   if (verb === 'GET' && pathname === '/categories/sources') return [];
   if (verb === 'GET' && pathname === '/gtd/sections') return { sections: [] };
   if (verb === 'GET' && pathname === '/plugins') return [];
-  if (verb === 'GET' && pathname.endsWith('/headers')) return { headers: [] };
 
   return { ok: true, demo: true };
 }

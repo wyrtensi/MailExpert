@@ -16,6 +16,7 @@ the target architecture is [docs/architecture/team-mail-system-handoff.md](docs/
 - Mailbox audit log with an admin screen.
 - Local demo mode for showing the product without a real mailbox.
 - Gmail conversations threaded the way Gmail threads them: provider thread and message ids stored, no grouping by subject, a resumable backfill for already-cached mail, and a per-mailbox threading mode with preview, switch, rollback and a batched recompute.
+- Per-message threading diagnostics: the headers, the provider thread number, the reason a message landed in its conversation and the folders it lives in.
 - Several Google OAuth applications end to end. An unverified Google Cloud project accepts at most 100 unique users for its lifetime and the count never goes down, so mailboxes are spread over several projects: application selection with seat reservations, the grant journal, token refresh through the application a mailbox belongs to, revoke of refused and replaced grants, and the admin screen with active, closed and disabled states.
 - One "Add account" entry: a Gmail address with suggestions of known addresses, and a manual IMAP/SMTP setup for administrators. Gmail mailboxes are reconnected from the sidebar and the Accounts tab.
 - Google OAuth operations guide ([docs/operations/google-oauth.md](docs/operations/google-oauth.md)): separate development and production Google Cloud projects, consent screen mode, redirect URIs per host, app states, secret rotation, moving mailboxes between apps, revoke and removal.
@@ -34,7 +35,6 @@ the target architecture is [docs/architecture/team-mail-system-handoff.md](docs/
 
 - Gmail scale test in waves of 10 → 25 → 50 → 100 mailboxes: memory, CPU, IMAP connections, provider errors and UI latency on the target server.
 - 24-hour stability run, controlled restart and restore.
-- Per-message threading diagnostics: the headers, the provider thread number, the reason a message landed in its conversation and the folders it lives in.
 
 ## Later
 

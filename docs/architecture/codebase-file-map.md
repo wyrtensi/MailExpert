@@ -104,6 +104,7 @@ Frontend не ходит к Gmail напрямую. Он обращается к
 - `labels.js`, `labelsRead.js` — label/folder metadata.
 - `unifiedInbox.js` — выбор аккаунтов для общей ленты; в нашем MVP все Gmail получают opt-out.
 - `threading/` — цепочки писем: `threadId.js` вычисляет ключ цепочки и причину (`computeThreading`: номер Gmail в режиме `gmail`, иначе цепочка `References`/`In-Reply-To`, без склейки по теме), `providerIds.js` читает `X-GM-THRID`/`X-GM-MSGID` из ответа imapflow, `providerIdBackfill.js` догружает эти номера для уже сохранённых писем и в режиме `gmail` переключает их ключ, `providerIdBackfillStore.js` хранит прогресс догрузки, `providerThreadIndex.js` проверяет, что индекс по номеру цепочки валиден, `recompute.js` пересчитывает `thread_id` всех писем ящика заново после смены режима пачками, разбирая старые склейки по теме, `recomputeStore.js` хранит прогресс и курсор этого пересчёта (см. миграцию 0064).
+- `threadingDiagnostics.js` (по образцу `senderHistory.js`) — диагностика одного письма для `GET /api/mail/messages/:id/threading`: заголовки цепочки, номер Gmail, причина из `threading_reason`, режим ящика и группировка остальных писем той же цепочки по папкам через `thread_key`, без новой миграции.
 
 ### Безопасность и инфраструктура backend
 
@@ -187,7 +188,8 @@ Google OAuth — не plugin уровня UI: он является credential p
 - `folderSync.js` — внешние папки Gmail;
 - `sidebar.js` — будущий фильтр аккаунтов;
 - `nativeActionSecurity.js` — доверие native bridge;
-- `api.js` — все OAuth/admin вызовы должны идти через него.
+- `api.js` — все OAuth/admin вызовы должны идти через него;
+- `senderHistory.js`, `threadingDiagnostics.js` — чистые хелперы под секции диалога письма/заголовков (`SenderHistory.jsx`, `MessageHeaderModal.jsx`): i18n-ключи причины/режима и т.п.
 
 ### Локализация
 

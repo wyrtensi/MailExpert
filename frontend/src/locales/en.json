@@ -287,6 +287,32 @@
       "more_other": "{{count}} more: search all letters from them",
       "allFrom": "Search all letters from them",
       "openFailed": "Could not open the letter"
+    },
+    "threading": {
+      "title": "Conversation",
+      "loading": "Loading…",
+      "loadFailed": "Could not load",
+      "messageId": "Message-ID",
+      "inReplyTo": "In-Reply-To",
+      "references": "References",
+      "none": "None",
+      "gmailThreadNumber": "Gmail thread number",
+      "reasonLabel": "Reason",
+      "modeLabel": "Mailbox mode",
+      "mode": {
+        "gmail": "Threaded the way Gmail threads it",
+        "rfc": "Threaded by the reply headers"
+      },
+      "reason": {
+        "gmailThrid": "Gmail thread number",
+        "newRoot": "First letter of the conversation",
+        "rfcRoot": "Reply to the letter that started the conversation",
+        "rfcAncestor": "Reply to a letter already in the conversation",
+        "rfcProvisional": "Ancestor not loaded yet — threaded by a reference in the headers",
+        "unknown": "Reason not recorded (letter loaded before diagnostics existed)"
+      },
+      "conversationCount_one": "{{count}} letter in this conversation",
+      "conversationCount_other": "{{count}} letters in this conversation"
     }
   },
   "messageList": {

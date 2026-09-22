@@ -178,3 +178,18 @@ test('the demo sender history lists earlier letters with their direction, and fr
   const found = await demoRequest('GET', '/mail/search?q=from%3Amaya%40northstar.example');
   assert.deepEqual(found.messages.map(m => m.id), ['demo-001']);
 });
+
+test('the demo threading diagnostics report the reply chain and letter count for a known message', async () => {
+  const diagnostics = await demoRequest('GET', '/mail/messages/demo-005/threading');
+  assert.equal(diagnostics.inReplyTo, '<demo-001@demo.mailexpert.local>');
+  assert.deepEqual(diagnostics.references, ['<demo-001@demo.mailexpert.local>']);
+  assert.equal(diagnostics.reason, 'rfc-root');
+  assert.equal(diagnostics.conversation.total, 2);
+});
+
+test('the demo threading diagnostics reject like the real 404 for an unknown message', async () => {
+  await assert.rejects(
+    () => demoRequest('GET', '/mail/messages/does-not-exist/threading'),
+    /Message not found/,
+  );
+});

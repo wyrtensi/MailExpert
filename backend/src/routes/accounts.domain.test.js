@@ -26,6 +26,7 @@ vi.mock('../services/mailNode/mailcow.js', async (importActual) => {
       email: `${localPart}@${domain}`, password: 'generated-password', reused: false,
     })),
     disableMailbox: vi.fn(async () => {}),
+    getMailbox: vi.fn(async () => null),
   };
 });
 
@@ -34,7 +35,7 @@ import accountRoutes from './accounts.js';
 import { query } from '../services/db.js';
 import { imapManager } from '../index.js';
 import { recordAudit } from '../services/auditLog.js';
-import { MailNodeError, disableMailbox, provisionMailbox } from '../services/mailNode/mailcow.js';
+import { MailNodeError, disableMailbox, getMailbox, provisionMailbox } from '../services/mailNode/mailcow.js';
 
 const ID = '77777777-7777-4777-8777-777777777777';
 const CFG = { mailHost: 'mail.example.com', apiKey: 'k', quotaMb: 5120 };
@@ -169,6 +170,32 @@ describe('domain mailboxes in /api/accounts', () => {
       expect(query.mock.calls.some(([sql]) => sql.startsWith('DELETE'))).toBe(false);
     });
 
+    it('deletes the row when the node refuses because the mailbox is gone', async () => {
+      disableMailbox.mockRejectedValueOnce(new MailNodeError('mail_node_refused', 'The mail node refused: access_denied'));
+      getMailbox.mockResolvedValueOnce(null);
+      query.mockImplementation(async (sql) => (
+        sql.startsWith('SELECT id, email_address, mail_node')
+          ? { rows: [{ id: ID, email_address: 'info@example.com', mail_node: true }] }
+          : { rows: [] }
+      ));
+      const res = await del();
+      expect(res.status).toBe(200);
+      expect(query.mock.calls.some(([sql]) => sql.startsWith('DELETE'))).toBe(true);
+    });
+
+    it('keeps the row when the node refuses and the mailbox is still there', async () => {
+      disableMailbox.mockRejectedValueOnce(new MailNodeError('mail_node_refused', 'The mail node refused: something'));
+      getMailbox.mockResolvedValueOnce({ email: 'info@example.com', active: true });
+      query.mockImplementation(async (sql) => (
+        sql.startsWith('SELECT id, email_address, mail_node')
+          ? { rows: [{ id: ID, email_address: 'info@example.com', mail_node: true }] }
+          : { rows: [] }
+      ));
+      const res = await del();
+      expect(res.status).toBe(502);
+      expect(query.mock.calls.some(([sql]) => sql.startsWith('DELETE'))).toBe(false);
+    });
+
     it('deletes any other mailbox without calling the node', async () => {
       query.mockImplementation(async (sql) => (
         sql.startsWith('SELECT id, email_address, mail_node')
@@ -179,6 +206,38 @@ describe('domain mailboxes in /api/accounts', () => {
       expect(res.status).toBe(200);
       expect(disableMailbox).not.toHaveBeenCalled();
       expect(query.mock.calls.some(([sql]) => sql.startsWith('DELETE'))).toBe(true);
+    });
+  });
+
+  describe('PUT', () => {
+    const STORED = {
+      id: ID, email_address: 'info@example.com', mail_node: true, name: 'Info',
+      imap_host: 'mail.example.com', imap_port: 993, imap_tls: true, imap_skip_tls_verify: false,
+      smtp_host: 'mail.example.com', smtp_port: 587, smtp_tls: 'STARTTLS',
+      auth_user: 'info@example.com', auth_pass: 'enc:generated-password', smtp_auth_user: null, smtp_auth_pass: null,
+    };
+    const put = (body) => fetch(`${base}/api/accounts/${ID}`, {
+      method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body),
+    });
+    beforeEach(() => {
+      query.mockImplementation(async (sql) => (sql.startsWith('SELECT * FROM email_accounts') ? { rows: [STORED] } : { rows: [STORED] }));
+    });
+
+    it('refuses to point a mail node mailbox at another server or change its login', async () => {
+      for (const change of [{ imap_host: 'evil.example.net' }, { smtp_host: 'evil.example.net' }, { auth_user: 'x' }, { auth_pass: 'x' }]) {
+        const res = await put(change);
+        expect(res.status).toBe(400);
+        expect((await res.json()).code).toBe('mail_node_connection_locked');
+      }
+      expect(query.mock.calls.some(([sql]) => sql.startsWith('UPDATE'))).toBe(false);
+    });
+
+    it('accepts the form resending the unchanged server settings with a new name', async () => {
+      const res = await put({
+        name: 'Info desk', imap_host: 'mail.example.com', imap_port: 993, imap_skip_tls_verify: false,
+        smtp_host: 'mail.example.com', smtp_port: 587, smtp_tls: 'STARTTLS',
+      });
+      expect(res.status).toBe(200);
     });
   });
 });

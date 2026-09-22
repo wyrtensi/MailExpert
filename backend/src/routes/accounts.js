@@ -17,7 +17,7 @@ import { THREAD_MODE_GMAIL, THREAD_MODE_RFC } from '../services/threading/thread
 import { previewRecompute } from '../services/threading/recompute.js';
 import { providerThreadIndexState } from '../services/threading/providerThreadIndex.js';
 import {
-  MailNodeError, disableMailbox, getMailNodeConfig, listDomains, parseHostName, parseLocalPart, provisionMailbox,
+  MailNodeError, disableMailbox, getMailbox, getMailNodeConfig, listDomains, parseHostName, parseLocalPart, provisionMailbox,
 } from '../services/mailNode/mailcow.js';
 import { mailNodeFailure, refuse as refuseMailNode } from './mailNode.js';
 
@@ -28,6 +28,9 @@ const THREAD_MODES = new Set([THREAD_MODE_RFC, THREAD_MODE_GMAIL]);
 // connectAccount's in-progress guard would drop the second and leave the GTD sync
 // tick armed inconsistently with the final DB value. Queued per account id.
 const reconnectQueue = createKeyedSerializer();
+// One domain mailbox creation per address at a time: two at once would both provision it, the
+// second taking it over with a new password and leaving the first row with a dead one.
+const domainCreateQueue = createKeyedSerializer();
 
 const ALLOWED_IMAP_PORTS = new Set([143, 993]);
 const ALLOWED_SMTP_PORTS = new Set([465, 587]);
@@ -151,6 +154,11 @@ function changedConnectionFields(stored, updates) {
 // A mailbox on the mail node, open to everyone signed in: the server picks the host, the ports and
 // a password only MailExpert knows, so nothing from the body reaches the connection settings.
 async function createDomainMailbox(req, res) {
+  const email = `${parseLocalPart(req.body?.localPart)}@${parseHostName(req.body?.domain)}`;
+  return domainCreateQueue(email, () => createDomainMailboxNow(req, res));
+}
+
+async function createDomainMailboxNow(req, res) {
   const localPart = parseLocalPart(req.body?.localPart);
   if (!localPart) return res.status(400).json({ error: 'The name before @ may hold letters, digits, dot, dash and underscore', code: 'local_part_invalid' });
   const domain = parseHostName(req.body?.domain);
@@ -285,6 +293,13 @@ router.put('/:id', async (req, res) => {
   const storedResult = await query('SELECT * FROM email_accounts WHERE id = $1', [id]);
   if (!storedResult.rows.length) return res.status(404).json({ error: 'Account not found' });
   const stored = storedResult.rows[0];
+
+  // The server and the password of a mail node mailbox belong to the node settings: pointing it at
+  // another host would hand the generated password to that host. The form resends unchanged
+  // values, so only a real change is refused.
+  if (stored.mail_node && changedConnectionFields(stored, updates).length) {
+    return res.status(400).json({ error: 'The server settings of a mail node mailbox cannot be changed', code: 'mail_node_connection_locked' });
+  }
 
   if ('name' in updates && hasHeaderInjectionChars(updates.name)) {
     return res.status(400).json({ error: 'Name cannot contain control characters' });
@@ -449,8 +464,12 @@ router.delete('/:id', async (req, res) => {
       try {
         await disableMailbox(cfg, check.rows[0].email_address);
       } catch (err) {
-        if (err instanceof MailNodeError) return mailNodeFailure(res, err);
-        throw err;
+        if (!(err instanceof MailNodeError)) throw err;
+        // mailcow refuses to edit a mailbox that is gone (removed by hand, or another node): then
+        // nothing is left active and the row may go.
+        const gone = err.code === 'mail_node_refused'
+          && await getMailbox(cfg, check.rows[0].email_address).then((m) => m === null, () => false);
+        if (!gone) return mailNodeFailure(res, err);
       }
     }
 

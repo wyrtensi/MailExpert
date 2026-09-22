@@ -78,6 +78,12 @@ describe('/api/mail-node', () => {
     expect(saveMailNodeConfig).toHaveBeenCalledWith({ mailHost: 'mail.example.com', apiKey: 'stored-key', quotaMb: 1024, diskPingUrl: null });
   });
 
+  it('asks for the key again when the host changes, so the stored key never goes to a new host', async () => {
+    const res = await call('PUT', '/config', { mailHost: 'other.example.net', apiKey: '••••••••' });
+    expect((await res.json()).code).toBe('api_key_required');
+    expect(listDomains).not.toHaveBeenCalled();
+  });
+
   it('does not save settings the node refuses', async () => {
     listDomains.mockRejectedValueOnce(new MailNodeError('mail_node_auth', 'The mail node refused the API key'));
     const res = await call('PUT', '/config', { mailHost: 'mail.example.com', apiKey: 'wrong' });

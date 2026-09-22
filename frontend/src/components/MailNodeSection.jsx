@@ -48,14 +48,13 @@ export default function MailNodeSection() {
 
   const fail = (err) => setError({ key: mailNodeErrorKey(err?.code), detail: mailNodeErrorDetail(err) });
 
+  // Each list shows on its own: a failing mailbox listing does not hide the domains.
   const loadNode = useCallback(async () => {
-    try {
-      const [d, o] = await Promise.all([api.mailNode.listDomains(), api.mailNode.listMailboxes()]);
-      setDomains(d?.domains ?? []);
-      setOverview(o);
-    } catch (err) {
-      fail(err);
-    }
+    const [d, o] = await Promise.allSettled([api.mailNode.listDomains(), api.mailNode.listMailboxes()]);
+    if (d.status === 'fulfilled') setDomains(d.value?.domains ?? []);
+    if (o.status === 'fulfilled') setOverview(o.value);
+    const failed = [d, o].find((r) => r.status === 'rejected');
+    if (failed) fail(failed.reason);
   }, []);
 
   useEffect(() => {

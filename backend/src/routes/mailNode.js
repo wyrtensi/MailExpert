@@ -77,8 +77,10 @@ router.put('/config', requireAdmin, async (req, res) => {
   const sent = typeof req.body?.apiKey === 'string' ? req.body.apiKey.trim() : '';
   let apiKey = sent;
   if (!sent || sent === REDACTED_SECRET) {
-    apiKey = (await getMailNodeConfig())?.apiKey;
-    if (!apiKey) return refuse(res, 'api_key_required');
+    // The stored key goes only to the host it was entered for: a new host needs the key again.
+    const current = await getMailNodeConfig();
+    if (!current?.apiKey || current.mailHost !== mailHost) return refuse(res, 'api_key_required');
+    apiKey = current.apiKey;
   }
   const cfg = { mailHost, apiKey, quotaMb, diskPingUrl };
   try {

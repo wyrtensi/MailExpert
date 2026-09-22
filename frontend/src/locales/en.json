@@ -884,7 +884,8 @@
       "oauthReconnectRequired": "Google authorization expired or was revoked. Reconnect Gmail to resume syncing.",
       "deleteTitle": "Remove mailbox?",
       "deleteMessage": "The mailbox and all its synced messages will be removed for every user. This cannot be undone.",
-      "deleteMailNodeMessage": "The mailbox leaves MailExpert and is disabled on the mail node: mail to it is refused and its letters stay on the server. Creating the same address again turns it back on."
+      "deleteMailNodeMessage": "The mailbox leaves MailExpert and is disabled on the mail node: mail to it is refused and its letters stay on the server. Creating the same address again turns it back on.",
+      "mailNodeServerNote": "This mailbox lives on the mail node: its server and password come from the node settings and cannot be changed here."
     },
     "folderMappings": {
       "title": "Folder mappings",

@@ -448,6 +448,9 @@ git pull && \
 
 ## Backup and Restore
 
+Quick, unencrypted, unverified dump for a source-build install — fine for a dev box, not for
+production:
+
 ```bash
 # Backup database
 docker exec mailexpert-postgres pg_dump -U mailexpert mailexpert \
@@ -457,6 +460,13 @@ docker exec mailexpert-postgres pg_dump -U mailexpert mailexpert \
 cat mailexpert-YYYYMMDD.sql | \
   docker exec -i mailexpert-postgres psql -U mailexpert -d mailexpert
 ```
+
+## Production Deployment
+
+For a production VPS, use the scripted install instead: encrypted, deduplicated, verified
+backups (restic to any S3-compatible storage), automatic sign-in and edge (Caddy or Cloudflare
+Tunnel) setup, updates and a way to move the panel to another server without losing data. See
+[docs/operations/deployment.md](docs/operations/deployment.md).
 
 ---
 

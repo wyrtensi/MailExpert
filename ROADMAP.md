@@ -21,12 +21,12 @@ the target architecture is [docs/architecture/team-mail-system-handoff.md](docs/
 - Google OAuth operations guide ([docs/operations/google-oauth.md](docs/operations/google-oauth.md)): separate development and production Google Cloud projects, consent screen mode, redirect URIs per host, app states, secret rotation, moving mailboxes between apps, revoke and removal.
 - Sidebar mailbox filter and per-mailbox connection health.
 - Selected upstream MailFlow fixes (see [upstream PR assessment](docs/architecture/upstream-pr-assessment.md)).
+- Scripted production deployment for both sign-in hosts: `install.sh`/`configure.sh`, edge (Caddy or Cloudflare Tunnel), encrypted and verified restic backups, `update.sh`, a documented manual rollback and moving the panel to another server without losing data. Runbook: [docs/operations/deployment.md](docs/operations/deployment.md).
 
 ## Now
 
-- Deployment and runbooks for both sign-in hosts.
 - Live OAuth lifecycle check on real accounts: consent, refresh after expiry, revoke, reconnect.
-- Clean deployment from the documentation with backup and restore of PostgreSQL together with the encryption key.
+- Production acceptance: a full move rehearsal between two VPS following the deployment runbook, with downtime measured (docs/operations/deployment.md, section 8).
 
 ## Next
 

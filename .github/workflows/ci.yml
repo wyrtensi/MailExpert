@@ -107,6 +107,7 @@ jobs:
     name: Deploy e2e
     needs: [shellcheck, bats]
     runs-on: ubuntu-latest
+    timeout-minutes: 45
 
     steps:
       - uses: actions/checkout@v6
@@ -159,7 +160,7 @@ jobs:
           provenance: false
           cache-from: type=gha,scope=edge
 
-      - name: Install e2e
+      - name: Deploy e2e
         run: scripts/deploy/test/e2e.sh --version "${{ steps.image.outputs.tag }}" --image-prefix local.invalid
 
   images:

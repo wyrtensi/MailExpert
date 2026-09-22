@@ -15,35 +15,37 @@ SCRIPT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 . "$SCRIPT_DIR/lib/common.sh"
 # shellcheck source=lib/env.sh
 . "$SCRIPT_DIR/lib/env.sh"
+# shellcheck source=lib/backup.sh
+. "$SCRIPT_DIR/lib/backup.sh"
 exit_on_unexpected_failure
 
 # How long to wait for a running install.sh, which holds the lock for minutes on a first install.
 LOCK_TIMEOUT=${MAILEXPERT_LOCK_TIMEOUT:-600}
 [[ $LOCK_TIMEOUT =~ ^[0-9]+$ ]] || die "MAILEXPERT_LOCK_TIMEOUT must be a number of seconds" 2
 
-# Owner secrets, replaced when given again (rotation).
-APP_OWNER_KEYS=(CF_ACCESS_ISSUER CF_ACCESS_AUDIENCE AUTH_GOOGLE_CLIENT_ID AUTH_GOOGLE_CLIENT_SECRET HEALTHCHECK_PING_URL)
-EDGE_OWNER_KEYS=(TUNNEL_TOKEN DNS_API_TOKEN)
-
 usage() {
   cat <<'EOF'
 Usage: configure.sh [--prefix /opt/mailexpert] < file-with-KEY=VALUE-lines
 
 Panel (<prefix>/.env):     CF_ACCESS_ISSUER, CF_ACCESS_AUDIENCE, AUTH_GOOGLE_CLIENT_ID,
-                           AUTH_GOOGLE_CLIENT_SECRET, HEALTHCHECK_PING_URL
+                           AUTH_GOOGLE_CLIENT_SECRET, HEALTHCHECK_PING_URL, BACKUP_PING_URL
+Backups (<prefix>/.env):   RESTIC_REPOSITORY (s3:https://<endpoint>/<bucket>[/<path>], any
+                           S3-compatible storage), AWS_ACCESS_KEY_ID, AWS_SECRET_ACCESS_KEY,
+                           AWS_DEFAULT_REGION (only when the storage needs one), RESTIC_PASSWORD
 Edge (<prefix>/edge/.env): TUNNEL_TOKEN, DNS_API_TOKEN
-Generated keys (SESSION_SECRET, ENCRYPTION_KEY, DB_PASSWORD, VAPID_PUBLIC_KEY,
-VAPID_PRIVATE_KEY) are accepted only when absent or identical; they are never replaced.
-Then run install.sh again.
+A key given again replaces the stored value, except RESTIC_PASSWORD and the generated keys
+(SESSION_SECRET, ENCRYPTION_KEY, DB_PASSWORD, VAPID_PUBLIC_KEY, VAPID_PRIVATE_KEY): those are
+accepted only when absent or identical. On a new server restore.sh takes the generated keys
+from the backup. Then run install.sh again.
 EOF
 }
 
-# key_target <key>: app, edge or generated; status 1 for keys configure.sh does not store.
+# key_target <key>: app, edge or once; status 1 for keys configure.sh does not store.
 key_target() {
   local key=$1 known
   for known in "${APP_OWNER_KEYS[@]}"; do [ "$known" = "$key" ] && { echo app; return 0; }; done
   for known in "${EDGE_OWNER_KEYS[@]}"; do [ "$known" = "$key" ] && { echo edge; return 0; }; done
-  for known in "${GENERATED_SECRET_KEYS[@]}"; do [ "$known" = "$key" ] && { echo generated; return 0; }; done
+  for known in "${WRITE_ONCE_KEYS[@]}"; do [ "$known" = "$key" ] && { echo once; return 0; }; done
   return 1
 }
 
@@ -51,7 +53,10 @@ key_target() {
 value_problem() {
   case $1 in
     CF_ACCESS_ISSUER) [[ $2 =~ ^https://[a-z0-9-]+\.cloudflareaccess\.com$ ]] || echo "must be https://<TEAM>.cloudflareaccess.com" ;;
-    HEALTHCHECK_PING_URL) [[ $2 =~ ^https:// ]] || echo "must be an https:// URL" ;;
+    HEALTHCHECK_PING_URL | BACKUP_PING_URL) [[ $2 =~ ^https:// ]] || echo "must be an https:// URL" ;;
+    RESTIC_REPOSITORY) restic_repository_ok "$2" || echo "must be s3:https://<endpoint>/<bucket>[/<path>]" ;;
+    RESTIC_PASSWORD) [ "${#2}" -ge 16 ] || echo "must be at least 16 characters" ;;
+    AWS_DEFAULT_REGION) [[ $2 =~ ^[a-z0-9-]{2,32}$ ]] || echo "must be a region name such as us-east-1" ;;
   esac
   return 0
 }
@@ -108,10 +113,10 @@ main() {
   chmod 700 "$prefix/edge" "$prefix/state"
   take_install_lock "$prefix/state" "$LOCK_TIMEOUT" configure.sh
   for i in "${!keys[@]}"; do
-    [ "${targets[i]}" = generated ] || continue
+    [ "${targets[i]}" = once ] || continue
     current=$(env_get "$prefix/.env" "${keys[i]}") || current=
     if [ -n "$current" ] && [ "$current" != "${values[i]}" ]; then
-      errors+=("${keys[i]}: $prefix/.env already has a different value; generated secrets are never replaced")
+      errors+=("${keys[i]}: $prefix/.env already has a different value; it is never replaced here (on a new server restore.sh brings ENCRYPTION_KEY and the other generated keys from the backup; a wrong RESTIC_PASSWORD is corrected by hand)")
     fi
   done
   fail_on_errors "${errors[@]}"

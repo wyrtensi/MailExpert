@@ -119,3 +119,57 @@ EOF
   [ "$(env_get "$P/edge/.env" TUNNEL_TOKEN)" = locked-value ]
   wait
 }
+
+@test "restic keys and the backup ping URL go to .env and no value is printed" {
+  run bash "$CONFIGURE" --prefix "$P" <<'EOF'
+RESTIC_REPOSITORY=s3:https://s3.example.com/panel-backups/main
+RESTIC_PASSWORD=restic-password-value-0001
+AWS_ACCESS_KEY_ID=access-key-value-0002
+AWS_SECRET_ACCESS_KEY=secret-key-value-0003
+AWS_DEFAULT_REGION=eu-central-1
+BACKUP_PING_URL=https://hc-ping.example.com/backup-ping-0004
+EOF
+  [ "$status" -eq 0 ]
+  [[ $output == *RESTIC_PASSWORD* && $output != *value-000* && $output != *backup-ping-0004* ]]
+  [ "$(env_get "$P/.env" RESTIC_REPOSITORY)" = s3:https://s3.example.com/panel-backups/main ]
+  [ "$(env_get "$P/.env" RESTIC_PASSWORD)" = restic-password-value-0001 ]
+  [ "$(env_get "$P/.env" AWS_ACCESS_KEY_ID)" = access-key-value-0002 ]
+  [ "$(env_get "$P/.env" AWS_SECRET_ACCESS_KEY)" = secret-key-value-0003 ]
+  [ "$(env_get "$P/.env" AWS_DEFAULT_REGION)" = eu-central-1 ]
+  [ "$(env_get "$P/.env" BACKUP_PING_URL)" = https://hc-ping.example.com/backup-ping-0004 ]
+}
+
+@test "the repository must be S3 over https, plain http only on the loopback" {
+  for bad in s3:http://s3.example.com/b /srv/restic sftp:backup@example.com:/r s3:https://s3.example.com; do
+    run bash "$CONFIGURE" --prefix "$P" <<<"RESTIC_REPOSITORY=$bad"
+    [ "$status" -eq 2 ]
+    [[ $output == *"RESTIC_REPOSITORY: must be s3:https://"* ]]
+  done
+  run bash "$CONFIGURE" --prefix "$P" <<<"RESTIC_REPOSITORY=s3:http://127.0.0.1:19000/me-e2e-backups"
+  [ "$status" -eq 0 ]
+  run bash "$CONFIGURE" --prefix "$P" <<<"BACKUP_PING_URL=http://hc.example.com/x"
+  [ "$status" -eq 2 ]
+  run bash "$CONFIGURE" --prefix "$P" <<<"AWS_DEFAULT_REGION=Not_A_Region"
+  [ "$status" -eq 2 ]
+}
+
+@test "RESTIC_PASSWORD: at least 16 characters and written once" {
+  run bash "$CONFIGURE" --prefix "$P" <<<"RESTIC_PASSWORD=too-short"
+  [ "$status" -eq 2 ]
+  [[ $output != *too-short* ]]
+  bash "$CONFIGURE" --prefix "$P" <<<"RESTIC_PASSWORD=first-restic-password"
+  run bash "$CONFIGURE" --prefix "$P" <<<"RESTIC_PASSWORD=first-restic-password"
+  [ "$status" -eq 0 ]
+  before=$(sha256sum <"$P/.env")
+  run bash "$CONFIGURE" --prefix "$P" <<<"RESTIC_PASSWORD=second-restic-password"
+  [ "$status" -eq 2 ]
+  [[ $output == *"RESTIC_PASSWORD: "*"never replaced"* && $output != *first-restic* && $output != *second-restic* ]]
+  [ "$(sha256sum <"$P/.env")" = "$before" ]
+}
+
+@test "a different generated key points to restore.sh for a move" {
+  bash "$CONFIGURE" --prefix "$P" <<<"ENCRYPTION_KEY=$(printf 'b%.0s' {1..64})"
+  run bash "$CONFIGURE" --prefix "$P" <<<"ENCRYPTION_KEY=$(printf 'c%.0s' {1..64})"
+  [ "$status" -eq 2 ]
+  [[ $output == *"ENCRYPTION_KEY: "*restore.sh* ]]
+}

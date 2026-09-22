@@ -9,6 +9,19 @@
 # shellcheck disable=SC2034 # read by install.sh and tests
 GENERATED_SECRET_KEYS=(SESSION_SECRET ENCRYPTION_KEY DB_PASSWORD VAPID_PUBLIC_KEY VAPID_PRIVATE_KEY)
 
+# Owner secrets that configure.sh stores, replaced when given again (rotation). Backups go to any
+# S3-compatible storage the owner picks: the repository URL and the access keys are all it takes.
+# shellcheck disable=SC2034 # read by configure.sh, restore.sh and tests
+APP_OWNER_KEYS=(CF_ACCESS_ISSUER CF_ACCESS_AUDIENCE AUTH_GOOGLE_CLIENT_ID AUTH_GOOGLE_CLIENT_SECRET
+  HEALTHCHECK_PING_URL BACKUP_PING_URL RESTIC_REPOSITORY AWS_ACCESS_KEY_ID AWS_SECRET_ACCESS_KEY
+  AWS_DEFAULT_REGION)
+# shellcheck disable=SC2034
+EDGE_OWNER_KEYS=(TUNNEL_TOKEN DNS_API_TOKEN)
+# Written once and never replaced by configure.sh: the generated keys, and RESTIC_PASSWORD, which
+# a replacement would not change in the repository, only lock this server out of it.
+# shellcheck disable=SC2034
+WRITE_ONCE_KEYS=("${GENERATED_SECRET_KEYS[@]}" RESTIC_PASSWORD)
+
 env_value_ok() {
   case $1 in
     *[[:space:]]* | *[\'\"\$\#\\]*) return 1 ;;
@@ -16,19 +29,22 @@ env_value_ok() {
   return 0
 }
 
-# env_get <file> <key>: prints the value; status 1 when the file or the key is absent.
+# env_get <file> <key>: prints the value; status 1 when the file or the key is absent. A key that
+# appears more than once resolves like a shell or `docker compose --env-file` would read it: the
+# last line wins.
 env_get() {
-  local file=$1 key=$2 line
+  local file=$1 key=$2 line value found=0
   [ -f "$file" ] || return 1
   while IFS= read -r line || [ -n "$line" ]; do
     case $line in
       "$key="*)
-        printf '%s\n' "${line#"$key="}"
-        return 0
+        value=${line#"$key="}
+        found=1
         ;;
     esac
   done <"$file"
-  return 1
+  [ "$found" = 1 ] || return 1
+  printf '%s\n' "$value"
 }
 
 # env_set <file> <key> <value>: adds or replaces one key, other lines stay as they are. The file

@@ -16,6 +16,8 @@ REPO_DIR=$(cd "$DEPLOY_DIR/../.." && pwd)
 . "$DEPLOY_DIR/lib/config.sh"
 # shellcheck source=../lib/edge.sh
 . "$DEPLOY_DIR/lib/edge.sh"
+# shellcheck source=e2e-lib.sh
+. "$TEST_DIR/e2e-lib.sh"
 
 PROJECT=me-e2e
 EDGE_PROJECT=me-e2e-edge
@@ -37,21 +39,6 @@ if [ -z "$VERSION" ] || [ -z "$IMAGE_PREFIX" ] || [ -z "$REPO_URL" ]; then
   die "--version, --image-prefix and --repo-url are required" 2
 fi
 
-fail() {
-  printf '[e2e] FAIL: %s\n' "$*" >&2
-  exit 1
-}
-pass() { printf '[e2e] ok: %s\n' "$*"; }
-
-# labelled <ps|volume|network> <compose project>
-labelled() {
-  case $1 in
-    ps) docker ps -aq --filter "label=com.docker.compose.project=$2" ;;
-    volume) docker volume ls -q --filter "label=com.docker.compose.project=$2" ;;
-    network) docker network ls -q --filter "label=com.docker.compose.project=$2" ;;
-  esac
-}
-
 for p in "$PROJECT" "$EDGE_PROJECT"; do
   case $p in mailexpert | edge) fail "refusing to run as project $p" ;; esac
   [ -z "$(labelled ps "$p")$(labelled volume "$p")" ] || fail "project $p already has containers or volumes"
@@ -60,11 +47,7 @@ done
 
 teardown() {
   local status=$? p
-  for p in "$PROJECT" "$EDGE_PROJECT"; do
-    labelled ps "$p" | xargs -r docker rm -fv >/dev/null
-    labelled volume "$p" | xargs -r docker volume rm >/dev/null
-    labelled network "$p" | xargs -r docker network rm >/dev/null
-  done
+  for p in "$PROJECT" "$EDGE_PROJECT"; do remove_project "$p"; done
   rm -rf "$PREFIX" "$RENDER"
   exit "$status"
 }

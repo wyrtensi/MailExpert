@@ -3,6 +3,14 @@ import { useTranslation } from 'react-i18next';
 import { copyToClipboard } from '../utils/clipboard.js';
 import { api } from '../utils/api.js';
 import { useMobile } from '../hooks/useMobile.js';
+import {
+  conversationFolders,
+  conversationTotal,
+  hasGmailThreadNumber,
+  hasReferences,
+  modeKey,
+  reasonKey,
+} from '../utils/threadingDiagnostics.js';
 
 export default function MessageHeaderModal({ messageId, subject, onClose, onSubjectResolved }) {
   const { t } = useTranslation();
@@ -11,6 +19,9 @@ export default function MessageHeaderModal({ messageId, subject, onClose, onSubj
   const [resolvedSubject, setResolvedSubject] = useState(subject);
   const [loading, setLoading] = useState(true);
   const [copied, setCopied] = useState(false);
+  const [threading, setThreading] = useState(null);
+  const [threadingLoading, setThreadingLoading] = useState(true);
+  const [threadingFailed, setThreadingFailed] = useState(false);
   const onSubjectResolvedRef = useRef(onSubjectResolved);
   onSubjectResolvedRef.current = onSubjectResolved;
 
@@ -25,6 +36,19 @@ export default function MessageHeaderModal({ messageId, subject, onClose, onSubj
       })
       .catch(err => setHeaders(`Error: ${err.message}`))
       .finally(() => setLoading(false));
+  }, [messageId]);
+
+  // Fetched independently of the raw headers above: one failing must not take down the other.
+  useEffect(() => {
+    let live = true;
+    setThreading(null);
+    setThreadingFailed(false);
+    setThreadingLoading(true);
+    api.getMessageThreading(messageId)
+      .then(data => { if (live) setThreading(data); })
+      .catch(() => { if (live) setThreadingFailed(true); })
+      .finally(() => { if (live) setThreadingLoading(false); });
+    return () => { live = false; };
   }, [messageId]);
 
   const handleCopy = async () => {
@@ -58,6 +82,79 @@ export default function MessageHeaderModal({ messageId, subject, onClose, onSubj
   const displaySubject = (resolvedSubject && resolvedSubject !== '(no subject)')
     ? resolvedSubject
     : (parsedHeaders.find(h => h.key.toLowerCase() === 'subject')?.value || t('common.noSubject'));
+
+  const threadingLabelStyle = {
+    fontSize: 10, fontWeight: 600, color: 'var(--text-tertiary)',
+    fontFamily: 'JetBrains Mono, monospace', textTransform: 'uppercase',
+    letterSpacing: '0.04em', marginBottom: 2,
+  };
+  const threadingValueStyle = {
+    fontSize: 12, color: 'var(--text-primary)', wordBreak: 'break-all', lineHeight: 1.5,
+  };
+
+  // "Conversation": why this letter landed where it did, above the raw headers below.
+  // Independent of the headers fetch — its own loading/failure never blocks the other.
+  function renderThreadingSection() {
+    if (threadingLoading) {
+      return <div style={{ color: 'var(--text-tertiary)', fontSize: 13 }}>{t('message.threading.loading')}</div>;
+    }
+    if (threadingFailed || !threading) {
+      return threadingFailed
+        ? <div style={{ color: 'var(--text-tertiary)', fontSize: 13 }}>{t('message.threading.loadFailed')}</div>
+        : null;
+    }
+    const folders = conversationFolders(threading);
+    return (
+      <div style={{
+        marginBottom: 16, border: '1px solid var(--border-subtle)', borderRadius: 8,
+        padding: '10px 12px', display: 'flex', flexDirection: 'column', gap: 10,
+      }}>
+        <div style={{ fontSize: 12, fontWeight: 600, color: 'var(--text-secondary)' }}>
+          {t('message.threading.title')}
+        </div>
+        <div>
+          <div style={threadingLabelStyle}>{t('message.threading.messageId')}</div>
+          <div style={threadingValueStyle}>{threading.messageId || t('message.threading.none')}</div>
+        </div>
+        <div>
+          <div style={threadingLabelStyle}>{t('message.threading.inReplyTo')}</div>
+          <div style={threadingValueStyle}>{threading.inReplyTo || t('message.threading.none')}</div>
+        </div>
+        <div>
+          <div style={threadingLabelStyle}>{t('message.threading.references')}</div>
+          {hasReferences(threading)
+            ? threading.references.map((ref, i) => (
+              <div key={i} style={threadingValueStyle}>{ref}</div>
+            ))
+            : <div style={threadingValueStyle}>{t('message.threading.none')}</div>}
+        </div>
+        {hasGmailThreadNumber(threading) && (
+          <div>
+            <div style={threadingLabelStyle}>{t('message.threading.gmailThreadNumber')}</div>
+            <div style={threadingValueStyle}>{threading.providerThreadId}</div>
+          </div>
+        )}
+        <div>
+          <div style={threadingLabelStyle}>{t('message.threading.reasonLabel')}</div>
+          <div style={threadingValueStyle}>{t(reasonKey(threading.reason))}</div>
+        </div>
+        <div>
+          <div style={threadingLabelStyle}>{t('message.threading.modeLabel')}</div>
+          <div style={threadingValueStyle}>{t(modeKey(threading.mode))}</div>
+        </div>
+        <div>
+          <div style={threadingValueStyle}>
+            {t('message.threading.conversationCount', { count: conversationTotal(threading) })}
+          </div>
+          {folders.length > 0 && (
+            <div style={{ ...threadingValueStyle, color: 'var(--text-tertiary)', marginTop: 2 }}>
+              {folders.map(f => `${f.folder} (${f.count})`).join(', ')}
+            </div>
+          )}
+        </div>
+      </div>
+    );
+  }
 
   if (isMobile) {
     return (
@@ -108,6 +205,7 @@ export default function MessageHeaderModal({ messageId, subject, onClose, onSubj
           </button>
         </div>
         <div style={{ flex: 1, overflowY: 'auto' }}>
+          <div style={{ padding: '12px 16px 0' }}>{renderThreadingSection()}</div>
           {loading && (
             <div style={{ color: 'var(--text-tertiary)', fontSize: 13, padding: '12px 16px' }}>
               {t('contextMenu.headers.loading')}
@@ -216,6 +314,7 @@ export default function MessageHeaderModal({ messageId, subject, onClose, onSubj
         </div>
 
         <div style={{ flex: 1, overflow: 'auto', padding: '16px 20px' }}>
+          {renderThreadingSection()}
           {loading && (
             <div style={{ color: 'var(--text-tertiary)', fontSize: 13 }}>{t('contextMenu.headers.loading')}</div>
           )}

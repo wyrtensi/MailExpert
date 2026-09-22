@@ -136,6 +136,9 @@ const SAME_VALUE_ALLOWED = {
   'gtd.title':                              'any', // "GTD" — acronym (Getting Things Done)
   'shortcuts.groups.gtd':                   'any', // "GTD" — acronym group heading
   'admin.integrations.todoist.title':       'any', // Todoist — brand name
+  'message.threading.messageId':            'any', // RFC 5322 header name, same in all locales
+  'message.threading.inReplyTo':            'any', // RFC 5322 header name, same in all locales
+  'message.threading.references':           'any', // RFC 5322 header name, same in all locales
 
   // ── English and Russian share the value ───────────────────────────────────
   // "SSO" — acronym, same in en and ru
@@ -176,6 +179,7 @@ const LOCALE_SPECIFIC_KEYS_BY_LOCALE = {
     'contacts.count_few', 'contacts.count_many',
     'message.senderHistory.summary_few', 'message.senderHistory.summary_many',
     'message.senderHistory.more_few', 'message.senderHistory.more_many',
+    'message.threading.conversationCount_few', 'message.threading.conversationCount_many',
   ]),
 };
 const LOCALE_SPECIFIC_KEYS = new Set(

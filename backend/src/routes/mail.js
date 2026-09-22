@@ -3,6 +3,7 @@ import { Router } from 'express';
 import { ZipArchive } from 'archiver';
 import { query } from '../services/db.js';
 import { SENDER_HISTORY_DEFAULT_LIMIT, SENDER_HISTORY_MAX_LIMIT, senderHistory } from '../services/senderHistory.js';
+import { threadingDiagnostics } from '../services/threadingDiagnostics.js';
 import { requireAuth } from '../middleware/auth.js';
 import { imapManager } from '../index.js';
 import { sanitizeEmail, stripEmailHead, hasRemoteImages, blockRemoteImages, rewriteEbayImageserUrls, rewriteAnchorHrefs } from '../services/emailSanitizer.js';
@@ -426,6 +427,16 @@ router.get('/messages/:id/sender-history', async (req, res) => {
   const history = await senderHistory(id, { limit });
   if (!history) return res.status(404).json({ error: 'Message not found' });
   res.json(history);
+});
+
+// Why this letter is in its conversation (services/threadingDiagnostics.js): headers, the
+// Gmail thread number, the reason and the mailbox's threading mode.
+router.get('/messages/:id/threading', async (req, res) => {
+  const { id } = req.params;
+  if (!UUID_RE.test(id)) return res.status(400).json({ error: 'Invalid message ID' });
+  const diagnostics = await threadingDiagnostics(id);
+  if (!diagnostics) return res.status(404).json({ error: 'Message not found' });
+  res.json(diagnostics);
 });
 
 router.get('/messages/:id/body', async (req, res) => {

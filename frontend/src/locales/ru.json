@@ -293,6 +293,34 @@
       "more_other": "Ещё {{count}}: найти все письма от него",
       "allFrom": "Найти все письма от него",
       "openFailed": "Не удалось открыть письмо"
+    },
+    "threading": {
+      "title": "Цепочка",
+      "loading": "Загрузка…",
+      "loadFailed": "Не удалось загрузить",
+      "messageId": "Message-ID",
+      "inReplyTo": "In-Reply-To",
+      "references": "References",
+      "none": "Нет",
+      "gmailThreadNumber": "Номер цепочки Gmail",
+      "reasonLabel": "Причина",
+      "modeLabel": "Режим ящика",
+      "mode": {
+        "gmail": "Цепочки как в Gmail",
+        "rfc": "Цепочки по заголовкам"
+      },
+      "reason": {
+        "gmailThrid": "Номер цепочки Gmail",
+        "newRoot": "Первое письмо цепочки",
+        "rfcRoot": "Ответ на письмо, начавшее цепочку",
+        "rfcAncestor": "Ответ на письмо из цепочки",
+        "rfcProvisional": "Предок ещё не загружен: цепочка по ссылке из заголовков",
+        "unknown": "Причина не записана (письмо загружено до диагностики)"
+      },
+      "conversationCount_one": "{{count}} письмо в этой переписке",
+      "conversationCount_few": "{{count}} письма в этой переписке",
+      "conversationCount_many": "{{count}} писем в этой переписке",
+      "conversationCount_other": "{{count}} письма в этой переписке"
     }
   },
   "messageList": {

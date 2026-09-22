@@ -6,6 +6,12 @@
 # On the host it creates one container, me-e2e-mc-<id>, removed at exit (E2E_KEEP=1 keeps it).
 #
 #   scripts/deploy/test/e2e-mailcow.sh --image ghcr.io/wyrtensi/mailexpert-backend:sha-<12>
+#   scripts/deploy/test/e2e-mailcow.sh --image ... --scenario load [--mailboxes 100]
+#
+# The default scenario checks the flows once (e2e-mailcow-driver.mjs). The load scenario
+# (e2e-mailcow-load.mjs) creates many mailboxes and measures connecting, delivery to all of them,
+# reconnecting after a backend restart and ten parallel sessions, sampling the backend's memory
+# and CPU and the IMAP sessions on the node every 5 seconds.
 #
 # Needs about 6 GB of memory for Docker and pulls a few GB of mailcow images on every run; it is
 # a manual check, not part of CI. From Git Bash on Windows run it with MSYS_NO_PATHCONV=1, so
@@ -19,20 +25,26 @@ TEST_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 # shellcheck source=../lib/common.sh
 . "$TEST_DIR/../lib/common.sh"
 
-IMAGE=''
+IMAGE='' SCENARIO=functional MAILBOXES=100
 while [ $# -gt 0 ]; do
   case $1 in
     --image) IMAGE=$2 && shift 2 ;;
+    --scenario) SCENARIO=$2 && shift 2 ;;
+    --mailboxes) MAILBOXES=$2 && shift 2 ;;
     *) die "unknown option: $1" 2 ;;
   esac
 done
 [ -n "$IMAGE" ] || die "--image <backend image> is required" 2
+case $SCENARIO in functional | load) ;; *) die "--scenario must be functional or load" 2 ;; esac
+[[ $MAILBOXES =~ ^[1-9][0-9]{0,3}$ ]] || die "--mailboxes must be a number from 1 to 9999" 2
 
 NAME=me-e2e-mc-${E2E_ID:-$(gen_hex 4)}
 if docker container inspect "$NAME" >/dev/null 2>&1; then die "container $NAME already exists"; fi
 
+SAMPLER_PID=''
 cleanup() {
   local status=$?
+  if [ -n "$SAMPLER_PID" ]; then kill "$SAMPLER_PID" 2>/dev/null || true; fi
   if [ "${E2E_KEEP:-0}" = 1 ]; then
     log "kept $NAME; remove it with: docker rm -fv $NAME"
   elif docker container inspect "$NAME" >/dev/null 2>&1; then
@@ -104,7 +116,51 @@ for _ in $(seq 30); do
 done
 panel_ok || die "the panel did not become healthy"
 
-log "running the checks"
-docker exec -i "$NAME" sh -c 'cat > /opt/driver.mjs' <"$TEST_DIR/e2e-mailcow-driver.mjs"
-inner "docker run --rm $PANEL_ARGS -v /opt/driver.mjs:/app/e2e-mailcow-driver.mjs:ro -w /app \
-  -e PANEL=http://backend:3000 -e MAIL_HOST=$MAIL_HOST -e API_KEY=$API_KEY $IMAGE node e2e-mailcow-driver.mjs"
+if [ "$SCENARIO" = functional ]; then
+  log "running the checks"
+  docker exec -i "$NAME" sh -c 'cat > /opt/driver.mjs' <"$TEST_DIR/e2e-mailcow-driver.mjs"
+  inner "docker run --rm $PANEL_ARGS -v /opt/driver.mjs:/app/e2e-mailcow-driver.mjs:ro -w /app     -e PANEL=http://backend:3000 -e MAIL_HOST=$MAIL_HOST -e API_KEY=$API_KEY $IMAGE node e2e-mailcow-driver.mjs"
+  exit 0
+fi
+
+# Load: one sample line every 5 seconds: backend memory and CPU, IMAP sessions on the node.
+SAMPLES=$(mktemp)
+sample() {
+  while :; do
+    local stats who
+    stats=$(inner "docker stats --no-stream --format '{{.MemUsage}} {{.CPUPerc}}' backend" 2>/dev/null | awk '{print $1, $4}')
+    who=$(inner "cd /opt/mailcow && docker compose exec -T dovecot-mailcow doveadm who -1 2>/dev/null | grep -c imap" 2>/dev/null || echo 0)
+    printf '%s %s %s\n' "$(date +%s)" "$stats" "$who" >>"$SAMPLES"
+    sleep 5
+  done
+}
+sample &
+SAMPLER_PID=$!
+
+docker exec -i "$NAME" sh -c 'cat > /opt/load.mjs' <"$TEST_DIR/e2e-mailcow-load.mjs"
+DOMAIN="l$(gen_hex 3).test"
+phase() {
+  log "load phase: $1"
+  inner "docker run --rm $PANEL_ARGS -v /opt/load.mjs:/app/e2e-mailcow-load.mjs:ro -w /app \
+    -e PANEL=http://backend:3000 -e MAIL_HOST=$MAIL_HOST -e API_KEY=$API_KEY -e MAILBOXES=$MAILBOXES \
+    -e DOMAIN=$DOMAIN -e PHASE=$1 ${2:-} $IMAGE node e2e-mailcow-load.mjs" | grep '^RESULT '
+}
+phase setup
+phase delivery
+phase sessions
+log "restarting the backend"
+restarted_at=$(( $(date +%s) * 1000 ))
+inner 'docker restart backend >/dev/null'
+for _ in $(seq 30); do
+  if panel_ok; then break; fi
+  sleep 3
+done
+phase restart "-e RESTARTED_AT=$restarted_at"
+kill "$SAMPLER_PID" 2>/dev/null || true
+SAMPLER_PID=''
+# The busiest moments: highest memory (MiB) and CPU, and the most IMAP sessions on the node.
+awk '{ mem=$2; if (mem ~ /GiB/) { sub(/GiB/, "", mem); mem*=1024 } else sub(/MiB/, "", mem);
+       cpu=$3; sub(/%/, "", cpu);
+       if (mem+0 > m) m=mem+0; if (cpu+0 > c) c=cpu+0; if ($4+0 > w) w=$4+0 }
+     END { printf "PEAK backend memory %.0f MiB, backend CPU %.0f%%, IMAP sessions on the node %d\n", m, c, w }' "$SAMPLES"
+log "samples ($(wc -l <"$SAMPLES") lines): $SAMPLES"

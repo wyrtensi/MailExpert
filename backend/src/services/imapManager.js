@@ -1394,12 +1394,46 @@ async function applyHelperOAuthFailure(account, err) {
   }
 }
 
+// A pooled login nobody used for this long is closed; the next action opens a new one. Without it
+// every mailbox that ever synced a folder or served a click keeps a second IMAP session open for
+// good, which on a self-hosted node doubles its sessions (Dovecot: one process, a few MB each).
+// IMAP_POOL_IDLE_SECONDS: 0 keeps pooled logins open; empty or invalid = the default.
+export const DEFAULT_POOL_IDLE_SECONDS = 300;
+export function parsePoolIdleMs(raw) {
+  if (raw === undefined || raw === null || String(raw).trim() === '') return DEFAULT_POOL_IDLE_SECONDS * 1000;
+  const n = Number(String(raw).trim());
+  return Number.isInteger(n) && n >= 0 ? n * 1000 : DEFAULT_POOL_IDLE_SECONDS * 1000;
+}
+const POOL_IDLE_MS = parsePoolIdleMs(process.env.IMAP_POOL_IDLE_SECONDS);
+
+// Start (or restart) the idle clock of a pooled client that was just returned to its pool.
+export function armPoolIdleClose(pool, client, idleMs) {
+  disarmPoolIdleClose(pool, client);
+  if (!idleMs) return;
+  const timer = setTimeout(() => {
+    pool.idleTimers.delete(client);
+    if (pool.inUse.has(client) || !pool.clients.includes(client)) return;
+    pool.clients = pool.clients.filter(c => c !== client);
+    client.logout().catch(() => {});
+  }, idleMs);
+  timer.unref?.();
+  pool.idleTimers.set(client, timer);
+}
+
+export function disarmPoolIdleClose(pool, client) {
+  const timer = pool.idleTimers?.get(client);
+  if (!timer) return;
+  clearTimeout(timer);
+  pool.idleTimers.delete(client);
+}
+
 function drainWaiters(pool) {
   while (pool.waiters.length > 0) {
     const free = pool.clients.find(c => !pool.inUse.has(c));
     if (!free) break;
     const entry = pool.waiters.shift();
     clearTimeout(entry.timer);
+    disarmPoolIdleClose(pool, free);
     pool.inUse.add(free);
     entry.resolve(free);
   }
@@ -1410,13 +1444,14 @@ function drainWaiters(pool) {
 async function acquirePooledClient(account, { noTemp = false } = {}) {
   const id = account.id;
   if (!connectionPools.has(id)) {
-    connectionPools.set(id, { clients: [], inUse: new Set(), waiters: [], connecting: 0 });
+    connectionPools.set(id, { clients: [], inUse: new Set(), waiters: [], connecting: 0, idleTimers: new Map() });
   }
   const pool = connectionPools.get(id);
 
   // Find an idle client
   const idle = pool.clients.find(c => !pool.inUse.has(c));
   if (idle) {
+    disarmPoolIdleClose(pool, idle);
     pool.inUse.add(idle);
     return idle;
   }
@@ -1444,6 +1479,7 @@ async function acquirePooledClient(account, { noTemp = false } = {}) {
     client.on('close', () => {
       const p = connectionPools.get(id);
       if (p) {
+        disarmPoolIdleClose(p, client);
         p.clients = p.clients.filter(c => c !== client);
         p.inUse.delete(client);
         drainWaiters(p);
@@ -1488,13 +1524,14 @@ function releasePooledClient(account, client) {
     client.logout().catch(() => {});
   } else {
     drainWaiters(pool);
+    if (!pool.inUse.has(client)) armPoolIdleClose(pool, client, POOL_IDLE_MS);
   }
 }
 
 function evictPool(accountId) {
   const pool = connectionPools.get(accountId);
   if (!pool) return;
-  for (const c of pool.clients) { c.logout().catch(() => {}); }
+  for (const c of pool.clients) { disarmPoolIdleClose(pool, c); c.logout().catch(() => {}); }
   const evictErr = new Error('IMAP pool evicted');
   for (const entry of pool.waiters) { clearTimeout(entry.timer); entry.reject(evictErr); }
   connectionPools.delete(accountId);

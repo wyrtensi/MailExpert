@@ -27,7 +27,7 @@ the target architecture is [docs/architecture/team-mail-system-handoff.md](docs/
 ## Now
 
 - Live OAuth lifecycle check on real accounts: consent, refresh after expiry, revoke, reconnect.
-- First mail node: install mailcow by the runbook and walk its live check list (docs/operations/mail-node.md, section 9); the mailcow client is tested against a stub only.
+- First mail node: install mailcow by the runbook and check what the live test cannot (docs/operations/mail-node.md, section 9): delivery through EOP, disk pings, the real certificate, the fail2ban allow list. The panel and mailcow 2026-09 together pass `scripts/deploy/test/e2e-mailcow.sh`.
 - Production acceptance: a full move rehearsal between two VPS following the deployment runbook, with downtime measured (docs/operations/deployment.md, section 8).
 
 ## Next

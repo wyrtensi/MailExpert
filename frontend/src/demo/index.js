@@ -4,6 +4,7 @@ const ACCOUNT_FIXTURES = [
     name: 'Sales Team',
     sender_name: 'MailExpert Sales',
     email_address: 'sales@demo.mailexpert.local',
+    imap_host: 'imap.demo.mailexpert.local', imap_port: 993, smtp_host: 'smtp.demo.mailexpert.local', smtp_port: 587, smtp_tls: 'STARTTLS',
     color: '#7c3aed',
     protocol: 'imap',
     enabled: true,
@@ -20,6 +21,7 @@ const ACCOUNT_FIXTURES = [
     name: 'Operations',
     sender_name: 'MailExpert Operations',
     email_address: 'ops@demo.mailexpert.local',
+    imap_host: 'imap.demo.mailexpert.local', imap_port: 993, smtp_host: 'smtp.demo.mailexpert.local', smtp_port: 587, smtp_tls: 'STARTTLS',
     color: '#0891b2',
     protocol: 'imap',
     enabled: true,
@@ -482,6 +484,14 @@ function contactFromPayload(payload, current = {}) {
   };
 }
 
+// The mail node as an admin sees it in the demo: one domain, one mailbox made there, the disk.
+let mailNodeDomains = [
+  { domain: 'demo.mailexpert.local', active: true, maxMailboxes: 500, mailboxes: 1 },
+];
+let mailNodeMailboxes = [
+  { accountId: 'demo-support', email: 'support@demo.mailexpert.local', onNode: true, active: true, quotaMb: 5120, usedBytes: 734003200 },
+];
+
 export async function demoRequest(method, path, body = {}) {
   const verb = method.toUpperCase();
   const url = parsePath(path);
@@ -495,6 +505,19 @@ export async function demoRequest(method, path, body = {}) {
     return { ok: true };
   }
   if (verb === 'GET' && pathname === '/accounts') return clone(ACCOUNT_FIXTURES);
+  // "Mailbox on our domain": the demo adds it to the account list for this page session.
+  if (verb === 'POST' && pathname === '/accounts' && body?.kind === 'domain') {
+    const email = `${String(body.localPart || '').toLowerCase()}@${body.domain}`;
+    const account = {
+      ...clone(ACCOUNT_FIXTURES[0]), id: `demo-node-${email}`, name: body.name || email, sender_name: null,
+      imap_host: 'mail.demo.mailexpert.local', smtp_host: 'mail.demo.mailexpert.local',
+      email_address: email, color: '#0ea5e9', signature: null, sort_order: ACCOUNT_FIXTURES.length, mail_node: true,
+    };
+    ACCOUNT_FIXTURES.push(account);
+    mailNodeMailboxes = [...mailNodeMailboxes, { accountId: account.id, email, onNode: true, active: true, quotaMb: 5120, usedBytes: 0 }];
+    mailNodeDomains = mailNodeDomains.map(d => (d.domain === body.domain ? { ...d, mailboxes: d.mailboxes + 1 } : d));
+    return clone(account);
+  }
 
   const foldersMatch = pathname.match(/^\/accounts\/([^/]+)\/folders$/);
   if (verb === 'GET' && foldersMatch) return clone(foldersFor(decodeURIComponent(foldersMatch[1])));
@@ -654,7 +677,31 @@ export async function demoRequest(method, path, body = {}) {
   }
 
   if (verb === 'GET' && pathname === '/integrations') return {};
-  if (verb === 'GET' && pathname === '/integrations/status') return { google: { configured: false }, microsoft: { configured: false } };
+  if (verb === 'GET' && pathname === '/integrations/status') {
+    return { google: { configured: false, available: false }, microsoft: { configured: false }, domainMail: { configured: true } };
+  }
+  if (verb === 'GET' && pathname === '/admin/google-apps') return { apps: [] };
+  if (verb === 'GET' && pathname === '/mail-node/config') {
+    return { configured: true, mailHost: 'mail.demo.mailexpert.local', apiKey: '•'.repeat(8), quotaMb: 5120, diskPingUrl: '' };
+  }
+  if (verb === 'PUT' && pathname === '/mail-node/config') return { ok: true };
+  if (verb === 'GET' && pathname === '/mail-node/domains') return clone({ domains: mailNodeDomains });
+  if (verb === 'POST' && pathname === '/mail-node/domains') {
+    const domain = String(body?.domain || '').trim().toLowerCase();
+    if (domain && !mailNodeDomains.some(d => d.domain === domain)) {
+      mailNodeDomains = [...mailNodeDomains, { domain, active: true, maxMailboxes: Number(body?.mailboxes) || 500, mailboxes: 0 }];
+    }
+    return { ok: true, domain };
+  }
+  if (verb === 'GET' && pathname === '/mail-node/mailboxes') {
+    return clone({ disk: { usedPercent: 41, used: '16G', total: '40G', warn: false }, mailboxes: mailNodeMailboxes });
+  }
+  const quotaMatch = pathname.match(/^\/mail-node\/mailboxes\/([^/]+)\/quota$/);
+  if (verb === 'PUT' && quotaMatch) {
+    const id = decodeURIComponent(quotaMatch[1]);
+    mailNodeMailboxes = mailNodeMailboxes.map(m => (m.accountId === id ? { ...m, quotaMb: Number(body?.quotaMb) } : m));
+    return { ok: true, quotaMb: Number(body?.quotaMb) };
+  }
   if (verb === 'GET' && pathname === '/update') return { updateAvailable: false };
   if (verb === 'GET' && pathname === '/version') return { version: '3.3.0-demo', sha: 'demo' };
   if ((verb === 'POST' && pathname === '/oauth/microsoft/device')

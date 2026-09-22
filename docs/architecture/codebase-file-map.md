@@ -69,6 +69,7 @@ Frontend не ходит к Gmail напрямую. Он обращается к
 | `routes/oauth.js` | Microsoft OAuth/device code; монтирует `routes/oauthGoogle.js` и реэкспортирует `refreshMicrosoftToken` из `services/oauth/microsoftOAuth.js` |
 | `routes/oauthGoogle.js` | Google OAuth под `/oauth/google`: переподключение `GET /oauth/google?account=<id>`, одноразовый переход `/launch?flow=` и callback, который создаёт (`add`) или обновляет (`reconnect`) Gmail-ящик и пишет журнал мест |
 | `routes/oauthGoogleApi.js` | `/api/oauth/google`: `POST /start` формы Gmail (выбор приложения, бронь, ключ перехода) и `GET /known-emails` для подсказки |
+| `routes/mailNode.js` | `/api/mail-node`: настройки почтового узла (mailcow), домены, квоты и заполнение ящиков узла, диск; список доменов виден всем, остальное администратору. Создание ящика узла — `POST /api/accounts` с `kind: 'domain'`, отключение на узле — в `DELETE /api/accounts/:id` |
 | `routes/googleAppsAdmin.js` | `/api/admin/google-apps`: список, добавление, правка, смена состояния и удаление Google-приложений; монтируется в `routes/admin.js` |
 | `routes/oidc.js` | Вход пользователей MailExpert через внешний OIDC/SSO; не путать с OAuth почтового аккаунта |
 | `routes/integrations.js` | Глобальные секреты/настройки интеграций; для Google — только общий callback-адрес и `/status` (`google.configured`, `google.available`) |
@@ -108,6 +109,7 @@ Frontend не ходит к Gmail напрямую. Он обращается к
 
 - `encryption.js` — граница шифрования паролей и OAuth-токенов. Google refresh token должен проходить только через неё.
 - `hostValidation.js`, `connectionPolicy.js`, `safeFetch.js` — SSRF/DNS rebinding/TLS policy. Не обходить их в OAuth или SMTP.
+- `mailNode/mailcow.js` — клиент API mailcow (домены, создание, отключение и квота ящика, диск; отказ внутри ответа 200 — ошибка) и настройки узла в `integration_config`; `mailNode/diskWatch.js` — проверка диска узла раз в 10 минут с пингом ссылки мониторинга. Эксплуатация — [mail-node.md](../operations/mail-node.md).
 - `redis.js` — клиент Redis и session/runtime state.
 - `db.js`, `migrations.js` — PostgreSQL pool, транзакции и запуск миграций.
 - `authLimiter.js`, `rateLimiter.js`, `authEvents.js` — защита login/API и журнал безопасности.
@@ -169,6 +171,7 @@ Google OAuth — не plugin уровня UI: он является credential p
 
 - `AuditLogTab.jsx` — экран журнала для администратора: фильтры и подгрузка по курсору; логика запроса и подписей в `utils/auditLog.js`.
 - `AccessSyncPanel.jsx` — вкладка синхронизации с Cloudflare Access в режиме `google`; логика формы и итога прогона в `utils/accessSync.js`.
+- `MailNodeSection.jsx` — раздел «Почтовый узел» в «Интеграции → Почтовые провайдеры» для администратора: имя узла, ключ API, квота, ссылка проверки диска, домены, ящики узла с квотами; `DomainMailboxAddForm.jsx` — форма «Ящик на нашем домене» в «Добавить аккаунт»; чистая логика в `utils/mailNode.js`.
 - `GoogleAppsSection.jsx` — экран «Google-приложения» в «Интеграции → Почтовые провайдеры» для администратора: callback-адрес, таблица приложений, добавление, правка, состояния; чистая логика в `utils/googleApps.js`.
 - `AddAccountPicker.jsx` и `GmailAddForm.jsx` — диалог «Добавить аккаунт»: выбор варианта и форма Gmail с подсказкой адресов; варианты, подсказка и ошибки старта в `utils/addAccount.js`, результаты callback и URL переподключения в `utils/googleOAuth.js` и `utils/accountHealth.js`.
 

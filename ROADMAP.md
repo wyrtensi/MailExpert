@@ -21,11 +21,13 @@ the target architecture is [docs/architecture/team-mail-system-handoff.md](docs/
 - Google OAuth operations guide ([docs/operations/google-oauth.md](docs/operations/google-oauth.md)): separate development and production Google Cloud projects, consent screen mode, redirect URIs per host, app states, secret rotation, moving mailboxes between apps, revoke and removal.
 - Sidebar mailbox filter and per-mailbox connection health.
 - Selected upstream MailFlow fixes (see [upstream PR assessment](docs/architecture/upstream-pr-assessment.md)).
+- Mailboxes on owned domains through a mailcow mail node: any signed-in user creates one from "Add account" (the server picks host, ports and a password nobody sees), deleting it only disables it on the node and creating the same address again enables it back; administrators add domains, set the default quota (5 GB) and per-mailbox quotas, and see usage and the mail disk, which the panel also reports to a ping URL. mailcow, EOP, DNS and DKIM are set up by hand: [docs/operations/mail-node.md](docs/operations/mail-node.md).
 - Scripted production deployment for both sign-in hosts: `install.sh`/`configure.sh`, edge (Caddy or Cloudflare Tunnel), encrypted and verified restic backups, `update.sh`, a documented manual rollback and moving the panel to another server without losing data. Runbook: [docs/operations/deployment.md](docs/operations/deployment.md).
 
 ## Now
 
 - Live OAuth lifecycle check on real accounts: consent, refresh after expiry, revoke, reconnect.
+- First mail node: install mailcow by the runbook and walk its live check list (docs/operations/mail-node.md, section 9); the mailcow client is tested against a stub only.
 - Production acceptance: a full move rehearsal between two VPS following the deployment runbook, with downtime measured (docs/operations/deployment.md, section 8).
 
 ## Next
@@ -36,8 +38,8 @@ the target architecture is [docs/architecture/team-mail-system-handoff.md](docs/
 
 ## Later
 
-- Owned-domain mailboxes delivered through a separate Postfix/Dovecot mail node behind Microsoft EOP. The mail node is its own project with its own readiness criteria. MailExpert connects to it as an ordinary IMAP/SMTP server and creates, disables and re-enables mailboxes through the node's API. Platform choice, server sizing and adaptive quotas are researched in [docs/architecture/mail-node-research](docs/architecture/mail-node-research/README.md).
-- A domain mailbox option in "Add account" with the mail node's connection settings, so a mailbox on it is created from that entry without typing hosts and ports. Its model and permissions get their own design together with the mail node.
+- The mail node on the same server as the panel (the edge would proxy <MAIL_HOST> to mailcow); today it needs its own server.
+- Adaptive mailbox quotas, if fixed quotas prove wasteful ([research](docs/architecture/mail-node-research/README.md), section 6).
 - Individual manager identities and mailbox membership, if per-person accountability becomes a requirement on top of the audit log.
 
 Have a request or found a bug? [Open an issue](https://github.com/wyrtensi/MailExpert/issues).

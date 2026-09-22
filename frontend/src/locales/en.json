@@ -402,6 +402,11 @@
     "lock": "Lock",
     "signOut": "Sign out",
     "connectionError": "Connection error",
+    "userMenu": "Account menu",
+    "expandAccount": "Expand {{name}}",
+    "collapseAccount": "Collapse {{name}}",
+    "expandFolder": "Expand {{name}}",
+    "collapseFolder": "Collapse {{name}}",
     "accountFilter": {
       "label": "Filter mailboxes by name or email",
       "placeholder": "Find a mailbox…",
@@ -825,7 +830,7 @@
         "domainLocalPartPh": "name",
         "domainDomainLabel": "Domain",
         "domainNameLabel": "Display name (optional)",
-        "domainNamePh": "Sales desk",
+        "domainNamePh": "e.g. Sales desk",
         "domainNote": "The password is generated and kept by MailExpert only. If this address was deleted before, it comes back with its old letters.",
         "domainCreate": "Create mailbox",
         "domainCreating": "Creating…",
@@ -885,7 +890,8 @@
       "deleteTitle": "Remove mailbox?",
       "deleteMessage": "The mailbox and all its synced messages will be removed for every user. This cannot be undone.",
       "deleteMailNodeMessage": "The mailbox leaves MailExpert and is disabled on the mail node: mail to it is refused and its letters stay on the server. Creating the same address again turns it back on.",
-      "mailNodeServerNote": "This mailbox lives on the mail node: its server and password come from the node settings and cannot be changed here."
+      "mailNodeServerNote": "This mailbox lives on the mail node: its server and password come from the node settings and cannot be changed here.",
+      "mailNodeBadge": "Mail node"
     },
     "folderMappings": {
       "title": "Folder mappings",
@@ -1693,6 +1699,7 @@
       "apiKeyNote": "A read-write key from the mailcow admin page, allowed only from the address of this panel.",
       "quotaLabel": "Quota of a new mailbox, MB",
       "quotaNote": "A quota only caps a mailbox and reserves no disk. Up to {{max}} MB per mailbox.",
+      "quotaGb": "= {{value}} GB",
       "pingLabel": "Disk check ping URL (optional)",
       "pingPh": "https://hc.example.com/ping/…",
       "pingNote": "Every 10 minutes the panel reads the mail disk and pings this URL: success below 85%, /fail above. A monitoring service with alerts (for example to Telegram) also warns when pings stop.",
@@ -1720,7 +1727,7 @@
       "addressColumn": "Address",
       "usageColumn": "Used",
       "quotaColumn": "Quota",
-      "usage": "{{used}} ({{percent}}%)",
+      "usage": "{{used}} of {{quota}} ({{percent}}%)",
       "notOnNode": "Missing on the mail node",
       "quotaSaved": "Quota changed.",
       "unitMb": "MB",

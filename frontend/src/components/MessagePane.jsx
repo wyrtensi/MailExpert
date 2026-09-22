@@ -1980,6 +1980,7 @@ ${bodyContent}
             disabled={!hasPrev}
             onClick={() => selectAndMarkRead(allMessages[currentIdx - 1])}
             title={t('message.previousMessage')}
+            aria-label={t('message.previousMessage')}
             style={{
               background: 'none', border: 'none', flexShrink: 0,
               color: 'var(--text-secondary)', cursor: hasPrev ? 'pointer' : 'default',
@@ -1995,6 +1996,7 @@ ${bodyContent}
             disabled={!hasNext}
             onClick={() => selectAndMarkRead(allMessages[currentIdx + 1])}
             title={t('message.nextMessage')}
+            aria-label={t('message.nextMessage')}
             style={{
               background: 'none', border: 'none', flexShrink: 0,
               color: 'var(--text-secondary)', cursor: hasNext ? 'pointer' : 'default',
@@ -2032,6 +2034,7 @@ ${bodyContent}
           <button
             onClick={() => setShowReplyMenu(v => !v)}
             title={t('message.replyOptions')}
+            aria-label={t('message.replyOptions')}
             style={{
               background: 'transparent', border: '1px solid transparent',
               borderLeft: '1px solid var(--border-subtle)',
@@ -3311,6 +3314,7 @@ function PaneBtn({ children, onClick, title, danger, style: extraStyle }) {
     <button
       onClick={onClick}
       title={title}
+      aria-label={title}
       className="btn-press"
       onMouseEnter={() => setHov(true)}
       onMouseLeave={() => setHov(false)}

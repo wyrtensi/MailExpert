@@ -1122,8 +1122,20 @@ function AccountsTab() {
               {account.name?.[0]?.toUpperCase() || '?'}
             </div>
             <div style={{ flex: '1 1 150px', minWidth: 140 }}>
-              <div style={{ fontSize: 14, fontWeight: 500, color: 'var(--text-primary)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
-                {account.name}
+              <div style={{ display: 'flex', alignItems: 'center', gap: 6, minWidth: 0 }}>
+                <span style={{ fontSize: 14, fontWeight: 500, color: 'var(--text-primary)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                  {account.name}
+                </span>
+                {account.mail_node === true && (
+                  <span style={{
+                    fontSize: 10, fontWeight: 600, padding: '2px 6px', borderRadius: 20,
+                    background: 'rgba(124,106,247,0.15)', color: 'var(--accent)',
+                    border: '1px solid rgba(124,106,247,0.25)',
+                    letterSpacing: '0.04em', textTransform: 'uppercase', flexShrink: 0,
+                  }}>
+                    {t('admin.accounts.mailNodeBadge')}
+                  </span>
+                )}
               </div>
               <div style={{ fontSize: 12, color: 'var(--text-tertiary)', marginTop: 1, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
                 {account.email_address}

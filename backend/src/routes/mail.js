@@ -2,6 +2,7 @@ import { STATUS_STALE_MS } from '../services/folderStatus.js';
 import { Router } from 'express';
 import { ZipArchive } from 'archiver';
 import { query } from '../services/db.js';
+import { SENDER_HISTORY_DEFAULT_LIMIT, SENDER_HISTORY_MAX_LIMIT, senderHistory } from '../services/senderHistory.js';
 import { requireAuth } from '../middleware/auth.js';
 import { imapManager } from '../index.js';
 import { sanitizeEmail, stripEmailHead, hasRemoteImages, blockRemoteImages, rewriteEbayImageserUrls, rewriteAnchorHrefs } from '../services/emailSanitizer.js';
@@ -412,6 +413,21 @@ function fetchWithTimeout(promise, ms) {
 }
 
 // Get full message body + attachments list
+// The earlier correspondence of this letter's mailbox with the same person (services/senderHistory.js).
+router.get('/messages/:id/sender-history', async (req, res) => {
+  const { id } = req.params;
+  if (!UUID_RE.test(id)) return res.status(400).json({ error: 'Invalid message ID' });
+  const limit = req.query.limit === undefined
+    ? SENDER_HISTORY_DEFAULT_LIMIT
+    : Number(req.query.limit);
+  if (!Number.isInteger(limit) || limit < 1 || limit > SENDER_HISTORY_MAX_LIMIT) {
+    return res.status(400).json({ error: `limit must be a whole number from 1 to ${SENDER_HISTORY_MAX_LIMIT}` });
+  }
+  const history = await senderHistory(id, { limit });
+  if (!history) return res.status(404).json({ error: 'Message not found' });
+  res.json(history);
+});
+
 router.get('/messages/:id/body', async (req, res) => {
   const { id } = req.params;
   if (!UUID_RE.test(id)) return res.status(400).json({ error: 'Invalid message id' });

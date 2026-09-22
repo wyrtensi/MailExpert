@@ -278,6 +278,21 @@
       "button": "Классифицировать с ИИ",
       "done": "Категория: {{category}}",
       "error": "Ошибка классификации ИИ."
+    },
+    "senderHistory": {
+      "summary_one": "Раньше с {{email}}: {{count}} письмо",
+      "summary_few": "Раньше с {{email}}: {{count}} письма",
+      "summary_many": "Раньше с {{email}}: {{count}} писем",
+      "summary_other": "Раньше с {{email}}: {{count}} письма",
+      "incoming": "От него",
+      "outgoing": "Наш ответ",
+      "noSubject": "(без темы)",
+      "more_one": "Ещё {{count}}: найти все письма от него",
+      "more_few": "Ещё {{count}}: найти все письма от него",
+      "more_many": "Ещё {{count}}: найти все письма от него",
+      "more_other": "Ещё {{count}}: найти все письма от него",
+      "allFrom": "Найти все письма от него",
+      "openFailed": "Не удалось открыть письмо"
     }
   },
   "messageList": {

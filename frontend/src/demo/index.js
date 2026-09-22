@@ -340,7 +340,11 @@ function listMessages(url, forceSearch = false) {
   if (folder) result = result.filter(item => item.folder === folder);
   if (unreadOnly) result = result.filter(item => !item.is_read);
   if (category) result = result.filter(item => (item.category || 'primary') === category);
-  if (query) {
+  // The one search operator the demo understands: from:<address>, as the sender history uses it.
+  const fromOnly = query.match(/^from:"?([^"\s]+)"?$/);
+  if (fromOnly) {
+    result = result.filter(item => String(item.from_email || '').toLocaleLowerCase() === fromOnly[1]);
+  } else if (query) {
     result = result.filter(item => [item.subject, item.from_name, item.from_email, item.snippet, item.body_text]
       .some(value => String(value || '').toLocaleLowerCase().includes(query)));
   }
@@ -492,6 +496,26 @@ let mailNodeMailboxes = [
   { accountId: 'demo-support', email: 'support@demo.mailexpert.local', onNode: true, active: true, quotaMb: 5120, usedBytes: 734003200 },
 ];
 
+function demoSenderHistory(id) {
+  const current = messageById(id);
+  if (!current) return { correspondent: null, total: 0, items: [] };
+  const account = ACCOUNT_FIXTURES.find(item => item.id === current.account_id);
+  const own = account?.email_address;
+  const other = current.from_email === own ? current.to_addresses[0] : current.from_email;
+  const earlier = MESSAGE_FIXTURES
+    .filter(m => m.id !== id && m.account_id === current.account_id && m.date < current.date)
+    .filter(m => m.from_email === other || (m.from_email === own && m.to_addresses.includes(other)))
+    .sort((a, b) => b.date.localeCompare(a.date));
+  return {
+    correspondent: other || null,
+    total: earlier.length,
+    items: earlier.slice(0, 5).map(m => ({
+      id: m.id, folder: m.folder, subject: m.subject, snippet: m.snippet, date: m.date,
+      direction: m.from_email === own ? 'out' : 'in',
+    })),
+  };
+}
+
 export async function demoRequest(method, path, body = {}) {
   const verb = method.toUpperCase();
   const url = parsePath(path);
@@ -528,6 +552,10 @@ export async function demoRequest(method, path, body = {}) {
   if (verb === 'GET' && (pathname === '/mail/search' || pathname === '/search')) {
     return clone({ ...listMessages(url, true), query: url.searchParams.get('q') || '' });
   }
+
+  // Earlier letters with the same person in the same mailbox, as the server answers it.
+  const historyMatch = pathname.match(/^\/mail\/messages\/([^/]+)\/sender-history$/);
+  if (verb === 'GET' && historyMatch) return clone(demoSenderHistory(decodeURIComponent(historyMatch[1])));
 
   const bodyMatch = pathname.match(/^\/mail\/messages\/([^/]+)\/body$/);
   if (verb === 'GET' && bodyMatch) {

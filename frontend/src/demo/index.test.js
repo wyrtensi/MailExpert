@@ -170,3 +170,11 @@ test('the demo mail node creates a domain mailbox and lists it with its quota', 
   await demoRequest('PUT', `/mail-node/mailboxes/${account.id}/quota`, { quotaMb: 10240 });
   assert.equal((await demoRequest('GET', '/mail-node/mailboxes')).mailboxes.find(m => m.accountId === account.id).quotaMb, 10240);
 });
+
+test('the demo sender history lists earlier letters with their direction, and from: search finds them', async () => {
+  const history = await demoRequest('GET', '/mail/messages/demo-001/sender-history?limit=5');
+  assert.equal(history.correspondent, 'maya@northstar.example');
+  assert.deepEqual(history.items.map(i => [i.id, i.direction]), [['demo-005', 'out']]);
+  const found = await demoRequest('GET', '/mail/search?q=from%3Amaya%40northstar.example');
+  assert.deepEqual(found.messages.map(m => m.id), ['demo-001']);
+});

@@ -82,7 +82,7 @@ export function prepareEmailHtml(rawHtml, uid) {
       padding: 0;
       background-color: #ffffff;
       color-scheme: light;
-      font-family: -apple-system, Arial, sans-serif;
+      font-family: var(--font-sans, -apple-system, Arial, sans-serif);
       font-size: 14px;
       line-height: 1.6;
       color: #1a1a1a;

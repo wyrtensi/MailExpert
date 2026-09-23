@@ -4,9 +4,23 @@
 //   display — headings, subject lines (can be serif/expressive)
 
 export const FONT_SETS = {
+  // One family everywhere, with Latin and Cyrillic letters and weights 300-700: Russian and English
+  // text, headings and the letter itself read in the same font.
   default: {
     label: 'MailExpert Default',
-    description: 'DM Sans × Fraunces — refined and contemporary',
+    description: 'Manrope — one family for Latin and Cyrillic',
+    preview: { heading: 'Manrope', body: 'Manrope', mono: 'JetBrains Mono' },
+    vars: {
+      '--font-sans': "'Manrope', sans-serif",
+      '--font-mono': "'JetBrains Mono', monospace",
+      '--font-display': "'Manrope', sans-serif",
+    },
+  },
+
+  // The default until 2026-09: DM Sans has no Cyrillic, so Russian text falls back to the system font.
+  classic: {
+    label: 'Classic',
+    description: 'DM Sans × Fraunces — Latin only, Cyrillic in the system font',
     preview: { heading: 'Fraunces', body: 'DM Sans', mono: 'JetBrains Mono' },
     vars: {
       '--font-sans': "'DM Sans', sans-serif",

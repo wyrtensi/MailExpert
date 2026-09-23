@@ -550,7 +550,7 @@
     "headers": {
       "title": "Full Headers",
       "copyRaw": "Copy raw",
-      "copied": "✓ Copied",
+      "copied": "Copied",
       "loading": "Loading headers…",
       "noHeaders": "No headers available"
     },
@@ -1917,7 +1917,7 @@
     "title": "GTD",
     "inbox": "Inbox",
     "waiting": "Waiting",
-    "inboxZero": "Inbox Zero ✓",
+    "inboxZero": "Inbox Zero",
     "allClear": "All clear",
     "allClearHint": "Nothing waiting on you.",
     "showAll": "Show all {{count}}",

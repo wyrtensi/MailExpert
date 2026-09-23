@@ -6,6 +6,8 @@ export function demoBadgeLabel(enabled) {
 
 // `switchLabel` and `onSwitch` add a button that signs the demo in as the other role (admin or
 // ordinary user); the badge itself stays click-through, only the button takes clicks.
+const narrowScreen = () => typeof window !== 'undefined' && !!window.matchMedia?.('(max-width: 767px)').matches;
+
 export default function DemoBadge({ enabled = false, roleLabel = '', switchLabel = '', onSwitch = null }) {
   const label = demoBadgeLabel(enabled);
 
@@ -33,9 +35,10 @@ export default function DemoBadge({ enabled = false, roleLabel = '', switchLabel
     'aria-live': 'polite',
     style: {
       // Bottom centre, click-through: the corners hold the compose window's buttons and the user menu.
+      // On a phone the open sidebar's user menu spans the whole bottom row, so the badge sits above it.
       position: 'fixed',
       left: '50%',
-      bottom: 12,
+      bottom: narrowScreen() ? 76 : 12,
       transform: 'translateX(-50%)',
       zIndex: 1100,
       padding: '6px 10px',

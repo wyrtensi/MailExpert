@@ -293,7 +293,20 @@
       "more_one": "{{count}} more: search all letters from them",
       "more_other": "{{count}} more: search all letters from them",
       "allFrom": "Search all letters from them",
-      "openFailed": "Could not open the letter"
+      "openFailed": "Could not open the letter",
+      "showThread": "Whole conversation",
+      "showThreadHint": "Show every letter of this conversation below",
+      "threadTitle_one": "Whole conversation: {{count}} letter",
+      "threadTitle_other": "Whole conversation: {{count}} letters",
+      "threadCurrent": "This letter is open above",
+      "threadExpandAll": "Expand all",
+      "threadCollapseAll": "Collapse all",
+      "threadOpen": "Open letter",
+      "threadShowQuote": "Show quoted text",
+      "threadHideQuote": "Hide quoted text",
+      "threadLoading": "Loading…",
+      "threadBodyFailed": "Could not load the text of this letter",
+      "threadTo": "to"
     },
     "threading": {
       "title": "Conversation",
@@ -452,7 +465,7 @@
     "wrongPin": "Incorrect PIN"
   },
   "sidebar": {
-    "allInboxes": "Inbox, all mailboxes",
+    "allInboxes": "All inboxes",
     "compose": "Compose",
     "toggleSidebar": "Toggle sidebar",
     "newFolder": "New folder",

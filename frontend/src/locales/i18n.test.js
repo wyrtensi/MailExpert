@@ -180,6 +180,7 @@ const LOCALE_SPECIFIC_KEYS_BY_LOCALE = {
     'contacts.count_few', 'contacts.count_many',
     'message.senderHistory.summary_few', 'message.senderHistory.summary_many',
     'message.senderHistory.more_few', 'message.senderHistory.more_many',
+    'message.senderHistory.threadTitle_few', 'message.senderHistory.threadTitle_many',
     'message.threading.conversationCount_few', 'message.threading.conversationCount_many',
   ]),
 };

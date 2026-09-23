@@ -27,7 +27,9 @@ export function unreadBadge({ count, known = true, stale = false, observedAt = n
   if (!Number.isFinite(count) || count <= 0) return null;
   const shown = max != null && count > max ? `${max}+` : String(count);
   return {
-    text: stale ? `~${shown}` : shown,
+    // No "~" in front of a stale count: it read as noise on every badge. Staleness stays in
+    // `stale` and the title.
+    text: shown,
     stale: !!stale,
     title: stale
       ? `Last observed unread count${observedAt ? ` (${new Date(observedAt).toLocaleString()})` : ''}; awaiting server refresh`

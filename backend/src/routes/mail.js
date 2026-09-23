@@ -3,6 +3,7 @@ import { Router } from 'express';
 import { ZipArchive } from 'archiver';
 import { query } from '../services/db.js';
 import { SENDER_HISTORY_DEFAULT_LIMIT, SENDER_HISTORY_MAX_LIMIT, senderHistory } from '../services/senderHistory.js';
+import { conversation } from '../services/conversation.js';
 import { threadingDiagnostics } from '../services/threadingDiagnostics.js';
 import { requireAuth } from '../middleware/auth.js';
 import { imapManager } from '../index.js';
@@ -427,6 +428,20 @@ router.get('/messages/:id/sender-history', async (req, res) => {
   const history = await senderHistory(id, { limit });
   if (!history) return res.status(404).json({ error: 'Message not found' });
   res.json(history);
+});
+
+// Every letter of this letter's conversation in its mailbox, oldest first (services/conversation.js).
+router.get('/messages/:id/conversation', async (req, res) => {
+  const { id } = req.params;
+  if (!UUID_RE.test(id)) return res.status(400).json({ error: 'Invalid message ID' });
+  try {
+    const result = await conversation(id);
+    if (!result) return res.status(404).json({ error: 'Message not found' });
+    res.json(result);
+  } catch (err) {
+    console.error('GET /messages/:id/conversation error:', err.message);
+    res.status(500).json({ error: 'Failed to load the conversation' });
+  }
 });
 
 // Why this letter is in its conversation (services/threadingDiagnostics.js): headers, the

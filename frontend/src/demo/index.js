@@ -676,6 +676,35 @@ function demoSenderHistory(id) {
   };
 }
 
+// The open letter's conversation in its mailbox (GET /api/mail/messages/:id/conversation), the
+// server's rules (services/conversation.js) over the demo's `messages`: same mailbox and thread
+// key, trash and spam left out, one copy per letter, oldest first, drafts marked as drafts.
+function demoConversation(id) {
+  const current = messageById(id);
+  if (!current) return null;
+  const account = accountFor(current.account_id);
+  const mappings = account?.folder_mappings || {};
+  const own = new Set([account?.email_address, ...(account?.aliases || []).map(a => a.email)].map(normalizeEmail));
+  const seen = new Set();
+  const items = messages
+    .filter(m => m.account_id === current.account_id && m.thread_key === current.thread_key)
+    .filter(m => m.folder !== mappings.trash && m.folder !== mappings.spam)
+    .sort((a, b) => a.date.localeCompare(b.date))
+    .filter((m) => {
+      const key = m.message_id || m.id;
+      if (seen.has(key)) return false;
+      seen.add(key);
+      return true;
+    })
+    .map(m => ({
+      id: m.id, folder: m.folder, subject: m.subject, snippet: m.snippet, date: m.date,
+      from_name: m.from_name, from_email: m.from_email, to_addresses: m.to_addresses, cc_addresses: m.cc_addresses,
+      has_attachments: !!m.has_attachments,
+      direction: m.folder === mappings.drafts ? 'draft' : own.has(normalizeEmail(m.from_email)) ? 'out' : 'in',
+    }));
+  return { threadKey: current.thread_key, total: items.length, items };
+}
+
 // A contact's correspondence across every enabled mailbox (GET /api/contacts/:id/letters), the
 // same rules the server applies (services/contactLetters.js) over the demo's own `messages`:
 // own address = the mailbox's address plus its aliases, per mailbox; trash/spam/drafts are
@@ -856,6 +885,14 @@ export async function demoRequest(method, path, body = {}) {
   // Earlier letters with the same person in the same mailbox, as the server answers it.
   const historyMatch = pathname.match(/^\/mail\/messages\/([^/]+)\/sender-history$/);
   if (verb === 'GET' && historyMatch) return clone(demoSenderHistory(decodeURIComponent(historyMatch[1])));
+
+  // Every letter of the open letter's conversation in its mailbox, as the server answers it.
+  const conversationMatch = pathname.match(/^\/mail\/messages\/([^/]+)\/conversation$/);
+  if (verb === 'GET' && conversationMatch) {
+    const result = demoConversation(decodeURIComponent(conversationMatch[1]));
+    if (!result) throw new Error('Message not found');
+    return clone(result);
+  }
 
   // Why this letter is in its conversation, as the server answers it.
   const threadingMatch = pathname.match(/^\/mail\/messages\/([^/]+)\/threading$/);

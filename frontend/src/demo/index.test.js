@@ -287,3 +287,18 @@ test('a letter deleted in the demo shows in Trash under a new id, as after an IM
   const after = await demoRequest('GET', '/mail/messages?accountId=demo-ops&folder=Trash');
   assert.equal(after.messages.some(m => m.message_id === '<demo-002@demo.mailexpert.local>'), false);
 });
+
+test('the demo sends a new mailbox under its sender name and offers the second one in From', async () => {
+  const created = await demoRequest('POST', '/accounts', {
+    kind: 'domain', localPart: 'press', domain: 'example.com', name: '', senderName: 'Пресс-служба', senderNameAlt: 'Press Office',
+  });
+  assert.equal(created.sender_name, 'Пресс-служба');
+  assert.equal(created.name, 'Пресс-служба');
+  assert.deepEqual(created.aliases.map(a => [a.name, a.email]), [['Press Office', 'press@example.com']]);
+  assert.deepEqual((await demoRequest('GET', `/accounts/${encodeURIComponent(created.id)}/aliases`)).map(a => a.name), ['Press Office']);
+
+  await demoRequest('POST', '/oauth/google/start', { email: 'acme.legacy.demo@gmail.com', senderName: 'Иван Петров', senderNameAlt: 'Ivan Petrov' });
+  const gmail = (await demoRequest('GET', '/accounts')).find(a => a.email_address === 'acme.legacy.demo@gmail.com');
+  assert.equal(gmail.sender_name, 'Иван Петров');
+  assert.deepEqual(gmail.aliases.map(a => a.name), ['Ivan Petrov']);
+});

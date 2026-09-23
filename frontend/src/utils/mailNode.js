@@ -52,6 +52,22 @@ export function domainMailboxFormError({ localPart, domain }) {
   return null;
 }
 
+// The sender name is required on "Our mailbox": it is what recipients read in From.
+export function senderNameError(senderName) {
+  return String(senderName ?? '').trim() ? null : 'admin.accounts.add.senderNameRequired';
+}
+
+// The sender names as the server takes them (POST /api/accounts kind=domain, POST
+// /api/oauth/google/start): trimmed, empty ones left out, a second name equal to the first dropped.
+export function senderNamesPayload({ senderName, senderNameAlt } = {}) {
+  const main = String(senderName ?? '').trim();
+  const alt = String(senderNameAlt ?? '').trim();
+  return {
+    ...(main ? { senderName: main } : {}),
+    ...(alt && alt.toLowerCase() !== main.toLowerCase() ? { senderNameAlt: alt } : {}),
+  };
+}
+
 // Whether the address the form would create is a mailbox of the install already. The server
 // refuses it too (409 mailbox_exists); the form says so while the name is typed. A mailbox that is
 // only on the node, not in MailExpert, is not taken: creating it enables it again.

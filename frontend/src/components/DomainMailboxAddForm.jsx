@@ -8,6 +8,8 @@ import {
   mailNodeErrorKey,
   normalizeLocalPart,
   selectableDomains,
+  senderNameError,
+  senderNamesPayload,
 } from '../utils/mailNode.js';
 
 const inputStyle = {
@@ -15,6 +17,7 @@ const inputStyle = {
   borderRadius: 7, color: 'var(--text-primary)', fontSize: 13, outline: 'none', boxSizing: 'border-box',
 };
 const labelStyle = { display: 'block', fontSize: 12, color: 'var(--text-secondary)', marginBottom: 5 };
+const hintStyle = { marginTop: 5, fontSize: 11, color: 'var(--text-tertiary)', lineHeight: 1.5 };
 const buttonStyle = (primary, enabled = true) => ({
   padding: '9px 16px', borderRadius: 7, fontSize: 13, fontWeight: 500, cursor: enabled ? 'pointer' : 'default',
   opacity: enabled ? 1 : 0.5,
@@ -23,17 +26,20 @@ const buttonStyle = (primary, enabled = true) => ({
     : { border: '1px solid var(--border)', background: 'none', color: 'var(--text-secondary)' }),
 });
 
-// "Add account -> Our mailbox": the name before @, a domain of the mail node and the name the
-// mailbox shows under. An address that is already a mailbox of the install is refused while it is
-// typed; the rest is confirmed on a second step before anything is created. The server creates
-// the mailbox (or enables it again) with a password only MailExpert knows and connects it;
-// `onCreated` gets the new account row.
+// "Add account -> Our mailbox": the name before @, a domain of the mail node, the name recipients
+// read in From (required) and a second one to choose when writing (for instance in Latin letters),
+// and the name the mailbox shows under in MailExpert. An address that is already a mailbox of the
+// install is refused while it is typed; the rest is confirmed on a second step before anything is
+// created. The server creates the mailbox (or enables it again) with a password only MailExpert
+// knows and connects it; `onCreated` gets the new account row, with the second name as its alias.
 export default function DomainMailboxAddForm({ accounts = [], onCreated }) {
   const { t } = useTranslation();
   const [domains, setDomains] = useState(null);
   const [loadError, setLoadError] = useState(null);
   const [localPart, setLocalPart] = useState('');
   const [domain, setDomain] = useState('');
+  const [senderName, setSenderName] = useState('');
+  const [senderNameAlt, setSenderNameAlt] = useState('');
   const [name, setName] = useState('');
   const [confirming, setConfirming] = useState(false);
   const [busy, setBusy] = useState(false);
@@ -53,9 +59,13 @@ export default function DomainMailboxAddForm({ accounts = [], onCreated }) {
   }, []);
 
   const taken = domainMailboxTaken({ localPart, domain }, accounts);
-  const formError = domainMailboxFormError({ localPart, domain }) ?? (taken ? 'admin.accounts.add.domainErrorExists' : null);
+  const addressError = domainMailboxFormError({ localPart, domain }) ?? (taken ? 'admin.accounts.add.domainErrorExists' : null);
+  const formError = addressError ?? senderNameError(senderName);
   const canContinue = !busy && !formError;
   const email = `${normalizeLocalPart(localPart)}@${domain}`;
+  const names = senderNamesPayload({ senderName, senderNameAlt });
+  // The mailbox list shows the sender name unless another name is given.
+  const listName = name.trim() || names.senderName || email;
 
   const edit = (setter) => (e) => { setter(e.target.value); setError(null); };
 
@@ -69,7 +79,7 @@ export default function DomainMailboxAddForm({ accounts = [], onCreated }) {
     setBusy(true);
     setError(null);
     try {
-      const account = await api.addDomainMailbox({ localPart: normalizeLocalPart(localPart), domain, name: name.trim() });
+      const account = await api.addDomainMailbox({ localPart: normalizeLocalPart(localPart), domain, name: listName, ...names });
       onCreated(account);
     } catch (err) {
       setError({ key: mailNodeErrorKey(err?.code), detail: mailNodeErrorDetail(err) });
@@ -90,16 +100,22 @@ export default function DomainMailboxAddForm({ accounts = [], onCreated }) {
   if (!domains.length) return <div style={{ fontSize: 13, color: 'var(--text-secondary)' }}>{t('admin.accounts.add.domainNoDomains')}</div>;
 
   if (confirming) {
+    const row = (labelKey, value, strong = false) => (
+      <>
+        <dt style={{ fontSize: 11, color: 'var(--text-tertiary)' }}>{t(labelKey)}</dt>
+        <dd style={{ margin: '2px 0 10px', color: 'var(--text-primary)', fontWeight: strong ? 500 : 400 }}>{value}</dd>
+      </>
+    );
     return (
       <div>
         <div style={{ fontSize: 14, fontWeight: 600, color: 'var(--text-primary)', marginBottom: 12 }}>
           {t('admin.accounts.add.domainConfirmTitle')}
         </div>
-        <dl style={{ margin: 0, padding: '12px 14px', borderRadius: 8, background: 'var(--bg-tertiary)', fontSize: 13 }}>
-          <dt style={{ fontSize: 11, color: 'var(--text-tertiary)' }}>{t('admin.accounts.add.domainAddressLabel')}</dt>
-          <dd style={{ margin: '2px 0 10px', color: 'var(--text-primary)', fontWeight: 500 }}>{email}</dd>
-          <dt style={{ fontSize: 11, color: 'var(--text-tertiary)' }}>{t('admin.accounts.add.domainConfirmName')}</dt>
-          <dd style={{ margin: '2px 0 0', color: 'var(--text-primary)' }}>{name.trim() || email}</dd>
+        <dl style={{ margin: 0, padding: '12px 14px 2px', borderRadius: 8, background: 'var(--bg-tertiary)', fontSize: 13 }}>
+          {row('admin.accounts.add.domainAddressLabel', email, true)}
+          {row('admin.accounts.add.domainConfirmSender', `${names.senderName} <${email}>`)}
+          {names.senderNameAlt && row('admin.accounts.add.domainConfirmSenderAlt', `${names.senderNameAlt} <${email}>`)}
+          {row('admin.accounts.add.domainConfirmName', listName)}
         </dl>
         <div style={{ marginTop: 10, fontSize: 11, color: 'var(--text-tertiary)', lineHeight: 1.6 }}>
           {t('admin.accounts.add.domainNote')}
@@ -127,7 +143,7 @@ export default function DomainMailboxAddForm({ accounts = [], onCreated }) {
           autoComplete="off"
           value={localPart}
           placeholder={t('admin.accounts.add.domainLocalPartPh')}
-          aria-invalid={!!(localPart && formError)}
+          aria-invalid={!!(localPart && addressError)}
           onChange={edit(setLocalPart)}
           style={{ ...inputStyle, flex: 1 }}
         />
@@ -141,9 +157,30 @@ export default function DomainMailboxAddForm({ accounts = [], onCreated }) {
           {domains.map((d) => <option key={d} value={d}>{d}</option>)}
         </select>
       </div>
-      {localPart && formError && (
-        <div style={{ marginTop: 6, fontSize: 11, color: taken ? 'var(--red)' : 'var(--text-tertiary)' }}>{t(formError)}</div>
+      {localPart && addressError && (
+        <div style={{ marginTop: 6, fontSize: 11, color: taken ? 'var(--red)' : 'var(--text-tertiary)' }}>{t(addressError)}</div>
       )}
+
+      <label htmlFor="domain-add-sender" style={{ ...labelStyle, marginTop: 14 }}>{t('admin.accounts.add.senderNameLabel')}</label>
+      <input
+        id="domain-add-sender"
+        required
+        value={senderName}
+        placeholder={t('admin.accounts.add.senderNamePh')}
+        onChange={edit(setSenderName)}
+        style={inputStyle}
+      />
+      <div style={hintStyle}>{t('admin.accounts.add.senderNameHint')}</div>
+
+      <label htmlFor="domain-add-sender-alt" style={{ ...labelStyle, marginTop: 14 }}>{t('admin.accounts.add.senderNameAltLabel')}</label>
+      <input
+        id="domain-add-sender-alt"
+        value={senderNameAlt}
+        placeholder={t('admin.accounts.add.senderNameAltPh')}
+        onChange={edit(setSenderNameAlt)}
+        style={inputStyle}
+      />
+      <div style={hintStyle}>{t('admin.accounts.add.senderNameAltHint')}</div>
 
       <label htmlFor="domain-add-name" style={{ ...labelStyle, marginTop: 14 }}>{t('admin.accounts.add.domainNameLabel')}</label>
       <input

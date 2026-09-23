@@ -3,6 +3,8 @@ import assert from 'node:assert/strict';
 import {
   domainMailboxFormError,
   domainMailboxTaken,
+  senderNameError,
+  senderNamesPayload,
   mailNodeConfigError,
   mailNodeErrorDetail,
   mailNodeErrorKey,
@@ -106,5 +108,21 @@ describe('domainMailboxTaken', () => {
     assert.equal(domainMailboxTaken({ localPart: '', domain: 'example.com' }, accounts), false);
     assert.equal(domainMailboxTaken({ localPart: 'sales', domain: '' }, accounts), false);
     assert.equal(domainMailboxTaken({ localPart: 'sales', domain: 'example.com' }), false);
+  });
+});
+
+describe('sender names', () => {
+  it('requires the sender name of Our mailbox', () => {
+    assert.equal(senderNameError('  '), 'admin.accounts.add.senderNameRequired');
+    assert.equal(senderNameError(undefined), 'admin.accounts.add.senderNameRequired');
+    assert.equal(senderNameError('Иван Петров'), null);
+  });
+
+  it('sends trimmed names, leaves empty ones out and drops a second name equal to the first', () => {
+    assert.deepEqual(senderNamesPayload({ senderName: ' Иван Петров ', senderNameAlt: ' Ivan Petrov ' }),
+      { senderName: 'Иван Петров', senderNameAlt: 'Ivan Petrov' });
+    assert.deepEqual(senderNamesPayload({ senderName: 'Sales', senderNameAlt: 'sales' }), { senderName: 'Sales' });
+    assert.deepEqual(senderNamesPayload({ senderName: '', senderNameAlt: '' }), {});
+    assert.deepEqual(senderNamesPayload({ senderNameAlt: 'Ivan' }), { senderNameAlt: 'Ivan' });
   });
 });

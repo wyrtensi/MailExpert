@@ -10,9 +10,10 @@ const HOUR = 3600 * 1000;
 const FOLDER_MAPPINGS = { inbox: 'INBOX', sent: 'Sent', archive: 'Archive', spam: 'Spam', trash: 'Trash', drafts: 'Drafts' };
 const COLORS = ['#7c3aed', '#0891b2', '#16a34a', '#ea580c', '#db2777', '#2563eb', '#ca8a04', '#0d9488', '#9333ea', '#dc2626', '#4f46e5', '#65a30d'];
 
-// Mailboxes on the mail node: [local part, display name].
+// Mailboxes on the mail node: [local part, display name, second sender name for readers abroad].
 const NODE_TEAMS = [
-  ['sales', 'Отдел продаж'], ['support', 'Поддержка'], ['billing', 'Бухгалтерия'], ['hr', 'Кадры'],
+  ['sales', 'Отдел продаж', 'Sales Department'], ['support', 'Поддержка', 'Customer Support'],
+  ['billing', 'Бухгалтерия', 'Accounting'], ['hr', 'Кадры'],
   ['marketing', 'Маркетинг'], ['legal', 'Юридический отдел'], ['partners', 'Партнёры'], ['press', 'Пресс-служба'],
   ['careers', 'Вакансии'], ['security', 'Безопасность'], ['purchasing', 'Закупки'], ['logistics', 'Логистика'],
   ['finance', 'Finance'], ['design', 'Design'], ['product', 'Product'], ['research', 'Research'],
@@ -141,9 +142,10 @@ const SCENARIOS = [
 const fill = (text, vars) => text.replace(/\{(\w+)\}/g, (_, key) => String(vars[key] ?? ''));
 const pad = (n, width = 2) => String(n).padStart(width, '0');
 
-function fleetAccount(index, { email, name, gmail, domain }) {
+function fleetAccount(index, { email, name, gmail, domain, secondName }) {
+  const id = `demo-fx-${pad(index)}`;
   return {
-    id: `demo-fx-${pad(index)}`,
+    id,
     name,
     sender_name: name,
     email_address: email,
@@ -158,7 +160,8 @@ function fleetAccount(index, { email, name, gmail, domain }) {
     signature: `<p>${name}</p>`,
     categorization_enabled: true,
     health: 'healthy',
-    aliases: [],
+    // A second sender name is an alias with the mailbox's own address (compose's From list).
+    aliases: secondName ? [{ id: `${id}-alias-1`, account_id: id, name: secondName, email, reply_to: null, signature: null }] : [],
     thread_mode: gmail ? 'gmail' : 'rfc',
     ...(gmail ? { oauth_provider: 'google' } : { mail_node: true, mail_node_domain: domain }),
   };
@@ -168,9 +171,9 @@ function fleetAccount(index, { email, name, gmail, domain }) {
 export function fleetAccounts() {
   const accounts = [];
   for (let i = 0; i < NODE_TEAMS.length; i++) {
-    const [local, nodeName] = NODE_TEAMS[i];
+    const [local, nodeName, secondName] = NODE_TEAMS[i];
     const domain = FLEET_DOMAINS[i % FLEET_DOMAINS.length];
-    accounts.push(fleetAccount(accounts.length, { email: `${local}@${domain}`, name: nodeName, gmail: false, domain }));
+    accounts.push(fleetAccount(accounts.length, { email: `${local}@${domain}`, name: nodeName, gmail: false, domain, secondName }));
     const [gmailAddress, gmailName] = GMAIL_TEAMS[i];
     accounts.push(fleetAccount(accounts.length, { email: gmailAddress, name: gmailName, gmail: true }));
   }

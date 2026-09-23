@@ -657,9 +657,15 @@ export function dedupeByIdentity(list) {
 // Filter `incoming` to the messages whose stable identity is not already present in `existing`.
 // Used by restore/undo so a message the network refresh already brought back — possibly under a
 // regenerated id, matched via Message-ID — is not re-added as a duplicate. Pure.
+//
+// Presence is judged per account. Since #476 the list can hold one row per account for a single
+// Message-ID, and a bare Message-ID key made Undo a no-op: archive one account's copy, press
+// Undo, and the other account's copy answered "already present". A row with no account keys on
+// the Message-ID alone, as before.
 export function missingByIdentity(existing, incoming) {
-  const present = new Set(existing.map(messageIdentity));
-  return (incoming || []).filter(m => m && !present.has(messageIdentity(m)));
+  const key = m => `${messageIdentity(m)}\u0000${m.account_id ?? ''}`;
+  const present = new Set(existing.map(key));
+  return (incoming || []).filter(m => m && !present.has(key(m)));
 }
 
 // Choose which message of a thread a deep-link should open, given the thread's rows and

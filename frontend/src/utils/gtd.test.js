@@ -937,6 +937,22 @@ describe('missingByIdentity', () => {
     const incoming = [{ id: 'b', message_id: null }];
     assert.deepEqual(missingByIdentity(existing, incoming).map(m => m.id), ['b']);
   });
+
+  it('restores one account copy while the OTHER account copy is still listed (#476 undo)', () => {
+    // Found in a fresh review of the branch. All Inboxes now lists both accounts' copies. The
+    // user archives work's copy and presses Undo: restoreMessages asks what to put back, and
+    // a Message-ID-only key answered "nothing, it is already there", pointing at home's copy.
+    // Undo silently did nothing.
+    const afterArchive = [{ id: 'home', message_id: '<m1>', folder: 'INBOX', account_id: 'home' }];
+    const undo         = [{ id: 'work', message_id: '<m1>', folder: 'INBOX', account_id: 'work' }];
+    assert.deepEqual(missingByIdentity(afterArchive, undo).map(m => m.id), ['work']);
+  });
+
+  it('still skips a same-account copy already back under a regenerated id', () => {
+    const existing = [{ id: 'new', message_id: '<m1>', account_id: 'work' }];
+    const incoming = [{ id: 'old', message_id: '<m1>', account_id: 'work' }];
+    assert.deepEqual(missingByIdentity(existing, incoming), []);
+  });
 });
 
 describe('openDeepLinkMessage — stale-id recovery', () => {

@@ -52,6 +52,7 @@ import TodoistTaskModal from './TodoistTaskModal.jsx';
 import SenderAvatarImage from './SenderAvatarImage.jsx';
 import ContextMenu from './ContextMenu.jsx';
 import { formatDateTime, localeTag } from '../utils/formatDate.js';
+import { mailboxBusyOr, isMailboxBusy, MAILBOX_BUSY_CODE } from '../utils/mailboxBusy.js';
 
 function parseAddressField(raw) {
   try {
@@ -284,7 +285,7 @@ export default function MessagePane({ windowMessageId = null, onWindowClose = nu
         addNotification({
           type: 'error',
           title: t(label === 'spam' ? 'spam.failTitle' : 'spam.failHamTitle'),
-          body: err.message || t(label === 'spam' ? 'spam.failBody' : 'spam.failHamBody'),
+          body: mailboxBusyOr(err, t, err.message || t(label === 'spam' ? 'spam.failBody' : 'spam.failHamBody')),
         });
       }
     }, 4500);
@@ -564,7 +565,8 @@ export default function MessagePane({ windowMessageId = null, onWindowClose = nu
       })
       .catch(err => {
         if (cancelled) return;
-        setBodyError(err.message);
+        // The code, not translated text: translated at render, so the effect need not depend on t.
+        setBodyError(isMailboxBusy(err) ? MAILBOX_BUSY_CODE : err.message);
       })
       .finally(() => {
         if (!cancelled) setLoadingBody(false);
@@ -1557,7 +1559,7 @@ ${bodyContent}
         console.error('Move failed:', err);
         useStore.getState().restoreMessages([moved]);
         if (!moved.is_read) incrementUnread(moved.account_id);
-        addNotification({ title: t('message.moved.failTitle'), body: t('message.moved.failBody') });
+        addNotification({ title: t('message.moved.failTitle'), body: mailboxBusyOr(err, t, t('message.moved.failBody')) });
       }
     }, 4500);
     addNotification({
@@ -1671,11 +1673,11 @@ ${bodyContent}
       try {
         await api.deleteMessage(deleted.id);
         setCompletedDelete(deleted.id);
-      } catch {
+      } catch (err) {
         clearDeleteGuard(deleted.id);
         useStore.getState().restoreMessages([deleted]);
         if (!deleted.is_read) incrementUnread(deleted.account_id);
-        addNotification({ type: 'error', title: t('messageList.deleted.failTitle'), body: t('messageList.deleted.failBody') });
+        addNotification({ type: 'error', title: t('messageList.deleted.failTitle'), body: mailboxBusyOr(err, t, t('messageList.deleted.failBody')) });
       }
     }, 4500);
     addNotification({
@@ -1706,7 +1708,7 @@ ${bodyContent}
         }
       } catch (err) {
         console.error('Archive failed:', err);
-        addNotification({ title: t('message.archived.failTitle'), body: t('message.archived.failBody') });
+        addNotification({ title: t('message.archived.failTitle'), body: mailboxBusyOr(err, t, t('message.archived.failBody')) });
       }
     }, 4500);
     addNotification({
@@ -1815,7 +1817,7 @@ ${bodyContent}
             console.error('Snooze failed:', err.message);
             useStore.getState().restoreMessages([snoozedMsg]);
             if (!snoozedMsg.is_read) incrementUnread(snoozedMsg.account_id);
-            addNotification({ title: t('message.snoozed.failTitle'), body: t('message.snoozed.failBody') });
+            addNotification({ title: t('message.snoozed.failTitle'), body: mailboxBusyOr(err, t, t('message.snoozed.failBody')) });
           });
         }
         break;
@@ -2786,7 +2788,7 @@ ${bodyContent}
                 {t('message.loadingError')}
               </div>
               <div style={{ fontSize: 13, color: 'var(--text-secondary)', lineHeight: 1.5 }}>
-                {bodyError}
+                {bodyError === MAILBOX_BUSY_CODE ? t('common.mailboxBusy') : bodyError}
               </div>
             </div>
             <button

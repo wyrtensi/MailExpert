@@ -182,7 +182,7 @@ describe('startProviderIdBackfill connection handling', () => {
     expect(mgr.providerIdBackfillRunning.has(gmail.id)).toBe(false);
   });
 
-  it('logs out the client once and frees the slot when the run fails after connecting', async () => {
+  it('closes the client once and frees the slot when the run fails after connecting', async () => {
     const mgr = newManager();
     runProviderIdBackfill.mockImplementation(async ({ getClient }) => {
       await getClient();
@@ -193,7 +193,8 @@ describe('startProviderIdBackfill connection handling', () => {
     await mgr.startProviderIdBackfill(gmail);
 
     expect(imapClients).toHaveLength(1);
-    expect(imapClients[0].logout).toHaveBeenCalledTimes(1);
+    expect(imapClients[0].close).toHaveBeenCalledTimes(1);
+    expect(imapClients[0].logout).not.toHaveBeenCalled();
     expect(mgr._bgConnSem.activeCount(HOST)).toBe(0);
   });
 

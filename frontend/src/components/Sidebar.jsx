@@ -20,6 +20,7 @@ import { useMobile } from '../hooks/useMobile.js';
 import LogoMark from './LogoMark.jsx';
 import ProfileModal from './ProfileModal.jsx';
 import { useUiScale, descale } from '../hooks/useUiScale.js';
+import { CheckIcon, CloseIcon } from './UiIcons.jsx';
 
 const ICONS = {
   inbox: (
@@ -1451,8 +1452,8 @@ export default function Sidebar() {
                       }}
                     />
                     <div style={{ display: 'flex', gap: 2, flexShrink: 0 }}>
-                      <button onClick={handleCreateFolderSubmit} style={{ background: 'var(--accent)', border: 'none', borderRadius: 4, color: 'var(--accent-text)', padding: '2px 6px', cursor: 'pointer', fontSize: 11 }}>✓</button>
-                      <button onClick={() => { setCreatingFolder(null); setCreateName(''); }} style={{ background: 'var(--bg-tertiary)', border: 'none', borderRadius: 4, color: 'var(--text-secondary)', padding: '2px 6px', cursor: 'pointer', fontSize: 11 }}>✕</button>
+                      <button onClick={handleCreateFolderSubmit} aria-label={t('common.save')} title={t('common.save')} style={{ background: 'var(--accent)', border: 'none', borderRadius: 4, color: 'var(--accent-text)', padding: '3px 6px', cursor: 'pointer', display: 'inline-flex', alignItems: 'center' }}><CheckIcon size={12} /></button>
+                      <button onClick={() => { setCreatingFolder(null); setCreateName(''); }} aria-label={t('common.cancel')} title={t('common.cancel')} style={{ background: 'var(--bg-tertiary)', border: 'none', borderRadius: 4, color: 'var(--text-secondary)', padding: '3px 6px', cursor: 'pointer', display: 'inline-flex', alignItems: 'center' }}><CloseIcon size={12} /></button>
                     </div>
                   </div>
                 );
@@ -1652,10 +1653,10 @@ export default function Sidebar() {
 
                         {isRenaming ? (
                           <div style={{ display: 'flex', gap: 2, flexShrink: 0 }} onClick={e => e.stopPropagation()}>
-                            <button onClick={handleRenameSubmit} disabled={folderOpLoading} style={{ background: 'var(--accent)', border: 'none', borderRadius: 4, color: 'var(--accent-text)', padding: '2px 6px', cursor: 'pointer', fontSize: 11 }}>
-                              {folderOpLoading ? '…' : '✓'}
+                            <button onClick={handleRenameSubmit} disabled={folderOpLoading} aria-label={t('common.save')} title={t('common.save')} style={{ background: 'var(--accent)', border: 'none', borderRadius: 4, color: 'var(--accent-text)', padding: '3px 6px', cursor: 'pointer', display: 'inline-flex', alignItems: 'center', fontSize: 11 }}>
+                              {folderOpLoading ? '…' : <CheckIcon size={12} />}
                             </button>
-                            <button onClick={() => setRenamingFolder(null)} style={{ background: 'var(--bg-tertiary)', border: 'none', borderRadius: 4, color: 'var(--text-secondary)', padding: '2px 6px', cursor: 'pointer', fontSize: 11 }}>✕</button>
+                            <button onClick={() => setRenamingFolder(null)} aria-label={t('common.cancel')} title={t('common.cancel')} style={{ background: 'var(--bg-tertiary)', border: 'none', borderRadius: 4, color: 'var(--text-secondary)', padding: '3px 6px', cursor: 'pointer', display: 'inline-flex', alignItems: 'center' }}><CloseIcon size={12} /></button>
                           </div>
                         ) : (
                           !folder.no_select && (() => {

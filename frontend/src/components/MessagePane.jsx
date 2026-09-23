@@ -14,6 +14,7 @@ import { startRun, cancelRun, getAiState, subscribeRuns } from '../aiRuns.js';
 import { renderMarkdown } from '../utils/renderMarkdown.js';
 import { pickReplyAlias } from '../utils/replyAlias.js';
 import { mailboxBanner } from '../utils/mailboxBanner.js';
+import { emailFontFor } from '../utils/emailFont.js';
 import { buildQuote, identityName, quoteMetaFor, senderLanguage } from '../utils/quoteHeader.js';
 import SenderHistory from './SenderHistory.jsx';
 import { measureContentHeight, createHeightController, forceEagerImages } from '../utils/emailFrameHeight.js';
@@ -308,6 +309,11 @@ export default function MessagePane({ windowMessageId = null, onWindowClose = nu
   const [paneScrolled, setPaneScrolled] = useState(false);
   // Toolbar names (utils/paneToolbar.js): every name is tried when the toolbar gets a width, and
   // while the row overflows one name goes per render, least used first, before anything paints.
+  // A letter without its own font reads in the interface font (utils/emailFont.js).
+  const fontSet = useStore(s => s.fontSet);
+  const theme = useStore(s => s.theme);
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  const emailFont = useMemo(() => emailFontFor(), [fontSet, theme]);
   const toolbarElRef = useRef(null);
   const toolbarObserverRef = useRef(null);
   const [labelCount, setLabelCount] = useState(0);
@@ -2975,9 +2981,10 @@ ${bodyContent}
                      for same-specificity !important declarations inside the email's own
                      <style> blocks (which land in <body> after the email HTML). */
                   html, body { height: auto !important; min-height: 0 !important; overflow: hidden !important; }
+                  ${emailFont.css}
                   body { margin: 0 !important; padding: 0 !important;
                          background-color: #ffffff !important; color-scheme: light;
-                         font-family: -apple-system, Arial, sans-serif;
+                         font-family: ${emailFont.family ? `${emailFont.family}, ` : ''}-apple-system, Arial, sans-serif;
                          font-size: 14px; line-height: 1.6; color: #1a1a1a;
                          word-wrap: break-word; overflow-wrap: break-word; }
                   img { max-width: 100% !important; height: auto !important; }
@@ -3060,7 +3067,7 @@ ${bodyContent}
             margin: 0, padding: '14px 16px 12px',
             whiteSpace: 'pre-wrap', wordBreak: 'break-word',
             fontSize: 14, color: '#1a1a1a', lineHeight: 1.7,
-            fontFamily: 'DM Sans, sans-serif', background: 'white',
+            fontFamily: 'var(--font-sans, sans-serif)', background: 'white',
             borderRadius: isMobile ? 0 : 10,
             border: isMobile ? 'none' : '1px solid var(--border-subtle)',
             overflow: 'hidden',

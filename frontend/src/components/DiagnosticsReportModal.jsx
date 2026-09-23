@@ -4,6 +4,7 @@ import { copyToClipboard } from '../utils/clipboard.js';
 import { useStore } from '../store/index.js';
 import { useUiScale } from '../hooks/useUiScale.js';
 import { generateReport } from '../utils/diagnostics.js';
+import { CloseIcon } from './UiIcons.jsx';
 
 // Sanitized diagnostics report: generate, preview (so the user can see exactly
 // what will be shared), then download or copy. Nothing is sent automatically.
@@ -60,7 +61,7 @@ export default function DiagnosticsReportModal({ onClose }) {
       >
         <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', padding: '14px 16px', borderBottom: '1px solid var(--border-subtle)' }}>
           <span style={{ fontSize: 15, fontWeight: 600, color: 'var(--text-primary)' }}>{t('diagnostics.title')}</span>
-          <button onClick={onClose} aria-label={t('common.cancel')} style={{ background: 'none', border: 'none', cursor: 'pointer', color: 'var(--text-tertiary)', fontSize: 18, lineHeight: 1 }}>✕</button>
+          <button onClick={onClose} aria-label={t('common.cancel')} style={{ background: 'none', border: 'none', cursor: 'pointer', color: 'var(--text-tertiary)', display: 'inline-flex', alignItems: 'center' }}><CloseIcon size={18} /></button>
         </div>
 
         <div style={{ padding: '14px 16px', overflowY: 'auto' }}>

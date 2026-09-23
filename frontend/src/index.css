@@ -7,7 +7,7 @@
   itself, which would be a self-reference) so the pre-JS paint matches v3.
 */
 @theme {
-  --font-sans: 'DM Sans', sans-serif;
+  --font-sans: 'Manrope', sans-serif;
   --font-mono: 'JetBrains Mono', monospace;
 }
 
@@ -90,7 +90,7 @@ html, body, #root {
   padding: 0;
   background: var(--bg-primary);
   color: var(--text-primary);
-  font-family: var(--font-sans, 'DM Sans', sans-serif);
+  font-family: var(--font-sans, 'Manrope', sans-serif);
   /* Prevent wide email iframes from making the entire page scroll horizontally
      on iOS Safari. Nested overflow:hidden on inner containers is not enough —
      iOS WebKit can still scroll the document itself. */
@@ -294,7 +294,7 @@ body, #root {
 .tiptap-compose .ProseMirror {
   outline: none;
   color: var(--text-primary);
-  font-family: var(--font-sans, 'DM Sans', sans-serif);
+  font-family: var(--font-sans, 'Manrope', sans-serif);
   font-size: 14px;
   line-height: 1.7;
   min-height: 120px;

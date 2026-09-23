@@ -22,6 +22,7 @@ import { ComposerLink } from '../utils/editorLink.js';
 import { copyToClipboard } from '../utils/clipboard.js';
 import { resolveInitialFrom } from '../utils/defaultSender.js';
 import { threadCacheKey } from '../utils/threadKey.js';
+import { SmileIcon } from './UiIcons.jsx';
 
 // Resize an image blob/file to max maxW pixels wide, preserving aspect ratio.
 // Returns a Promise<string> of a base64 data URL.
@@ -417,19 +418,25 @@ export default function ComposeModal() {
     () => window.visualViewport?.height ?? window.innerHeight
   );
   const composePanelRef = useRef(null);
+  // The panel sits inside the app's scale(fontSize) wrapper: the visual viewport is in screen
+  // pixels, the panel's top and height in layout pixels, so both are divided by the scale. Without
+  // that the panel was 10% taller than the screen at 110% and the page scrolled its top away.
+  const panelScaleRef = useRef(1);
+  panelScaleRef.current = uiScale;
   useEffect(() => {
     if (!isMobile) return;
     const vv = window.visualViewport;
     if (!vv) return;
     const update = () => {
+      const scale = panelScaleRef.current || 1;
       setViewportHeight(vv.height);
       // Apply top and height directly to the DOM — avoids a re-render on every
       // scroll/resize tick. Updating height here (not just top) ensures the panel
       // shrinks immediately when the keyboard opens rather than waiting a frame,
       // which would leave it extending behind the keyboard.
       if (composePanelRef.current) {
-        composePanelRef.current.style.top = vv.offsetTop + 'px';
-        composePanelRef.current.style.height = vv.height + 'px';
+        composePanelRef.current.style.top = (vv.offsetTop / scale) + 'px';
+        composePanelRef.current.style.height = (vv.height / scale) + 'px';
       }
     };
     vv.addEventListener('resize', update);
@@ -1167,7 +1174,7 @@ export default function ComposeModal() {
         onKeyDown={handleKeyDown}
         style={{
           position: 'fixed', top: 0, left: 0, right: 0,
-          height: viewportHeight,
+          height: viewportHeight / (uiScale || 1),
           paddingTop: 'var(--sat)',
           background: 'var(--bg-secondary)',
           zIndex: 2000,
@@ -2843,8 +2850,8 @@ function RichToolbar({ editor, onAttach, onInsertImage, htmlMode, onToggleHtml, 
           <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M10 13a5 5 0 007.54.54l3-3a5 5 0 00-7.07-7.07l-1.72 1.71"/><path d="M14 11a5 5 0 00-7.54-.54l-3 3a5 5 0 007.07 7.07l1.71-1.71"/></svg>
         </TBtn>
         <button ref={emojiBtnRef} title="Emoji" onMouseDown={openEmoji}
-          style={{ background: 'none', border: 'none', borderRadius: 4, padding: '3px 6px', cursor: 'pointer', display: 'inline-flex', alignItems: 'center' }}>
-          <span style={{ fontSize: 13, lineHeight: 1 }}>😀</span>
+          style={{ background: 'none', border: 'none', borderRadius: 4, padding: '3px 6px', cursor: 'pointer', display: 'inline-flex', alignItems: 'center', color: 'var(--text-secondary)' }}>
+          <SmileIcon size={15} />
         </button>
 
         <Sep />

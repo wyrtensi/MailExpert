@@ -53,6 +53,7 @@ import { LANGUAGES } from '../utils/language.js';
 import { providerIdsBackfillText } from '../utils/providerIdsBackfill.js';
 import { threadModeLabel, threadModeOf, threadRecomputeText, threadSwitchTarget } from '../utils/threadMode.js';
 import { localeTag } from '../utils/formatDate.js';
+import { CheckIcon, PlusIcon, WarningIcon } from './UiIcons.jsx';
 
 // ─── Shared field component ───────────────────────────────────────────────────
 function Field({ label, required, children }) {
@@ -1151,12 +1152,12 @@ function AccountsTab() {
               </div>
               <div style={{ fontSize: 11, marginTop: 3, display: 'flex', alignItems: 'center', gap: 6, flexWrap: 'wrap' }}>
                 {isGoogleReconnectRequired(account) ? (
-                  <span style={{ color: 'var(--red)' }}>⚠ {t('admin.accounts.oauthReconnectRequired')}</span>
+                  <span style={{ color: 'var(--red)', display: 'inline-flex', alignItems: 'center', gap: 4 }}><WarningIcon size={12} /> {t('admin.accounts.oauthReconnectRequired')}</span>
                 ) : account.sync_error ? (
                   <span style={{
                     color: 'var(--red)',
                     overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap',
-                  }}>⚠ {account.sync_error}</span>
+                  }}><WarningIcon size={12} /> {account.sync_error}</span>
                 ) : (
                   <>
                     <span style={{ color: 'var(--green)' }}>● {t('admin.accounts.connected')}</span>
@@ -4369,7 +4370,7 @@ function CategoriesSection({ initialSubTab }) {
                   opacity: adding && !isAdded ? 0.5 : 1,
                 }}>
                 {setName === 'social_networks' ? t('admin.categories.builtinSocial') : t('admin.categories.builtinDev')}
-                {isAdded ? ' ✓' : ' +'}
+                {' '}{isAdded ? <CheckIcon size={12} /> : <PlusIcon size={12} />}
               </button>
             );
           })}

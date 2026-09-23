@@ -1,4 +1,5 @@
 import { pickReplyAlias } from './replyAlias.js';
+import { buildQuote, identityName, quoteMetaFor, senderLanguage } from './quoteHeader.js';
 
 function parseAddressField(raw) {
   try {
@@ -53,17 +54,10 @@ export async function openReplyFromMessage(message, { accounts, openCompose, get
   const rawSubject = (message.subject || '').trim();
 
   const replyBody = await getMessageBody(message.id).catch(() => null);
-  const replyDate = message.date ? new Date(message.date).toLocaleString() : '';
-  const replySafeName = (message.from_name || '').replace(/[\r\n]+/g, ' ');
-  const replyFromStr = replySafeName
-    ? `${replySafeName} <${message.from_email}>`
-    : message.from_email || '';
-  const quotedText = replyBody?.text
-    ? `\n\n---\nOn ${replyDate}, ${replyFromStr} wrote:\n${replyBody.text.split('\n').map(l => '> ' + l).join('\n')}`
-    : '';
-  const quotedBodyHtml = replyBody?.html
-    ? `<div style="border-left:3px solid var(--border,#ccc);padding-left:12px;margin-top:12px;color:var(--text-secondary,#666)"><p style="margin:0 0 6px;font-size:12px">On ${replyDate}, ${replyFromStr} wrote:</p>${replyBody.html}</div>`
-    : null;
+  // The quote header speaks the language of the name the reply goes out under.
+  const quoteMeta = quoteMetaFor(message, 'reply');
+  const quoteLang = senderLanguage(identityName(myAccount, replyAliasId));
+  const { quotedText, quotedHtml: quotedBodyHtml } = buildQuote(quoteMeta, quoteLang, { text: replyBody?.text, html: replyBody?.html });
 
   openCompose({
     to: sender,
@@ -72,6 +66,8 @@ export async function openReplyFromMessage(message, { accounts, openCompose, get
     body: '',
     quotedBody: quotedText,
     quotedBodyHtml,
+    quoteMeta,
+    quoteLang,
     inReplyTo: message.message_id,
     references: referencesChain,
     accountId: message.account_id,
@@ -85,27 +81,21 @@ export async function openReplyFromMessage(message, { accounts, openCompose, get
   });
 }
 
-export async function openForwardFromMessage(message, { openCompose, getMessageBody }) {
+export async function openForwardFromMessage(message, { openCompose, getMessageBody, accounts = [] }) {
   const fwdBody = await getMessageBody(message.id).catch(() => null);
-  const fwdDate = message.date ? new Date(message.date).toLocaleString() : '';
-  const fwdSafeName = (message.from_name || '').replace(/[\r\n]+/g, ' ');
-  const fwdFromStr = fwdSafeName
-    ? `${fwdSafeName} <${message.from_email}>`
-    : message.from_email || '';
-  const safeSubject = (message.subject || '').replace(/[\r\n]+/g, ' ');
-  const toStr = parseAddressField(message.to_addresses);
-  const ccStr = parseAddressField(message.cc_addresses);
-
-  const fwdText = `\n\n---------- Forwarded message ----------\nFrom: ${fwdFromStr}\nDate: ${fwdDate}\nSubject: ${safeSubject}${toStr ? `\nTo: ${toStr}` : ''}${ccStr ? `\nCc: ${ccStr}` : ''}\n\n${fwdBody?.text || ''}`;
-  const fwdHtml = fwdBody?.html
-    ? `<div style="border-left:3px solid var(--border,#ccc);padding-left:12px;margin-top:12px;color:var(--text-secondary,#666)"><p style="margin:0 0 6px;font-size:12px">---------- Forwarded message ----------<br>From: ${fwdFromStr}<br>Date: ${fwdDate}<br>Subject: ${safeSubject}${toStr ? `<br>To: ${toStr}` : ''}${ccStr ? `<br>Cc: ${ccStr}` : ''}</p>${fwdBody.html}</div>`
-    : null;
+  const quoteExtra = { to: parseAddressField(message.to_addresses), cc: parseAddressField(message.cc_addresses) };
+  const quoteMeta = quoteMetaFor(message, 'forward');
+  const quoteLang = senderLanguage(identityName(accounts.find(a => a.id === message.account_id)));
+  const { quotedText: fwdText, quotedHtml: fwdHtml } = buildQuote(quoteMeta, quoteLang, { text: fwdBody?.text, html: fwdBody?.html, ...quoteExtra });
 
   openCompose({
     subject: message.subject?.startsWith('Fwd:') ? message.subject : `Fwd: ${message.subject}`,
     body: '',
     quotedBody: fwdText,
     quotedBodyHtml: fwdHtml,
+    quoteMeta,
+    quoteLang,
+    quoteExtra,
     accountId: message.account_id,
     isForward: true,
     forwardedAttachments: (fwdBody?.attachments || []).map(att => ({

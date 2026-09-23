@@ -3,6 +3,7 @@ import { useTranslation } from 'react-i18next';
 import { useStore } from '../store/index.js';
 import { api } from '../utils/api.js';
 import { AUDIT_ACTIONS, auditActionLabelKey, auditDetail, auditQuery } from '../utils/auditLog.js';
+import { localeTag } from '../utils/formatDate.js';
 
 const EMPTY_FILTERS = { account: '', user: '', action: '', fromDate: '', toDate: '' };
 
@@ -169,7 +170,7 @@ export default function AuditLogTab() {
             <tbody>
               {entries.map((entry) => (
                 <tr key={entry.id}>
-                  <td style={{ ...cellStyle, whiteSpace: 'nowrap' }}>{new Date(entry.occurredAt).toLocaleString()}</td>
+                  <td style={{ ...cellStyle, whiteSpace: 'nowrap' }}>{new Date(entry.occurredAt).toLocaleString(localeTag())}</td>
                   <td style={cellStyle}>{entry.actorEmail || t('admin.audit.unknownUser')}</td>
                   <td style={cellStyle}>{entry.accountEmail || ''}</td>
                   <td style={{ ...cellStyle, color: 'var(--text-primary)' }}>{actionText(entry.action)}</td>

@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { formatDate } from './formatDate.js';
+import { dateLanguage, formatDate, formatDateTime, formatDay, localeTag, setDateLanguage } from './formatDate.js';
 
 // Local-time dates relative to now, so the expectations hold in any timezone.
 function localDate(daysAgo, hours, minutes) {
@@ -37,4 +37,29 @@ test('formatDate returns an empty string for missing or invalid input', () => {
   assert.equal(formatDate(null), '');
   assert.equal(formatDate(undefined), '');
   assert.equal(formatDate('not a date'), '');
+});
+
+test('formatDate in Russian: 24-hour time, Вчера, day before month', () => {
+  assert.equal(formatDate(localDate(0, 15, 30).toISOString(), 'ru'), '15:30');
+  assert.equal(formatDate(localDate(1, 12, 0).toISOString(), 'ru'), 'Вчера');
+  const lastYear = new Date(new Date().getFullYear() - 1, 2, 7, 12, 0, 0);
+  assert.equal(formatDate(lastYear.toISOString(), 'ru'), `7 мар. ${lastYear.getFullYear()}`);
+});
+
+test('the interface language set by i18n is the default, and anything unknown reads as English', () => {
+  const lastYear = new Date(new Date().getFullYear() - 1, 8, 16, 8, 45, 0);
+  setDateLanguage('ru');
+  try {
+    assert.equal(dateLanguage(), 'ru');
+    assert.equal(formatDay(lastYear), `16 сент. ${lastYear.getFullYear()}`);
+    assert.equal(formatDateTime(lastYear), `16 сент. ${lastYear.getFullYear()}, 08:45`);
+    assert.equal(formatDateTime(lastYear, { withYear: false }), '16 сент., 08:45');
+    assert.equal(localeTag(), 'ru-RU');
+  } finally {
+    setDateLanguage('xx');
+  }
+  assert.equal(dateLanguage(), 'en');
+  assert.equal(formatDateTime(lastYear), `Sep 16, ${lastYear.getFullYear()} 8:45 AM`);
+  assert.equal(localeTag(), 'en-US');
+  assert.equal(formatDay('nope'), '');
 });

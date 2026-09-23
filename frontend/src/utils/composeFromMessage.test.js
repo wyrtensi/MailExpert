@@ -1,6 +1,7 @@
 import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
 import { openReplyFromMessage, openForwardFromMessage } from './composeFromMessage.js';
+import { formatQuoteDate } from './quoteHeader.js';
 
 function harness(body = null) {
   let payload = null;
@@ -257,7 +258,9 @@ describe('malformed address fields fall back cleanly', () => {
 
 describe('quoted body templates', () => {
   const date = '2026-07-13T10:00:00Z';
-  const when = new Date(date).toLocaleString();
+  // No Cyrillic in the From name here, so the header is English (utils/quoteHeader.js).
+  const when = formatQuoteDate(date, 'en');
+  const open = (lang) => `<div style="border-left:3px solid var(--border,#ccc);padding-left:12px;margin-top:12px;color:var(--text-secondary,#666)"><p data-mailexpert-quote-header="${lang}" style="margin:0 0 6px;font-size:12px">`;
 
   it('builds the exact reply quoted text and html, sanitizing newlines in the name', async () => {
     const h = harness({ text: 'line1\nline2', html: '<p>Hi</p>' });
@@ -268,7 +271,7 @@ describe('quoted body templates', () => {
     assert.equal(h.payload().quotedBody, `\n\n---\nOn ${when}, Bad Actor <f@example.com> wrote:\n> line1\n> line2`);
     assert.equal(
       h.payload().quotedBodyHtml,
-      `<div style="border-left:3px solid var(--border,#ccc);padding-left:12px;margin-top:12px;color:var(--text-secondary,#666)"><p style="margin:0 0 6px;font-size:12px">On ${when}, Bad Actor <f@example.com> wrote:</p><p>Hi</p></div>`,
+      `${open('en')}On ${when}, Bad Actor &lt;f@example.com&gt; wrote:</p><p>Hi</p></div>`,
     );
   });
 
@@ -303,8 +306,24 @@ describe('quoted body templates', () => {
     );
     assert.equal(
       h.payload().quotedBodyHtml,
-      `<div style="border-left:3px solid var(--border,#ccc);padding-left:12px;margin-top:12px;color:var(--text-secondary,#666)"><p style="margin:0 0 6px;font-size:12px">---------- Forwarded message ----------<br>From: Ann <ann@example.com><br>Date: ${when}<br>Subject: Hello<br>To: Bob <bob@example.com><br>Cc: cc@example.com</p><p>body</p></div>`,
+      `${open('en')}---------- Forwarded message ----------<br>From: Ann &lt;ann@example.com&gt;<br>Date: ${when}<br>Subject: Hello<br>To: Bob &lt;bob@example.com&gt;<br>Cc: cc@example.com</p><p>body</p></div>`,
     );
+  });
+
+  it('writes the header in Russian when the reply goes out under a Russian name', async () => {
+    const h = harness({ text: 'привет', html: '<p>привет</p>' });
+    await openReplyFromMessage(
+      { account_id: 'a', date, from_name: 'Anna', from_email: 'anna@example.com' },
+      {
+        accounts: [{ id: 'a', email_address: 'sales@example.com', sender_name: 'Отдел продаж', aliases: [] }],
+        openCompose: h.openCompose, getMessageBody: h.getMessageBody,
+      },
+    );
+    const ruWhen = formatQuoteDate(date, 'ru');
+    assert.equal(h.payload().quotedBody, `\n\n---\n${ruWhen}, Anna <anna@example.com> написал(а):\n> привет`);
+    assert.equal(h.payload().quoteLang, 'ru');
+    assert.deepEqual(h.payload().quoteMeta, { kind: 'reply', date, from: 'Anna <anna@example.com>', subject: '' });
+    assert.ok(h.payload().quotedBodyHtml.startsWith(open('ru')));
   });
 
   it('forward without html keeps the text scaffold', async () => {

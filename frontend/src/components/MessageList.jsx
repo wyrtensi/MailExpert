@@ -2086,6 +2086,7 @@ export default function MessageList() {
         break;
       case 'forward':
         await openForwardFromMessage(message, {
+          accounts,
           openCompose,
           getMessageBody: api.getMessageBody,
         });

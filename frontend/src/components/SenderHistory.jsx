@@ -1,6 +1,5 @@
 import { useEffect, useState } from 'react';
 import { useTranslation } from 'react-i18next';
-import { format } from 'date-fns';
 import { api } from '../utils/api.js';
 import {
   SENDER_HISTORY_LIMIT,
@@ -9,6 +8,7 @@ import {
   moreCount,
   senderSearchQuery,
 } from '../utils/senderHistory.js';
+import { formatDay } from '../utils/formatDate.js';
 
 const rowButtonStyle = {
   display: 'flex', alignItems: 'baseline', gap: 8, width: '100%', textAlign: 'left',
@@ -72,7 +72,7 @@ export default function SenderHistory({ messageId, onOpen, onSearch }) {
             >
               <span style={badgeStyle(item.direction === 'out')}>{t(directionKey(item.direction))}</span>
               <span style={{ flexShrink: 0, color: 'var(--text-tertiary)', whiteSpace: 'nowrap' }}>
-                {item.date ? format(new Date(item.date), 'MMM d, yyyy') : ''}
+                {formatDay(item.date)}
               </span>
               <span style={{ flexShrink: 0, maxWidth: '45%', fontWeight: 500, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
                 {item.subject || t('message.senderHistory.noSubject')}

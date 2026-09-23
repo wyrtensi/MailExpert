@@ -3,6 +3,7 @@ import { useTranslation } from 'react-i18next';
 import { useStore } from '../store/index.js';
 import { api } from '../utils/api.js';
 import ConfirmOverlay from './ConfirmOverlay.jsx';
+import { localeTag } from '../utils/formatDate.js';
 
 const PAGE_SIZE = 200;
 
@@ -163,7 +164,7 @@ export default function GoogleUsersPanel() {
                     ? t('admin.users.noEmail')
                     : u.isBootstrapAdmin
                       ? t('admin.users.bootstrapBadge')
-                      : t('admin.users.joined', { date: new Date(u.created_at).toLocaleDateString() })}
+                      : t('admin.users.joined', { date: new Date(u.created_at).toLocaleDateString(localeTag()) })}
                 </div>
               </div>
               {!self && !u.isBootstrapAdmin && (

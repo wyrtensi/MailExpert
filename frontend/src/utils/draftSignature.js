@@ -3,6 +3,8 @@
 // wrapper from backend/src/utils/signatureWrapper.js; the composer keeps the signature in its
 // own editor, so on reopen the body must go into the body editor without it.
 
+import { TEXT_QUOTE_HEADER_RE } from './quoteHeader.js';
+
 const SIGNATURE_CLASS = 'mailexpert-signature';
 // Wrapper style written before the class marker existed. Matched exactly (ignoring
 // whitespace and a trailing semicolon) and only on a div without a class.
@@ -10,8 +12,8 @@ const LEGACY_SIGNATURE_STYLE = 'margin-top:16px;color:#555;font-size:13px';
 
 // Plain-text signature delimiter written by the draft and send routes.
 const TEXT_DELIMITER = '\n\n-- \n';
-// Quote headers appended after the signature by composeFromMessage.js (reply and forward).
-const TEXT_QUOTE_HEADER_RE = /\n\n(?:---\nOn [^\n]* wrote:\n|---------- Forwarded message ----------\n)/;
+// Quote headers appended after the signature (reply and forward, in English or Russian):
+// utils/quoteHeader.js builds them and owns the pattern.
 
 const normalizeStyle = (style) => (style || '').replace(/\s+/g, '').replace(/;$/, '').toLowerCase();
 

@@ -52,6 +52,7 @@ import { accountLabel } from '../utils/accountLabel.js';
 import { LANGUAGES } from '../utils/language.js';
 import { providerIdsBackfillText } from '../utils/providerIdsBackfill.js';
 import { threadModeLabel, threadModeOf, threadRecomputeText, threadSwitchTarget } from '../utils/threadMode.js';
+import { localeTag } from '../utils/formatDate.js';
 
 // ─── Shared field component ───────────────────────────────────────────────────
 function Field({ label, required, children }) {
@@ -1229,7 +1230,7 @@ function AccountsTab() {
             {[
               ['IMAP', `${account.imap_host}:${account.imap_port}`],
               ['SMTP', `${account.smtp_host}:${account.smtp_port}`],
-              [t('admin.accounts.lastSync'), account.last_sync ? new Date(account.last_sync).toLocaleTimeString() : t('common.never')],
+              [t('admin.accounts.lastSync'), account.last_sync ? new Date(account.last_sync).toLocaleTimeString(localeTag()) : t('common.never')],
             ].map(([label, val]) => (
               <div key={label} style={{ fontSize: 11 }}>
                 <span style={{ color: 'var(--text-tertiary)' }}>{label} </span>
@@ -4042,7 +4043,7 @@ function AISection() {
                       {cancelling ? t('admin.ai.cancelling') : t('common.cancel')}
                     </button>
                   </div>
-                  <div style={{ fontSize: 11, color: 'var(--text-tertiary)', marginTop: 8 }}>{t('admin.ai.deviceExpires', { time: new Date(pendingDevice.expiresAt).toLocaleTimeString() })}</div>
+                  <div style={{ fontSize: 11, color: 'var(--text-tertiary)', marginTop: 8 }}>{t('admin.ai.deviceExpires', { time: new Date(pendingDevice.expiresAt).toLocaleTimeString(localeTag()) })}</div>
                 </div>
               )}
             </div>
@@ -4855,7 +4856,7 @@ function UsersAndInvitesPanel() {
                 )}
               </div>
               <div style={{ fontSize: 11, color: 'var(--text-tertiary)', marginTop: 1 }}>
-                {t('admin.users.joined', { date: new Date(u.created_at).toLocaleDateString() })}
+                {t('admin.users.joined', { date: new Date(u.created_at).toLocaleDateString(localeTag()) })}
               </div>
             </div>
 
@@ -5042,7 +5043,7 @@ function UsersAndInvitesPanel() {
                       {inv.email}
                     </div>
                     <div style={{ fontSize: 11, color: 'var(--text-tertiary)', marginTop: 1 }}>
-                      {t('admin.users.inviteExpires', { date: new Date(inv.expires_at).toLocaleDateString() })}
+                      {t('admin.users.inviteExpires', { date: new Date(inv.expires_at).toLocaleDateString(localeTag()) })}
                     </div>
                   </div>
                   <button
@@ -5092,8 +5093,8 @@ function UsersAndInvitesPanel() {
                   </div>
                   <div style={{ fontSize: 11, color: 'var(--text-tertiary)', marginTop: 1 }}>
                     {inv.used_at
-                      ? t('admin.users.inviteUsedBy', { username: inv.used_by_username || 'unknown', date: new Date(inv.used_at).toLocaleDateString() })
-                      : t('admin.users.inviteExpired', { date: new Date(inv.expires_at).toLocaleDateString() })}
+                      ? t('admin.users.inviteUsedBy', { username: inv.used_by_username || 'unknown', date: new Date(inv.used_at).toLocaleDateString(localeTag()) })
+                      : t('admin.users.inviteExpired', { date: new Date(inv.expires_at).toLocaleDateString(localeTag()) })}
                   </div>
                 </div>
                 <IconBtn onClick={() => handleRevokeInvite(inv.id)} title={t('admin.users.inviteDelete')} danger>
@@ -8011,7 +8012,7 @@ function SecurityTab() {
                   {authEvents.map(ev => (
                     <tr key={ev.id} style={{ borderBottom: '1px solid var(--border-subtle, var(--border))' }}>
                       <td style={{ padding: '6px 8px', color: 'var(--text-secondary)', whiteSpace: 'nowrap' }}>
-                        {new Date(ev.created_at).toLocaleString()}
+                        {new Date(ev.created_at).toLocaleString(localeTag())}
                       </td>
                       <td style={{ padding: '6px 8px', color: 'var(--text-primary)', whiteSpace: 'nowrap' }}>
                         {eventLabel(ev.event_type)}

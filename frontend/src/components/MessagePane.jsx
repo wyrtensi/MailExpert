@@ -2,7 +2,6 @@ import { createContext, useContext, useEffect, useLayoutEffect, useState, useRef
 import { useTranslation } from 'react-i18next';
 import { useStore, selectAccountFolders } from '../store/index.js';
 import { api } from '../utils/api.js';
-import { format } from 'date-fns';
 import { shortcutBus } from '../utils/shortcutBus.js';
 import { getEffectiveShortcuts, parseModKey, modCompactLabel } from '../utils/defaultShortcuts.js';
 import { useMobile } from '../hooks/useMobile.js';
@@ -15,6 +14,7 @@ import { startRun, cancelRun, getAiState, subscribeRuns } from '../aiRuns.js';
 import { renderMarkdown } from '../utils/renderMarkdown.js';
 import { pickReplyAlias } from '../utils/replyAlias.js';
 import { mailboxBanner } from '../utils/mailboxBanner.js';
+import { buildQuote, identityName, quoteMetaFor, senderLanguage } from '../utils/quoteHeader.js';
 import SenderHistory from './SenderHistory.jsx';
 import { measureContentHeight, createHeightController, forceEagerImages } from '../utils/emailFrameHeight.js';
 import { copyToClipboard } from '../utils/clipboard.js';
@@ -50,6 +50,7 @@ import { useUiScale } from '../hooks/useUiScale.js';
 import TodoistTaskModal from './TodoistTaskModal.jsx';
 import SenderAvatarImage from './SenderAvatarImage.jsx';
 import ContextMenu from './ContextMenu.jsx';
+import { formatDateTime, localeTag } from '../utils/formatDate.js';
 
 function parseAddressField(raw) {
   try {
@@ -1113,17 +1114,7 @@ export default function MessagePane({ windowMessageId = null, onWindowClose = nu
 
   const handleReply = (replyAll = false) => {
     if (!message) return;
-    const date = message.date ? new Date(message.date).toLocaleString() : '';
-    const safeName = (message.from_name || '').replace(/[\r\n]+/g, ' ');
-    const fromStr = safeName
-      ? `${safeName} <${message.from_email}>`
-      : message.from_email || '';
-    const quotedText = body?.text
-      ? `\n\n---\nOn ${date}, ${fromStr} wrote:\n${body.text.split('\n').map(l => '> ' + l).join('\n')}`
-      : '';
-    const quotedBodyHtml = body?.html
-      ? `<div style="border-left:3px solid var(--border,#ccc);padding-left:12px;margin-top:12px;color:var(--text-secondary,#666)"><p style="margin:0 0 6px;font-size:12px">On ${date}, ${fromStr} wrote:</p>${body.html}</div>`
-      : null;
+    const quoteMeta = quoteMetaFor(message, 'reply');
 
     const replyToArr = Array.isArray(message.reply_to)
       ? message.reply_to
@@ -1144,6 +1135,9 @@ export default function MessagePane({ windowMessageId = null, onWindowClose = nu
       fromEmail: message.from_email,
       accountEmail: myEmail,
     });
+    // The quote header speaks the language of the name the reply goes out under.
+    const quoteLang = senderLanguage(identityName(myAccount, replyAliasId));
+    const { quotedText, quotedHtml: quotedBodyHtml } = buildQuote(quoteMeta, quoteLang, { text: body?.text, html: body?.html });
 
     const myAddresses = new Set([
       myEmail.toLowerCase(),
@@ -1177,6 +1171,8 @@ export default function MessagePane({ windowMessageId = null, onWindowClose = nu
       body: '',
       quotedBody: quotedText,
       quotedBodyHtml,
+      quoteMeta,
+      quoteLang,
       inReplyTo: message.message_id,
       references: referencesChain,
       accountId: message.account_id,
@@ -1191,25 +1187,18 @@ export default function MessagePane({ windowMessageId = null, onWindowClose = nu
 
   const handleForward = () => {
     if (!message) return;
-    const date = message.date ? new Date(message.date).toLocaleString() : '';
-    const safeName = (message.from_name || '').replace(/[\r\n]+/g, ' ');
-    const fromStr = safeName
-      ? `${safeName} <${message.from_email}>`
-      : message.from_email || '';
-    const safeSubject = (message.subject || '').replace(/[\r\n]+/g, ' ');
-
-    const toStr = parseAddressField(message.to_addresses);
-    const ccStr = parseAddressField(message.cc_addresses);
-
-    const fwdText = `\n\n---------- Forwarded message ----------\nFrom: ${fromStr}\nDate: ${date}\nSubject: ${safeSubject}${toStr ? `\nTo: ${toStr}` : ''}${ccStr ? `\nCc: ${ccStr}` : ''}\n\n${body?.text || ''}`;
-    const fwdHtml = body?.html
-      ? `<div style="border-left:3px solid var(--border,#ccc);padding-left:12px;margin-top:12px;color:var(--text-secondary,#666)"><p style="margin:0 0 6px;font-size:12px">---------- Forwarded message ----------<br>From: ${fromStr}<br>Date: ${date}<br>Subject: ${safeSubject}${toStr ? `<br>To: ${toStr}` : ''}${ccStr ? `<br>Cc: ${ccStr}` : ''}</p>${body.html}</div>`
-      : null;
+    const quoteExtra = { to: parseAddressField(message.to_addresses), cc: parseAddressField(message.cc_addresses) };
+    const quoteMeta = quoteMetaFor(message, 'forward');
+    const quoteLang = senderLanguage(identityName(accounts.find(a => a.id === message.account_id)));
+    const { quotedText: fwdText, quotedHtml: fwdHtml } = buildQuote(quoteMeta, quoteLang, { text: body?.text, html: body?.html, ...quoteExtra });
     openCompose({
       subject: message.subject?.startsWith('Fwd:') ? message.subject : `Fwd: ${message.subject}`,
       body: '',
       quotedBody: fwdText,
       quotedBodyHtml: fwdHtml,
+      quoteMeta,
+      quoteLang,
+      quoteExtra,
       accountId: message.account_id,
       isForward: true,
       forwardedAttachments: (body?.attachments || []).map(att => ({
@@ -1232,7 +1221,7 @@ export default function MessagePane({ windowMessageId = null, onWindowClose = nu
   const handlePrint = () => {
     if (!message) return;
     const esc = (s) => (s || '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
-    const date = message.date ? new Date(message.date).toLocaleString() : '';
+    const date = message.date ? new Date(message.date).toLocaleString(localeTag()) : '';
     const fromStr = message.from_name
       ? `${esc(message.from_name)} &lt;${esc(message.from_email)}&gt;`
       : esc(message.from_email);
@@ -2639,7 +2628,7 @@ ${bodyContent}
                     )}
                     <div style={{ ...line, marginTop: 6, display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap' }}>
                       <span style={{ whiteSpace: 'nowrap' }}>
-                        {message.date ? format(new Date(message.date), isMobile ? 'MMM d, h:mm a' : 'MMM d, yyyy h:mm a') : ''}
+                        {formatDateTime(message.date, { withYear: !isMobile })}
                       </span>
                     </div>
                   </>

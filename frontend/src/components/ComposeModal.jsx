@@ -6,6 +6,7 @@ import { useStore } from '../store/index.js';
 import { api } from '../utils/api.js';
 import { useMobile } from '../hooks/useMobile.js';
 import { useUiScale, descale } from '../hooks/useUiScale.js';
+import { QUOTE_HEADER_ATTR, identityName, quoteHeaderHtml, quoteHeaderPlain, senderLanguage, switchQuoteText } from '../utils/quoteHeader.js';
 import { useEditor, EditorContent, useEditorState, NodeViewWrapper, ReactNodeViewRenderer } from '@tiptap/react';
 import { Extension } from '@tiptap/core';
 import StarterKit from '@tiptap/starter-kit';
@@ -642,6 +643,29 @@ export default function ComposeModal() {
       quotedHtmlRef.current.innerHTML = DOMPurify.sanitize(quotedBodyHtml, { FORBID_TAGS: ['style'] });
     }
   }, []); // eslint-disable-line react-hooks/exhaustive-deps
+
+  // The quote header ("On <date>, <sender> wrote:" / "<дата>, <отправитель> написал(а):") follows
+  // the language of the From name (utils/quoteHeader.js): switching between a Russian and a Latin
+  // name rewrites it in the plain text and in the HTML header paragraph. A header the writer edited
+  // is left alone; a reopened draft carries no quoteMeta and is never touched.
+  const quoteLangRef = useRef(composeData?.quoteLang || null);
+  const fromName = identityName(fromAccount, fromAlias?.id);
+  useEffect(() => {
+    const meta = composeData?.quoteMeta;
+    const current = quoteLangRef.current;
+    if (!meta || !current) return;
+    const next = senderLanguage(fromName);
+    if (next === current) return;
+    const extra = composeData?.quoteExtra || {};
+    setQuotedBody(prev => switchQuoteText(prev, meta, current, next, extra));
+    const header = quotedHtmlRef.current?.querySelector(`[${QUOTE_HEADER_ATTR}]`);
+    // Only a header still as generated is rewritten; the writer's own wording stays.
+    if (header && header.innerText.trim() === quoteHeaderPlain(meta, current, extra)) {
+      header.innerHTML = quoteHeaderHtml(meta, next, extra);
+      header.setAttribute(QUOTE_HEADER_ATTR, next);
+    }
+    quoteLangRef.current = next;
+  }, [fromName]); // eslint-disable-line react-hooks/exhaustive-deps
 
   // Chrome re-evaluates spell check state for all contentEditable elements whenever new ones
   // are added to the DOM (e.g. signature + quoted body divs in reply/forward). Setting the

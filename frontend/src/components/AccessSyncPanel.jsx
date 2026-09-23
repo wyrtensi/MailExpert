@@ -4,6 +4,7 @@ import { api } from '../utils/api.js';
 import {
   accessSyncForm, accessSyncFormError, accessSyncIdleKey, accessSyncPayload, accessSyncRunSummary, accessSyncSaveErrorKey,
 } from '../utils/accessSync.js';
+import { localeTag } from '../utils/formatDate.js';
 
 const fieldStyle = {
   width: '100%', padding: '9px 12px', background: 'var(--bg-tertiary)', border: '1px solid var(--border)',
@@ -151,7 +152,7 @@ export default function AccessSyncPanel() {
       >
         <div style={{ color: 'var(--text-secondary)', marginBottom: 4 }}>
           {data.lastRun
-            ? t('admin.accessSync.lastRun', { time: new Date(data.lastRun.finishedAt).toLocaleString() })
+            ? t('admin.accessSync.lastRun', { time: new Date(data.lastRun.finishedAt).toLocaleString(localeTag()) })
             : t('admin.accessSync.neverRun')}
         </div>
         {summary && (

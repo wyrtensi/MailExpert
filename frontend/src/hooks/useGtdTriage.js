@@ -219,6 +219,7 @@ export function useGtdTriage() {
           const message = await resolveContextMenuMessage(thread, 'gtdSidebar', api.resolveMessage);
           if (action === 'forward') {
             await openForwardFromMessage(message, {
+              accounts,
               openCompose,
               getMessageBody: api.getMessageBody,
             });

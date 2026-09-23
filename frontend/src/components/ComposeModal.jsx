@@ -6,7 +6,7 @@ import { useStore } from '../store/index.js';
 import { api } from '../utils/api.js';
 import { useMobile } from '../hooks/useMobile.js';
 import { useUiScale, descale } from '../hooks/useUiScale.js';
-import { QUOTE_HEADER_ATTR, quoteHeaderHtml, senderLanguage, switchQuoteText } from '../utils/quoteHeader.js';
+import { QUOTE_HEADER_ATTR, identityName, quoteHeaderHtml, quoteHeaderPlain, senderLanguage, switchQuoteText } from '../utils/quoteHeader.js';
 import { useEditor, EditorContent, useEditorState, NodeViewWrapper, ReactNodeViewRenderer } from '@tiptap/react';
 import { Extension } from '@tiptap/core';
 import StarterKit from '@tiptap/starter-kit';
@@ -649,7 +649,7 @@ export default function ComposeModal() {
   // name rewrites it in the plain text and in the HTML header paragraph. A header the writer edited
   // is left alone; a reopened draft carries no quoteMeta and is never touched.
   const quoteLangRef = useRef(composeData?.quoteLang || null);
-  const fromName = fromAlias ? fromAlias.name : (fromAccount?.sender_name || fromAccount?.name || '');
+  const fromName = identityName(fromAccount, fromAlias?.id);
   useEffect(() => {
     const meta = composeData?.quoteMeta;
     const current = quoteLangRef.current;
@@ -659,7 +659,8 @@ export default function ComposeModal() {
     const extra = composeData?.quoteExtra || {};
     setQuotedBody(prev => switchQuoteText(prev, meta, current, next, extra));
     const header = quotedHtmlRef.current?.querySelector(`[${QUOTE_HEADER_ATTR}]`);
-    if (header) {
+    // Only a header still as generated is rewritten; the writer's own wording stays.
+    if (header && header.innerText.trim() === quoteHeaderPlain(meta, current, extra)) {
       header.innerHTML = quoteHeaderHtml(meta, next, extra);
       header.setAttribute(QUOTE_HEADER_ATTR, next);
     }

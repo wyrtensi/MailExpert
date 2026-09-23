@@ -2,7 +2,7 @@ import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
 import {
   TEXT_QUOTE_HEADER_RE, buildQuote, formatQuoteDate, identityName, quoteHeaderHtml, quoteMetaFor,
-  senderLanguage, switchQuoteText,
+  quoteHeaderPlain, senderLanguage, switchQuoteText,
 } from './quoteHeader.js';
 
 const date = '2026-09-16T08:45:00';
@@ -64,5 +64,18 @@ describe('switching the From name', () => {
       assert.ok(TEXT_QUOTE_HEADER_RE.test(`body${buildQuote(reply, lang, { text: 'x' }).quotedText}`), `reply ${lang}`);
       assert.ok(TEXT_QUOTE_HEADER_RE.test(`body${buildQuote(forward, lang, { text: 'x' }).quotedText}`), `forward ${lang}`);
     }
+  });
+});
+
+describe('text from the letter in the header', () => {
+  it('keeps "$$" and "$&" in a subject when the header switches language', () => {
+    const meta = quoteMetaFor({ date, from_email: 'a@example.com', subject: 'Save $$ and $& today' }, 'forward');
+    const en = buildQuote(meta, 'en', { text: 'x' }).quotedText;
+    const ru = switchQuoteText(en, meta, 'en', 'ru');
+    assert.ok(ru.includes('Тема: Save $$ and $& today'), ru);
+  });
+
+  it('gives the generated header as the page shows it, line by line', () => {
+    assert.equal(quoteHeaderPlain(forward, 'ru').split('\n')[0], '---------- Пересланное сообщение ----------');
   });
 });

@@ -92,7 +92,15 @@ export function switchQuoteText(quoted, meta, fromLang, toLang, extra = {}) {
   if (!quoted || fromLang === toLang) return quoted;
   const before = quoteHeaderLines(meta, fromLang, extra).join('\n');
   const after = quoteHeaderLines(meta, toLang, extra).join('\n');
-  return quoted.includes(before) ? quoted.replace(before, after) : quoted;
+  // A function replacement: the header holds the sender's subject and name, where "$$" or "$&"
+  // would otherwise be read as replacement patterns.
+  return quoted.includes(before) ? quoted.replace(before, () => after) : quoted;
+}
+
+// The HTML header paragraph's text for a language, as the page shows it (lines on their own rows),
+// to tell a generated header from one the writer edited.
+export function quoteHeaderPlain(meta, lang, extra = {}) {
+  return quoteHeaderLines(meta, lang, extra).join('\n');
 }
 
 // The HTML header paragraph's content for a language (escaped, lines joined with <br>).

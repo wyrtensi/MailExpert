@@ -274,4 +274,14 @@ describe('archiveInChunks', () => {
     assert.equal(result.error.message, 'network failed');
     assert.equal(call, 2);
   });
+
+  it('says when a chunk that got partly through found the mailbox busy', async () => {
+    const result = await threadedArchive.archiveInChunks(['a', 'b'], async () => (
+      { archived: ['a'], noArchiveFolder: [], code: 'mailbox_busy' }
+    ));
+    assert.deepEqual(result.archived, ['a']);
+    assert.equal(result.busy, true);
+    const clean = await threadedArchive.archiveInChunks(['a'], async (chunk) => ({ archived: chunk, noArchiveFolder: [] }));
+    assert.equal(clean.busy, false);
+  });
 });

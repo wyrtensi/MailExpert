@@ -38,7 +38,7 @@ function textToHtml(text) {
     .join('');
 }
 
-async function buildRawDraft({ accountId, aliasId, to, cc, bcc, subject, body, bodyIsHtml, quotedBody, quotedBodyHtml, editedSignature }) {
+async function buildRawDraft({ accountId, aliasId, to, cc, bcc, subject, body, bodyIsHtml, quotedBody, quotedBodyHtml, editedSignature, priority }) {
   const acctResult = await query(
     'SELECT * FROM email_accounts WHERE id = $1',
     [accountId]
@@ -95,6 +95,9 @@ async function buildRawDraft({ accountId, aliasId, to, cc, bcc, subject, body, b
     cc: (Array.isArray(cc) ? cc : []).filter(Boolean).join(', ') || undefined,
     bcc: (Array.isArray(bcc) ? bcc : []).filter(Boolean).join(', ') || undefined,
     subject: sanitizeHeaderValue(subject || ''),
+    // The chosen priority travels in the draft's own headers (X-Priority, Importance), so the
+    // composer restores it when the draft is reopened and other clients show it too.
+    ...(priority === 'high' || priority === 'low' ? { priority } : {}),
     text: textBody,
     html: draftHtml,
     ...(inlineImageAttachments.length ? { attachments: inlineImageAttachments } : {}),
@@ -144,7 +147,7 @@ async function isDraftsPath(account, folder, draftsFolder) {
 }
 
 router.post('/draft', async (req, res) => {
-  const { accountId, aliasId, to, cc, bcc, subject, body, bodyIsHtml = false, quotedBody, quotedBodyHtml, editedSignature, existingUid, existingFolder, existingAccountId } = req.body;
+  const { accountId, aliasId, to, cc, bcc, subject, body, bodyIsHtml = false, quotedBody, quotedBodyHtml, editedSignature, priority, existingUid, existingFolder, existingAccountId } = req.body;
   if (!accountId) return res.status(400).json({ error: 'accountId required' });
 
   const ownerCheck = await query(
@@ -154,7 +157,7 @@ router.post('/draft', async (req, res) => {
   if (!ownerCheck.rows.length) return res.status(404).json({ error: 'Account not found' });
 
   try {
-    const { rawMessage, account, meta } = await buildRawDraft({ accountId, aliasId, to, cc, bcc, subject, body, bodyIsHtml, quotedBody, quotedBodyHtml, editedSignature });
+    const { rawMessage, account, meta } = await buildRawDraft({ accountId, aliasId, to, cc, bcc, subject, body, bodyIsHtml, quotedBody, quotedBodyHtml, editedSignature, priority });
 
     const draftsFolder = await resolveDraftsFolder(account);
     if (!draftsFolder) return res.status(422).json({ error: 'No Drafts folder found for this account' });

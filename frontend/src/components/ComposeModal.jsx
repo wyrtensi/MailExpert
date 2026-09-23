@@ -289,7 +289,8 @@ export default function ComposeModal() {
   const [sending, setSending] = useState(false);
   const [error, setError] = useState('');
   // High by default (owner decision 2026-09-23): the writer lowers it per letter.
-  const [priority, setPriority] = useState('high');
+  // High by default (owner's choice); a reopened draft keeps the priority it was saved with.
+  const [priority, setPriority] = useState(() => composeData?.priority || 'high');
   const [minimized, setMinimized] = useState(false);
   const [maximized, setMaximized] = useState(false);
   const [pos, setPos] = useState(null);
@@ -902,6 +903,7 @@ export default function ComposeModal() {
       const bodyToSend = plaintextEmail ? body : (htmlMode ? htmlSource : (editor?.isEmpty ? '' : (editor?.getHTML() ?? '')));
       const result = await api.saveDraft({
         accountId,
+        priority,
         ...(aliasId ? { aliasId } : {}),
         to: [...toChips, ...(toInput.trim() ? [toInput.trim()] : [])],
         cc: [...ccChips, ...(ccInput.trim() ? [ccInput.trim()] : [])],

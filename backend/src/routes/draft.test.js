@@ -138,6 +138,16 @@ describe('POST /api/mail/draft — signature wrapper (#432)', () => {
     expect(meta.bodyText.match(/\n\n-- \nSig/g)).toHaveLength(1);
   });
 
+  it('keeps the chosen priority in the draft headers, and none for normal', async () => {
+    await save({ priority: 'high' });
+    expect(imapManager.appendToFolder.mock.calls[0][2].toString()).toMatch(/^X-Priority: 1/m);
+  });
+
+  it('writes no priority header for a normal-priority draft', async () => {
+    await save({ priority: 'normal' });
+    expect(imapManager.appendToFolder.mock.calls[0][2].toString()).not.toMatch(/^X-Priority:/m);
+  });
+
   it('keeps ampersands and angle brackets unescaped in the draft text part', async () => {
     const meta = await save({ body: '<p>R&amp;D a &lt; b</p>', editedSignature: '<b>R&amp;D &lt;team&gt;</b>' });
     expect(meta.bodyText).toBe('R&D a < b\n\n-- \nR&D <team>');

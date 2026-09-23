@@ -960,21 +960,29 @@ export default function Sidebar() {
         </button>
       </div>
 
+      {/* Fixed block: unified inbox + contacts — sits above the scrolling nav so it never
+          scrolls away, regardless of how many mailboxes are enabled (down to zero or one). */}
+      <div style={{ padding: '0 8px 8px' }}>
+        <NavItem
+          icon={ICONS.inbox}
+          label={t('sidebar.allInboxes')}
+          active={isUnified && !showContacts}
+          collapsed={sidebarCollapsed}
+          badge={unreadCounts.total}
+          badgeStale={!unreadCounts.complete}
+          onClick={() => setSelectedAccount(null, 'INBOX')}
+        />
+        <NavItem
+          icon={ICONS.contacts}
+          label={t('contacts.title')}
+          active={showContacts}
+          collapsed={sidebarCollapsed}
+          onClick={() => { setShowContacts(!showContacts); if (isMobile) setMobileSidebarOpen(false); }}
+        />
+      </div>
+
       {/* Nav */}
       <nav style={{ flex: 1, overflow: 'hidden auto', padding: '4px 8px' }}>
-        {/* Unified Inbox — only shown with 2+ enabled accounts */}
-        {accounts.filter(a => a.enabled).length >= 2 && (
-          <NavItem
-            icon={ICONS.inbox}
-            label={t('sidebar.allInboxes')}
-            active={isUnified && !showContacts}
-            collapsed={sidebarCollapsed}
-            badge={unreadCounts.total}
-            badgeStale={!unreadCounts.complete}
-            onClick={() => setSelectedAccount(null, 'INBOX')}
-          />
-        )}
-
         {/* Favorites section */}
         {!sidebarCollapsed && favoriteFolders.length > 0 && (() => {
           const visibleFaves = favoriteFolders.filter(({ accountId }) => accounts.some(a => a.id === accountId));
@@ -1993,33 +2001,6 @@ export default function Sidebar() {
         </div>
       ) : (
         <>
-          <div style={{ padding: '4px 8px', display: 'flex', justifyContent: sidebarCollapsed ? 'center' : 'flex-start' }}>
-            <button
-              onClick={() => { setShowContacts(!showContacts); if (isMobile) setMobileSidebarOpen(false); }}
-              title={t('contacts.title')}
-              aria-label={t('contacts.title')}
-              style={{
-                ...(sidebarCollapsed
-                  ? { width: 28, height: 28, justifyContent: 'center' }
-                  : { width: '100%', height: 30, padding: '0 10px', gap: 10, justifyContent: 'flex-start' }),
-                borderRadius: 7,
-                border: 'none', cursor: 'pointer',
-                display: 'flex', alignItems: 'center',
-                background: showContacts ? 'var(--bg-hover)' : 'transparent',
-                color: showContacts ? 'var(--accent)' : 'var(--text-tertiary)',
-                transition: 'background 0.1s, color 0.1s',
-              }}
-              onMouseEnter={e => { if (!showContacts) { e.currentTarget.style.background = 'var(--bg-tertiary)'; e.currentTarget.style.color = 'var(--text-secondary)'; } }}
-              onMouseLeave={e => { if (!showContacts) { e.currentTarget.style.background = 'transparent'; e.currentTarget.style.color = 'var(--text-tertiary)'; } }}
-            >
-              {ICONS.contacts}
-              {!sidebarCollapsed && (
-                <span style={{ fontSize: 13, color: showContacts ? 'var(--accent)' : 'var(--text-secondary)' }}>
-                  {t('contacts.title')}
-                </span>
-              )}
-            </button>
-          </div>
           <div style={{ padding: '8px', borderTop: '1px solid var(--border-subtle)' }}>
           <div
             ref={userMenuBtnRef}

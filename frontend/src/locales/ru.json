@@ -468,7 +468,7 @@
     "wrongPin": "Неверный PIN-код"
   },
   "sidebar": {
-    "allInboxes": "Все входящие",
+    "allInboxes": "Входящие по всем ящикам",
     "compose": "Написать",
     "toggleSidebar": "Переключить боковую панель",
     "newFolder": "Новая папка",

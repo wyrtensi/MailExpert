@@ -448,7 +448,7 @@
     "wrongPin": "Incorrect PIN"
   },
   "sidebar": {
-    "allInboxes": "All Inboxes",
+    "allInboxes": "Inbox, all mailboxes",
     "compose": "Compose",
     "toggleSidebar": "Toggle sidebar",
     "newFolder": "New folder",

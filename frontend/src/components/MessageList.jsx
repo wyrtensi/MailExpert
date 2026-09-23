@@ -1,7 +1,7 @@
 import { useEffect, useLayoutEffect, useRef, useCallback, useState, useMemo } from 'react';
 import { pickReplyAlias } from '../utils/replyAlias.js';
 import { useTranslation } from 'react-i18next';
-import { useStore, selectSelectedMessageMid } from '../store/index.js';
+import { useStore, selectSelectedMessageMid, selectSelectedMessageAccountId } from '../store/index.js';
 import { api } from '../utils/api.js';
 import { mailboxBusyOr, isMailboxBusy, MAILBOX_BUSY_CODE } from '../utils/mailboxBusy.js';
 import { priorityFromHeaders } from '../utils/draftPriority.js';
@@ -146,6 +146,7 @@ export default function MessageList() {
   // RFC message_id of the open message, so a row highlights when it is a different DB copy
   // of the selected message (multi-folder model) — e.g. the inbox copy of a GTD sidebar click.
   const selectedMid = useStore(selectSelectedMessageMid);
+  const selectedAcct = useStore(selectSelectedMessageAccountId);
 
   const isMobile = useMobile();
   const isUnified = selectedAccountId === null;
@@ -3683,6 +3684,7 @@ export default function MessageList() {
                 isLoadingThread={loadingThread === cacheKey}
                 selectedMessageId={selectedMessageId}
                 selectedMid={selectedMid}
+                selectedAcct={selectedAcct}
                 lastViewedMessageId={lastViewedMessageId}
                 showAccount={false} /* No per-account dot on unified rows: it added noise beside the unread indicator; the account is visible in the message pane header. */
                 isNarrow={isNarrow}
@@ -3724,7 +3726,7 @@ export default function MessageList() {
                 key={message.id}
                 message={message}
                 account={accountsById[message.account_id]}
-                selected={isSelectedRow(message, selectedMessageId, selectedMid)}
+                selected={isSelectedRow(message, selectedMessageId, selectedMid, selectedAcct)}
                 lastViewed={lastViewedMessageId === message.id && selectedMessageId !== message.id}
                 isChecked={selectedIds.has(message.id)}
                 selectionMode={selectionMode}
@@ -4177,7 +4179,7 @@ function EmptyState({ folderSyncing, searchQuery, searchError, unreadOnly, selec
   );
 }
 
-function ThreadRow({ message, account, isExpanded, threadMsgs, isLoadingThread, selectedMessageId, selectedMid, lastViewedMessageId, showAccount, isNarrow, onThreadClick, onThreadToggle, showMobileAvatars, showMessagePreviews, onSelect, onOpenWindow, onMarkRead, onStar, onDelete, hoverQuickActions, onContextMenu, onMove, onDragStart, isMobile, swipeLeftAction, swipeRightAction, onSwipeLeft, onSwipeRight, isChecked, selectionMode, onToggleSelect, onRangeSelect, onLongPress }) {
+function ThreadRow({ message, account, isExpanded, threadMsgs, isLoadingThread, selectedMessageId, selectedMid, selectedAcct, lastViewedMessageId, showAccount, isNarrow, onThreadClick, onThreadToggle, showMobileAvatars, showMessagePreviews, onSelect, onOpenWindow, onMarkRead, onStar, onDelete, hoverQuickActions, onContextMenu, onMove, onDragStart, isMobile, swipeLeftAction, swipeRightAction, onSwipeLeft, onSwipeRight, isChecked, selectionMode, onToggleSelect, onRangeSelect, onLongPress }) {
   const { t } = useTranslation();
   const [hovered, setHovered] = useState(false);
   const messageCount = message.message_count || 1;
@@ -4197,8 +4199,8 @@ function ThreadRow({ message, account, isExpanded, threadMsgs, isLoadingThread, 
   // Identity-matched selection (parity with the flat MessageRow's isSelectedRow): a GTD sidebar
   // deep-link opens a different DB copy of the same mail, so match the head or any cached
   // sub-message on message_id, not just the raw id, or the inbox thread row won't light up.
-  const selectedHere = isSelectedRow(message, selectedMessageId, selectedMid)
-    || !!threadMsgs?.some(m => isSelectedRow(m, selectedMessageId, selectedMid));
+  const selectedHere = isSelectedRow(message, selectedMessageId, selectedMid, selectedAcct)
+    || !!threadMsgs?.some(m => isSelectedRow(m, selectedMessageId, selectedMid, selectedAcct));
   // The lingering "last viewed" glow is desktop-only (parity with the flat MessageRow, which
   // gates it with `lastViewed && !isMobile`). On mobile there is no persistent reading pane, so
   // a row staying highlighted after you swipe back from a message reads as a stuck selection.

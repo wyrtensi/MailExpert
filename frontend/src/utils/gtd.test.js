@@ -434,6 +434,38 @@ describe('pickThreadMessage', () => {
   });
 });
 
+describe('isSelectedRow: account scoping (#476)', () => {
+  const sel = { id: 'work-row', message_id: '<m1>', account_id: 'work' };
+
+  it('does not highlight the other account copy of the same email', () => {
+    // Both copies are rendered as separate rows now, so a Message-ID-only match would light up
+    // both when the user clicked one.
+    const other = { id: 'home-row', message_id: '<m1>', account_id: 'home' };
+    assert.equal(isSelectedRow(other, sel.id, sel.message_id, sel.account_id), false);
+  });
+
+  it('still highlights the clicked row itself', () => {
+    assert.equal(isSelectedRow(sel, sel.id, sel.message_id, sel.account_id), true);
+  });
+
+  it('still highlights a same-account copy in another folder, which is the point of the mid match', () => {
+    // The GTD sidebar entry / label-folder copy: different DB id, same message, same account.
+    const labelCopy = { id: 'label-row', message_id: '<m1>', account_id: 'work' };
+    assert.equal(isSelectedRow(labelCopy, sel.id, sel.message_id, sel.account_id), true);
+  });
+
+  it('still matches by id when the row is the selected one but its account is not loaded', () => {
+    const noAcct = { id: 'work-row', message_id: '<m1>' };
+    assert.equal(isSelectedRow(noAcct, sel.id, sel.message_id, sel.account_id), true);
+  });
+
+  it('keeps the old identity match when either side has no account', () => {
+    const row = { id: 'other', message_id: '<m1>' };
+    assert.equal(isSelectedRow(row, 'work-row', '<m1>', null), true, 'selection account unknown');
+    assert.equal(isSelectedRow(row, 'work-row', '<m1>', 'work'), true, 'row account unknown');
+  });
+});
+
 describe('isSelectedRow', () => {
   it('matches a different DB copy of the selected message by shared message_id', () => {
     // GTD section row (label-folder copy) and inbox row (INBOX copy) are distinct ids, same RFC id.
@@ -488,24 +520,44 @@ describe('messageIdentity', () => {
 });
 
 describe('appendMessagesByIdentity', () => {
-  it('does NOT let an incoming read twin replace the unread copy from another account', () => {
-    // The follow-up bug: one email delivered to two unified accounts. A background refresh or
-    // pagination merge replaced the displayed row unconditionally, so the already-read twin
-    // could evict the unread copy and hide mail the user had not seen.
+  it('adds the other account copy as its own row instead of replacing the held one (#476)', () => {
+    // Originally this asserted that the read twin must not EVICT the unread copy, because a
+    // merge that replaced unconditionally could hide mail the user had not seen. Keeping both
+    // rows removes the eviction entirely: there is no survivor to choose, so neither copy's
+    // read state can stand in for the other's.
     const existing = [{ id: 'unread', message_id: '<m1>', folder: 'INBOX', account_id: 'a', is_read: false }];
     const incoming = [{ id: 'read',   message_id: '<m1>', folder: 'INBOX', account_id: 'b', is_read: true }];
     const result = appendMessagesByIdentity(existing, incoming);
-    assert.equal(result.length, 1);
-    assert.equal(result[0].id, 'unread');
+    assert.equal(result.length, 2);
+    assert.deepEqual(result.map(m => m.id), ['unread', 'read']);
+    // The held row is untouched, so the unread copy stays unread and stays visible.
     assert.equal(result[0].is_read, false);
   });
 
-  it('DOES let an incoming unread twin replace a read copy from another account', () => {
+  it('keeps both in the other merge order too, so neither copy depends on arrival order', () => {
     const existing = [{ id: 'read',   message_id: '<m1>', folder: 'INBOX', account_id: 'a', is_read: true }];
     const incoming = [{ id: 'unread', message_id: '<m1>', folder: 'INBOX', account_id: 'b', is_read: false }];
     const result = appendMessagesByIdentity(existing, incoming);
+    assert.equal(result.length, 2);
+    assert.deepEqual(result.map(m => m.id), ['read', 'unread']);
+  });
+
+  it('contributes one row when a batch carries a copy and its Sent twin', () => {
+    // The delivery-scoped batch key must not let a single delivery through twice.
+    const result = appendMessagesByIdentity([], [
+      { id: 'recv', message_id: '<m1>', folder: 'INBOX', account_id: 'a' },
+      { id: 'sent', message_id: '<m1>', folder: 'Sent', account_id: 'a' },
+    ]);
     assert.equal(result.length, 1);
-    assert.equal(result[0].id, 'unread');
+    assert.equal(result[0].id, 'recv');
+  });
+
+  it('contributes two rows when a batch carries two accounts INBOX copies', () => {
+    const result = appendMessagesByIdentity([], [
+      { id: 'a', message_id: '<m1>', folder: 'INBOX', account_id: 'work' },
+      { id: 'b', message_id: '<m1>', folder: 'INBOX', account_id: 'home' },
+    ]);
+    assert.equal(result.length, 2);
   });
 
   it('still replaces a reindexed row in the SAME account even when read state is unchanged', () => {
@@ -524,13 +576,19 @@ describe('appendMessagesByIdentity', () => {
     assert.equal(appendMessagesByIdentity(existing, incoming)[0].id, 'new');
   });
 
-  it('agrees with dedupeByIdentity: both paths keep the same copy of a cross-account pair', () => {
-    // The three merge paths disagreeing is what let the row flip between refreshes.
+  it('agrees with dedupeByIdentity on a cross-account pair: every path keeps both', () => {
+    // The merge paths disagreeing is what let the row flip between refreshes. They still have
+    // to agree; what they agree on is now that both deliveries are real rows.
     const unread = { id: 'unread', message_id: '<m1>', folder: 'INBOX', account_id: 'a', is_read: false };
     const read   = { id: 'read',   message_id: '<m1>', folder: 'INBOX', account_id: 'b', is_read: true };
-    assert.equal(dedupeByIdentity([read, unread])[0].id, 'unread');
-    assert.equal(appendMessagesByIdentity([read], [unread])[0].id, 'unread');
-    assert.equal(appendMessagesByIdentity([unread], [read])[0].id, 'unread');
+    assert.deepEqual(dedupeByIdentity([read, unread]).map(m => m.id), ['read', 'unread']);
+    assert.deepEqual(appendMessagesByIdentity([read], [unread]).map(m => m.id), ['read', 'unread']);
+    assert.deepEqual(appendMessagesByIdentity([unread], [read]).map(m => m.id), ['unread', 'read']);
+    // And the Sent twin still collapses identically on both paths.
+    const recv = { id: 'recv', message_id: '<m2>', folder: 'INBOX', account_id: 'a' };
+    const sent = { id: 'sent', message_id: '<m2>', folder: 'Sent',  account_id: 'b' };
+    assert.deepEqual(dedupeByIdentity([recv, sent]).map(m => m.id), ['recv']);
+    assert.deepEqual(appendMessagesByIdentity([recv], [sent]).map(m => m.id), ['recv']);
   });
 
   it('replaces a reindexed message in place instead of duplicating it (the #378 bug)', () => {
@@ -578,6 +636,65 @@ describe('appendMessagesByIdentity', () => {
   });
 });
 
+describe('dedupeByIdentity: independent deliveries to different accounts (#476)', () => {
+  // Reported by @amalroymj: the same email delivered to two connected accounts showed once
+  // in All Inboxes. Every client whose behavior could be verified from source shows both --
+  // Thunderbird desktop builds Unified Folders as a virtual folder over each account's INBOX
+  // and never compares Message-IDs, and Thunderbird for Android concatenates a per-account
+  // query per account. Mailbird documents the same behavior explicitly. The structural
+  // reason is that each copy is a separate mailbox item carrying its own \Seen flag, so
+  // collapsing them forces a choice about whose read state the surviving row represents.
+  //
+  // MailFlow also summed the unread badge across accounts without deduplicating it, so the
+  // count said two while the list showed one, and reading the visible copy left a phantom
+  // unread that had no row in the unified list.
+
+  it('keeps both copies when one message reached two accounts INBOX', () => {
+    const list = [
+      { id: 'a', message_id: '<m1>', folder: 'INBOX', account_id: 'work' },
+      { id: 'b', message_id: '<m1>', folder: 'INBOX', account_id: 'home' },
+    ];
+    const result = dedupeByIdentity(list);
+    assert.equal(result.length, 2, 'two separate mailbox items, two rows');
+    assert.deepEqual(result.map(m => m.id), ['a', 'b'], 'and arrival order is preserved');
+  });
+
+  it('keeps one row per account when three accounts received it', () => {
+    const list = ['x', 'y', 'z'].map(acct => ({ id: acct, message_id: '<m1>', folder: 'INBOX', account_id: acct }));
+    assert.equal(dedupeByIdentity(list).length, 3);
+  });
+
+  it('still collapses the Sent twin, which is a different case (#378)', () => {
+    // You sent this from one of your accounts to another. That is one message seen from both
+    // ends, not two independent deliveries, and the INBOX copy still represents it.
+    const list = [
+      { id: 'recv', message_id: '<m1>', folder: 'INBOX', account_id: 'u2' },
+      { id: 'sent', message_id: '<m1>', folder: 'Sent', account_id: 'u1' },
+    ];
+    const result = dedupeByIdentity(list);
+    assert.equal(result.length, 1, 'INBOX and Sent still collapse');
+    assert.equal(result[0].id, 'recv');
+  });
+
+  it('still collapses two copies in the same folder of the same account', () => {
+    // Two live UIDs can legitimately share a Message-ID inside one folder; 93 such rows exist
+    // on a real instance. Those are one message to the reader and stay collapsed.
+    const list = [
+      { id: 'u1', message_id: '<m1>', folder: 'INBOX', account_id: 'same' },
+      { id: 'u2', message_id: '<m1>', folder: 'INBOX', account_id: 'same' },
+    ];
+    assert.equal(dedupeByIdentity(list).length, 1);
+  });
+
+  it('collapses when an account id is missing, rather than guessing they are independent', () => {
+    const list = [
+      { id: 'a', message_id: '<m1>', folder: 'INBOX' },
+      { id: 'b', message_id: '<m1>', folder: 'INBOX', account_id: 'home' },
+    ];
+    assert.equal(dedupeByIdentity(list).length, 1, 'unknown provenance keeps the old behavior');
+  });
+});
+
 describe('dedupeByIdentity', () => {
   it('collapses two rows that share a Message-ID into one (the #378 cross-account/Sent case)', () => {
     // Same email present as user2's received INBOX copy and user1's Sent copy.
@@ -600,19 +717,21 @@ describe('dedupeByIdentity', () => {
     assert.equal(result[0].folder, 'INBOX');
   });
 
-  it('keeps the UNREAD copy when the same message reached two unified accounts', () => {
-    // The reported bug: one GitHub notification delivered to two of the user's addresses.
-    // Same Message-ID, same Date, so the order they arrive in is arbitrary. Keeping the
-    // read copy hid an unread email from the default list while the unread filter, which
-    // drops the read copy server-side, still showed it.
+  it('keeps BOTH copies when the same message reached two unified accounts', () => {
+    // Previously this asserted the unread copy won the collapse: one notification delivered to
+    // two of the user's addresses shares a Message-ID and usually a Date, so arrival order is
+    // arbitrary, and keeping the read copy hid an unread email from the default list while the
+    // unread filter (which drops the read copy server-side) still showed it. Both copies now
+    // stay, so the list matches the unread filter and the summed badge without either copy
+    // having to speak for the other's read state.
     const list = [
       { id: 'read',   message_id: '<m1>', folder: 'INBOX', account_id: 'a', is_read: true },
       { id: 'unread', message_id: '<m1>', folder: 'INBOX', account_id: 'b', is_read: false },
     ];
     const result = dedupeByIdentity(list);
-    assert.equal(result.length, 1);
-    assert.equal(result[0].id, 'unread');
-    assert.equal(result[0].is_read, false);
+    assert.equal(result.length, 2);
+    assert.deepEqual(result.map(m => m.id), ['read', 'unread']);
+    assert.equal(result.find(m => m.id === 'unread').is_read, false);
   });
 
   it('keeps the unread copy no matter which order the two rows arrive in', () => {

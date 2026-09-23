@@ -654,6 +654,54 @@ describe('appendMessagesByIdentity', () => {
     assert.ok(!result.some(m => m.id === 'home-sent'), 'the Sent twin still collapses');
   });
 
+  it('replaces the SAME-FOLDER copy when one account holds two folder copies', () => {
+    // Found reviewing the index fix. Choosing the first loosely-matching row meant a
+    // reindexed INBOX row could land on the account's All Mail copy, replace that, and leave
+    // the stale INBOX row behind: two INBOX rows for one account.
+    const existing = [
+      { id: 'allmail',  message_id: '<m1>', folder: '[Gmail]/All Mail', account_id: 'work' },
+      { id: 'work-old', message_id: '<m1>', folder: 'INBOX', account_id: 'work' },
+    ];
+    const result = appendMessagesByIdentity(existing, [
+      { id: 'work-new', message_id: '<m1>', folder: 'INBOX', account_id: 'work' },
+    ]);
+    assert.equal(result.filter(m => m.folder === 'INBOX' && m.account_id === 'work').length, 1,
+      'one INBOX row for the account');
+    assert.ok(result.some(m => m.id === 'work-new'), 'the fresh row is the survivor');
+    assert.ok(!result.some(m => m.id === 'work-old'), 'the stale row is gone');
+  });
+
+  it('prefers the row from the same account over one whose account is unknown', () => {
+    // An account-less row matched any incoming row, so if it sat first it absorbed the
+    // replacement and the real stale row survived alongside its replacement.
+    const existing = [
+      { id: 'ghost',    message_id: '<m1>', folder: 'INBOX' },
+      { id: 'work-old', message_id: '<m1>', folder: 'INBOX', account_id: 'work' },
+    ];
+    const result = appendMessagesByIdentity(existing, [
+      { id: 'work-new', message_id: '<m1>', folder: 'INBOX', account_id: 'work' },
+    ]);
+    assert.equal(result.filter(m => m.account_id === 'work').length, 1, 'no duplicate for the account');
+    assert.ok(result.some(m => m.id === 'ghost'), 'the account-less row is untouched');
+  });
+
+  it('treats an account-less row as the same delivery before ranking against a Sent twin', () => {
+    // Ambiguous on its face, so the rule is stated rather than left to list order: a row whose
+    // account is unknown is treated as this delivery's own copy, matching how the replace rule
+    // below already treats a missing account_id. The alternative, ranking against another
+    // account's Sent twin, would replace a row belonging to a different message view.
+    const existing = [
+      { id: 'other-sent', message_id: '<m1>', folder: 'Sent', account_id: 'other' },
+      { id: 'unknown',    message_id: '<m1>', folder: 'INBOX' },
+    ];
+    const result = appendMessagesByIdentity(existing, [
+      { id: 'work', message_id: '<m1>', folder: 'INBOX', account_id: 'work' },
+    ]);
+    assert.ok(result.some(m => m.id === 'other-sent'), 'the Sent twin is left alone');
+    assert.ok(!result.some(m => m.id === 'unknown'), 'the account-less row was the one replaced');
+    assert.equal(result.length, 2);
+  });
+
   it('agrees with dedupeByIdentity on a cross-account pair: every path keeps both', () => {
     // The merge paths disagreeing is what let the row flip between refreshes. They still have
     // to agree; what they agree on is now that both deliveries are real rows.

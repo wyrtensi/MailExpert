@@ -527,13 +527,17 @@ export function appendMessagesByIdentity(existing, incoming) {
     if (m.message_id && idxByMid.has(m.message_id)) {
       const candidates = idxByMid.get(m.message_id);
       // The incoming row belongs to ONE delivery, so pick the held row representing that same
-      // delivery: the copy from its own account. A row with no account on either side keeps
-      // the old behavior and is treated as a candidate, since its provenance is unknown.
-      const sameDelivery = i => {
-        const held = messages[i];
-        return !held?.account_id || !m.account_id || held.account_id === m.account_id;
-      };
-      let at = candidates.find(sameDelivery);
+      // delivery. Most specific first, because a loose match that happens to sit earlier in
+      // the list would absorb the replacement and leave the row it should have replaced in
+      // place, which is how a duplicate appears:
+      //   1. same account AND same folder: a reindexed row replacing itself;
+      //   2. same account, other folder: the account's other copy of the message;
+      //   3. account unknown on either side: no better information, old behavior.
+      const pick = predicate => candidates.find(i => predicate(messages[i]));
+      const sameAccountAs = held => held?.account_id && m.account_id && held.account_id === m.account_id;
+      let at = pick(held => sameAccountAs(held) && held.folder === m.folder)
+        ?? pick(sameAccountAs)
+        ?? pick(held => !held?.account_id || !m.account_id);
       if (at === undefined) {
         // No copy from this account. If every row already here is an independent delivery,
         // this is simply another one and gets its own row.

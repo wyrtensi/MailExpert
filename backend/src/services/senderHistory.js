@@ -3,7 +3,7 @@ import { query } from './db.js';
 // "Before this letter": the earlier correspondence of the open message's mailbox with the same
 // person. The person is the sender, or for a letter the mailbox sent, its first recipient that is
 // not the mailbox itself. Their letters and the mailbox's letters to them both count, each marked
-// with its direction. Only this mailbox, never trash or spam, and a letter synced into several
+// with its direction. Only this mailbox, never trash, spam or drafts, and a letter synced into several
 // folders (Gmail labels) counts once.
 
 export const SENDER_HISTORY_DEFAULT_LIMIT = 5;
@@ -54,7 +54,7 @@ export async function senderHistory(messageId, { limit = SENDER_HISTORY_DEFAULT_
   if (!correspondent) return { correspondent: null, total: 0, items: [] };
 
   const mappings = message.folder_mappings || {};
-  const skippedFolders = [mappings.trash, mappings.spam].filter((f) => typeof f === 'string' && f);
+  const skippedFolders = [mappings.trash, mappings.spam, mappings.drafts].filter((f) => typeof f === 'string' && f);
 
   const { rows } = await query(`
     WITH history AS (

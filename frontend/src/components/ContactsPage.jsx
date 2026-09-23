@@ -669,30 +669,33 @@ function ContactDetail({ contact: c, confirmDelete, saving, error, onEdit, onWri
     copiedTimerRef.current = setTimeout(() => setCopiedKey(null), 1500);
   };
   return (
-    <div style={{ width: '100%', maxWidth: 560, position: 'relative', animation: 'pane-fade-in var(--motion-normal) var(--ease-emphasized) both' }}>
-      {/* Write/Edit/Delete — out of flow, top-right (fixed width). */}
-      <div style={{ position: 'absolute', top: 0, right: 0, display: 'flex', gap: 8 }}>
-        {canWrite && <ActionBtn onClick={onWrite}>{t('contacts.write')}</ActionBtn>}
-        <ActionBtn onClick={onEdit}>{t('common.edit')}</ActionBtn>
-        <ActionBtn onClick={onDeleteRequest} danger>{t('common.delete')}</ActionBtn>
-      </div>
-      <div style={{ display: 'flex', alignItems: 'flex-start', gap: 18, marginBottom: 28, paddingRight: canWrite ? 210 : 128 }}>
-        <Avatar
-          name={c.display_name}
-          email={c.primary_email}
-          size={60}
-          hasContactPhoto={Boolean(c.photo_data)}
-        />
-        <div style={{ flex: 1, minWidth: 0 }}>
-          <h2 style={{ margin: 0, fontSize: 22, fontWeight: 600, color: 'var(--text-primary)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
-            {c.display_name || c.primary_email}
-          </h2>
-          {c.organization && (
-            <div style={{ fontSize: 14, color: 'var(--text-secondary)', marginTop: 2 }}>{c.organization}</div>
-          )}
-          {c.is_auto && (
-            <div style={{ fontSize: 12, color: 'var(--text-tertiary)', marginTop: 4 }}>{t('contacts.autoHint')}</div>
-          )}
+    <div style={{ width: '100%', maxWidth: 560, animation: 'pane-fade-in var(--motion-normal) var(--ease-emphasized) both' }}>
+      {/* Name block and Write/Edit/Delete share a row that wraps: on a phone the buttons move
+          under the name instead of squeezing it to a single letter. */}
+      <div style={{ display: 'flex', flexWrap: 'wrap', alignItems: 'flex-start', gap: '12px 18px', marginBottom: 28 }}>
+        <div style={{ display: 'flex', alignItems: 'flex-start', gap: 18, flex: '1 1 240px', minWidth: 0 }}>
+          <Avatar
+            name={c.display_name}
+            email={c.primary_email}
+            size={60}
+            hasContactPhoto={Boolean(c.photo_data)}
+          />
+          <div style={{ flex: 1, minWidth: 0 }}>
+            <h2 style={{ margin: 0, fontSize: 22, fontWeight: 600, color: 'var(--text-primary)', overflowWrap: 'anywhere' }}>
+              {c.display_name || c.primary_email}
+            </h2>
+            {c.organization && (
+              <div style={{ fontSize: 14, color: 'var(--text-secondary)', marginTop: 2 }}>{c.organization}</div>
+            )}
+            {c.is_auto && (
+              <div style={{ fontSize: 12, color: 'var(--text-tertiary)', marginTop: 4 }}>{t('contacts.autoHint')}</div>
+            )}
+          </div>
+        </div>
+        <div style={{ display: 'flex', gap: 8, flex: 'none' }}>
+          {canWrite && <ActionBtn onClick={onWrite}>{t('contacts.write')}</ActionBtn>}
+          <ActionBtn onClick={onEdit}>{t('common.edit')}</ActionBtn>
+          <ActionBtn onClick={onDeleteRequest} danger>{t('common.delete')}</ActionBtn>
         </div>
       </div>
 

@@ -6,7 +6,12 @@
 # On the host it creates one container, me-e2e-mc-<id>, removed at exit (E2E_KEEP=1 keeps it).
 #
 #   scripts/deploy/test/e2e-mailcow.sh --image ghcr.io/wyrtensi/mailexpert-backend:sha-<12>
-#   scripts/deploy/test/e2e-mailcow.sh --image ... --scenario load [--mailboxes 100]
+#   scripts/deploy/test/e2e-mailcow.sh --image ... --scenario load [--mailboxes 100] [--imap-process-limit 2048]
+#     [--kind gmail] [--panel-env NAME=VALUE ...]
+#
+# --kind gmail adds the load mailboxes as Gmail mailboxes (imap.gmail.com / smtp.gmail.com, names
+# that point at the mailcow node inside the container), so the panel applies its Gmail rules.
+# --panel-env passes a setting to the panel, e.g. IMAP_MAX_PERSISTENT_PER_HOST=15.
 #
 # The default scenario checks the flows once (e2e-mailcow-driver.mjs). The load scenario
 # (e2e-mailcow-load.mjs) creates many mailboxes and measures connecting, delivery to all of them,
@@ -25,18 +30,25 @@ TEST_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 # shellcheck source=../lib/common.sh
 . "$TEST_DIR/../lib/common.sh"
 
-IMAGE='' SCENARIO=functional MAILBOXES=100
+IMAGE='' SCENARIO=functional MAILBOXES=100 IMAP_PROCESS_LIMIT='' KIND=node PANEL_ENV=''
 while [ $# -gt 0 ]; do
   case $1 in
     --image) IMAGE=$2 && shift 2 ;;
     --scenario) SCENARIO=$2 && shift 2 ;;
     --mailboxes) MAILBOXES=$2 && shift 2 ;;
+    --imap-process-limit) IMAP_PROCESS_LIMIT=$2 && shift 2 ;;
+    --kind) KIND=$2 && shift 2 ;;
+    --panel-env)
+      [[ $2 =~ ^[A-Z][A-Z0-9_]*=[A-Za-z0-9._:/-]*$ ]] || die "--panel-env must be NAME=VALUE" 2
+      PANEL_ENV="$PANEL_ENV -e $2" && shift 2 ;;
     *) die "unknown option: $1" 2 ;;
   esac
 done
 [ -n "$IMAGE" ] || die "--image <backend image> is required" 2
 case $SCENARIO in functional | load) ;; *) die "--scenario must be functional or load" 2 ;; esac
 [[ $MAILBOXES =~ ^[1-9][0-9]{0,3}$ ]] || die "--mailboxes must be a number from 1 to 9999" 2
+[ -z "$IMAP_PROCESS_LIMIT" ] || [[ $IMAP_PROCESS_LIMIT =~ ^[1-9][0-9]{2,4}$ ]] || die "--imap-process-limit must be a number from 100 to 99999" 2
+case $KIND in node | gmail) ;; *) die "--kind must be node or gmail" 2 ;; esac
 
 NAME=me-e2e-mc-${E2E_ID:-$(gen_hex 4)}
 if docker container inspect "$NAME" >/dev/null 2>&1; then die "container $NAME already exists"; fi
@@ -82,9 +94,15 @@ log "issuing a test CA and a certificate for $MAIL_HOST"
 inner "mkdir -p /opt/testca && cd /opt/testca \
   && openssl req -x509 -newkey rsa:2048 -nodes -keyout ca.key -out ca.pem -days 7 -subj '/CN=MailExpert e2e CA' 2>/dev/null \
   && openssl req -newkey rsa:2048 -nodes -keyout key.pem -out req.csr -subj '/CN=$MAIL_HOST' 2>/dev/null \
-  && printf 'subjectAltName=DNS:$MAIL_HOST\nextendedKeyUsage=serverAuth\n' > ext.cnf \
+  && printf 'subjectAltName=DNS:$MAIL_HOST,DNS:imap.gmail.com,DNS:smtp.gmail.com\nextendedKeyUsage=serverAuth\n' > ext.cnf \
   && openssl x509 -req -in req.csr -CA ca.pem -CAkey ca.key -CAcreateserial -out cert.pem -days 7 -extfile ext.cnf 2>/dev/null \
   && cp cert.pem key.pem /opt/mailcow/data/assets/ssl/"
+
+# The node setting docs/operations/mail-node.md (section 6a) asks for from about 400 mailboxes.
+if [ -n "$IMAP_PROCESS_LIMIT" ]; then
+  log "raising the dovecot imap process_limit to $IMAP_PROCESS_LIMIT"
+  inner "printf 'service imap {\n  process_limit = %s\n}\n' $IMAP_PROCESS_LIMIT >> /opt/mailcow/data/conf/dovecot/extra.conf"
+fi
 
 log "starting mailcow (pulls its images)"
 inner 'cd /opt/mailcow && docker compose pull -q >/dev/null 2>&1 && docker compose up -d >/dev/null 2>&1'
@@ -96,6 +114,11 @@ for _ in $(seq 90); do
   sleep 5
 done
 api_ok || die "the mailcow API did not answer"
+if [ -n "$IMAP_PROCESS_LIMIT" ]; then
+  applied=$(inner 'cd /opt/mailcow && docker compose exec -T dovecot-mailcow doveconf -h service/imap/process_limit' | tr -d '\r')
+  [ "$applied" = "$IMAP_PROCESS_LIMIT" ] || die "dovecot imap process_limit is $applied, expected $IMAP_PROCESS_LIMIT"
+  log "dovecot imap process_limit is $applied"
+fi
 
 log "starting the panel from $IMAGE"
 secret() { gen_hex 32; }
@@ -106,9 +129,29 @@ sleep 5
 # The panel reaches the node by name, like in production; here the name points at the host of
 # the inner daemon, where mailcow publishes its ports.
 PANEL_ARGS="--network panel --add-host $MAIL_HOST:host-gateway -v /opt/testca/ca.pem:/ca/ca.pem:ro -e NODE_EXTRA_CA_CERTS=/ca/ca.pem"
+# --kind gmail: the panel resolves mail hosts over DNS, not /etc/hosts, so imap.gmail.com must be
+# answered by a DNS server of our own, or the panel would log in to the real Gmail. dnsmasq answers
+# the two Gmail names with the node's address and every other outside name with NXDOMAIN; container
+# names still resolve through Docker's own DNS, and the node's name through --add-host as before.
+GMAIL_IP=''
+if [ "$KIND" = gmail ]; then
+  GMAIL_IP=$(inner "docker network inspect bridge -f '{{(index .IPAM.Config 0).Gateway}}'" | tr -d '\r')
+  [[ $GMAIL_IP =~ ^[0-9.]+$ ]] || die "could not find the inner Docker gateway address"
+  inner "docker run -d --name dns --network panel alpine:3.22 sh -c 'apk add -q --no-cache dnsmasq \
+    && exec dnsmasq -k --no-resolv --address=/imap.gmail.com/$GMAIL_IP --address=/smtp.gmail.com/$GMAIL_IP --address=/#/' >/dev/null"
+  DNS_IP=''
+  for _ in $(seq 30); do
+    DNS_IP=$(inner "docker inspect -f '{{range .NetworkSettings.Networks}}{{.IPAddress}}{{end}}' dns" | tr -d '\r')
+    if inner "docker exec dns nslookup imap.gmail.com 127.0.0.1 2>/dev/null | grep -q '$GMAIL_IP'"; then break; fi
+    sleep 2
+  done
+  inner "docker exec dns nslookup imap.gmail.com 127.0.0.1 2>/dev/null | grep -q '$GMAIL_IP'" || die "the test DNS server did not start"
+  PANEL_ARGS="$PANEL_ARGS --dns $DNS_IP"
+  log "imap.gmail.com and smtp.gmail.com resolve to the node ($GMAIL_IP) through $DNS_IP"
+fi
 inner "docker run -d --name backend $PANEL_ARGS -e NODE_ENV=production -e PORT=3000 -e APP_URL=http://backend:3000 \
   -e SESSION_SECRET=$(secret) -e ENCRYPTION_KEY=$(secret) -e DB_HOST=pg -e DB_PASSWORD=pw -e REDIS_URL=redis://redis:6379 \
-  -e AUTH_MODE=local $IMAGE >/dev/null"
+  -e AUTH_MODE=local $PANEL_ENV $IMAGE >/dev/null"
 panel_ok() { inner "docker run --rm --network panel $IMAGE node -e \"fetch('http://backend:3000/api/health').then(r=>process.exit(r.ok?0:1),()=>process.exit(1))\"" >/dev/null 2>&1; }
 for _ in $(seq 30); do
   if panel_ok; then break; fi
@@ -143,7 +186,7 @@ phase() {
   log "load phase: $1"
   inner "docker run --rm $PANEL_ARGS -v /opt/load.mjs:/app/e2e-mailcow-load.mjs:ro -w /app \
     -e PANEL=http://backend:3000 -e MAIL_HOST=$MAIL_HOST -e API_KEY=$API_KEY -e MAILBOXES=$MAILBOXES \
-    -e DOMAIN=$DOMAIN -e PHASE=$1 ${2:-} $IMAGE node e2e-mailcow-load.mjs" | grep '^RESULT '
+    -e DOMAIN=$DOMAIN -e LOAD_KIND=$KIND -e GMAIL_IP=$GMAIL_IP -e PHASE=$1 ${2:-} $IMAGE node e2e-mailcow-load.mjs" | grep '^RESULT '
 }
 phase setup
 phase delivery

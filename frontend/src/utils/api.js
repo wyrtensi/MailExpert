@@ -333,7 +333,7 @@ export const api = {
   getAccounts: () => request('GET', '/accounts'),
   addAccount: (data) => request('POST', '/accounts', data),
   // A mailbox on the mail node: the server picks the host and a password nobody sees.
-  addDomainMailbox: ({ localPart, domain, name }) => request('POST', '/accounts', { kind: 'domain', localPart, domain, name }),
+  addDomainMailbox: ({ localPart, domain, name, ...names }) => request('POST', '/accounts', { kind: 'domain', localPart, domain, name, ...names }),
   mailNode: {
     getConfig: () => request('GET', '/mail-node/config'),
     saveConfig: (data) => request('PUT', '/mail-node/config', data),
@@ -419,7 +419,7 @@ export const api = {
   pollMsDeviceFlow: () => directApi.pollMsDeviceFlow(),
   // Gmail by address: start answers a one-time /oauth/google/launch path (the address stays out
   // of MailExpert URLs); known-emails lists addresses connected before that have no mailbox now.
-  startGoogleOAuth: (email) => request('POST', '/oauth/google/start', { email }),
+  startGoogleOAuth: (email, names = {}) => request('POST', '/oauth/google/start', { email, ...names }),
   knownGoogleEmails: (q) => request('GET', `/oauth/google/known-emails?${new URLSearchParams({ q })}`),
 
   // Sync

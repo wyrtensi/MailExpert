@@ -1,4 +1,5 @@
 import { useEffect, useLayoutEffect, useRef, useCallback, useState } from 'react';
+import { pickReplyAlias } from '../utils/replyAlias.js';
 import { useTranslation } from 'react-i18next';
 import { useStore, selectSelectedMessageMid } from '../store/index.js';
 import { api } from '../utils/api.js';
@@ -1280,25 +1281,14 @@ export default function MessageList() {
       ...(myAccount?.aliases || []).map(al => al.email.toLowerCase()),
     ]);
 
-    const replyAliasId = (() => {
-      const aliases = myAccount?.aliases || [];
-      if (!aliases.length) return null;
-      try {
-        const toArr = Array.isArray(message.to_addresses)
-          ? message.to_addresses
-          : JSON.parse(message.to_addresses || '[]');
-        const ccArr = Array.isArray(message.cc_addresses)
-          ? message.cc_addresses
-          : JSON.parse(message.cc_addresses || '[]');
-        const allEmails = [...toArr, ...ccArr].map(t => t.email?.toLowerCase()).filter(Boolean);
-        const fromEmail = (message.from_email || '').toLowerCase();
-        const match = aliases.find(al => {
-          const aliasEmail = al.email.toLowerCase();
-          return allEmails.includes(aliasEmail) || fromEmail === aliasEmail;
-        });
-        return match ? match.id : null;
-      } catch { return null; }
-    })();
+    const replyAliasId = pickReplyAlias({
+      aliases: myAccount?.aliases || [],
+      deliveryAddresses: message.delivery_addresses,
+      toAddresses: message.to_addresses,
+      ccAddresses: message.cc_addresses,
+      fromEmail: message.from_email,
+      accountEmail: myEmail,
+    });
 
     const allRecipients = (() => {
       try {

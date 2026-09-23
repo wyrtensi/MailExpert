@@ -332,6 +332,15 @@ describe('GET /oauth/google/callback', () => {
     expect(aliasParams).toEqual(['new-acc', 'Ivan Petrov', 'user@gmail.com']);
   });
 
+  it('adds no second name equal to the Google profile name the mailbox sends under', async () => {
+    mockSuccessfulGoogle();
+    const { state } = await seedAddState('user@gmail.com', { senderNameAlt: 'user name' });
+
+    await callback({ code: 'auth-code-xyz', state });
+
+    expect(sqlCall(/^\s*INSERT INTO account_aliases/)).toBeUndefined();
+  });
+
   it('updates an existing account, keeps the stored refresh token and clears the reconnect flag', async () => {
     const { state } = await startReconnect();
     installDb({ existing: existingMailbox() });

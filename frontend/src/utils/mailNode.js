@@ -27,6 +27,7 @@ const ERROR_KEYS = {
   local_part_invalid: 'admin.accounts.add.domainErrorLocalPart',
   domain_unknown: 'admin.accounts.add.domainErrorUnknown',
   mailbox_exists: 'admin.accounts.add.domainErrorExists',
+  sender_name_invalid: 'admin.accounts.add.senderNameInvalid',
 };
 const ERROR_FALLBACK_KEY = 'admin.mailNode.errorFailed';
 

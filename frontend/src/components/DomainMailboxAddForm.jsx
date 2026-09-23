@@ -166,6 +166,7 @@ export default function DomainMailboxAddForm({ accounts = [], onCreated }) {
         id="domain-add-sender"
         required
         value={senderName}
+        maxLength={200}
         placeholder={t('admin.accounts.add.senderNamePh')}
         onChange={edit(setSenderName)}
         style={inputStyle}
@@ -176,6 +177,7 @@ export default function DomainMailboxAddForm({ accounts = [], onCreated }) {
       <input
         id="domain-add-sender-alt"
         value={senderNameAlt}
+        maxLength={200}
         placeholder={t('admin.accounts.add.senderNameAltPh')}
         onChange={edit(setSenderNameAlt)}
         style={inputStyle}

@@ -931,7 +931,8 @@
         "senderNameRequired": "Укажите имя отправителя.",
         "gmailSenderHint": "Если оставить пустым, письма уйдут под именем из профиля Google.",
         "domainConfirmSender": "Отправляет как",
-        "domainConfirmSenderAlt": "Или как"
+        "domainConfirmSenderAlt": "Или как",
+        "senderNameInvalid": "Имя отправителя не может содержать переносов строк."
       },
       "presetYahoo": "Yahoo Mail",
       "presetIcloud": "iCloud",

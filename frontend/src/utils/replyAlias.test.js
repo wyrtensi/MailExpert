@@ -151,3 +151,25 @@ describe('pickReplyAlias', () => {
     assert.equal(result, 'alias-2');
   });
 });
+
+describe('pickReplyAlias with a second sender name', () => {
+  const second = { id: 'al-second', email: 'Sales@Example.com' };
+  const other = { id: 'al-other', email: 'info@example.com' };
+
+  it('replies under the main name: an alias with the mailbox address never wins', () => {
+    assert.equal(pickReplyAlias({
+      aliases: [second], deliveryAddresses: ['sales@example.com'], toAddresses: [{ email: 'sales@example.com' }],
+      fromEmail: 'client@example.net', accountEmail: 'sales@example.com',
+    }), null);
+    // A letter from Sent, written under the second name, still replies under the main one.
+    assert.equal(pickReplyAlias({
+      aliases: [second], toAddresses: [{ email: 'client@example.net' }], fromEmail: 'sales@example.com', accountEmail: 'sales@example.com',
+    }), null);
+  });
+
+  it('still picks an alias with its own address next to it', () => {
+    assert.equal(pickReplyAlias({
+      aliases: [second, other], deliveryAddresses: ['info@example.com'], accountEmail: 'sales@example.com',
+    }), 'al-other');
+  });
+});

@@ -267,7 +267,11 @@ async function saveGoogleAccount(pending, identity, tokens, appId) {
         RETURNING id
       `, [pending.userId, identity.name || email, email, color, encryptedAccess, encryptedRefresh, tokens.expiresAt, appId, identity.sub, THREAD_MODE_GMAIL, pending.senderName]);
       accountId = inserted.rows[0].id;
-      await addSecondSenderName(client, { accountId, email, senderNameAlt: pending.senderNameAlt });
+      // Without a main name the mailbox sends under the Google profile name, known only now: a
+      // second name equal to it would list the same From twice.
+      const mainName = (pending.senderName || identity.name || email).toLowerCase();
+      const secondName = pending.senderNameAlt && pending.senderNameAlt.toLowerCase() !== mainName ? pending.senderNameAlt : null;
+      await addSecondSenderName(client, { accountId, email, senderNameAlt: secondName });
       result = 'created';
     }
 

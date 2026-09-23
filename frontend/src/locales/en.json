@@ -911,7 +911,8 @@
         "senderNameRequired": "Enter the sender name.",
         "gmailSenderHint": "Leave it empty to send under the name of the Google profile.",
         "domainConfirmSender": "Sends as",
-        "domainConfirmSenderAlt": "Or as"
+        "domainConfirmSenderAlt": "Or as",
+        "senderNameInvalid": "A sender name cannot contain line breaks."
       },
       "presetYahoo": "Yahoo Mail",
       "presetIcloud": "iCloud",

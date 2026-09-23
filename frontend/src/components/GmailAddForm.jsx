@@ -270,6 +270,7 @@ export default function GmailAddForm({ accounts, onDone, demo = isDemoMode }) {
       <input
         id="gmail-add-sender"
         value={senderName}
+        maxLength={200}
         placeholder={t('admin.accounts.add.senderNamePh')}
         onChange={(e) => setSenderName(e.target.value)}
         style={inputStyle}
@@ -280,6 +281,7 @@ export default function GmailAddForm({ accounts, onDone, demo = isDemoMode }) {
       <input
         id="gmail-add-sender-alt"
         value={senderNameAlt}
+        maxLength={200}
         placeholder={t('admin.accounts.add.senderNameAltPh')}
         onChange={(e) => setSenderNameAlt(e.target.value)}
         style={inputStyle}

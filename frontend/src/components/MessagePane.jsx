@@ -1141,6 +1141,7 @@ export default function MessagePane({ windowMessageId = null, onWindowClose = nu
       toAddresses: message.to_addresses,
       ccAddresses: message.cc_addresses,
       fromEmail: message.from_email,
+      accountEmail: myEmail,
     });
 
     const myAddresses = new Set([

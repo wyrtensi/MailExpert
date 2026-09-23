@@ -1,4 +1,5 @@
 import { fleetAccounts, fleetDomains, fleetLetters } from './fleet.js';
+import { demoRole } from '../utils/demoRole.js';
 
 const ACCOUNT_FIXTURES = [
   {
@@ -205,6 +206,22 @@ const CONTACT_FIXTURES = [
     has_contact_photo: false,
   },
 ];
+
+// The demo signs in as the administrator, or as an ordinary user (utils/demoRole.js) so the owner
+// can see what a manager without admin rights sees.
+const DEMO_PLAIN_USER = {
+  id: 'demo-colleague',
+  username: 'colleague@demo.mailexpert.local',
+  email: 'colleague@demo.mailexpert.local',
+  authMode: 'local',
+  displayName: 'Demo User',
+  avatar: null,
+  isAdmin: false,
+  totpEnabled: false,
+  hasPassword: false,
+  hasLockPin: false,
+  locked: false,
+};
 
 const DEMO_USER = {
   id: 'demo-user',
@@ -856,7 +873,7 @@ export async function demoRequest(method, path, body = {}) {
   const pathname = url.pathname;
 
   if (verb === 'GET' && pathname === '/auth/config') return { mode: 'local', cloudflare: false, googleSignIn: false };
-  if (verb === 'GET' && pathname === '/auth/me') return { user: clone(DEMO_USER) };
+  if (verb === 'GET' && pathname === '/auth/me') return { user: clone(demoRole() === 'user' ? DEMO_PLAIN_USER : DEMO_USER) };
   if (verb === 'GET' && pathname === '/auth/preferences') return clone(preferences);
   if (verb === 'PATCH' && pathname === '/auth/preferences') {
     preferences = { ...preferences, ...clone(body) };

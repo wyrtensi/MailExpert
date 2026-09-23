@@ -1966,5 +1966,11 @@
   "languagePicker": {
     "title": "Choose the interface language",
     "hint": "You can change it later in Settings"
+  },
+  "demo": {
+    "roleAdmin": "administrator",
+    "roleUser": "user",
+    "viewAsUser": "View as a user",
+    "viewAsAdmin": "View as the administrator"
   }
 }

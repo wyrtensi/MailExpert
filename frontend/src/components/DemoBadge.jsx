@@ -52,7 +52,14 @@ export default function DemoBadge({ enabled = false, roleLabel = '', switchLabel
       pointerEvents: 'none',
       display: 'flex',
       alignItems: 'center',
-      whiteSpace: 'nowrap',
+      justifyContent: 'center',
+      // On a phone the text and the button wrap onto two lines instead of running off both sides.
+      flexWrap: 'wrap',
+      rowGap: 6,
+      textAlign: 'center',
+      width: 'max-content',
+      maxWidth: 'calc(100% - 24px)',
+      boxSizing: 'border-box',
     },
   }, `${label} — local data${roleLabel ? ` · ${roleLabel}` : ''}`, switchButton);
 }

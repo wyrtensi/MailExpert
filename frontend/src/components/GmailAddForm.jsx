@@ -3,6 +3,7 @@ import { useTranslation } from 'react-i18next';
 import { api } from '../utils/api.js';
 import { openOAuthWindow } from '../utils/oauthWindow.js';
 import { createLatestRequest } from '../utils/latestRequest.js';
+import { isDemoMode } from '../demo/mode.js';
 import {
   GOOGLE_LAUNCH_TTL_MS,
   KNOWN_EMAILS_DEBOUNCE_MS,
@@ -26,7 +27,9 @@ const LIST_ID = 'gmail-add-suggestions';
 // "Add account -> Gmail": the user types the address, MailExpert picks the Google app. The start
 // answer is a one-time path; the address itself never goes into a MailExpert URL. The callback
 // reports back to this window (App.jsx forwards it), and MailApp announces the result.
-export default function GmailAddForm({ accounts, onDone }) {
+// The demo has no Google: the consent step is a card in the form, and allowing it connects the
+// address locally and posts the same success message the callback would.
+export default function GmailAddForm({ accounts, onDone, demo = isDemoMode }) {
   const { t } = useTranslation();
   const [email, setEmail] = useState('');
   const [known, setKnown] = useState([]);
@@ -35,6 +38,7 @@ export default function GmailAddForm({ accounts, onDone }) {
   const [busy, setBusy] = useState(false);
   const [errorKey, setErrorKey] = useState(null);
   const [launchPath, setLaunchPath] = useState(null);
+  const [demoConsent, setDemoConsent] = useState(null);
   const knownRequest = useRef(createLatestRequest());
 
   // Addresses connected before, from the grant journal: from two characters, debounced.
@@ -96,6 +100,11 @@ export default function GmailAddForm({ accounts, onDone }) {
 
   const start = async () => {
     if (!canStart) return;
+    if (demo) {
+      setErrorKey(null);
+      setDemoConsent(email.trim());
+      return;
+    }
     setBusy(true);
     setErrorKey(null);
     setLaunchPath(null);
@@ -111,6 +120,50 @@ export default function GmailAddForm({ accounts, onDone }) {
       setBusy(false);
     }
   };
+
+  const allowDemoConsent = async () => {
+    setBusy(true);
+    setErrorKey(null);
+    try {
+      const { result } = await api.startGoogleOAuth(demoConsent);
+      window.postMessage({ type: 'oauth_success', provider: 'google', result }, window.location.origin);
+    } catch (err) {
+      setErrorKey(gmailStartErrorKey(err?.code));
+      setDemoConsent(null);
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  if (demoConsent) {
+    return (
+      <div style={{ padding: '16px 18px', border: '1px solid var(--border)', borderRadius: 10, background: 'var(--bg-tertiary)' }}>
+        <div style={{ fontSize: 11, textTransform: 'uppercase', letterSpacing: 0.4, color: 'var(--text-tertiary)' }}>
+          {t('admin.accounts.add.demoConsentBadge')}
+        </div>
+        <div style={{ fontSize: 14, fontWeight: 600, color: 'var(--text-primary)', margin: '6px 0 8px' }}>
+          {t('admin.accounts.add.demoConsentTitle', { email: demoConsent })}
+        </div>
+        <div style={{ fontSize: 12, color: 'var(--text-secondary)', lineHeight: 1.6 }}>
+          {t('admin.accounts.add.demoConsentBody')}
+        </div>
+        <div style={{ display: 'flex', gap: 8, marginTop: 14 }}>
+          <button type="button" onClick={allowDemoConsent} disabled={busy} style={{
+            padding: '9px 16px', borderRadius: 8, fontSize: 13, fontWeight: 500, border: 'none',
+            background: 'var(--accent)', color: 'var(--accent-text)', cursor: busy ? 'default' : 'pointer',
+          }}>
+            {t('admin.accounts.add.demoConsentAllow')}
+          </button>
+          <button type="button" onClick={() => setDemoConsent(null)} disabled={busy} style={{
+            padding: '9px 16px', borderRadius: 8, fontSize: 13, border: '1px solid var(--border)',
+            background: 'none', color: 'var(--text-secondary)', cursor: busy ? 'default' : 'pointer',
+          }}>
+            {t('common.cancel')}
+          </button>
+        </div>
+      </div>
+    );
+  }
 
   const onKeyDown = (e) => {
     if (e.key === 'Escape') {

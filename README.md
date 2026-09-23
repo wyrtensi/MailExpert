@@ -137,7 +137,7 @@ First build takes 2–3 minutes. MailExpert will be available on port 443 (HTTPS
 
 #### Demo workspace
 
-For a populated local workspace, set `VITE_DEMO_MODE=true` in `.env` and rebuild. Demo mode needs no mailbox credentials or OAuth, performs no network mail activity, and its local data resets on reload.
+For a populated local workspace, set `VITE_DEMO_MODE=true` in `.env` and rebuild, or run `npm run demo` in `frontend/` (no backend needed). The demo holds 50 mailboxes, Gmail and ones on the mail node's domains, with conversations of every kind; adding a mailbox works in it, with the Google step played by a card in the form. Demo mode needs no mailbox credentials or OAuth, performs no network mail activity, and its local data resets on reload.
 
 **Ports are configurable in `.env`:**
 

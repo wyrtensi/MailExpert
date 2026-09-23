@@ -166,7 +166,7 @@ test('the demo mail node creates a domain mailbox and lists it with its quota', 
   assert.equal(mailboxes.find(m => m.accountId === account.id).quotaMb, 5120);
   assert.equal(typeof disk.usedPercent, 'number');
   const { domains } = await demoRequest('GET', '/mail-node/domains');
-  assert.equal(domains[0].mailboxes, 2);
+  assert.equal(domains.find(d => d.domain === 'demo.mailexpert.local').mailboxes, 1);
   await demoRequest('PUT', `/mail-node/mailboxes/${account.id}/quota`, { quotaMb: 10240 });
   assert.equal((await demoRequest('GET', '/mail-node/mailboxes')).mailboxes.find(m => m.accountId === account.id).quotaMb, 10240);
 });
@@ -191,5 +191,82 @@ test('the demo threading diagnostics reject like the real 404 for an unknown mes
   await assert.rejects(
     () => demoRequest('GET', '/mail/messages/does-not-exist/threading'),
     /Message not found/,
+  );
+});
+
+test('the demo holds 50 mailboxes: Gmail ones in gmail mode and node ones on several domains', async () => {
+  const accounts = await demoRequest('GET', '/accounts');
+  assert.equal(accounts.length, 50);
+  assert.equal(new Set(accounts.map(a => a.email_address)).size, 50);
+  assert.equal(accounts.filter(a => a.thread_mode === 'gmail' && a.oauth_provider === 'google').length, 24);
+  const nodeDomains = new Set(accounts.filter(a => a.mail_node).map(a => a.email_address.split('@')[1]));
+  assert.ok(nodeDomains.size >= 3);
+  const { domains } = await demoRequest('GET', '/mail-node/domains');
+  assert.ok(domains.some(d => !d.active), 'an inactive domain shows the form filters it out');
+});
+
+test('the demo threaded list folds a conversation into one row with its letter count', async () => {
+  const flat = await demoRequest('GET', '/mail/messages?accountId=demo-fx-00&folder=INBOX');
+  const threaded = await demoRequest('GET', '/mail/messages?accountId=demo-fx-00&folder=INBOX&threaded=true');
+  assert.equal(threaded.threaded, true);
+  assert.ok(threaded.total < flat.total);
+  const conversation = threaded.messages.find(m => m.message_count > 1);
+  assert.ok(conversation);
+  const { messages } = await demoRequest('GET', `/mail/thread/${encodeURIComponent(conversation.thread_id)}?accountId=demo-fx-00`);
+  assert.ok(messages.length > conversation.message_count, 'the expansion adds the replies from Sent');
+  assert.ok(messages.some(m => m.folder === 'Sent'));
+});
+
+test('the demo letters cover every threading reason, each mailbox in its own mode', async () => {
+  const reasons = new Set();
+  const modes = new Map((await demoRequest('GET', '/accounts')).map(a => [a.id, a.thread_mode]));
+  for (const id of ['demo-fx-00', 'demo-fx-01', 'demo-fx-02', 'demo-fx-04', 'demo-fx-06', 'demo-fx-08']) {
+    for (const folder of ['INBOX', 'Sent', 'Archive', 'Projects/Launch']) {
+      const { messages } = await demoRequest('GET', `/mail/messages?accountId=${id}&folder=${encodeURIComponent(folder)}&limit=500`);
+      for (const m of messages) {
+        const diagnostics = await demoRequest('GET', `/mail/messages/${m.id}/threading`);
+        assert.equal(diagnostics.mode, modes.get(id));
+        reasons.add(diagnostics.reason);
+      }
+    }
+  }
+  for (const reason of ['new-root', 'rfc-root', 'rfc-ancestor', 'rfc-provisional', 'gmail-thrid', null]) {
+    assert.ok(reasons.has(reason), `no letter with reason ${reason}`);
+  }
+});
+
+test('the demo refuses a domain mailbox whose address is already a mailbox, like the server', async () => {
+  await assert.rejects(
+    () => demoRequest('POST', '/accounts', { kind: 'domain', localPart: 'Sales', domain: 'example.com', name: '' }),
+    err => err.code === 'mailbox_exists',
+  );
+  await assert.rejects(
+    () => demoRequest('POST', '/accounts', { kind: 'domain', localPart: 'info', domain: 'old-brand.example', name: '' }),
+    err => err.code === 'domain_unknown',
+  );
+  const created = await demoRequest('POST', '/accounts', { kind: 'domain', localPart: 'sales', domain: 'example.org', name: 'Продажи Запад' });
+  assert.equal(created.email_address, 'sales@example.org');
+  assert.equal(created.name, 'Продажи Запад');
+  await assert.rejects(
+    () => demoRequest('POST', '/accounts', { kind: 'domain', localPart: 'sales', domain: 'example.org', name: '' }),
+    err => err.code === 'mailbox_exists',
+  );
+  const inbox = await demoRequest('GET', `/mail/messages?accountId=${encodeURIComponent(created.id)}&folder=INBOX`);
+  assert.equal(inbox.total, 1);
+});
+
+test('the demo connects a Gmail address in place of Google and refuses it twice', async () => {
+  assert.deepEqual((await demoRequest('GET', '/integrations/status')).google, { configured: true, available: true });
+  const known = await demoRequest('GET', '/oauth/google/known-emails?q=archive');
+  assert.deepEqual(known.emails, ['acme.archive.demo@gmail.com']);
+  const started = await demoRequest('POST', '/oauth/google/start', { email: 'Acme.Archive.Demo@gmail.com' });
+  assert.equal(started.result, 'created');
+  const account = (await demoRequest('GET', '/accounts')).find(a => a.email_address === 'acme.archive.demo@gmail.com');
+  assert.equal(account.oauth_provider, 'google');
+  assert.equal(account.thread_mode, 'gmail');
+  assert.deepEqual((await demoRequest('GET', '/oauth/google/known-emails?q=archive')).emails, []);
+  await assert.rejects(
+    () => demoRequest('POST', '/oauth/google/start', { email: 'acme.archive.demo@gmail.com' }),
+    err => err.code === 'already_connected',
   );
 });

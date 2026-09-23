@@ -5,6 +5,7 @@ import {
   SUGGESTION_BADGE_KEYS,
   SUGGESTION_LIMIT,
   addAccountOptions,
+  defaultAddKind,
   buildEmailSuggestions,
   canStartGmail,
   exactMailboxMatch,
@@ -212,5 +213,18 @@ describe('gmailStartErrorKey', () => {
   it('falls back to the generic message', () => {
     assert.equal(gmailStartErrorKey(undefined), 'admin.integrations.google.errorGeneric');
     assert.equal(gmailStartErrorKey('toString'), 'admin.integrations.google.errorGeneric');
+  });
+});
+
+describe('defaultAddKind', () => {
+  it('opens on the first way that can be used now', () => {
+    const options = addAccountOptions({ isAdmin: true, googleStatus: { configured: false, available: false }, domainStatus: { configured: true } });
+    assert.equal(defaultAddKind(options), 'domain');
+    assert.equal(defaultAddKind(addAccountOptions({ googleStatus: { configured: true, available: true }, domainStatus: { configured: true } })), 'gmail');
+  });
+
+  it('falls back to the first tab while nothing is usable, and to null without tabs', () => {
+    assert.equal(defaultAddKind(addAccountOptions({})), 'gmail');
+    assert.equal(defaultAddKind([]), null);
   });
 });

@@ -57,6 +57,8 @@ export default function App() {
     applyLayout(localStorage.getItem('mailexpert_layout') || 'comfortable', savedListWidth);
 
     if (isDemoMode) {
+      // The demo is about conversations: it opens threaded unless this browser chose otherwise.
+      if (localStorage.getItem('mailexpert_threaded_view') === null) useStore.getState().setThreadedView(true);
       setUser(demoUser);
       setLocked(false);
       // Theme, font, and layout were applied above from localStorage. Do not use

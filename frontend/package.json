@@ -27,6 +27,7 @@
   },
   "scripts": {
     "dev": "vite",
+    "demo": "vite --mode demo",
     "build": "vite build",
     "preview": "vite preview",
     "test": "node --test",

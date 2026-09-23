@@ -3905,6 +3905,47 @@ describe('Gmail profile for many accounts on one server', () => {
       expect(clients[0].close).not.toHaveBeenCalled();
     });
 
+    it('closes the pooled session when an integrity flag scan is deferred, and issues no SEARCH behind it', async () => {
+      // A deferred scan leaves its FETCH running on the session. On Gmail the session is pooled,
+      // so returning normally would hand that busy session to the next user action.
+      vi.useFakeTimers();
+      try {
+        const acct = { ...gmail, id: 'gmail-integrity-deferred' };
+        const mgr = managerFor(acct);
+        mgr.syncMessages = vi.fn().mockResolvedValue({});
+        query.mockImplementation(async sql => {
+          if (sql.includes('FROM email_accounts')) return { rows: [acct] };
+          if (sql.includes('status_synced_modseq FROM folders')) return { rows: [{ status_synced_modseq: '5' }] };
+          return { rows: [] };
+        });
+        const search = vi.fn(async () => [1, 2, 3]);
+        ImapFlow.mockImplementation(function () {
+          const client = Object.assign(new EventEmitter(), {
+            usable: true,
+            connect: vi.fn().mockResolvedValue(),
+            logout: vi.fn().mockResolvedValue(),
+            mailbox: { exists: 3, uidValidity: 8n, highestModseq: 9n, uidNext: 10 },
+            capabilities: new Map([['CONDSTORE', true]]),
+            getMailboxLock: vi.fn(async () => ({ release: vi.fn() })),
+            search,
+            // Hangs forever; the unreachable yield only satisfies require-yield.
+            fetch: async function* () { await new Promise(() => {}); yield null; },
+          });
+          client.close = vi.fn(() => { client.usable = false; client.emit('close'); });
+          clients.push(client);
+          return client;
+        });
+        const pass = expect(mgr._refreshObservedFolder(acct, 'INBOX', { uidValidity: 8n, uidNext: 10, highestModseq: 9n }))
+          .rejects.toThrow(/deferred/);
+        await vi.advanceTimersByTimeAsync(25000);
+        await pass;
+        expect(clients).toHaveLength(1);
+        expect(clients[0].close).toHaveBeenCalled();
+        expect(search).not.toHaveBeenCalled();
+        expect(query.mock.calls.some(([sql]) => sql.includes('status_synced_at'))).toBe(false);
+      } finally { vi.useRealTimers(); }
+    });
+
     it('closes a pooled session whose job failed, so a timed-out FETCH is never handed on', async () => {
       const acct = { ...gmail, id: 'gmail-status-pool-failure' };
       const mgr = managerFor(acct);

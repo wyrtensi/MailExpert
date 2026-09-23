@@ -31,6 +31,7 @@ export async function openReplyFromMessage(message, { accounts, openCompose, get
     toAddresses: message.to_addresses,
     ccAddresses: message.cc_addresses,
     fromEmail: message.from_email,
+    accountEmail: myEmail,
   });
 
   const allRecipients = (() => {

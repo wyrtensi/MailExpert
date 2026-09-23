@@ -35,6 +35,7 @@ const START_ERROR_KEYS = {
   no_app_capacity: 'admin.integrations.google.errorNoAppCapacity',
   not_configured: 'admin.integrations.google.errorNotConfigured',
   email_invalid: 'admin.accounts.add.errorInvalidEmail',
+  sender_name_invalid: 'admin.accounts.add.senderNameInvalid',
 };
 const START_ERROR_FALLBACK_KEY = 'admin.integrations.google.errorGeneric';
 

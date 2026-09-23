@@ -27,6 +27,7 @@ const ERROR_KEYS = {
   local_part_invalid: 'admin.accounts.add.domainErrorLocalPart',
   domain_unknown: 'admin.accounts.add.domainErrorUnknown',
   mailbox_exists: 'admin.accounts.add.domainErrorExists',
+  sender_name_invalid: 'admin.accounts.add.senderNameInvalid',
 };
 const ERROR_FALLBACK_KEY = 'admin.mailNode.errorFailed';
 
@@ -50,6 +51,22 @@ export function domainMailboxFormError({ localPart, domain }) {
   if (!LOCAL_PART_PATTERN.test(local) || local.includes('..')) return 'admin.accounts.add.domainErrorLocalPart';
   if (!domain) return 'admin.accounts.add.domainErrorPickDomain';
   return null;
+}
+
+// The sender name is required on "Our mailbox": it is what recipients read in From.
+export function senderNameError(senderName) {
+  return String(senderName ?? '').trim() ? null : 'admin.accounts.add.senderNameRequired';
+}
+
+// The sender names as the server takes them (POST /api/accounts kind=domain, POST
+// /api/oauth/google/start): trimmed, empty ones left out, a second name equal to the first dropped.
+export function senderNamesPayload({ senderName, senderNameAlt } = {}) {
+  const main = String(senderName ?? '').trim();
+  const alt = String(senderNameAlt ?? '').trim();
+  return {
+    ...(main ? { senderName: main } : {}),
+    ...(alt && alt.toLowerCase() !== main.toLowerCase() ? { senderNameAlt: alt } : {}),
+  };
 }
 
 // Whether the address the form would create is a mailbox of the install already. The server

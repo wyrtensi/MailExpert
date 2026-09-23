@@ -7,6 +7,7 @@ import { GoogleAppSelectionError, releaseGoogleSeat, selectGoogleApp } from '../
 import { createOAuthState } from '../services/oauth/oauthState.js';
 import { GOOGLE_EMAIL_PATTERN, createGoogleLaunch } from '../services/oauth/googleLaunch.js';
 import { allowedRequestOrigin } from '../utils/publicOrigins.js';
+import { parseSenderNames } from '../utils/senderNames.js';
 
 // Mounted at /api/oauth/google. Starting a flow reserves a seat, so it lives under /api where
 // the X-Requested-With check and the screen lock apply; the browser then follows a one-time
@@ -22,6 +23,9 @@ router.post('/start', async (req, res) => {
   const raw = typeof req.body?.email === 'string' ? req.body.email.trim() : '';
   if (!GOOGLE_EMAIL_PATTERN.test(raw)) return res.status(400).json({ error: 'Enter a valid email address', code: 'email_invalid' });
   const email = raw.toLowerCase();
+  // Optional here: without a sender name the mailbox sends under the Google profile name.
+  const names = parseSenderNames(req.body);
+  if (names.error) return res.status(400).json({ error: names.error, code: 'sender_name_invalid' });
 
   // Mailboxes are shared: an address any user already connected is connected for everyone.
   const existing = await query('SELECT id FROM email_accounts WHERE lower(email_address) = $1 LIMIT 1', [email]);
@@ -44,6 +48,7 @@ router.post('/start', async (req, res) => {
   try {
     const { state, codeChallenge } = await createOAuthState({
       provider: PROVIDER, userId: req.session.userId, loginHint: email, appId: config.appId, mode: 'add', email,
+      senderName: names.senderName, senderNameAlt: names.senderNameAlt,
     });
     const url = buildGoogleAuthorizationUrl({
       clientId: config.clientId, state, codeChallenge, redirectUri: config.redirectUri, loginHint: email,

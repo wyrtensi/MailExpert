@@ -45,7 +45,7 @@ describe('OAuth state + PKCE store', () => {
     const saved = JSON.parse(raw);
     expect(saved).toEqual({
       userId: 'u1', codeVerifier: expect.any(String), loginHint: 'x@gmail.com', appId: null,
-      mode: null, email: null, accountId: null,
+      mode: null, email: null, accountId: null, senderName: null, senderNameAlt: null,
     });
     expect(saved.codeVerifier.length).toBeGreaterThanOrEqual(43);
     expect(a.codeChallenge).toBe(base64url(createHash('sha256').update(saved.codeVerifier).digest()));
@@ -57,7 +57,7 @@ describe('OAuth state + PKCE store', () => {
     const first = await consumeOAuthState({ provider: 'google', state });
     expect(first).toEqual({
       userId: 'u1', codeVerifier: expect.any(String), loginHint: null, appId: null,
-      mode: null, email: null, accountId: null,
+      mode: null, email: null, accountId: null, senderName: null, senderNameAlt: null,
     });
     expect(await consumeOAuthState({ provider: 'google', state })).toBeNull();
     expect(redisClient.getDel).toHaveBeenCalledTimes(2);
@@ -95,7 +95,7 @@ describe('OAuth state + PKCE store', () => {
     expect(await consumeOAuthState({ provider: 'auth-google', state: second.state, anonymous: true }))
       .toEqual({
         userId: null, codeVerifier: expect.any(String), loginHint: null, appId: null,
-        mode: null, email: null, accountId: null,
+        mode: null, email: null, accountId: null, senderName: null, senderNameAlt: null,
       });
   });
 
@@ -108,10 +108,19 @@ describe('OAuth state + PKCE store', () => {
     });
   });
 
+  it('carries the sender names of a mailbox added from the Gmail form', async () => {
+    const { state } = await createOAuthState({
+      provider: 'google', userId: 'u1', mode: 'add', email: 'x@gmail.com', senderName: 'Иван Петров', senderNameAlt: 'Ivan Petrov',
+    });
+    await expect(consumeOAuthState({ provider: 'google', state })).resolves.toMatchObject({
+      senderName: 'Иван Петров', senderNameAlt: 'Ivan Petrov',
+    });
+  });
+
   it('reports no mode, email or target for a flow started without them', async () => {
     const { state } = await createOAuthState({ provider: 'google', userId: 'u1' });
     await expect(consumeOAuthState({ provider: 'google', state })).resolves.toMatchObject({
-      mode: null, email: null, accountId: null,
+      mode: null, email: null, accountId: null, senderName: null, senderNameAlt: null,
     });
   });
 });

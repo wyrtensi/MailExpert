@@ -13,6 +13,7 @@ import {
 } from '../services/oauth/googleOAuth.js';
 import { recordGoogleGrant, resolveGoogleConfig } from '../services/oauth/googleApps.js';
 import { createOAuthState, consumeOAuthState } from '../services/oauth/oauthState.js';
+import { addSecondSenderName } from '../utils/senderNames.js';
 import { GoogleAppSelectionError, releaseGoogleSeat, selectGoogleApp } from '../services/oauth/googleAppSelection.js';
 import { consumeGoogleLaunch } from '../services/oauth/googleLaunch.js';
 import { allowedRequestOrigin } from '../utils/publicOrigins.js';
@@ -255,17 +256,22 @@ async function saveGoogleAccount(pending, identity, tokens, appId) {
           auth_user,
           oauth_provider, oauth_access_token, oauth_refresh_token, oauth_token_expiry,
           oauth_public_client, oauth_reconnect_required, include_in_unified_inbox,
-          oauth_app_id, oauth_subject, thread_mode
+          oauth_app_id, oauth_subject, thread_mode, sender_name
         ) VALUES ($1, $2, $3, $4, 'imap',
           'imap.gmail.com', 993, true,
           'smtp.gmail.com', 465, 'SSL',
           $3,
           'google', $5, $6, $7,
           false, false, false,
-          $8, $9, $10)
+          $8, $9, $10, $11)
         RETURNING id
-      `, [pending.userId, identity.name || email, email, color, encryptedAccess, encryptedRefresh, tokens.expiresAt, appId, identity.sub, THREAD_MODE_GMAIL]);
+      `, [pending.userId, identity.name || email, email, color, encryptedAccess, encryptedRefresh, tokens.expiresAt, appId, identity.sub, THREAD_MODE_GMAIL, pending.senderName]);
       accountId = inserted.rows[0].id;
+      // Without a main name the mailbox sends under the Google profile name, known only now: a
+      // second name equal to it would list the same From twice.
+      const mainName = (pending.senderName || identity.name || email).toLowerCase();
+      const secondName = pending.senderNameAlt && pending.senderNameAlt.toLowerCase() !== mainName ? pending.senderNameAlt : null;
+      await addSecondSenderName(client, { accountId, email, senderNameAlt: secondName });
       result = 'created';
     }
 

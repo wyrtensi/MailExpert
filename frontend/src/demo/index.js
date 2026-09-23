@@ -598,6 +598,14 @@ function welcomeLetter(account) {
   }));
 }
 
+// The second sender name becomes an alias with the mailbox's own address, as on the server
+// (backend utils/senderNames.js), so compose's From list offers both names.
+function secondSenderName(accountId, email, raw, senderName) {
+  const alt = String(raw ?? '').trim();
+  if (!alt || alt.toLowerCase() === String(senderName ?? '').toLowerCase()) return [];
+  return [{ id: `${accountId}-alias-1`, account_id: accountId, name: alt, email, reply_to: null, signature: null }];
+}
+
 // "Mailbox on our domain" in the demo, with the same refusals as POST /api/accounts kind=domain.
 function createDomainMailbox(body) {
   const localPart = normalizeEmail(body.localPart);
@@ -608,9 +616,11 @@ function createDomainMailbox(body) {
   if (!domain) throw demoError('Unknown domain', 'domain_unknown');
   const email = `${localPart}@${domain.domain}`;
   if (mailboxWithEmail(email)) throw demoError('This mailbox is already in MailExpert', 'mailbox_exists');
-  const name = String(body.name ?? '').trim() || email;
+  const senderName = String(body.senderName ?? '').trim() || null;
+  const name = String(body.name ?? '').trim() || senderName || email;
   const account = {
-    ...clone(ACCOUNT_FIXTURES[0]), id: `demo-node-${email}`, name, sender_name: name,
+    ...clone(ACCOUNT_FIXTURES[0]), id: `demo-node-${email}`, name, sender_name: senderName,
+    aliases: secondSenderName(`demo-node-${email}`, email, body.senderNameAlt, senderName),
     imap_host: 'mail.demo.mailexpert.local', smtp_host: 'mail.demo.mailexpert.local',
     email_address: email, color: '#0ea5e9', signature: null, sort_order: ACCOUNT_FIXTURES.length,
     mail_node: true, thread_mode: 'rfc',
@@ -628,8 +638,10 @@ function connectGmail(body) {
   const email = normalizeEmail(body.email);
   if (!/^[^\s@]{1,64}@[^\s@]{1,255}$/.test(email)) throw demoError('Invalid email', 'email_invalid');
   if (mailboxWithEmail(email)) throw demoError('Already connected', 'already_connected');
+  const senderName = String(body.senderName ?? '').trim() || null;
   const account = {
-    ...clone(ACCOUNT_FIXTURES[0]), id: `demo-gmail-${email}`, name: email, sender_name: email.split('@')[0],
+    ...clone(ACCOUNT_FIXTURES[0]), id: `demo-gmail-${email}`, name: email, sender_name: senderName || email.split('@')[0],
+    aliases: secondSenderName(`demo-gmail-${email}`, email, body.senderNameAlt, senderName),
     imap_host: 'imap.gmail.com', smtp_host: 'smtp.gmail.com', email_address: email, color: '#ea4335',
     signature: null, sort_order: ACCOUNT_FIXTURES.length, oauth_provider: 'google', thread_mode: 'gmail',
   };
@@ -770,7 +782,8 @@ export async function demoRequest(method, path, body = {}) {
 
   const foldersMatch = pathname.match(/^\/accounts\/([^/]+)\/folders$/);
   if (verb === 'GET' && foldersMatch) return clone(foldersFor(decodeURIComponent(foldersMatch[1])));
-  if (verb === 'GET' && /^\/accounts\/[^/]+\/aliases$/.test(pathname)) return [];
+  const aliasesMatch = pathname.match(/^\/accounts\/([^/]+)\/aliases$/);
+  if (verb === 'GET' && aliasesMatch) return clone(accountFor(decodeURIComponent(aliasesMatch[1]))?.aliases || []);
 
   if (verb === 'GET' && pathname === '/mail/unread-counts') return clone(unreadCounts());
   if (verb === 'GET' && pathname === '/mail/messages') return clone(listMessages(url));

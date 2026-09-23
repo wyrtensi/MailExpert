@@ -7,8 +7,13 @@ export function parseAddressListField(value) {
   }
 }
 
-export function pickReplyAlias({ aliases, deliveryAddresses, toAddresses, ccAddresses, fromEmail }) {
-  if (!aliases || !aliases.length) return null;
+// An alias with the mailbox's own address (a second sender name, e.g. the same name in Latin
+// letters) matches every letter by address, so it cannot be told apart from the mailbox itself:
+// the mailbox wins and replies go out under its main name; the second name is picked by hand.
+export function pickReplyAlias({ aliases, deliveryAddresses, toAddresses, ccAddresses, fromEmail, accountEmail }) {
+  const own = (accountEmail || '').toLowerCase();
+  aliases = (aliases || []).filter(al => (al.email || '').toLowerCase() !== own);
+  if (!aliases.length) return null;
 
   const delivered = parseAddressListField(deliveryAddresses).map(e => (e || '').toLowerCase()).filter(Boolean);
   const to = parseAddressListField(toAddresses).map(a => a.email?.toLowerCase()).filter(Boolean);

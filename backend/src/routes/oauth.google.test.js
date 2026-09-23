@@ -120,6 +120,7 @@ function installDb({ existing = null } = {}) {
         return { rows: dbState.existing ? [dbState.existing] : [] };
       }
       if (/^\s*INSERT INTO email_accounts/.test(sql)) return { rows: [{ id: 'new-acc' }] };
+      if (/^\s*INSERT INTO account_aliases/.test(sql)) return { rows: [{ id: 'alias-1', name: params[1], email: params[2] }] };
       if (/^\s*UPDATE email_accounts/.test(sql)) return { rows: [], rowCount: 1 };
       if (/^\s*SELECT \* FROM email_accounts WHERE id = \$1/.test(sql)) {
         return { rows: [{ id: params[0], email_address: 'user@gmail.com', oauth_provider: 'google' }] };
@@ -142,9 +143,9 @@ async function startFlow(query = '') {
 
 // The add flow starts at POST /api/oauth/google/start (covered by oauthGoogleApi.test.js). Here its
 // state is created the way that route creates it, through the real single-use store.
-async function seedAddState(email = 'user@gmail.com') {
+async function seedAddState(email = 'user@gmail.com', names = {}) {
   const { state } = await createOAuthState({
-    provider: 'google', userId: USER_ID, loginHint: email, appId: APP_ID, mode: 'add', email,
+    provider: 'google', userId: USER_ID, loginHint: email, appId: APP_ID, mode: 'add', email, ...names,
   });
   return { state };
 }
@@ -304,16 +305,40 @@ describe('GET /oauth/google/callback', () => {
     expect(insertSql).toMatch(/'smtp\.gmail\.com', 465, 'SSL'/);
     expect(insertSql).toMatch(/'google'/);
     expect(insertSql).toMatch(/include_in_unified_inbox,\s*oauth_app_id, oauth_subject, thread_mode/);
-    expect(insertSql).toMatch(/false, false, false,\s*\$8, \$9, \$10\)\s*RETURNING id/);
+    expect(insertSql).toMatch(/false, false, false,\s*\$8, \$9, \$10, \$11\)\s*RETURNING id/);
     expect(insertParams).toContain('enc(access-tok)');
     expect(insertParams).toContain('enc(refresh-tok)');
     expect(insertParams).not.toContain('access-tok');
     expect(insertParams).not.toContain('refresh-tok');
-    expect(insertParams.slice(7)).toEqual([APP_ID, 'sub-1', 'gmail']);
+    // No sender name from the form: sender_name stays empty and the mailbox sends under its name.
+    expect(insertParams.slice(7)).toEqual([APP_ID, 'sub-1', 'gmail', null]);
+    expect(sqlCall(/^\s*INSERT INTO account_aliases/)).toBeUndefined();
     expect(recordGoogleGrant).toHaveBeenCalledWith({ appId: APP_ID, email: 'user@gmail.com', sub: 'sub-1' });
 
     expect(imapManager.connectAccount).toHaveBeenCalledWith(expect.objectContaining({ id: 'new-acc' }));
     expectCooldownClearedBeforeConnect('new-acc');
+  });
+
+  it('sends under the names from the Gmail form: the main one on the row, the second as an alias', async () => {
+    mockSuccessfulGoogle();
+    const { state } = await seedAddState('user@gmail.com', { senderName: 'Иван Петров', senderNameAlt: 'Ivan Petrov' });
+
+    const res = await callback({ code: 'auth-code-xyz', state });
+
+    expect(res.headers.get('location')).toBe('/?oauth_success=google&oauth_result=created');
+    const [, insertParams] = sqlCall(/^\s*INSERT INTO email_accounts/);
+    expect(insertParams[10]).toBe('Иван Петров');
+    const [, aliasParams] = sqlCall(/^\s*INSERT INTO account_aliases/);
+    expect(aliasParams).toEqual(['new-acc', 'Ivan Petrov', 'user@gmail.com']);
+  });
+
+  it('adds no second name equal to the Google profile name the mailbox sends under', async () => {
+    mockSuccessfulGoogle();
+    const { state } = await seedAddState('user@gmail.com', { senderNameAlt: 'user name' });
+
+    await callback({ code: 'auth-code-xyz', state });
+
+    expect(sqlCall(/^\s*INSERT INTO account_aliases/)).toBeUndefined();
   });
 
   it('updates an existing account, keeps the stored refresh token and clears the reconnect flag', async () => {

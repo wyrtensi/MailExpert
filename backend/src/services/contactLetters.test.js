@@ -39,13 +39,13 @@ describe('contactLetters', () => {
     expect(query).toHaveBeenCalledTimes(2);
   });
 
-  it('queries own addresses, alias addresses and folder skips per account, and clamps limit/offset', async () => {
+  it('queries own addresses, alias addresses, folder skips and folder preferences per account, and clamps limit/offset', async () => {
     query
       .mockResolvedValueOnce({ rows: [{ emails: [{ value: ' Maya@C.example ' }, { value: 'm.chen@c.example' }] }] }) // contact
       .mockResolvedValueOnce({ rows: [{ id: 'acct-1' }, { id: 'acct-2' }] }) // enabled accounts
       .mockResolvedValueOnce({
         rows: [
-          { id: 'acct-1', email_address: 'sales@x.example', folder_mappings: { trash: 'Trash', spam: 'Spam' } },
+          { id: 'acct-1', email_address: 'sales@x.example', folder_mappings: { inbox: 'INBOX', sent: 'Sent', trash: 'Trash', spam: 'Spam', drafts: 'Drafts' } },
           { id: 'acct-2', email_address: 'ops@x.example', folder_mappings: {} },
         ],
       }) // account details
@@ -66,23 +66,23 @@ describe('contactLetters', () => {
     const pageCall = query.mock.calls[5];
     const pageParams = pageCall[1];
 
-    const [allFromAddresses, accountIds, contactAddresses, ownAccountIds, ownEmails, skipAccountIds, skipFolders] = aggParams;
+    const [accountIds, contactAddresses, ownAccountIds, ownEmails, skipAccountIds, skipFolders, primaryAccountIds, primaryFolders] = aggParams;
     expect(accountIds).toEqual(['acct-1', 'acct-2']);
     expect(contactAddresses).toEqual(['maya@c.example', 'm.chen@c.example']);
     // Own addresses include both accounts' own address plus the alias, each paired with its account.
     expect(ownAccountIds).toEqual(['acct-1', 'acct-1', 'acct-2']);
     expect(ownEmails).toEqual(['sales@x.example', 'help@x.example', 'ops@x.example']);
-    // The indexed filter address list is the union of contact + every own address.
-    expect(allFromAddresses.sort()).toEqual(
-      ['maya@c.example', 'm.chen@c.example', 'sales@x.example', 'help@x.example', 'ops@x.example'].sort(),
-    );
-    // Only acct-1 defines trash/spam folders.
-    expect(skipAccountIds).toEqual(['acct-1', 'acct-1']);
-    expect(skipFolders).toEqual(['Trash', 'Spam']);
+    // acct-1 defines trash/spam/drafts; acct-2 defines none.
+    expect(skipAccountIds).toEqual(['acct-1', 'acct-1', 'acct-1']);
+    expect(skipFolders).toEqual(['Trash', 'Spam', 'Drafts']);
+    // acct-1 defines inbox+sent; acct-2 has no folder_mappings, so it falls back to the literal
+    // 'INBOX' default and has no configured sent folder.
+    expect(primaryAccountIds).toEqual(['acct-1', 'acct-1', 'acct-2']);
+    expect(primaryFolders).toEqual(['INBOX', 'Sent', 'INBOX']);
 
     // limit/offset are clamped and appended as the last two page-query params.
-    expect(pageParams.slice(7)).toEqual([CONTACT_LETTERS_MAX_LIMIT, 0]);
-    expect(pageCall[0]).toContain('LIMIT $8 OFFSET $9');
+    expect(pageParams.slice(8)).toEqual([CONTACT_LETTERS_MAX_LIMIT, 0]);
+    expect(pageCall[0]).toContain('LIMIT $9 OFFSET $10');
 
     expect(result).toEqual({
       received: 3,
@@ -91,5 +91,20 @@ describe('contactLetters', () => {
       total: 4,
       items: [{ id: 'm1', account_id: 'acct-1', folder: 'INBOX', subject: 'Hi', snippet: 's', date: '2026-09-16T08:45:00.000Z', direction: 'in' }],
     });
+  });
+
+  it('fractional limit/offset are truncated, not rejected', async () => {
+    query
+      .mockResolvedValueOnce({ rows: [{ emails: [{ value: 'maya@c.example' }] }] })
+      .mockResolvedValueOnce({ rows: [{ id: 'acct-1' }] })
+      .mockResolvedValueOnce({ rows: [{ id: 'acct-1', email_address: 'sales@x.example', folder_mappings: {} }] })
+      .mockResolvedValueOnce({ rows: [] })
+      .mockResolvedValueOnce({ rows: [{ received: '0', sent: '0', last_date: null, total: '0' }] })
+      .mockResolvedValueOnce({ rows: [] });
+
+    await contactLetters('contact-1', { limit: 12.9, offset: 3.7 });
+
+    const pageParams = query.mock.calls[5][1];
+    expect(pageParams.slice(8)).toEqual([12, 3]);
   });
 });

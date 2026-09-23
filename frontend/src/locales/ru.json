@@ -1902,24 +1902,14 @@
       "website": "Сайт",
       "organization": "Организация",
       "notes": "Заметки",
-      "emailsSent": "Отправлено писем",
       "lastContacted": "Последний контакт"
     },
-    "emailTypes": {
-      "other": "Другой",
-      "work": "Работа",
-      "home": "Дом"
-    },
-    "phoneTypes": {
-      "mobile": "Мобильный",
-      "work": "Работа",
-      "home": "Дом",
-      "other": "Другой"
-    },
-    "urlTypes": {
-      "work": "Рабочий",
-      "home": "Личный",
-      "other": "Другой"
+    "letters": {
+      "received": "Получено писем",
+      "sent": "Отправлено писем",
+      "show": "Показать письма",
+      "hide": "Скрыть письма",
+      "showMore": "Показать ещё"
     }
   },
   "todoist": {

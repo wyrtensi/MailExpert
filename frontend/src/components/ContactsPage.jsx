@@ -5,7 +5,8 @@ import { useStore } from '../store/index.js';
 import { useMobile } from '../hooks/useMobile.js';
 import SenderAvatarImage from './SenderAvatarImage.jsx';
 import { contactComposeAddress, contactForEmail, contactFormFromSender, websiteHref, websiteLabel } from '../utils/contactLinks.js';
-import { localeTag } from '../utils/formatDate.js';
+import { copyToClipboard } from '../utils/clipboard.js';
+import ContactLetters from './ContactLetters.jsx';
 
 // Deterministic avatar color from a string
 function avatarColor(str) {
@@ -38,7 +39,7 @@ function Avatar({ name, email, size = 36, hasContactPhoto }) {
 }
 
 function EmptyEmailForm() {
-  return [{ value: '', type: 'other', primary: true }];
+  return [{ value: '', primary: true }];
 }
 
 function emptyContact() {
@@ -58,7 +59,7 @@ const PAGE_SIZE = 100;
 
 export default function ContactsPage() {
   const { t } = useTranslation();
-  const { setShowContacts, contactsFocus, clearContactsFocus, openCompose } = useStore();
+  const { setShowContacts, contactsFocus, clearContactsFocus, openCompose, setSelectedAccount } = useStore();
   const isMobile = useMobile();
 
   const [contacts, setContacts]     = useState([]);
@@ -297,7 +298,7 @@ export default function ContactsPage() {
   });
 
   const addEmail = () => setForm(f => ({
-    ...f, emails: [...f.emails, { value: '', type: 'other', primary: false }],
+    ...f, emails: [...f.emails, { value: '', primary: false }],
   }));
 
   const removeEmail = (idx) => setForm(f => ({
@@ -310,7 +311,7 @@ export default function ContactsPage() {
   });
 
   const addPhone = () => setForm(f => ({
-    ...f, phones: [...f.phones, { value: '', type: 'mobile' }],
+    ...f, phones: [...f.phones, { value: '' }],
   }));
 
   const removePhone = (idx) => setForm(f => ({
@@ -322,7 +323,7 @@ export default function ContactsPage() {
   }));
 
   const addUrl = () => setForm(f => ({
-    ...f, urls: [...f.urls, { value: '', type: 'work' }],
+    ...f, urls: [...f.urls, { value: '' }],
   }));
 
   const removeUrl = (idx) => setForm(f => ({
@@ -332,6 +333,27 @@ export default function ContactsPage() {
   const writeTo = (contact) => {
     const address = contactComposeAddress(contact);
     if (address) openCompose({ to: [address] });
+  };
+
+  // Opens a letter from the contact's correspondence list in its own mailbox and folder,
+  // the way ElectronNotificationBridge opens a notification's message: switch to that
+  // account/folder (which also leaves the contacts view — setSelectedAccount clears
+  // showContacts), splice the fetched message into the store so it is selectable even
+  // before the list's own fetch for that folder lands, then select it.
+  const openLetter = async (item) => {
+    try {
+      const msg = await api.getMessage(item.id);
+      const state = useStore.getState();
+      state.setSearchQuery('');
+      setSelectedAccount(item.account_id, item.folder);
+      if (!state.messages.some(m => m.id === msg.id)) {
+        useStore.setState(current => ({ messages: [msg, ...current.messages] }));
+      }
+      window.dispatchEvent(new CustomEvent('mailexpert:refresh'));
+      window.setTimeout(() => useStore.getState().setSelectedMessage(msg.id), 0);
+    } catch (err) {
+      console.error('Failed to open letter:', err.message);
+    }
   };
 
   const inForm = editing || showNew;
@@ -477,6 +499,7 @@ export default function ContactsPage() {
           onDeleteRequest={() => setConfirmDelete(true)}
           onDeleteConfirm={deleteContact}
           onDeleteCancel={() => setConfirmDelete(false)}
+          onOpenLetter={openLetter}
           t={t}
         />
       )}
@@ -628,8 +651,18 @@ export default function ContactsPage() {
   );
 }
 
-function ContactDetail({ contact: c, confirmDelete, saving, error, onEdit, onWrite, onDeleteRequest, onDeleteConfirm, onDeleteCancel, t }) {
+function ContactDetail({ contact: c, confirmDelete, saving, error, onEdit, onWrite, onDeleteRequest, onDeleteConfirm, onDeleteCancel, onOpenLetter, t }) {
   const canWrite = Boolean(contactComposeAddress(c));
+  const [copiedKey, setCopiedKey] = useState(null);
+  const copiedTimerRef = useRef(null);
+  useEffect(() => () => clearTimeout(copiedTimerRef.current), []);
+  const handleCopy = async (key, value) => {
+    const { ok } = await copyToClipboard(value);
+    if (!ok) return;
+    clearTimeout(copiedTimerRef.current);
+    setCopiedKey(key);
+    copiedTimerRef.current = setTimeout(() => setCopiedKey(null), 1500);
+  };
   return (
     <div style={{ width: '100%', maxWidth: 560, position: 'relative', animation: 'pane-fade-in var(--motion-normal) var(--ease-emphasized) both' }}>
       {/* Write/Edit/Delete — out of flow, top-right (fixed width). */}
@@ -682,19 +715,31 @@ function ContactDetail({ contact: c, confirmDelete, saving, error, onEdit, onWri
       {((c.emails?.length > 0) || (c.phones?.length > 0) || (c.urls?.length > 0) || c.notes) && (
         <DetailSection>
           {(c.emails || []).map((e, i) => (
-            <DetailRow key={i} label={t(`contacts.emailTypes.${e.type || 'other'}`, { defaultValue: t('contacts.emailTypes.other') })}>
-              <a href={`mailto:${e.value}`} style={{ color: 'var(--accent)', textDecoration: 'none' }}>{e.value}</a>
+            <DetailRow key={i} label={t('contacts.fields.email')}>
+              <CopyableValue
+                value={e.value}
+                copied={copiedKey === `email-${i}`}
+                onCopy={() => handleCopy(`email-${i}`, e.value)}
+                color="var(--accent)"
+                t={t}
+              />
             </DetailRow>
           ))}
           {(c.phones || []).map((p, i) => (
-            <DetailRow key={i} label={t(`contacts.phoneTypes.${p.type === 'cell' || p.type === 'iphone' ? 'mobile' : (p.type || 'other')}`, { defaultValue: t('contacts.phoneTypes.other') })}>
-              <a href={`tel:${p.value}`} style={{ color: 'var(--text-primary)', textDecoration: 'none' }}>{p.value}</a>
+            <DetailRow key={i} label={t('contacts.fields.phone')}>
+              <CopyableValue
+                value={p.value}
+                copied={copiedKey === `phone-${i}`}
+                onCopy={() => handleCopy(`phone-${i}`, p.value)}
+                color="var(--text-primary)"
+                t={t}
+              />
             </DetailRow>
           ))}
           {(c.urls || []).map((u, i) => {
             const href = websiteHref(u.value);
             return (
-              <DetailRow key={'url-' + i} label={t('contacts.urlTypes.' + (u.type || 'work'), { defaultValue: t('contacts.fields.website') })}>
+              <DetailRow key={'url-' + i} label={t('contacts.fields.website')}>
                 {href
                   ? <a href={href} target="_blank" rel="noopener noreferrer" style={{ color: 'var(--accent)', textDecoration: 'none' }}>{websiteLabel(u.value)}</a>
                   : u.value}
@@ -705,19 +750,33 @@ function ContactDetail({ contact: c, confirmDelete, saving, error, onEdit, onWri
         </DetailSection>
       )}
 
-      {(c.send_count > 0 || c.last_sent) && (
-        <DetailSection>
-          {c.send_count > 0 && (
-            <DetailRow label={t('contacts.fields.emailsSent')}>{c.send_count}</DetailRow>
-          )}
-          {c.last_sent && (
-            <DetailRow label={t('contacts.fields.lastContacted')}>
-              {new Date(c.last_sent).toLocaleDateString(localeTag())}
-            </DetailRow>
-          )}
-        </DetailSection>
-      )}
+      <ContactLetters contactId={c.id} onOpenLetter={onOpenLetter} t={t} />
     </div>
+  );
+}
+
+// An email or phone value: clicking it copies to the clipboard instead of opening mailto:/tel:,
+// with a short inline confirmation. A real <button> so it works from the keyboard too.
+function CopyableValue({ value, copied, onCopy, color, t }) {
+  return (
+    <span style={{ display: 'inline-flex', alignItems: 'center', gap: 8 }}>
+      <button
+        type="button"
+        onClick={onCopy}
+        style={{
+          background: 'none', border: 'none', padding: 0, margin: 0,
+          font: 'inherit', color, textDecoration: 'none', cursor: 'pointer',
+          textAlign: 'left', wordBreak: 'break-word',
+        }}
+      >
+        {value}
+      </button>
+      {copied && (
+        <span style={{ fontSize: 11, color: 'var(--text-tertiary)' }}>
+          {t('contextMenu.headers.copied')}
+        </span>
+      )}
+    </span>
   );
 }
 
@@ -778,15 +837,6 @@ function ContactForm({
               placeholder="email@example.com"
               onChange={ev => onSetEmail(i, 'value', ev.target.value)}
             />
-            <select
-              value={e.type}
-              onChange={ev => onSetEmail(i, 'type', ev.target.value)}
-              style={{ ...inputStyle, width: 80, padding: '8px 6px' }}
-            >
-              <option value="other">{t('contacts.emailTypes.other')}</option>
-              <option value="work">{t('contacts.emailTypes.work')}</option>
-              <option value="home">{t('contacts.emailTypes.home')}</option>
-            </select>
             {form.emails.length > 1 && (
               <button onClick={() => onRemoveEmail(i)} style={removeBtn}>
                 <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>
@@ -809,16 +859,6 @@ function ContactForm({
               placeholder="+1 555 000 0000"
               onChange={ev => onSetPhone(i, 'value', ev.target.value)}
             />
-            <select
-              value={p.type}
-              onChange={ev => onSetPhone(i, 'type', ev.target.value)}
-              style={{ ...inputStyle, width: 90, padding: '8px 6px' }}
-            >
-              <option value="mobile">{t('contacts.phoneTypes.mobile')}</option>
-              <option value="work">{t('contacts.phoneTypes.work')}</option>
-              <option value="home">{t('contacts.phoneTypes.home')}</option>
-              <option value="other">{t('contacts.phoneTypes.other')}</option>
-            </select>
             <button onClick={() => onRemovePhone(i)} style={removeBtn}>
               <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>
             </button>
@@ -839,15 +879,6 @@ function ContactForm({
               placeholder={t('contacts.websitePh')}
               onChange={ev => onSetUrl(i, 'value', ev.target.value)}
             />
-            <select
-              value={u.type}
-              onChange={ev => onSetUrl(i, 'type', ev.target.value)}
-              style={{ ...inputStyle, width: 90, padding: '8px 6px' }}
-            >
-              <option value="work">{t('contacts.urlTypes.work')}</option>
-              <option value="home">{t('contacts.urlTypes.home')}</option>
-              <option value="other">{t('contacts.urlTypes.other')}</option>
-            </select>
             <button onClick={() => onRemoveUrl(i)} style={removeBtn}>
               <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>
             </button>

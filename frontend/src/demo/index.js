@@ -670,6 +670,57 @@ function demoSenderHistory(id) {
   };
 }
 
+// A contact's correspondence across every enabled mailbox (GET /api/contacts/:id/letters), the
+// same rules the server applies (services/contactLetters.js) over the demo's own `messages`:
+// own address = the mailbox's address plus its aliases, per mailbox; trash/spam are skipped per
+// mailbox's own folder mapping; a letter counts once per mailbox by message_id; newest first.
+function demoContactLetters(contactId, { limit = 20, offset = 0 } = {}) {
+  const contact = contacts.find(item => item.id === contactId);
+  if (!contact) return null;
+
+  const addresses = new Set((contact.emails || []).map(e => normalizeEmail(e.value)).filter(Boolean));
+  if (!addresses.size) return { received: 0, sent: 0, lastDate: null, total: 0, items: [] };
+
+  const cappedLimit = Math.max(1, Math.min(Number(limit) || 20, 50));
+  const safeOffset = Math.max(0, Number(offset) || 0);
+
+  const matches = messages.filter(m => {
+    const account = accountFor(m.account_id);
+    if (!account?.enabled) return false;
+    const mappings = account.folder_mappings || {};
+    if (m.folder === mappings.trash || m.folder === mappings.spam) return false;
+    const own = new Set([account.email_address, ...(account.aliases || []).map(a => a.email)].map(normalizeEmail));
+    const from = normalizeEmail(m.from_email);
+    if (addresses.has(from)) return true;
+    if (own.has(from)) {
+      const recipients = [...(m.to_addresses || []), ...(m.cc_addresses || [])].map(r => normalizeEmail(r.email));
+      return recipients.some(r => addresses.has(r));
+    }
+    return false;
+  });
+
+  const seen = new Set();
+  const deduped = [];
+  for (const m of [...matches].sort((a, b) => b.date.localeCompare(a.date))) {
+    const key = `${m.account_id}:${m.message_id || m.id}`;
+    if (seen.has(key)) continue;
+    seen.add(key);
+    deduped.push(m);
+  }
+
+  const received = deduped.filter(m => addresses.has(normalizeEmail(m.from_email))).length;
+  return {
+    received,
+    sent: deduped.length - received,
+    lastDate: deduped.length ? deduped[0].date : null,
+    total: deduped.length,
+    items: deduped.slice(safeOffset, safeOffset + cappedLimit).map(m => ({
+      id: m.id, account_id: m.account_id, folder: m.folder, subject: m.subject, snippet: m.snippet,
+      date: m.date, direction: addresses.has(normalizeEmail(m.from_email)) ? 'in' : 'out',
+    })),
+  };
+}
+
 function demoMessageIdFor(id) {
   return `<${id}@demo.mailexpert.local>`;
 }
@@ -935,6 +986,14 @@ export async function demoRequest(method, path, body = {}) {
     const contact = contactFromPayload(body, { id, uid: id });
     contacts.push(contact);
     return clone(contact);
+  }
+  const contactLettersMatch = pathname.match(/^\/contacts\/([^/]+)\/letters$/);
+  if (verb === 'GET' && contactLettersMatch) {
+    const result = demoContactLetters(decodeURIComponent(contactLettersMatch[1]), {
+      limit: url.searchParams.get('limit'), offset: url.searchParams.get('offset'),
+    });
+    if (!result) throw demoError('Contact not found', 'not_found');
+    return clone(result);
   }
   const contactMatch = pathname.match(/^\/contacts\/([^/]+)$/);
   if (verb === 'GET' && contactMatch) return clone(contacts.find(item => item.id === decodeURIComponent(contactMatch[1])) || {});

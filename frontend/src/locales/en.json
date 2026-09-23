@@ -1870,24 +1870,14 @@
       "website": "Website",
       "organization": "Organization",
       "notes": "Notes",
-      "emailsSent": "Emails sent",
       "lastContacted": "Last contacted"
     },
-    "emailTypes": {
-      "other": "Other",
-      "work": "Work",
-      "home": "Home"
-    },
-    "phoneTypes": {
-      "mobile": "Mobile",
-      "work": "Work",
-      "home": "Home",
-      "other": "Other"
-    },
-    "urlTypes": {
-      "work": "Work",
-      "home": "Home",
-      "other": "Other"
+    "letters": {
+      "received": "Emails received",
+      "sent": "Emails sent",
+      "show": "Show letters",
+      "hide": "Hide letters",
+      "showMore": "Show more"
     }
   },
   "todoist": {

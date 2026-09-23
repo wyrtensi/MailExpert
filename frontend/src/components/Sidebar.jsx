@@ -1253,6 +1253,12 @@ export default function Sidebar() {
           const showingHidden = showHiddenFor.has(account.id);
 
           const selectInbox = () => setSelectedAccount(account.id, 'INBOX');
+          // A click on the mailbox already open at its inbox shows or hides its folders; any
+          // other click opens its inbox.
+          const onAccountClick = () => {
+            if (!sidebarCollapsed && isSelected && selectedFolder === 'INBOX') toggleAccount(account.id);
+            else selectInbox();
+          };
           // The server sends `health`; an account patched before that (or by an older
           // backend) falls back to the same rule computed locally.
           const health = HEALTH_LABEL_KEYS[account.health] ? account.health : computeAccountHealth(account);
@@ -1299,7 +1305,7 @@ export default function Sidebar() {
                   if (!isAccountActive)
                     e.currentTarget.style.background = 'transparent';
                 }}
-                onClick={selectInbox}
+                onClick={onAccountClick}
                 onContextMenu={!sidebarCollapsed ? (e) => openAccountCtxMenu(e, account) : undefined}
                 title={rowLabel}
                 aria-label={rowLabel}

@@ -14,8 +14,11 @@ test('demo direct API helpers resolve locally without calling fetch', async () =
     },
   });
 
-  assert.equal(await direct.streamAiChat([{ role: 'user', content: 'Hello' }]), '');
-  assert.deepEqual(await direct.unlock('1234'), { ok: true, demo: true });
+  // A real AI chat call needs a real provider behind it — same as the admin AI test/classify
+  // endpoints, this now rejects instead of the old silent-empty-string fallback (part 2 of the
+  // demo-settings fix: no write pretends to succeed with nothing behind it either).
+  await assert.rejects(() => direct.streamAiChat([{ role: 'user', content: 'Hello' }]), /demo mode/);
+  assert.deepEqual(await direct.unlock('1234'), { ok: true });
   assert.deepEqual(await direct.savePreferencesOnExit({ theme: 'dark' }), { ok: true });
   assert.deepEqual(await direct.startMsDeviceFlow(), { disabled: true, configured: false });
   assert.deepEqual(await direct.pollMsDeviceFlow(), { disabled: true, configured: false });

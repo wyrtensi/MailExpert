@@ -207,7 +207,8 @@
     "noSubject": "(no subject)",
     "direction": {
       "received": "Received",
-      "sent": "Sent"
+      "sent": "Sent",
+      "draft": "Draft"
     },
     "to": "To:",
     "via": "via",
@@ -287,8 +288,6 @@
     "senderHistory": {
       "summary_one": "Earlier with {{email}}: {{count}} letter",
       "summary_other": "Earlier with {{email}}: {{count}} letters",
-      "incoming": "From them",
-      "outgoing": "Our reply",
       "noSubject": "(no subject)",
       "more_one": "{{count}} more: search all letters from them",
       "more_other": "{{count}} more: search all letters from them",

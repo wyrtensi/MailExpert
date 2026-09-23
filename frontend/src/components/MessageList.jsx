@@ -16,7 +16,7 @@ import ContextMenu from './ContextMenu.jsx';
 import RowHoverActions from './RowHoverActions.jsx';
 import GtdTabList from './GtdTabList.jsx';
 import DirectionBadge from './DirectionBadge.jsx';
-import { mailboxBanner } from '../utils/mailboxBanner.js';
+import { mailboxBanner, isDraftFolder } from '../utils/mailboxBanner.js';
 import { useUiScale, descale } from '../hooks/useUiScale.js';
 import {
   gtdActiveForContext, buildGtdDisplaySections, GTD_COLORS, GTD_CHIP_BG, sectionBadge, isSelectedRow,
@@ -4343,11 +4343,18 @@ function ThreadRow({ message, account, isExpanded, threadMsgs, isLoadingThread, 
             }}>
               {account && (
                 <DirectionBadge
-                  // The row's own from_email is the thread ROOT's sender (for display); a
-                  // thread row's direction must reflect its latest letter instead, carried
-                  // separately as latest_from_email (messageService.js / demo/index.js) since
-                  // a thread that opened incoming and ended with our reply is still "Sent".
-                  direction={mailboxBanner({ ...message, from_email: message.latest_from_email ?? message.from_email }, account).direction}
+                  // The badge describes the letter this row actually shows — its date and
+                  // snippet, i.e. the newest letter within the current view's folder scope
+                  // (deduped/ranked the same way message_count/unread_count already are in
+                  // messageService.js; see latest_from_email there). It is NOT necessarily the
+                  // thread's true latest across every folder: our replies live in Sent, so an
+                  // "incoming, then our reply" thread viewed from INBOX never includes the
+                  // reply in this scope at all and still badges "Received" — correctly, for
+                  // what this row displays. latest_from_email still matters within one folder,
+                  // e.g. a group thread where two different people wrote into the same INBOX.
+                  direction={isDraftFolder(message.folder, account.folder_mappings)
+                    ? 'draft'
+                    : mailboxBanner({ ...message, from_email: message.latest_from_email ?? message.from_email }, account).direction}
                   compact={isNarrow || isMobile}
                 />
               )}
@@ -4449,8 +4456,20 @@ function ThreadRow({ message, account, isExpanded, threadMsgs, isLoadingThread, 
                   }}>
                     {msg.from_name || msg.from_email || t('common.unknown', 'Unknown')}
                   </span>
-                  <span style={{ fontSize: 11, color: 'var(--text-tertiary)', flexShrink: 0, marginLeft: 8 }}>
-                    {formatDate(msg.date)}
+                  <span style={{ display: 'flex', alignItems: 'center', gap: 6, flexShrink: 0, marginLeft: 8 }}>
+                    {account && (
+                      // Every message in an expanded thread shares the parent row's account (a
+                      // thread is grouped per (account_id, thread_key), never cross-mailbox), so
+                      // this is its own real sender — no root-vs-latest ambiguity here, unlike
+                      // the collapsed thread row above.
+                      <DirectionBadge
+                        direction={isDraftFolder(msg.folder, account.folder_mappings) ? 'draft' : mailboxBanner(msg, account).direction}
+                        compact={isNarrow || isMobile}
+                      />
+                    )}
+                    <span style={{ fontSize: 11, color: 'var(--text-tertiary)' }}>
+                      {formatDate(msg.date)}
+                    </span>
                   </span>
                 </div>
                 {showMessagePreviews && (
@@ -4669,7 +4688,9 @@ function MessageRow({ message, account, selected, lastViewed, isChecked, selecti
           <div style={{ display: 'flex', alignItems: 'center', gap: 4, flexShrink: 0, marginLeft: 8 }}>
             {account && (
               <DirectionBadge
-                direction={mailboxBanner(message, account).direction}
+                direction={isDraftFolder(message.folder, account.folder_mappings)
+                  ? 'draft'
+                  : mailboxBanner(message, account).direction}
                 compact={isNarrow || isMobile}
               />
             )}

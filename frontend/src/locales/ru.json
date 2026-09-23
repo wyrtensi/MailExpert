@@ -207,7 +207,8 @@
     "noSubject": "(без темы)",
     "direction": {
       "received": "Получено",
-      "sent": "Отправлено"
+      "sent": "Отправлено",
+      "draft": "Черновик"
     },
     "to": "Кому:",
     "via": "через",
@@ -291,8 +292,6 @@
       "summary_few": "Раньше с {{email}}: {{count}} письма",
       "summary_many": "Раньше с {{email}}: {{count}} писем",
       "summary_other": "Раньше с {{email}}: {{count}} письма",
-      "incoming": "От него",
-      "outgoing": "Наш ответ",
       "noSubject": "(без темы)",
       "more_one": "Ещё {{count}}: найти все письма от него",
       "more_few": "Ещё {{count}}: найти все письма от него",

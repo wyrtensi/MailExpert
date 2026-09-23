@@ -35,6 +35,7 @@ vi.mock('./connectionPolicy.js', () => ({ getConnectionPolicy: vi.fn() }));
 import {
   ImapManager, acquirePooledClient, releasePooledClient, evictPool, poolSizeFor,
   POOL_SIZE, ACQUIRE_TIMEOUT_MS, BACKGROUND_ACQUIRE_TIMEOUT_MS, POOLED_OPERATION_TIMEOUT_MS, BODY_FETCH_POOL_TIMEOUT_MS,
+  LONG_POOLED_OPERATION_TIMEOUT_MS,
 } from './imapManager.js';
 import { ImapFlow } from 'imapflow';
 import { query } from './db.js';
@@ -282,6 +283,33 @@ describe('a stalled pooled command', () => {
     const next = await acquirePooledClient(ACCOUNT);
     expect(next).not.toBe(sockets[0]);
     releasePooledClient(ACCOUNT, next);
+  });
+
+  it.each([
+    ['emptyFolder', mgr => mgr.emptyFolder(ACCOUNT, 'Trash')],
+    ['markAllReadImap', mgr => mgr.markAllReadImap(ACCOUNT, 'INBOX')],
+    ['appendToFolder', mgr => mgr.appendToFolder(ACCOUNT, 'Sent', Buffer.from('x'))],
+  ])('gives %s the long bound, not the default one', async (_name, run) => {
+    // Whole-folder writes and a large Sent upload legitimately take longer than the default;
+    // cutting them off at 120 s would leave a folder half emptied or lose the Sent copy.
+    hangOnLock();
+    ImapFlow.mockImplementation(function () {
+      const client = new EventEmitter();
+      client.connect = vi.fn(() => Promise.resolve());
+      client.close = vi.fn();
+      client.getMailboxLock = vi.fn(() => new Promise(() => {}));
+      client.append = vi.fn(() => new Promise(() => {}));
+      sockets.push(client);
+      return client;
+    });
+    const mgr = Object.create(ImapManager.prototype);
+    const outcome = settle(run(mgr));
+    await vi.advanceTimersByTimeAsync(POOLED_OPERATION_TIMEOUT_MS + 1000);
+    expect(sockets[0].close).not.toHaveBeenCalled();
+    await vi.advanceTimersByTimeAsync(LONG_POOLED_OPERATION_TIMEOUT_MS - POOLED_OPERATION_TIMEOUT_MS);
+    const { ok } = await outcome;
+    expect(ok).toBe(false);
+    expect(sockets[0].close).toHaveBeenCalled();
   });
 
   it('bounds a body fetch inside the route budget', async () => {

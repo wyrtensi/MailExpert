@@ -1326,7 +1326,7 @@ export const POOLED_OPERATION_TIMEOUT_MS = 120000;
 // at about the time the reader is told it failed.
 export const BODY_FETCH_POOL_TIMEOUT_MS = 30000;
 // Whole-account or whole-folder background passes.
-const LONG_POOLED_OPERATION_TIMEOUT_MS = 5 * 60 * 1000;
+export const LONG_POOLED_OPERATION_TIMEOUT_MS = 5 * 60 * 1000;
 
 export function poolSizeFor(account) {
   return providerProfile(account).poolSize ?? POOL_SIZE;
@@ -1862,6 +1862,10 @@ export class ImapManager {
     // one re-reads the flags of a whole folder, so they get the same per-host bound of their own.
     this._integritySem = createKeyedSemaphore(host => backgroundConnectionLimit(host));
     this._connectCooldown = new Map(); // accountId -> { until: ms, failures: number } after connection refusals
+    // accountId -> { until, failures } after the folder status client's login was rejected while
+    // the persistent connection stayed up (see _withCountClient). Present = that login is known
+    // to be rejected; removed when it succeeds again or on clearConnectCooldown.
+    this._statusAuthCooldown = new Map();
     // accountId -> the value last persisted to email_accounts.sync_error: a string (error is
     // showing), null (known clear), or absent (unknown — e.g. just after a restart, where the
     // DB may still hold a stale error, so the next call writes through unconditionally).
@@ -2760,6 +2764,22 @@ export class ImapManager {
   // now succeed — so that attempt is not silently skipped by the cooldown gate in connectAccount.
   clearConnectCooldown(accountId) {
     this._connectCooldown.delete(accountId);
+    this._statusAuthCooldown?.delete(accountId);
+  }
+
+  // The folder status client's login was rejected while the account's persistent connection is
+  // still up. The account-wide auth cooldown would stop the healthy sync tick and new-mail
+  // handling, so this status-only cooldown takes the same ladder (authCooldownMs: 30 min doubling
+  // to 6 h) for the status client alone. Without it the status monitor retried the rejected login
+  // on its own backoff (capped at 10 min), about six failed logins an hour for as long as the
+  // password stayed wrong: exactly what gets a server IP banned by fail2ban on mailcow-style
+  // hosts. Returns the delay in ms.
+  _noteStatusAuthFailure(account) {
+    const failures = (this._statusAuthCooldown.get(account.id)?.failures || 0) + 1;
+    const ms = authCooldownMs(failures);
+    this._statusAuthCooldown.set(account.id, { until: Date.now() + ms, failures });
+    console.warn(`Folder status login rejected for ${logAccount(account)} while its persistent connection is up — status checks paused for ${Math.round(ms / 60000)}m (attempt #${failures}); sync continues on the persistent connection`);
+    return ms;
   }
 
   // Persist an account failure so the UI can show it, and push it to the client live. Every path
@@ -2810,6 +2830,10 @@ export class ImapManager {
     // not one of them was ever surfaced, otherwise deferred failures accumulate across hours of
     // healthy operation and the next isolated refusal reports immediately.
     this._accountErrorStreak.delete(account.id);
+    // A rejected status-client login is still true while the persistent connection syncs fine, so
+    // the sync tick's success must not wipe it every minute; it clears when that login succeeds
+    // again (or the credentials are edited, clearConnectCooldown).
+    if (this._statusAuthCooldown?.has(account.id)) return;
     const prev = this._syncErrorState.get(account.id);
     if (prev === null) return;
     try {
@@ -3309,6 +3333,8 @@ export class ImapManager {
     try {
       const cooldown = this._connectCooldown.get(account.id);
       if (cooldown && Date.now() < cooldown.until) throw new Error('Provider connection cooldown active');
+      const statusCooldown = this._statusAuthCooldown?.get(account.id);
+      if (statusCooldown && Date.now() < statusCooldown.until) throw new Error('Folder status login cooldown active');
       const { rows: [current] } = await query('SELECT * FROM email_accounts WHERE id=$1 AND enabled', [account.id]);
       // A flagged OAuth account stays offline until reconsent (also after a restart).
       if (!current || current.oauth_reconnect_required) return;
@@ -3317,11 +3343,14 @@ export class ImapManager {
         // A timed-out command may still be running on a session whose job failed, so it is
         // never handed on: withFreshClient evicts a session whose callback threw, and
         // releasePooledClient closes it (close(), not LOGOUT, which would queue behind it).
-        return await withFreshClient(current, fn, { background: true });
+        const pooledResult = await withFreshClient(current, fn, { background: true });
+        await this._noteStatusLoginOk(account);
+        return pooledResult;
       }
       const fresh = await ensureFreshToken(current);
       const { resolved, policy } = await raceTimeout(resolveAccountHost(fresh), 15000, 'Count host resolve');
       client = await connectImapClient(fresh, resolved, { policy }, 25000, 'Folder status connect');
+      await this._noteStatusLoginOk(account);
       return await fn(client);
     } catch (err) {
       if (await this._handleOAuthRefreshFailure(account, err)) throw err;
@@ -3333,7 +3362,10 @@ export class ImapManager {
       // minutes to 6 hours, without recording anything. The persistent connection's own
       // reconnect path arms the ladder if the credentials really are gone.
       if (isImapAuthFailure(err) && this.connections.has(account.id)) {
-        console.warn(`Folder status login rejected for ${logAccount(account)} while its persistent connection is up; not arming the auth cooldown: ${extractImapError(err)}`);
+        // Status-only ladder instead, and say so in the sidebar: the rejected login is real even
+        // though mail still arrives, and someone has to fix the password.
+        this._noteStatusAuthFailure(account);
+        await this._recordAccountError(account, extractImapError(err));
       } else {
         this._noteLoginFailure(account, err);
       }
@@ -3342,6 +3374,12 @@ export class ImapManager {
       if (client) { try { client.close(); } catch { /* already closed */ } }
       if (!pooled) this._bgConnSem.release(host);
     }
+  }
+
+  // The status client logged in: a status-only auth cooldown (and the error it recorded) is over.
+  async _noteStatusLoginOk(account) {
+    if (!this._statusAuthCooldown?.delete(account.id)) return;
+    await this._clearAccountError(account);
   }
 
   _queueObservedFolder(account, path, status) {
@@ -5405,11 +5443,13 @@ export class ImapManager {
 
   async appendToFolder(account, folder, rawMessage, flags = ['\\Seen']) {
     let uid = null;
+    // Long bound: a large message (the Sent copy of a mail with attachments) can take a while
+    // to upload, and cutting it off would lose the Sent copy.
     await withFreshClient(account, async (client) => {
       const result = await client.append(folder, rawMessage, flags);
       if (result === false) throw new Error('IMAP append returned false — server did not confirm message was stored');
       if (result && typeof result.uid === 'number') uid = result.uid;
-    });
+    }, { timeoutMs: LONG_POOLED_OPERATION_TIMEOUT_MS });
     console.log(`Appended to IMAP ${logAccount(account)}/${folder} uid=${uid}`);
     return { uid, folder };
   }
@@ -6123,7 +6163,9 @@ export class ImapManager {
       } finally {
         lock.release();
       }
-    });
+      // Long bound: chunked deletes over a folder of thousands of messages (the route runs this
+      // in the background for that reason).
+    }, { timeoutMs: LONG_POOLED_OPERATION_TIMEOUT_MS });
   }
 
   // Apply a whole-folder IMAP write to every matching message in the currently-locked
@@ -6197,7 +6239,9 @@ export class ImapManager {
       } finally {
         lock.release();
       }
-    });
+      // Long bound: a STORE cut off partway is undone by the next flag sync, so give a large
+      // folder the time it needs.
+    }, { timeoutMs: LONG_POOLED_OPERATION_TIMEOUT_MS });
   }
 
   async moveMessage(account, uid, fromFolder, toFolder) {

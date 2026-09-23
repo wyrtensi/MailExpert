@@ -3182,6 +3182,62 @@ describe('connect paths back off on IMAP authentication failure', () => {
     expect(mgr._bgConnSem.activeCount('imap.example.com')).toBe(0);
   });
 
+  it('puts the status client alone on the auth ladder, records the error and keeps it through healthy syncs', async () => {
+    // A stale password while IDLE stays up: the status monitor must not retry the rejected login
+    // every few minutes forever (fail2ban on mailcow bans the server IP for that), and someone
+    // has to be told.
+    const mgr = newManager();
+    mgr.connections.set(acct.id, Object.assign(new EventEmitter(), { close: vi.fn() }));
+    query.mockImplementation(async (sql) => ({ rows: sql.startsWith('SELECT * FROM email_accounts') ? [acct] : [], rowCount: 1 }));
+    const before = Date.now();
+    await expect(mgr._withCountClient(acct, async () => {})).rejects.toThrow();
+    const cd = mgr._statusAuthCooldown.get(acct.id);
+    expect(cd.until).toBeGreaterThanOrEqual(before + AUTH_FAILURE_COOLDOWN_MS);
+    expect(syncErrorWrites()).toHaveLength(1);
+    expect(syncErrorWrites()[0][1][0]).toMatch(/AUTHENTICATIONFAILED/);
+
+    // Within the cooldown no login is attempted at all.
+    ImapFlow.mockClear();
+    await expect(mgr._withCountClient(acct, async () => {})).rejects.toThrow('Folder status login cooldown active');
+    expect(ImapFlow).not.toHaveBeenCalled();
+
+    // A healthy sync tick does not wipe the recorded error while the status login stays rejected.
+    await mgr._clearAccountError(acct);
+    expect(query.mock.calls.some(([sql]) => sql.startsWith('UPDATE email_accounts SET sync_error = NULL'))).toBe(false);
+
+    // The next rejection after expiry climbs the ladder: one hour.
+    cd.until = 0;
+    const again = Date.now();
+    await expect(mgr._withCountClient(acct, async () => {})).rejects.toThrow();
+    expect(mgr._statusAuthCooldown.get(acct.id).until).toBeGreaterThanOrEqual(again + 2 * AUTH_FAILURE_COOLDOWN_MS);
+    // The account-wide ladder, which would stop the sync tick, is still untouched.
+    expect(mgr._connectCooldown.has(acct.id)).toBe(false);
+  });
+
+  it('lifts the status-only cooldown and the error once the status login works again', async () => {
+    const mgr = newManager();
+    mgr.connections.set(acct.id, Object.assign(new EventEmitter(), { close: vi.fn() }));
+    query.mockImplementation(async (sql) => ({ rows: sql.startsWith('SELECT * FROM email_accounts') ? [acct] : [], rowCount: 1 }));
+    await expect(mgr._withCountClient(acct, async () => {})).rejects.toThrow();
+    mgr._statusAuthCooldown.get(acct.id).until = 0;
+    connectError = null;
+    ImapFlow.mockImplementation(function () {
+      return Object.assign(new EventEmitter(), { connect: vi.fn().mockResolvedValue(), close: vi.fn(), logout: vi.fn() });
+    });
+    await mgr._withCountClient(acct, async () => {});
+    expect(mgr._statusAuthCooldown.has(acct.id)).toBe(false);
+    expect(query.mock.calls.some(([sql]) => sql.startsWith('UPDATE email_accounts SET sync_error = NULL'))).toBe(true);
+  });
+
+  it('lets an explicit reconnect or settings save lift the status-only cooldown too', async () => {
+    const mgr = newManager();
+    mgr.connections.set(acct.id, Object.assign(new EventEmitter(), { close: vi.fn() }));
+    query.mockImplementation(async (sql) => ({ rows: sql.startsWith('SELECT * FROM email_accounts') ? [acct] : [], rowCount: 1 }));
+    await expect(mgr._withCountClient(acct, async () => {})).rejects.toThrow();
+    mgr.clearConnectCooldown(acct.id);
+    expect(mgr._statusAuthCooldown.has(acct.id)).toBe(false);
+  });
+
   it('arms the same cooldown and surfaces the error when a poll-only tick hits an auth failure', async () => {
     const mgr = newManager();
     const before = Date.now();

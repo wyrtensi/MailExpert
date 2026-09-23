@@ -1374,7 +1374,7 @@ export default function ComposeModal() {
               }}
             />
           ) : (
-            <div className="tiptap-compose" style={{ flex: '1 0 auto', minHeight: 200, display: 'flex', flexDirection: 'column' }}>
+            <div className="tiptap-compose reading-card" style={{ flex: '1 0 auto', minHeight: 200, display: 'flex', flexDirection: 'column', background: 'var(--bg-secondary)' }}>
               <RichToolbar editor={editor} onAttach={() => fileInputRef.current?.click()}
                 htmlMode={htmlMode}
                 onToggleHtml={() => {

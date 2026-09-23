@@ -1187,8 +1187,13 @@ export default function Sidebar() {
             the selection or unread counts. The "+" next to it is a second, more discoverable
             entry point into the same add-account flow the user menu's "Add account" triggers
             (openAddAccount sets addAccountRequested, which AdminPanel's AccountsTab consumes). */}
+        {/* Sticky: the filter stays in reach while the list of mailboxes scrolls under it. It runs
+            to the nav's edges (the negative margins undo its padding) so rows do not show through. */}
         {showAccountFilter && (
-          <div style={{ position: 'relative', margin: '2px 2px 6px', display: 'flex', alignItems: 'center', gap: 6 }}>
+          <div style={{
+            position: 'sticky', top: -4, zIndex: 2, background: 'var(--bg-secondary)',
+            margin: '0 -8px 4px', padding: '6px 10px', display: 'flex', alignItems: 'center', gap: 6,
+          }}>
             <input
               type="search"
               value={accountFilter}

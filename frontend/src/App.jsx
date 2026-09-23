@@ -9,6 +9,7 @@ import LoginPage from './components/LoginPage.jsx';
 import GoogleLoginPage from './components/GoogleLoginPage.jsx';
 import { isGoogleAuthMode } from './utils/authMode.js';
 import { isDemoMode } from './demo/mode.js';
+import { needsLanguageChoice } from './utils/language.js';
 import MailApp from './components/MailApp.jsx';
 import LockScreen from './components/LockScreen.jsx';
 
@@ -59,6 +60,8 @@ export default function App() {
     if (isDemoMode) {
       // The demo is about conversations: it opens threaded unless this browser chose otherwise.
       if (localStorage.getItem('mailexpert_threaded_view') === null) useStore.getState().setThreadedView(true);
+      // No preferences to load in the demo: this browser's own choice is all there is.
+      if (needsLanguageChoice({ stored: localStorage.getItem('mailexpert_language') })) useStore.getState().setLanguagePickerOpen(true);
       setUser(demoUser);
       setLocked(false);
       // Theme, font, and layout were applied above from localStorage. Do not use

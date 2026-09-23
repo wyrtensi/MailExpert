@@ -188,7 +188,10 @@
     "recipientMenu": {
       "copy": "Copy address",
       "copyAll": "Copy all in this field"
-    }
+    },
+    "signatureLabel": "Signature",
+    "signatureHint": "Added at the end of the letter. In the plain-text copy a \"-- \" line goes before it, so mail programs recognise the signature and leave it out of quotes in replies.",
+    "priorityHint": "Marks the letter as important or unimportant (X-Priority and Importance headers). Outlook and Thunderbird show the mark; Gmail does not."
   },
   "message": {
     "find": {
@@ -313,6 +316,23 @@
       },
       "conversationCount_one": "{{count}} letter in this conversation",
       "conversationCount_other": "{{count}} letters in this conversation"
+    },
+    "toolbar": {
+      "reply": "Reply",
+      "replyAll": "Reply all",
+      "forward": "Forward",
+      "archive": "Archive",
+      "move": "Move",
+      "delete": "Delete",
+      "spam": "Spam",
+      "notSpam": "Not spam",
+      "task": "Task",
+      "unread": "Unread",
+      "headers": "Headers",
+      "print": "Print",
+      "ai": "AI",
+      "star": "Star",
+      "unstar": "Unstar"
     }
   },
   "messageList": {
@@ -988,7 +1008,7 @@
       "languageDescription": "Choose the display language for the interface",
       "fontSize": "Font Size",
       "fontSizeDescription": "Scale the interface text. 100% is the default.",
-      "fontSizeReset": "Reset to 100%",
+      "fontSizeReset": "Reset to {{percent}}%",
       "customCss": "Custom CSS",
       "customCssDescription": "Inject additional CSS after the active theme. Use CSS custom properties (e.g. --accent, --bg-primary) to override theme values, or add your own rules. Applied to all users.",
       "customCssPlaceholder": ":root {\n  --accent: #e74c3c;\n}",
@@ -1922,5 +1942,9 @@
     "copyFailed": "Copy failed",
     "generating": "Generating report…",
     "error": "Could not generate the report."
+  },
+  "languagePicker": {
+    "title": "Choose the interface language",
+    "hint": "You can change it later in Settings"
   }
 }

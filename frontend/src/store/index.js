@@ -4,10 +4,10 @@ import { mergeCountSnapshots, adjustCountPending, expireCountPending, settleCoun
 import { resolveSelectedAccount, pruneFolders } from '../utils/accountScope.js';
 import { withProvisionalHealth } from '../utils/accountHealth.js';
 import { applyTheme, applyCustomCss, getInitialTheme } from '../themes.js';
-import { applyFontSet, applyFontSize, effectiveFontSet, isRetroFont, THEME_FONT } from '../fonts.js';
+import { applyFontSet, applyFontSize, effectiveFontSet, isRetroFont, THEME_FONT, DEFAULT_FONT_SIZE } from '../fonts.js';
 import { applyLayout, normalizeLayout } from '../layouts.js';
 import { DEFAULT_AI_ACTIONS } from '../aiActions.js';
-import { normalizeLanguage } from '../utils/language.js';
+import { needsLanguageChoice, normalizeLanguage } from '../utils/language.js';
 import { abortAllRuns } from '../aiRuns.js';
 import {
   removeGtdThreadFromSections,
@@ -400,7 +400,8 @@ export const useStore = create((set, get) => ({
   }),
   sidebarWidth: (() => {
     const n = parseInt(localStorage.getItem('mailexpert_sidebar_width'));
-    return (n >= 160 && n <= 400) ? n : 240;
+    // 280 leaves room for a mailbox name and most addresses at the default 110% scale.
+    return (n >= 160 && n <= 400) ? n : 280;
   })(),
   setSidebarWidth: (w) => {
     localStorage.setItem('mailexpert_sidebar_width', String(w));
@@ -578,6 +579,9 @@ export const useStore = create((set, get) => ({
     i18n.changeLanguage(lng);
     schedulePrefSave({ language: lng });
   },
+  // The first-entry language picker (components/LanguagePicker.jsx).
+  languagePickerOpen: false,
+  setLanguagePickerOpen: (open) => set({ languagePickerOpen: open }),
 
   // Threaded view
   threadedView: localStorage.getItem('mailexpert_threaded_view') === 'true',
@@ -703,7 +707,7 @@ export const useStore = create((set, get) => ({
     schedulePrefSave({ font: fontSet });
   },
 
-  fontSize: parseInt(localStorage.getItem('mailexpert_font_size')) || 100,
+  fontSize: parseInt(localStorage.getItem('mailexpert_font_size')) || DEFAULT_FONT_SIZE,
   setFontSize: (pct) => {
     localStorage.setItem('mailexpert_font_size', String(pct));
     set({ fontSize: pct });
@@ -1066,7 +1070,7 @@ export const useStore = create((set, get) => ({
       // paired font overrides the saved font on load.
       applyFontSet(effectiveFontSet(get().theme, get().fontSet));
       if (prefs.fontSize) {
-        const n = parseInt(prefs.fontSize) || 100;
+        const n = parseInt(prefs.fontSize) || DEFAULT_FONT_SIZE;
         localStorage.setItem('mailexpert_font_size', String(n));
         set({ fontSize: n });
         applyFontSize(n);
@@ -1151,6 +1155,8 @@ export const useStore = create((set, get) => ({
         localStorage.setItem('mailexpert_language', language);
         set({ language });
         i18n.changeLanguage(language);
+      } else if (needsLanguageChoice({ stored: localStorage.getItem('mailexpert_language'), synced: prefs.language })) {
+        set({ languagePickerOpen: true });
       }
       if (typeof prefs.threadedView === 'boolean') {
         localStorage.setItem('mailexpert_threaded_view', String(prefs.threadedView));

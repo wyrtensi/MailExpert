@@ -44,7 +44,7 @@ export default function SenderHistory({ messageId, onOpen, onSearch }) {
   const more = moreCount(history);
 
   return (
-    <div style={{ marginBottom: 16, border: '1px solid var(--border-subtle)', borderRadius: 8 }}>
+    <div className="reading-card" style={{ marginBottom: 16, border: '1px solid var(--border-subtle)', borderRadius: 8 }}>
       <button
         type="button"
         onClick={() => setOpen((v) => !v)}

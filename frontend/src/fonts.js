@@ -434,6 +434,12 @@ export function applyFontSet(fontKey) {
   }
 }
 
+// The interface scale a new browser starts at, in percent. The screens are drawn mostly at 13px
+// with 11-12px secondary text; 110% brings body text to 14.3px and the smallest labels to 12.1px,
+// over the usual floors of 14px for reading and 12px for any text, while a 1366px laptop still
+// fits the three panes.
+export const DEFAULT_FONT_SIZE = 110;
+
 // Font size scaling is applied reactively in MailApp via the store's fontSize
 // value using CSS transform, so no root-level changes are needed here.
 export function applyFontSize() {}

@@ -1,7 +1,7 @@
 // Run with: node --test src/themes.test.js
 import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
-import { THEMES } from './themes.js';
+import { DEFAULT_THEME, THEMES, getInitialTheme, themeCss } from './themes.js';
 
 const names = Object.keys(THEMES);
 
@@ -42,5 +42,23 @@ describe('THEMES CSS-var contract', () => {
       assert.ok(Array.isArray(THEMES[name].preview), `${name} preview must be an array`);
       assert.equal(THEMES[name].preview.length, arity, `${name} preview arity differs from ${reference}`);
     }
+  });
+});
+
+describe('Daylight and Dusk', () => {
+  it('lead the picker, and a new browser starts on Daylight', () => {
+    assert.deepEqual(names.slice(0, 2), ['daylight', 'dusk']);
+    assert.equal(DEFAULT_THEME, 'daylight');
+    assert.equal(getInitialTheme(), 'daylight');
+  });
+
+  it('Dusk puts the letter cards on light paper, other themes leave them alone', () => {
+    const css = themeCss(THEMES.dusk);
+    assert.match(css, /^:root \{/);
+    assert.match(css, /\.msg-card, \.reading-card \{[^}]*--bg-secondary: #ffffff;/);
+    for (const key of Object.keys(THEMES.dusk.cardVars)) {
+      assert.ok(canonicalVars.includes(key), `${key} is not a theme variable`);
+    }
+    assert.doesNotMatch(themeCss(THEMES.daylight), /msg-card/);
   });
 });

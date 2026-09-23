@@ -1438,8 +1438,8 @@ export default function ComposeModal() {
           {/* Signature */}
           {(fromSignature || draftSignature != null) && (
             <div style={{ padding: '0 16px 12px' }}>
-              <div style={{ fontSize: 11, color: 'var(--text-tertiary)', margin: '8px 0 6px', userSelect: 'none' }}>
-                -- signature
+              <div title={t('compose.signatureHint')} style={{ fontSize: 12, color: 'var(--text-tertiary)', margin: '8px 0 6px', userSelect: 'none' }}>
+                {t('compose.signatureLabel')}
               </div>
               {renderSignatureEditor()}
             </div>
@@ -2086,8 +2086,8 @@ export default function ComposeModal() {
 
         {(fromSignature || draftSignature != null) ? (
           <div style={{ padding: '0 14px 10px' }}>
-            <div style={{ fontSize: 11, color: 'var(--text-tertiary)', marginBottom: 6, userSelect: 'none' }}>
-              -- signature
+            <div title={t('compose.signatureHint')} style={{ fontSize: 12, color: 'var(--text-tertiary)', marginBottom: 6, userSelect: 'none' }}>
+              {t('compose.signatureLabel')}
             </div>
             {renderSignatureEditor()}
           </div>
@@ -2170,12 +2170,15 @@ export default function ComposeModal() {
 
         {error && <span style={{ fontSize: 12, color: 'var(--red)', flex: 1 }}>{error}</span>}
 
+        <label htmlFor="compose-priority" title={t('compose.priorityHint')} style={{ marginLeft: 'auto', fontSize: 12, color: 'var(--text-tertiary)' }}>
+          {t('compose.priority')}
+        </label>
         <select
+          id="compose-priority"
           value={priority}
           onChange={e => setPriority(e.target.value)}
-          title={t('compose.priority')}
+          title={t('compose.priorityHint')}
           style={{
-            marginLeft: 'auto',
             background: 'var(--bg-tertiary)', border: '1px solid var(--border)',
             borderRadius: 4, fontSize: 11, padding: '2px 4px',
             cursor: 'pointer', outline: 'none',

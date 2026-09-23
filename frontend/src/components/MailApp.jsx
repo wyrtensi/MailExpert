@@ -19,6 +19,7 @@ import CommandPalette from './CommandPalette.jsx';
 import DemoBadge from './DemoBadge.jsx';
 import { usePluginSlot, PluginRuntime } from '../plugins/PluginSlot.jsx';
 import { isDemoMode } from '../demo/mode.js';
+import LanguagePicker from './LanguagePicker.jsx';
 
 const ContactsPage = lazy(() => import('./ContactsPage.jsx'));
 const WindowLayer  = lazy(() => import('./WindowLayer.jsx'));
@@ -78,6 +79,8 @@ export default function MailApp() {
   const syncInterval = useStore(s => s.syncInterval);
   const autoLockMinutes = useStore(s => s.autoLockMinutes);
   const lockScreen = useStore(s => s.lockScreen);
+  const languagePickerOpen = useStore(s => s.languagePickerOpen);
+  const setLanguagePickerOpen = useStore(s => s.setLanguagePickerOpen);
 
   // Auto-lock after inactivity (#235). MailApp only mounts while unlocked, so this
   // timer runs only when unlocked; hitting the timeout locks and unmounts this tree.
@@ -932,6 +935,7 @@ export default function MailApp() {
       <PluginRuntime />
       <CommandPalette open={paletteOpen} onClose={() => setPaletteOpen(false)} />
       {isDemoMode && <DemoBadge enabled={isDemoMode} />}
+      {languagePickerOpen && <LanguagePicker onDone={() => setLanguagePickerOpen(false)} />}
 
       {/* Keyboard shortcut help overlay — toggled by the '?' key */}
       {showShortcutHelp && (

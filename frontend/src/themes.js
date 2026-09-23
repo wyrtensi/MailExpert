@@ -62,6 +62,8 @@ export const THEMES = {
       '--text-tertiary': '#6b7385',
       '--accent': '#3d63dd',
       '--accent-text': '#ffffff',
+      '--accent-dim': '#e3e9fb',
+      '--accent-glow': 'rgba(61,99,221,0.12)',
       '--green': '#1f8a4c',
       '--red': '#c93c3c',
       '--amber': '#b7791f',

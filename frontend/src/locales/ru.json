@@ -341,6 +341,11 @@
       "ai": "ИИ",
       "star": "Отметить",
       "unstar": "Снять отметку"
+    },
+    "mailbox": {
+      "deliveredTo": "Пришло в ящик",
+      "sentFrom": "Отправлено из ящика",
+      "via": "на адрес {{address}}"
     }
   },
   "messageList": {

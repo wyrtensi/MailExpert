@@ -14,6 +14,7 @@ import { getResults, removeResult } from '../aiResults.js';
 import { startRun, cancelRun, getAiState, subscribeRuns } from '../aiRuns.js';
 import { renderMarkdown } from '../utils/renderMarkdown.js';
 import { pickReplyAlias } from '../utils/replyAlias.js';
+import { mailboxBanner } from '../utils/mailboxBanner.js';
 import SenderHistory from './SenderHistory.jsx';
 import { measureContentHeight, createHeightController, forceEagerImages } from '../utils/emailFrameHeight.js';
 import { copyToClipboard } from '../utils/clipboard.js';
@@ -2530,6 +2531,36 @@ ${bodyContent}
           overflow: 'hidden',
           boxShadow: isMobile ? 'none' : 'var(--shadow-soft), inset 0 1px 0 rgba(255,255,255,0.04)',
         }}>
+          {/* Which mailbox this letter is in: with many shared mailboxes it leads the card. */}
+          {(() => {
+            const account = accounts.find(a => a.id === message.account_id);
+            const banner = mailboxBanner(message, account);
+            const color = message.account_color || account?.color || 'var(--accent)';
+            return (
+              <div style={{
+                display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap',
+                padding: '9px 16px', borderBottom: '1px solid var(--border-subtle)',
+                background: `color-mix(in srgb, ${color} 10%, transparent)`,
+              }}>
+                <span aria-hidden style={{ width: 10, height: 10, borderRadius: '50%', background: color, flexShrink: 0 }} />
+                <span style={{ fontSize: 12, color: 'var(--text-tertiary)' }}>
+                  {banner.direction === 'out' ? t('message.mailbox.sentFrom') : t('message.mailbox.deliveredTo')}
+                </span>
+                <span style={{ fontSize: 14, fontWeight: 600, color: 'var(--text-primary)' }}>
+                  {message.account_name || account?.name}
+                </span>
+                <span style={{ fontSize: 13, color: 'var(--text-secondary)' }}>
+                  {message.account_email || account?.email_address}
+                </span>
+                {banner.via && (
+                  <span style={{ fontSize: 13, color: 'var(--text-secondary)' }}>
+                    {t('message.mailbox.via', { address: banner.via })}
+                  </span>
+                )}
+              </div>
+            );
+          })()}
+
           {/* Subject */}
           <div style={{
             padding: '14px 16px 12px',
@@ -2609,11 +2640,6 @@ ${bodyContent}
                     <div style={{ ...line, marginTop: 6, display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap' }}>
                       <span style={{ whiteSpace: 'nowrap' }}>
                         {message.date ? format(new Date(message.date), isMobile ? 'MMM d, h:mm a' : 'MMM d, yyyy h:mm a') : ''}
-                      </span>
-                      <span aria-hidden style={{ color: 'var(--border)' }}>·</span>
-                      <span style={{ display: 'inline-flex', alignItems: 'center', gap: 5, minWidth: 0 }}>
-                        <span style={{ width: 8, height: 8, borderRadius: '50%', flexShrink: 0, background: message.account_color || 'var(--accent)' }} />
-                        <span style={{ color: 'var(--text-secondary)', overflow: 'hidden', textOverflow: 'ellipsis' }}>{message.account_name}</span>
                       </span>
                     </div>
                   </>

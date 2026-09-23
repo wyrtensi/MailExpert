@@ -3170,6 +3170,18 @@ describe('connect paths back off on IMAP authentication failure', () => {
     expect(mgr._bgConnSem.activeCount('imap.example.com')).toBe(0);
   });
 
+  it('does not arm the auth cooldown from the folder status client while the persistent connection is up', async () => {
+    // Gmail runs folder status on the pool. One rejected pool grow (e.g. a transient
+    // AUTHENTICATIONFAILED right after a token refresh) must not stop the sync tick and new-mail
+    // handling of an account whose persistent connection is working, for 30 min to 6 h.
+    const mgr = newManager();
+    mgr.connections.set(acct.id, Object.assign(new EventEmitter(), { close: vi.fn() }));
+    query.mockImplementation(async (sql) => ({ rows: sql.startsWith('SELECT * FROM email_accounts') ? [acct] : [] }));
+    await expect(mgr._withCountClient(acct, async () => {})).rejects.toThrow();
+    expect(mgr._connectCooldown.has(acct.id)).toBe(false);
+    expect(mgr._bgConnSem.activeCount('imap.example.com')).toBe(0);
+  });
+
   it('arms the same cooldown and surfaces the error when a poll-only tick hits an auth failure', async () => {
     const mgr = newManager();
     const before = Date.now();

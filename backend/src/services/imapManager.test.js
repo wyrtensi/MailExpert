@@ -3423,7 +3423,7 @@ describe('Yahoo connection budget (#433)', () => {
 
   it('sizes the body-fetch pool from the provider profile', () => {
     expect(poolSizeFor(yahoo)).toBe(1);
-    expect(poolSizeFor({ imap_host: 'imap.example.com' })).toBe(2);
+    expect(poolSizeFor({ imap_host: 'imap.example.com' })).toBe(4);
   });
 
   it('skips the staleness probe while the Yahoo background connection is busy', async () => {

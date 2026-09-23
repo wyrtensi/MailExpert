@@ -1031,7 +1031,7 @@ const PROVIDERS = {
     //                             is reliable.
     //   preferFreshBodyFetch    — user/new-mail body fetches use a brand-new login instead of
     //                             the shared pool, so they neither contend with flag writes on
-    //                             the size-2 pool nor inherit a frozen pooled session view.
+    //                             the shared pool nor inherit a frozen pooled session view.
     //   usesIdle + idleKeepaliveMs — one IDLE connection pushes new mail; re-issued every 4 min
     //                             so the socket stays alive. maxSyncIntervalMs is now a backstop.
     batchSize: 100, batchDelay: 1500, errorDelay: 15000, batchesPerConn: 15,
@@ -1240,7 +1240,29 @@ export function connectStaggerFor(profile, accountCount) {
 
 // Per-account connection pool for body fetches — avoids TLS handshake on every click
 const connectionPools = new Map(); // accountId -> { clients: [], waiting: [] }
-const POOL_SIZE = 2;
+
+// Pooled connections per account when the provider profile sets no poolSize. With the one
+// persistent IDLE connection that puts an account at 5: Thunderbird's per-server default,
+// under Dovecot's mail_max_userip_connections default of 10.
+//
+// Raised from 2 in the same change that made a full pool queue instead of opening a temporary
+// login per waiter (upstream #474). The two go together: while that overflow existed the pool
+// size was not a ceiling, only the point where fan-out began. Now that it is a real ceiling, 2
+// would funnel every operation on an account through two connections.
+//
+// Only the default moves. Gmail keeps its profile value (3): one server runs up to 100 Gmail
+// accounts from one IP, and every extra pooled session is another sign-in from that IP. Yahoo
+// keeps 1 for its three-session limit.
+export const POOL_SIZE = 4;
+
+// How long an operation waits for a pooled connection before failing with poolExhausted.
+// Longer than the 30s commandTimeout that frees a stalled connection, so a caller queued
+// behind a stall is normally served rather than failing just before the slot frees.
+export const ACQUIRE_TIMEOUT_MS = 35000;
+
+// Background work (the folder status monitor, integrity sync) gives up sooner: it would rather
+// skip a cycle than hold a queue position the reader's own clicks are waiting behind.
+export const BACKGROUND_ACQUIRE_TIMEOUT_MS = 10000;
 
 export function poolSizeFor(account) {
   return providerProfile(account).poolSize ?? POOL_SIZE;
@@ -1439,9 +1461,11 @@ function drainWaiters(pool) {
   }
 }
 
-// noTemp: when the pool stays full, reject instead of opening a temporary login. For background
-// work that would rather skip a cycle than add a login.
-async function acquirePooledClient(account, { noTemp = false } = {}) {
+// A full pool never opens another connection: the caller queues, and past the acquire timeout
+// the operation fails with poolExhausted. noTemp (background work) gives up after
+// BACKGROUND_ACQUIRE_TIMEOUT_MS instead of ACQUIRE_TIMEOUT_MS; the name predates the queue,
+// when it meant "reject instead of opening a temporary login", which is now what every caller gets.
+export async function acquirePooledClient(account, { noTemp = false } = {}) {
   const id = account.id;
   if (!connectionPools.has(id)) {
     connectionPools.set(id, { clients: [], inUse: new Set(), waiters: [], connecting: 0, idleTimers: new Map() });
@@ -1458,7 +1482,9 @@ async function acquirePooledClient(account, { noTemp = false } = {}) {
 
   // Grow pool if under limit — refresh token before creating a new connection. The slot is
   // reserved before the first await: otherwise every caller in a burst passes this check while
-  // the first connect is still running, and the pool opens one login per request.
+  // the first connect is still running, and the pool opens one login per request. This counter
+  // is what makes the pool size a ceiling under concurrency (upstream measured 12 sockets on a
+  // pool of 4 without it); it is released on success and on failure alike.
   if (pool.clients.length + (pool.connecting || 0) < poolSizeFor(account)) {
     let client;
     pool.connecting = (pool.connecting || 0) + 1;
@@ -1490,48 +1516,52 @@ async function acquirePooledClient(account, { noTemp = false } = {}) {
     return client;
   }
 
-  // Pool full — queue a waiter; on 10s timeout fall back to a temporary client
+  // Pool full — wait for a slot. drainWaiters hands the next freed connection to the head of
+  // this queue, so the pool degrades into a queue rather than into more sockets.
+  //
+  // This used to open a temporary login after 10 seconds instead (upstream #474). Two stalled
+  // body fetches were enough: every operation queued behind them (mark-read, bulk-read, moves,
+  // pool pre-warm) gave up after 10s and logged in on its own, so demand became sockets with
+  // nothing bounding the count, and providers answer that by refusing everything. Mature
+  // clients queue here too: Thunderbird queues the URL, Evolution waits on a condition
+  // variable, offlineimap blocks on a bounded semaphore; RFC 2683 3.1.1 asks clients not to
+  // open extra connections to the same mailbox.
+  //
+  // A failed grow does not wake a waiter to try its own: that would be one fresh connect per
+  // queued waiter against a provider that just refused us. Waiters are served by a release or
+  // time out with poolExhausted, which callers surface as "busy, try again".
   return new Promise((resolve, reject) => {
     const entry = { resolve, reject, timer: null };
-    entry.timer = setTimeout(async () => {
+    entry.timer = setTimeout(() => {
       pool.waiters = pool.waiters.filter(w => w !== entry);
-      if (noTemp) {
-        recordImapEvent(account.imap_host, 'pool_busy');
-        reject(new Error('IMAP pool busy'));
-        return;
-      }
-      try {
-        const freshAccount = await ensureFreshToken(account);
-        const { resolved, policy } = await resolveAccountHost(freshAccount);
-        const tmp = await connectImapClient(freshAccount, resolved, { policy }, 30000, 'IMAP temp connect');
-        resolve(tmp);
-      } catch (err) {
-        await applyHelperOAuthFailure(account, err);
-        reject(err);
-      }
-    }, 10000);
+      recordImapEvent(account.imap_host, 'pool_busy');
+      const err = new Error('IMAP pool busy, please retry');
+      err.poolExhausted = true;
+      reject(err);
+    }, noTemp ? BACKGROUND_ACQUIRE_TIMEOUT_MS : ACQUIRE_TIMEOUT_MS);
     pool.waiters.push(entry);
   });
 }
 
-function releasePooledClient(account, client) {
+export function releasePooledClient(account, client) {
   const pool = connectionPools.get(account.id);
-  if (!pool) { client.logout().catch(() => {}); return; }
+  // close(), not logout(), for the same reason as every other teardown in this file: a wedged
+  // LOGOUT holds the socket until TCP death, and the connection counts against the provider's
+  // per-account limit the whole time. A client outside the pool was evicted after an error.
+  if (!pool) { try { client.close(); } catch { /* already closed */ } return; }
   pool.inUse.delete(client);
-  // If this client isn't in our pool (was a temp or already evicted on error),
-  // log it out. logout() is async — must use .catch() not try/catch.
   if (!pool.clients.includes(client)) {
-    client.logout().catch(() => {});
+    try { client.close(); } catch { /* already closed */ }
   } else {
     drainWaiters(pool);
     if (!pool.inUse.has(client)) armPoolIdleClose(pool, client, POOL_IDLE_MS);
   }
 }
 
-function evictPool(accountId) {
+export function evictPool(accountId) {
   const pool = connectionPools.get(accountId);
   if (!pool) return;
-  for (const c of pool.clients) { disarmPoolIdleClose(pool, c); c.logout().catch(() => {}); }
+  for (const c of pool.clients) { disarmPoolIdleClose(pool, c); try { c.close(); } catch { /* already closed */ } }
   const evictErr = new Error('IMAP pool evicted');
   for (const entry of pool.waiters) { clearTimeout(entry.timer); entry.reject(evictErr); }
   connectionPools.delete(accountId);
@@ -1543,10 +1573,10 @@ async function withFreshClient(account, fn, poolOpts) {
     return await fn(client);
   } catch (err) {
     // On error, evict this client from pool so next call gets a fresh one.
-    // Do not logout here — releasePooledClient in finally detects the client is
-    // no longer in pool.clients and calls logout exactly once.
+    // Do not close here — releasePooledClient in finally detects the client is
+    // no longer in pool.clients and closes it exactly once.
     // drainWaiters here so any queued caller gets an idle slot immediately rather
-    // than waiting the full 10-second overflow timeout.
+    // than waiting for the next release.
     const pool = connectionPools.get(account.id);
     if (pool) {
       pool.inUse.delete(client);
@@ -3158,15 +3188,10 @@ export class ImapManager {
       if (!current || current.oauth_reconnect_required) return;
       if (pooled) {
         // A busy pool skips this cycle (the monitor backs off) rather than opening a login.
-        return await withFreshClient(current, async pooledClient => {
-          try {
-            return await fn(pooledClient);
-          } catch (err) {
-            // A timed-out command may still be running on this session; never hand it on.
-            try { pooledClient.close(); } catch { /* already closed */ }
-            throw err;
-          }
-        }, { noTemp: true });
+        // A timed-out command may still be running on a session whose job failed, so it is
+        // never handed on: withFreshClient evicts a session whose callback threw, and
+        // releasePooledClient closes it (close(), not LOGOUT, which would queue behind it).
+        return await withFreshClient(current, fn, { noTemp: true });
       }
       const fresh = await ensureFreshToken(current);
       const { resolved, policy } = await raceTimeout(resolveAccountHost(fresh), 15000, 'Count host resolve');
@@ -5564,12 +5589,16 @@ export class ImapManager {
 
     // Providers flagged preferFreshBodyFetch (e.g. PurelyMail) skip the shared pool on the
     // FIRST attempt too: a brand-new login avoids both contending with flag writes on the
-    // size-2 pool and inheriting a frozen/half-open pooled session view that would hang the
+    // shared pool and inheriting a frozen/half-open pooled session view that would hang the
     // fetch until its command timeout. Other providers keep pool-first for TLS reuse.
     const firstAcquire = providerProfile(account).preferFreshBodyFetch ? withFreshLogin : withFreshClient;
     try {
       return await doFetch(firstAcquire);
     } catch (firstErr) {
+      // A full pool is our own connection budget, not a broken connection: never answer it with
+      // a fresh login (that is the overflow the queue exists to stop), and keep the flag so the
+      // route can say "busy, try again" instead of a generic error.
+      if (firstErr?.poolExhausted) throw firstErr;
       const detail = extractImapError(firstErr);
       // Retry once on any transient connection-level error (dead pool connection,
       // half-open TCP, NAT expiry, commandTimeout, socket reset, or an empty UID FETCH

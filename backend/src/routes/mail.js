@@ -578,6 +578,14 @@ router.get('/messages/:id/body', async (req, res) => {
         timeout: true,
       });
     }
+    // Our own connection budget, not the provider's: the account's pooled connections are all
+    // busy. Worth retrying, and nothing is broken, so say so rather than answer a generic 500.
+    if (err.poolExhausted) {
+      return res.status(503).json({
+        error: 'This account is busy with other mail operations. Please try again in a moment.',
+        busy: true,
+      });
+    }
     res.status(500).json({ error: msg });
   }
 });

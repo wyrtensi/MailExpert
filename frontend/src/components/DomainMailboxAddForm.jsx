@@ -104,6 +104,8 @@ export default function DomainMailboxAddForm({ accounts = [], onCreated }) {
         <div style={{ marginTop: 10, fontSize: 11, color: 'var(--text-tertiary)', lineHeight: 1.6 }}>
           {t('admin.accounts.add.domainNote')}
         </div>
+        {/* The account list can change while this step is open: say why Create went inactive. */}
+        {formError && <div role="alert" style={{ marginTop: 10, fontSize: 12, color: 'var(--red)' }}>{t(formError)}</div>}
         <div style={{ display: 'flex', gap: 8, marginTop: 16 }}>
           <button type="button" onClick={create} disabled={!canContinue} style={buttonStyle(true, canContinue)}>
             {busy ? t('admin.accounts.add.domainCreating') : t('admin.accounts.add.domainCreate')}
@@ -148,7 +150,7 @@ export default function DomainMailboxAddForm({ accounts = [], onCreated }) {
         id="domain-add-name"
         value={name}
         placeholder={t('admin.accounts.add.domainNamePh')}
-        onChange={(e) => setName(e.target.value)}
+        onChange={edit(setName)}
         style={inputStyle}
       />
 

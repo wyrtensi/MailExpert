@@ -567,11 +567,18 @@ function demoError(message, code) {
 const normalizeEmail = value => String(value ?? '').trim().toLowerCase();
 const mailboxWithEmail = email => ACCOUNT_FIXTURES.find(account => normalizeEmail(account.email_address) === normalizeEmail(email));
 
-// A new mailbox is not empty in the demo: one letter says it is ready.
+// A new mailbox is not empty in the demo: one letter says it is ready, threaded the way the
+// mailbox's mode would thread it.
 function welcomeLetter(account) {
   const sequence = nextMessageSequence++;
+  const id = `demo-${String(sequence).padStart(3, '0')}`;
+  const gmail = account.thread_mode === 'gmail';
+  const threadNumber = `19${String(sequence).padStart(17, '0')}`;
   messages.push(message({
-    id: `demo-${String(sequence).padStart(3, '0')}`, accountId: account.id,
+    ...(gmail
+      ? { threadId: `gmail:${threadNumber}`, reason: 'gmail-thrid', providerThreadId: threadNumber, providerMessageId: `${threadNumber}1` }
+      : { reason: 'new-root', threadId: `<${id}@demo.mailexpert.local>` }),
+    id, accountId: account.id,
     subject: 'Ящик подключён к MailExpert', fromName: 'MailExpert', fromEmail: 'noreply@demo.mailexpert.local',
     date: new Date().toISOString(), snippet: `Письма на ${account.email_address} теперь видны всей команде.`,
     category: 'automated',

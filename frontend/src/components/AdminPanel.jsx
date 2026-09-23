@@ -510,10 +510,10 @@ function AccountsTab() {
   const [addKind, setAddKind] = useState(null);
   const [googleStatus, setGoogleStatus] = useState(null);
   const [domainStatus, setDomainStatus] = useState(null);
+  // The statuses are cleared on the way out, so every opening starts from "loading" and no tab is
+  // picked from a stale or half-known status (an admin would see the manual form flash first).
   useEffect(() => {
     if (subview !== 'add') return;
-    setGoogleStatus(null);
-    setDomainStatus(null);
     api.getIntegrationsStatus()
       .then((data) => {
         setGoogleStatus(data?.google || { configured: false, available: false });
@@ -524,7 +524,12 @@ function AccountsTab() {
         setDomainStatus({ configured: false });
       });
   }, [subview]);
-  const closeAdd = useCallback(() => { setAddKind(null); setSubview('list'); }, []);
+  const closeAdd = useCallback(() => {
+    setAddKind(null);
+    setGoogleStatus(null);
+    setDomainStatus(null);
+    setSubview('list');
+  }, []);
 
   useEffect(() => {
     if (!addAccountRequested) return;
@@ -796,7 +801,7 @@ function AccountsTab() {
         </div>
         <AddAccountTabs
           options={addOptions}
-          active={addKind ?? defaultAddKind(addOptions)}
+          active={addKind ?? (googleStatus && domainStatus ? defaultAddKind(addOptions) : null)}
           onSelect={setAddKind}
           renderForm={(kind) => ADD_FORMS[kind]()}
         />

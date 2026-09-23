@@ -50,7 +50,12 @@ test('bulk delete removes Trash and Drafts messages but moves ordinary mail to T
   });
 
   assert.deepEqual(result, { ok: true, deleted: ['demo-001', 'demo-009', `demo-draft-${draft.uid}`] });
-  assert.equal((await demoRequest('GET', '/mail/messages/demo-001')).folder, 'Trash');
+  // Like the server, the Trash copy is a new row: the old id is gone, the letter (Message-ID) is in Trash.
+  assert.deepEqual(await demoRequest('GET', '/mail/messages/demo-001'), {});
+  const trash = await demoRequest('GET', '/mail/messages?accountId=demo-sales&folder=Trash');
+  const moved = trash.messages.find(m => m.message_id === '<demo-001@demo.mailexpert.local>');
+  assert.ok(moved);
+  assert.notEqual(moved.id, 'demo-001');
   assert.deepEqual(await demoRequest('GET', '/mail/messages/demo-009'), {});
   assert.deepEqual(await demoRequest('GET', `/mail/messages/demo-draft-${draft.uid}`), {});
 });
@@ -269,4 +274,16 @@ test('the demo connects a Gmail address in place of Google and refuses it twice'
     () => demoRequest('POST', '/oauth/google/start', { email: 'acme.archive.demo@gmail.com' }),
     err => err.code === 'already_connected',
   );
+});
+
+test('a letter deleted in the demo shows in Trash under a new id, as after an IMAP move', async () => {
+  await demoRequest('DELETE', '/mail/messages/demo-002');
+  const trash = await demoRequest('GET', '/mail/messages?accountId=demo-ops&folder=Trash');
+  const moved = trash.messages.find(m => m.message_id === '<demo-002@demo.mailexpert.local>');
+  assert.ok(moved, 'the letter is in Trash');
+  assert.notEqual(moved.id, 'demo-002');
+  // Deleting it again from Trash removes it for good.
+  await demoRequest('DELETE', `/mail/messages/${moved.id}`);
+  const after = await demoRequest('GET', '/mail/messages?accountId=demo-ops&folder=Trash');
+  assert.equal(after.messages.some(m => m.message_id === '<demo-002@demo.mailexpert.local>'), false);
 });

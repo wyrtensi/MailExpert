@@ -429,6 +429,15 @@ function moveMessages(ids, folder) {
   return updateMessages(ids, item => { item.folder = folder; });
 }
 
+// A letter moved to Trash is a new row on the server (the IMAP move gives it a new UID), so it
+// gets a new id here too. Keeping the old one hid it in Trash: the client guards a deleted id
+// for a few seconds so a stale refresh cannot bring it back (utils/pendingDeletes.js).
+let nextTrashSequence = 1;
+function moveToTrash(item) {
+  item.folder = 'Trash';
+  item.id = `${item.id.replace(/~trash\d+$/, '')}~trash${nextTrashSequence++}`;
+}
+
 function deleteMessages(ids) {
   const deleted = [];
   const remove = new Set();
@@ -437,7 +446,7 @@ function deleteMessages(ids) {
     if (!item) continue;
     deleted.push(id);
     if (item.folder === 'Trash' || item.folder === 'Drafts') remove.add(id);
-    else item.folder = 'Trash';
+    else moveToTrash(item);
   }
   if (remove.size) messages = messages.filter(item => !remove.has(item.id));
   return deleted;
@@ -837,7 +846,7 @@ export async function demoRequest(method, path, body = {}) {
     const id = decodeURIComponent(messageMatch[1]);
     const item = messageById(id);
     if (item?.folder === 'Trash' || item?.folder === 'Drafts') messages = messages.filter(candidate => candidate.id !== id);
-    else if (item) item.folder = 'Trash';
+    else if (item) moveToTrash(item);
     return { ok: true };
   }
 

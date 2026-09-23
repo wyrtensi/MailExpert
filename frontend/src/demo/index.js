@@ -300,7 +300,7 @@ const DEFAULT_PREFERENCES = {
   pageSize: 50,
   threadedView: true,
   categorizationEnabled: true,
-  blockRemoteImages: true,
+  blockRemoteImages: false,
   aiActions: [],
 };
 

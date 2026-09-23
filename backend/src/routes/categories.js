@@ -1,6 +1,6 @@
 import { Router } from 'express';
 import { query } from '../services/db.js';
-import { requireAuth } from '../middleware/auth.js';
+import { requireAuth, requireAdmin } from '../middleware/auth.js';
 import { invalidateSocialDomainCache, backfillCategories, aiClassifyMessage, BUILTIN_SETS, getGlobalCategorizationEnabled } from '../services/categorizer.js';
 import { validateHost } from '../services/hostValidation.js';
 import { safeFetch } from '../services/safeFetch.js';
@@ -77,7 +77,9 @@ router.get('/categories/sources', requireAuth, async (req, res) => {
 
 // ── Add source ────────────────────────────────────────────────────────────────
 
-router.post('/categories/sources', requireAuth, async (req, res) => {
+// Category sources and re-categorizing a mailbox change how every user's shared mail is sorted,
+// so they are administrators' settings (the Categories tab is hidden from other users too).
+router.post('/categories/sources', requireAdmin, async (req, res) => {
   const { sourceType, value, label } = req.body;
 
   if (!['manual', 'builtin', 'url'].includes(sourceType)) {
@@ -142,7 +144,7 @@ router.post('/categories/sources', requireAuth, async (req, res) => {
 
 // ── Toggle enabled ─────────────────────────────────────────────────────────────
 
-router.patch('/categories/sources/:id', requireAuth, async (req, res) => {
+router.patch('/categories/sources/:id', requireAdmin, async (req, res) => {
   const { enabled } = req.body;
   if (typeof enabled !== 'boolean') return res.status(400).json({ error: 'enabled must be boolean' });
 
@@ -160,7 +162,7 @@ router.patch('/categories/sources/:id', requireAuth, async (req, res) => {
 
 // ── Delete source ─────────────────────────────────────────────────────────────
 
-router.delete('/categories/sources/:id', requireAuth, async (req, res) => {
+router.delete('/categories/sources/:id', requireAdmin, async (req, res) => {
   const result = await query(
     'DELETE FROM category_list_sources WHERE id = $1 RETURNING id',
     [req.params.id]
@@ -173,7 +175,7 @@ router.delete('/categories/sources/:id', requireAuth, async (req, res) => {
 
 // ── Refresh URL subscription ──────────────────────────────────────────────────
 
-router.post('/categories/sources/:id/refresh', requireAuth, async (req, res) => {
+router.post('/categories/sources/:id/refresh', requireAdmin, async (req, res) => {
   const check = await query(
     'SELECT id, source_type, value FROM category_list_sources WHERE id = $1',
     [req.params.id]
@@ -197,7 +199,7 @@ router.post('/categories/sources/:id/refresh', requireAuth, async (req, res) => 
 
 // ── Re-categorize account messages ───────────────────────────────────────────
 
-router.post('/categories/recategorize/:accountId', requireAuth, async (req, res) => {
+router.post('/categories/recategorize/:accountId', requireAdmin, async (req, res) => {
   const check = await query(
     'SELECT id, categorization_enabled FROM email_accounts WHERE id = $1',
     [req.params.accountId]

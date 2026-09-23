@@ -358,7 +358,7 @@ router.put('/:id', async (req, res) => {
     if (r.requiresReconnect) pluginRequiresReconnect = true;
   }
 
-  const allowed = ['name', 'sender_name', 'color', 'enabled', 'include_in_unified_inbox', 'auth_user', 'auth_pass', 'sort_order', 'imap_host', 'imap_port', 'imap_tls', 'imap_skip_tls_verify', 'smtp_host', 'smtp_port', 'smtp_tls', 'smtp_auth_user', 'smtp_auth_pass', 'folder_mappings', 'signature', 'categorization_enabled'];
+  const allowed = ['name', 'sender_name', 'color', 'enabled', 'auth_user', 'auth_pass', 'sort_order', 'imap_host', 'imap_port', 'imap_tls', 'imap_skip_tls_verify', 'smtp_host', 'smtp_port', 'smtp_tls', 'smtp_auth_user', 'smtp_auth_pass', 'folder_mappings', 'signature', 'categorization_enabled'];
   const sets = [];
   const values = [];
   let i = 1;
@@ -368,7 +368,6 @@ router.put('/:id', async (req, res) => {
       const value = ((key === 'auth_pass' || key === 'smtp_auth_pass') && updates[key]) ? encrypt(updates[key])
         : (key === 'smtp_auth_user' || key === 'smtp_auth_pass') ? (updates[key] || null)
         : (key === 'signature') ? sanitizeSignature(updates[key]) || null
-        : (key === 'include_in_unified_inbox') ? !!updates[key]
         : updates[key];
       values.push(value);
     }

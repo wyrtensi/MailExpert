@@ -184,6 +184,34 @@ test('the demo sender history lists earlier letters with their direction, and fr
   assert.deepEqual(found.messages.map(m => m.id), ['demo-001']);
 });
 
+test('the demo contact letters cover every mailbox and report direction, counts and last contact', async () => {
+  // demo-contact-2 (Priya Shah) matches demo-004: received in the ops mailbox's inbox.
+  const letters = await demoRequest('GET', '/contacts/demo-contact-2/letters?limit=20&offset=0');
+  assert.equal(letters.received, 1);
+  assert.equal(letters.sent, 0);
+  assert.equal(letters.total, 1);
+  assert.deepEqual(letters.items.map(i => [i.id, i.account_id, i.direction]), [['demo-004', 'demo-ops', 'in']]);
+  assert.equal(letters.lastDate, letters.items[0].date);
+});
+
+test('the demo contact letters precedence matches mailboxBanner: an own address never counts as received', async () => {
+  // A contact whose address happens to equal one of our own mailboxes (demo-sales). demo-005 is
+  // that mailbox's own Sent reply to Maya — its from_email matches the contact's address, but an
+  // own address must win precedence and it's not addressed back to itself, so it must not appear
+  // at all (neither in nor out).
+  const contact = await demoRequest('POST', '/contacts', { displayName: 'Sales (self)', emails: [{ value: 'sales@demo.mailexpert.local' }] });
+  const letters = await demoRequest('GET', `/contacts/${contact.id}/letters?limit=20&offset=0`);
+  assert.equal(letters.items.some(i => i.id === 'demo-005'), false);
+  assert.equal(letters.total, 0);
+});
+
+test('the demo contact letters reject like the real 404 for an unknown contact', async () => {
+  await assert.rejects(
+    () => demoRequest('GET', '/contacts/does-not-exist/letters'),
+    /Contact not found/,
+  );
+});
+
 test('the demo threading diagnostics report the reply chain and letter count for a known message', async () => {
   const diagnostics = await demoRequest('GET', '/mail/messages/demo-005/threading');
   assert.equal(diagnostics.inReplyTo, '<demo-001@demo.mailexpert.local>');

@@ -1,6 +1,6 @@
 import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
-import { directionKey, hasSenderHistory, moreCount, senderSearchQuery } from './senderHistory.js';
+import { hasSenderHistory, moreCount, senderSearchQuery } from './senderHistory.js';
 
 const item = (id, direction = 'in') => ({ id, direction, subject: 's', date: '2026-09-01T00:00:00Z' });
 
@@ -10,18 +10,6 @@ describe('hasSenderHistory', () => {
     assert.equal(hasSenderHistory({ correspondent: null, total: 0, items: [] }), false);
     assert.equal(hasSenderHistory({ correspondent: 'maya@c.example', total: 0, items: [] }), false);
     assert.equal(hasSenderHistory(null), false);
-  });
-});
-
-describe('directionKey', () => {
-  it('marks letters from the person and letters to them differently', () => {
-    assert.equal(directionKey('in'), 'message.senderHistory.incoming');
-    assert.equal(directionKey('out'), 'message.senderHistory.outgoing');
-    assert.notEqual(directionKey('in'), directionKey('out'));
-  });
-
-  it('treats an unknown direction as incoming', () => {
-    assert.equal(directionKey(undefined), 'message.senderHistory.incoming');
   });
 });
 

@@ -459,6 +459,13 @@ export const api = {
   createContact: (data)     => request('POST',   '/contacts', data),
   updateContact: (id, data) => request('PATCH',  `/contacts/${id}`, data),
   deleteContact: (id)       => request('DELETE', `/contacts/${id}`),
+  getContactLetters: (id, { limit, offset } = {}) => {
+    const p = new URLSearchParams();
+    if (limit !== undefined) p.set('limit', limit);
+    if (offset !== undefined) p.set('offset', offset);
+    const qs = p.toString();
+    return request('GET', `/contacts/${id}/letters${qs ? '?' + qs : ''}`);
+  },
 
   // Image whitelist
   addToImageWhitelist: (entry) => request('POST', '/auth/preferences/whitelist-add', entry),

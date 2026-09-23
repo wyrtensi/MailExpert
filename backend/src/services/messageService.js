@@ -152,6 +152,17 @@ export async function listMessages({ accountId, folder = 'INBOX', limit = 50, of
       )
       SELECT id, uid, folder, message_id, thread_id, thread_subject AS subject,
              thread_from_name AS from_name, thread_from_email AS from_email,
+             -- The row itself (rn=1) is the newest message WITHIN THIS QUERY'S FOLDER SCOPE —
+             -- the same scope message_count/unread_count already use (deduped is filtered by
+             -- the view's folder). So its own from_email (before thread_from_email above swaps
+             -- in the thread ROOT's sender for display) is the sender of the letter this row
+             -- actually shows — direction badges use this one, not the displayed from_email, so
+             -- e.g. a group thread with two different people writing into the same INBOX badges
+             -- correctly. It is NOT necessarily the thread's true latest across every folder:
+             -- our own replies live in Sent, outside this scope, so a thread that opened
+             -- incoming and was replied to (in Sent) still badges "Received" when viewed from
+             -- INBOX — correctly, for the letter that row displays.
+             from_email AS latest_from_email,
              to_addresses, cc_addresses, reply_to, in_reply_to,
              date, snippet, is_starred, is_read, has_attachments, account_id,
              account_name, account_email, account_color,

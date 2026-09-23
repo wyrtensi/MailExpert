@@ -9,17 +9,6 @@ export function hasSenderHistory(history) {
   return !!history?.correspondent && Number(history.total) > 0 && Array.isArray(history.items) && history.items.length > 0;
 }
 
-// Spelled out literally so the i18n coverage test finds them.
-const DIRECTION_KEYS = {
-  in: 'message.senderHistory.incoming',
-  out: 'message.senderHistory.outgoing',
-};
-
-// Each row says plainly whether the letter came from the person or went to them.
-export function directionKey(direction) {
-  return DIRECTION_KEYS[direction] ?? DIRECTION_KEYS.in;
-}
-
 // The search that lists every letter from the person, for the "All letters from them" link.
 export function senderSearchQuery(correspondent) {
   const email = String(correspondent ?? '').trim();

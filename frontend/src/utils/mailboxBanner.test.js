@@ -1,6 +1,6 @@
 import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
-import { mailboxBanner } from './mailboxBanner.js';
+import { mailboxBanner, isDraftFolder } from './mailboxBanner.js';
 
 const account = { email_address: 'Sales@example.com', aliases: [{ email: 'info@example.com' }] };
 
@@ -23,5 +23,23 @@ describe('mailboxBanner', () => {
 
   it('falls back to the address on the letter row when the mailbox is not in the store', () => {
     assert.equal(mailboxBanner({ from_email: 'ops@example.com', account_email: 'ops@example.com' }, null).direction, 'out');
+  });
+});
+
+describe('isDraftFolder', () => {
+  it('matches the account\'s configured drafts folder exactly', () => {
+    assert.equal(isDraftFolder('Drafts', { drafts: 'Drafts' }), true);
+    assert.equal(isDraftFolder('INBOX', { drafts: 'Drafts' }), false);
+  });
+
+  it('falls back to a path heuristic when no drafts mapping is configured', () => {
+    assert.equal(isDraftFolder('Drafts', {}), true);
+    assert.equal(isDraftFolder('[Gmail]/Drafts', undefined), true);
+    assert.equal(isDraftFolder('INBOX', {}), false);
+  });
+
+  it('is false for an empty folder', () => {
+    assert.equal(isDraftFolder('', { drafts: 'Drafts' }), false);
+    assert.equal(isDraftFolder(null, { drafts: 'Drafts' }), false);
   });
 });

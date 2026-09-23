@@ -206,6 +206,11 @@
     },
     "selectToRead": "Select a message to read",
     "noSubject": "(no subject)",
+    "direction": {
+      "received": "Received",
+      "sent": "Sent",
+      "draft": "Draft"
+    },
     "to": "To:",
     "via": "via",
     "attachment_one": "{{count}} attachment",
@@ -284,8 +289,6 @@
     "senderHistory": {
       "summary_one": "Earlier with {{email}}: {{count}} letter",
       "summary_other": "Earlier with {{email}}: {{count}} letters",
-      "incoming": "From them",
-      "outgoing": "Our reply",
       "noSubject": "(no subject)",
       "more_one": "{{count}} more: search all letters from them",
       "more_other": "{{count}} more: search all letters from them",
@@ -449,7 +452,7 @@
     "wrongPin": "Incorrect PIN"
   },
   "sidebar": {
-    "allInboxes": "All Inboxes",
+    "allInboxes": "Inbox, all mailboxes",
     "compose": "Compose",
     "toggleSidebar": "Toggle sidebar",
     "newFolder": "New folder",
@@ -958,9 +961,6 @@
       },
       "syncFolders": "Sync folders",
       "syncFoldersError": "Folder sync failed",
-      "unifiedInboxSection": "Unified Inbox",
-      "unifiedInboxEnabled": "Include in Unified Inbox",
-      "unifiedInboxEnabledDesc": "Show messages from this account in All Inboxes, unified search, and category counts.",
       "categorizationSection": "Email Categorization",
       "categorizationEnabled": "Enable inbox categorization",
       "categorizationEnabledDesc": "Sort incoming emails into category tabs. Disabled by default.",
@@ -1870,24 +1870,14 @@
       "website": "Website",
       "organization": "Organization",
       "notes": "Notes",
-      "emailsSent": "Emails sent",
       "lastContacted": "Last contacted"
     },
-    "emailTypes": {
-      "other": "Other",
-      "work": "Work",
-      "home": "Home"
-    },
-    "phoneTypes": {
-      "mobile": "Mobile",
-      "work": "Work",
-      "home": "Home",
-      "other": "Other"
-    },
-    "urlTypes": {
-      "work": "Work",
-      "home": "Home",
-      "other": "Other"
+    "letters": {
+      "received": "Emails received",
+      "sent": "Emails sent",
+      "show": "Show letters",
+      "hide": "Hide letters",
+      "showMore": "Show more"
     }
   },
   "todoist": {

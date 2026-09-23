@@ -206,6 +206,11 @@
     },
     "selectToRead": "Выберите сообщение для чтения",
     "noSubject": "(без темы)",
+    "direction": {
+      "received": "Получено",
+      "sent": "Отправлено",
+      "draft": "Черновик"
+    },
     "to": "Кому:",
     "via": "через",
     "attachment_one": "{{count}} вложение",
@@ -288,8 +293,6 @@
       "summary_few": "Раньше с {{email}}: {{count}} письма",
       "summary_many": "Раньше с {{email}}: {{count}} писем",
       "summary_other": "Раньше с {{email}}: {{count}} письма",
-      "incoming": "От него",
-      "outgoing": "Наш ответ",
       "noSubject": "(без темы)",
       "more_one": "Ещё {{count}}: найти все письма от него",
       "more_few": "Ещё {{count}}: найти все письма от него",
@@ -469,7 +472,7 @@
     "wrongPin": "Неверный PIN-код"
   },
   "sidebar": {
-    "allInboxes": "Все входящие",
+    "allInboxes": "Входящие по всем ящикам",
     "compose": "Написать",
     "toggleSidebar": "Переключить боковую панель",
     "newFolder": "Новая папка",
@@ -980,9 +983,6 @@
       "syncFoldersError": "Не удалось синхронизировать папки",
       "senderNamePh": "напр. Алиса Смит",
       "senderName": "Имя отправителя",
-      "unifiedInboxSection": "Объединённые входящие",
-      "unifiedInboxEnabled": "Включать в объединённые входящие",
-      "unifiedInboxEnabledDesc": "Показывать сообщения этого аккаунта во «Всех входящих», общем поиске и счётчиках категорий.",
       "categorizationSection": "Категоризация почты",
       "categorizationEnabled": "Включить категоризацию входящих",
       "categorizationEnabledDesc": "Сортирует входящие письма по вкладкам категорий. По умолчанию отключено.",
@@ -1902,24 +1902,14 @@
       "website": "Сайт",
       "organization": "Организация",
       "notes": "Заметки",
-      "emailsSent": "Отправлено писем",
       "lastContacted": "Последний контакт"
     },
-    "emailTypes": {
-      "other": "Другой",
-      "work": "Работа",
-      "home": "Дом"
-    },
-    "phoneTypes": {
-      "mobile": "Мобильный",
-      "work": "Работа",
-      "home": "Дом",
-      "other": "Другой"
-    },
-    "urlTypes": {
-      "work": "Рабочий",
-      "home": "Личный",
-      "other": "Другой"
+    "letters": {
+      "received": "Получено писем",
+      "sent": "Отправлено писем",
+      "show": "Показать письма",
+      "hide": "Скрыть письма",
+      "showMore": "Показать ещё"
     }
   },
   "todoist": {

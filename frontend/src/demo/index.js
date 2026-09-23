@@ -407,6 +407,12 @@ function threadedPage(filtered, { accountId, folder, limit, offset }) {
       subject: first.subject,
       from_name: first.from_name,
       from_email: first.from_email,
+      // The row displays the thread ROOT's sender (from_email above), but a direction badge
+      // describes the letter the row shows — the newest one within this view's folder scope
+      // (mirrors messageService.js's latest_from_email; see its comment for what this is and
+      // is not: a reply in Sent is outside an INBOX view's scope entirely, so it still doesn't
+      // affect the badge there).
+      latest_from_email: newest.from_email,
       message_count: Math.max(1, new Set(whole.map(m => m.message_id)).size),
       unread_count: group.filter(m => !m.is_read).length,
     };
@@ -666,6 +672,62 @@ function demoSenderHistory(id) {
     items: earlier.slice(0, 5).map(m => ({
       id: m.id, folder: m.folder, subject: m.subject, snippet: m.snippet, date: m.date,
       direction: m.from_email === own ? 'out' : 'in',
+    })),
+  };
+}
+
+// A contact's correspondence across every enabled mailbox (GET /api/contacts/:id/letters), the
+// same rules the server applies (services/contactLetters.js) over the demo's own `messages`:
+// own address = the mailbox's address plus its aliases, per mailbox; trash/spam/drafts are
+// skipped per mailbox's own folder mapping; a letter counts once per mailbox by message_id;
+// newest first. Precedence matches mailboxBanner() / contactLetters.js exactly: an own address
+// as the sender always wins ('out', once the contact is confirmed in the recipients) — checked
+// BEFORE the contact-address match, so a contact whose address happens to be one of our own
+// mailboxes is never misread as having "sent" us its own outgoing mail.
+function demoContactLetters(contactId, { limit = 20, offset = 0 } = {}) {
+  const contact = contacts.find(item => item.id === contactId);
+  if (!contact) return null;
+
+  const addresses = new Set((contact.emails || []).map(e => normalizeEmail(e.value)).filter(Boolean));
+  if (!addresses.size) return { received: 0, sent: 0, lastDate: null, total: 0, items: [] };
+
+  const cappedLimit = Math.max(1, Math.min(Math.trunc(Number(limit)) || 20, 50));
+  const safeOffset = Math.max(0, Math.trunc(Number(offset)) || 0);
+
+  const matches = messages.reduce((acc, m) => {
+    const account = accountFor(m.account_id);
+    if (!account?.enabled) return acc;
+    const mappings = account.folder_mappings || {};
+    if (m.folder === mappings.trash || m.folder === mappings.spam || m.folder === mappings.drafts) return acc;
+    const own = new Set([account.email_address, ...(account.aliases || []).map(a => a.email)].map(normalizeEmail));
+    const from = normalizeEmail(m.from_email);
+    if (own.has(from)) {
+      const recipients = [...(m.to_addresses || []), ...(m.cc_addresses || [])].map(r => normalizeEmail(r.email));
+      if (recipients.some(r => addresses.has(r))) acc.push({ message: m, direction: 'out' });
+      return acc;
+    }
+    if (addresses.has(from)) acc.push({ message: m, direction: 'in' });
+    return acc;
+  }, []);
+
+  const seen = new Set();
+  const deduped = [];
+  for (const entry of [...matches].sort((a, b) => b.message.date.localeCompare(a.message.date))) {
+    const key = `${entry.message.account_id}:${entry.message.message_id || entry.message.id}`;
+    if (seen.has(key)) continue;
+    seen.add(key);
+    deduped.push(entry);
+  }
+
+  const received = deduped.filter(entry => entry.direction === 'in').length;
+  return {
+    received,
+    sent: deduped.length - received,
+    lastDate: deduped.length ? deduped[0].message.date : null,
+    total: deduped.length,
+    items: deduped.slice(safeOffset, safeOffset + cappedLimit).map(({ message: m, direction }) => ({
+      id: m.id, account_id: m.account_id, folder: m.folder, subject: m.subject, snippet: m.snippet,
+      date: m.date, direction,
     })),
   };
 }
@@ -935,6 +997,14 @@ export async function demoRequest(method, path, body = {}) {
     const contact = contactFromPayload(body, { id, uid: id });
     contacts.push(contact);
     return clone(contact);
+  }
+  const contactLettersMatch = pathname.match(/^\/contacts\/([^/]+)\/letters$/);
+  if (verb === 'GET' && contactLettersMatch) {
+    const result = demoContactLetters(decodeURIComponent(contactLettersMatch[1]), {
+      limit: url.searchParams.get('limit'), offset: url.searchParams.get('offset'),
+    });
+    if (!result) throw demoError('Contact not found', 'not_found');
+    return clone(result);
   }
   const contactMatch = pathname.match(/^\/contacts\/([^/]+)$/);
   if (verb === 'GET' && contactMatch) return clone(contacts.find(item => item.id === decodeURIComponent(contactMatch[1])) || {});

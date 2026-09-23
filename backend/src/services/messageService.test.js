@@ -183,6 +183,25 @@ describe('listMessages — threaded mode', () => {
     const cteSql = query.mock.calls[2][0];
     expect(cteSql).toContain("AND folder = 'INBOX'");
   });
+
+  // A thread row displays the thread ROOT's sender (thread_from_email AS from_email, for a
+  // stable identity across the conversation), but a direction badge must reflect the LATEST
+  // letter instead — a thread that opened incoming and ended with our reply is still "sent".
+  // latest_from_email carries the rn=1 (newest) row's own from_email, separately from the
+  // displayed one, so the frontend can tell the two apart.
+  it('carries the latest message\'s own sender separately from the displayed thread sender', async () => {
+    query
+      .mockResolvedValueOnce({ rows: [{ id: 'acc-1' }] })
+      .mockResolvedValueOnce({ rows: [{ total_count: 1, unread_count: 0 }] })
+      .mockResolvedValueOnce({ rows: [] })
+      .mockResolvedValueOnce({ rows: [{ total: 0 }] });
+
+    await listMessages({ userId: 'user-1', accountId: 'acc-1', threaded: 'true' });
+
+    const cteSql = query.mock.calls[2][0];
+    expect(cteSql).toContain('thread_from_email AS from_email');
+    expect(cteSql).toContain('from_email AS latest_from_email');
+  });
 });
 
 describe('listMessages — threaded grouping is per mailbox', () => {

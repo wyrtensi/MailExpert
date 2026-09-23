@@ -1,4 +1,4 @@
-import { useEffect, useLayoutEffect, useRef, useCallback, useState } from 'react';
+import { useEffect, useLayoutEffect, useRef, useCallback, useState, useMemo } from 'react';
 import { pickReplyAlias } from '../utils/replyAlias.js';
 import { useTranslation } from 'react-i18next';
 import { useStore, selectSelectedMessageMid } from '../store/index.js';
@@ -16,6 +16,8 @@ import { useSwipeRow } from '../hooks/useSwipeRow.js';
 import ContextMenu from './ContextMenu.jsx';
 import RowHoverActions from './RowHoverActions.jsx';
 import GtdTabList from './GtdTabList.jsx';
+import DirectionBadge from './DirectionBadge.jsx';
+import { mailboxBanner, isDraftFolder } from '../utils/mailboxBanner.js';
 import { useUiScale, descale } from '../hooks/useUiScale.js';
 import {
   gtdActiveForContext, buildGtdDisplaySections, GTD_COLORS, GTD_CHIP_BG, sectionBadge, isSelectedRow,
@@ -143,6 +145,12 @@ export default function MessageList() {
   const isMobile = useMobile();
   const isUnified = selectedAccountId === null;
   const selectedAccount = accounts.find(a => a.id === selectedAccountId);
+  // Looked up per row to compute its direction badge (mailboxBanner needs the account's own
+  // address and aliases, not just the account_color already denormalized onto the message).
+  const accountsById = useMemo(
+    () => Object.fromEntries(accounts.map(account => [account.id, account])),
+    [accounts],
+  );
   const unifiedInboxAccountKey = accounts
     .filter(isAccountInUnifiedInbox)
     .map(account => account.id)
@@ -3657,6 +3665,7 @@ export default function MessageList() {
               <ThreadRow
                 key={cacheKey}
                 message={message}
+                account={accountsById[message.account_id]}
                 isExpanded={expandedThreadId === cacheKey}
                 threadMsgs={threadMessages[cacheKey] || null}
                 isLoadingThread={loadingThread === cacheKey}
@@ -3702,6 +3711,7 @@ export default function MessageList() {
               <MessageRow
                 key={message.id}
                 message={message}
+                account={accountsById[message.account_id]}
                 selected={isSelectedRow(message, selectedMessageId, selectedMid)}
                 lastViewed={lastViewedMessageId === message.id && selectedMessageId !== message.id}
                 isChecked={selectedIds.has(message.id)}
@@ -4155,7 +4165,7 @@ function EmptyState({ folderSyncing, searchQuery, searchError, unreadOnly, selec
   );
 }
 
-function ThreadRow({ message, isExpanded, threadMsgs, isLoadingThread, selectedMessageId, selectedMid, lastViewedMessageId, showAccount, isNarrow, onThreadClick, onThreadToggle, showMobileAvatars, showMessagePreviews, onSelect, onOpenWindow, onMarkRead, onStar, onDelete, hoverQuickActions, onContextMenu, onMove, onDragStart, isMobile, swipeLeftAction, swipeRightAction, onSwipeLeft, onSwipeRight, isChecked, selectionMode, onToggleSelect, onRangeSelect, onLongPress }) {
+function ThreadRow({ message, account, isExpanded, threadMsgs, isLoadingThread, selectedMessageId, selectedMid, lastViewedMessageId, showAccount, isNarrow, onThreadClick, onThreadToggle, showMobileAvatars, showMessagePreviews, onSelect, onOpenWindow, onMarkRead, onStar, onDelete, hoverQuickActions, onContextMenu, onMove, onDragStart, isMobile, swipeLeftAction, swipeRightAction, onSwipeLeft, onSwipeRight, isChecked, selectionMode, onToggleSelect, onRangeSelect, onLongPress }) {
   const { t } = useTranslation();
   const [hovered, setHovered] = useState(false);
   const messageCount = message.message_count || 1;
@@ -4338,6 +4348,23 @@ function ThreadRow({ message, isExpanded, threadMsgs, isLoadingThread, selectedM
             <div style={{
               display: 'flex', alignItems: 'center', gap: 4, flexShrink: 0, marginLeft: 8,
             }}>
+              {account && (
+                <DirectionBadge
+                  // The badge describes the letter this row actually shows — its date and
+                  // snippet, i.e. the newest letter within the current view's folder scope
+                  // (deduped/ranked the same way message_count/unread_count already are in
+                  // messageService.js; see latest_from_email there). It is NOT necessarily the
+                  // thread's true latest across every folder: our replies live in Sent, so an
+                  // "incoming, then our reply" thread viewed from INBOX never includes the
+                  // reply in this scope at all and still badges "Received" — correctly, for
+                  // what this row displays. latest_from_email still matters within one folder,
+                  // e.g. a group thread where two different people wrote into the same INBOX.
+                  direction={isDraftFolder(message.folder, account.folder_mappings)
+                    ? 'draft'
+                    : mailboxBanner({ ...message, from_email: message.latest_from_email ?? message.from_email }, account).direction}
+                  compact={isNarrow || isMobile}
+                />
+              )}
               {message.has_attachments && (
                 <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="var(--text-tertiary)" strokeWidth="2">
                   <path d="M21.44 11.05l-9.19 9.19a6 6 0 01-8.49-8.49l9.19-9.19a4 4 0 015.66 5.66l-9.2 9.19a2 2 0 01-2.83-2.83l8.49-8.48"/>
@@ -4436,8 +4463,20 @@ function ThreadRow({ message, isExpanded, threadMsgs, isLoadingThread, selectedM
                   }}>
                     {msg.from_name || msg.from_email || t('common.unknown', 'Unknown')}
                   </span>
-                  <span style={{ fontSize: 11, color: 'var(--text-tertiary)', flexShrink: 0, marginLeft: 8 }}>
-                    {formatDate(msg.date)}
+                  <span style={{ display: 'flex', alignItems: 'center', gap: 6, flexShrink: 0, marginLeft: 8 }}>
+                    {account && (
+                      // Every message in an expanded thread shares the parent row's account (a
+                      // thread is grouped per (account_id, thread_key), never cross-mailbox), so
+                      // this is its own real sender — no root-vs-latest ambiguity here, unlike
+                      // the collapsed thread row above.
+                      <DirectionBadge
+                        direction={isDraftFolder(msg.folder, account.folder_mappings) ? 'draft' : mailboxBanner(msg, account).direction}
+                        compact={isNarrow || isMobile}
+                      />
+                    )}
+                    <span style={{ fontSize: 11, color: 'var(--text-tertiary)' }}>
+                      {formatDate(msg.date)}
+                    </span>
                   </span>
                 </div>
                 {showMessagePreviews && (
@@ -4456,7 +4495,7 @@ function ThreadRow({ message, isExpanded, threadMsgs, isLoadingThread, selectedM
   );
 }
 
-function MessageRow({ message, selected, lastViewed, isChecked, selectionMode, showAccount, isNarrow, onSelect, onOpenWindow, onToggleSelect, onRangeSelect, onAvatarClick, showMobileAvatars, showMessagePreviews, onMarkRead, onStar, onDelete, hoverQuickActions, onContextMenu, onMove, onDragStart, isMobile, swipeLeftAction, swipeRightAction, onSwipeLeft, onSwipeRight, onLongPress }) {
+function MessageRow({ message, account, selected, lastViewed, isChecked, selectionMode, showAccount, isNarrow, onSelect, onOpenWindow, onToggleSelect, onRangeSelect, onAvatarClick, showMobileAvatars, showMessagePreviews, onMarkRead, onStar, onDelete, hoverQuickActions, onContextMenu, onMove, onDragStart, isMobile, swipeLeftAction, swipeRightAction, onSwipeLeft, onSwipeRight, onLongPress }) {
   const { t } = useTranslation();
   const [hovered, setHovered] = useState(false);
   const [avatarHovered, setAvatarHovered] = useState(false);
@@ -4654,6 +4693,14 @@ function MessageRow({ message, selected, lastViewed, isChecked, selectionMode, s
             </span>
           </div>
           <div style={{ display: 'flex', alignItems: 'center', gap: 4, flexShrink: 0, marginLeft: 8 }}>
+            {account && (
+              <DirectionBadge
+                direction={isDraftFolder(message.folder, account.folder_mappings)
+                  ? 'draft'
+                  : mailboxBanner(message, account).direction}
+                compact={isNarrow || isMobile}
+              />
+            )}
             {message.has_attachments && (
               <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="var(--text-tertiary)" strokeWidth="2">
                 <path d="M21.44 11.05l-9.19 9.19a6 6 0 01-8.49-8.49l9.19-9.19a4 4 0 015.66 5.66l-9.2 9.19a2 2 0 01-2.83-2.83l8.49-8.48"/>

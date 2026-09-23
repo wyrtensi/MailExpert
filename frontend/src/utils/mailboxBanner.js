@@ -18,3 +18,14 @@ export function mailboxBanner(message, account) {
   const via = delivered.find((address) => address !== own) ?? null;
   return { direction, via };
 }
+
+// Whether `folder` is the given account's Drafts folder — an unsent draft is neither "sent" nor
+// "received", so a direction badge (DirectionBadge.jsx) shows 'draft' instead of asking
+// mailboxBanner(). Prefers the account's configured folder_mappings.drafts (exact match); falls
+// back to a path heuristic (matches Sidebar.jsx's own folder-icon detection) for an account that
+// never had one configured.
+export function isDraftFolder(folder, folderMappings) {
+  if (!folder) return false;
+  if (folderMappings?.drafts) return folder === folderMappings.drafts;
+  return String(folder).toLowerCase().includes('draft');
+}

@@ -383,37 +383,6 @@ function AccountForm({ initial, onSave, onCancel }) {
         <>
           <div style={{ height: 1, background: 'var(--border-subtle)', margin: '16px 0' }} />
           <div style={{ fontSize: 11, color: 'var(--text-secondary)', marginBottom: 10, fontWeight: 600, letterSpacing: '0.05em', textTransform: 'uppercase' }}>
-            {t('admin.accounts.unifiedInboxSection')}
-          </div>
-          <div style={{ display: 'flex', alignItems: 'flex-start', gap: 10 }}>
-            <button
-              type="button"
-              aria-pressed={form.include_in_unified_inbox !== false}
-              onClick={() => set('include_in_unified_inbox', form.include_in_unified_inbox === false)}
-              style={{
-                width: 36, height: 20, borderRadius: 10, border: 'none',
-                cursor: 'pointer', padding: 0,
-                background: form.include_in_unified_inbox !== false ? 'var(--accent)' : TOGGLE_OFF_BACKGROUND,
-                position: 'relative', transition: 'background 0.2s', flexShrink: 0, marginTop: 1,
-              }}
-            >
-              <span style={{
-                position: 'absolute', top: 2,
-                left: form.include_in_unified_inbox !== false ? 18 : 2,
-                width: 16, height: 16,
-                borderRadius: '50%', background: 'white', transition: 'left 0.2s',
-              }} />
-            </button>
-            <div>
-              <div style={{ fontSize: 13, color: 'var(--text-secondary)' }}>{t('admin.accounts.unifiedInboxEnabled')}</div>
-              <div style={{ fontSize: 11, color: 'var(--text-tertiary)', marginTop: 2 }}>
-                {t('admin.accounts.unifiedInboxEnabledDesc')}
-              </div>
-            </div>
-          </div>
-
-          <div style={{ height: 1, background: 'var(--border-subtle)', margin: '16px 0' }} />
-          <div style={{ fontSize: 11, color: 'var(--text-secondary)', marginBottom: 10, fontWeight: 600, letterSpacing: '0.05em', textTransform: 'uppercase' }}>
             {t('admin.accounts.categorizationSection')}
           </div>
           <div style={{ display: 'flex', alignItems: 'flex-start', gap: 10, opacity: categorizationEnabled ? 0.5 : 1 }}>
@@ -554,7 +523,7 @@ function AccountsTab() {
   };
 
   const handleEdit = async (form) => {
-    const updates = { name: form.name, sender_name: form.sender_name || null, color: form.color, imap_host: form.imap_host, imap_port: form.imap_port, imap_skip_tls_verify: !!form.imap_skip_tls_verify, smtp_host: form.smtp_host, smtp_port: form.smtp_port, smtp_tls: form.smtp_tls, signature: form.signature || null, categorization_enabled: !!form.categorization_enabled, include_in_unified_inbox: form.include_in_unified_inbox !== false };
+    const updates = { name: form.name, sender_name: form.sender_name || null, color: form.color, imap_host: form.imap_host, imap_port: form.imap_port, imap_skip_tls_verify: !!form.imap_skip_tls_verify, smtp_host: form.smtp_host, smtp_port: form.smtp_port, smtp_tls: form.smtp_tls, signature: form.signature || null, categorization_enabled: !!form.categorization_enabled };
     if (form.auth_pass) updates.auth_pass = form.auth_pass;
     if (form.auth_user) updates.auth_user = form.auth_user;
     // Separate SMTP credentials (optional). A username sends both (a blank password on

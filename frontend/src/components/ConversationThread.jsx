@@ -1,8 +1,9 @@
-import { useEffect, useRef, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import { api } from '../utils/api.js';
 import { formatDateTime } from '../utils/formatDate.js';
 import { emailFontFor } from '../utils/emailFont.js';
+import { createHeightController, forceEagerImages, measureContentHeight } from '../utils/emailFrameHeight.js';
 import { conversationSrcDoc, htmlHasQuote, personLabel, recipientsLine, splitTextQuote } from '../utils/conversationView.js';
 import DirectionBadge from './DirectionBadge.jsx';
 import { useMobile } from '../hooks/useMobile.js';
@@ -77,7 +78,7 @@ function ThreadLetter({ item, open, onToggle, onOpen, isMobile, t }) {
   const to = recipientsLine(item.to_addresses, item.cc_addresses);
   return (
     <article className="reading-card" style={{
-      border: '1px solid var(--border-subtle)', borderRadius: 10, overflow: 'hidden',
+      border: '1px solid var(--border-subtle)', borderRadius: 10, overflow: 'hidden', background: 'var(--bg-secondary)',
       borderLeft: `3px solid ${item.direction === 'out' ? 'var(--accent)' : item.direction === 'in' ? 'var(--green, #22c55e)' : 'var(--border)'}`,
     }}>
       <button
@@ -114,6 +115,36 @@ function ThreadLetter({ item, open, onToggle, onOpen, isMobile, t }) {
   );
 }
 
+// Bodies of stacked letters: at most BODY_LOADS_AT_ONCE requests in flight (an uncached body is
+// an IMAP fetch, and "Expand all" on a long thread must not empty the mailbox's connection pool),
+// and a loaded body is kept while the page lives, so collapsing and expanding again costs nothing.
+const BODY_LOADS_AT_ONCE = 3;
+const bodyCache = new Map();
+const bodyQueue = [];
+let bodyLoadsRunning = 0;
+
+function pumpBodyQueue() {
+  while (bodyLoadsRunning < BODY_LOADS_AT_ONCE && bodyQueue.length) {
+    const { id, resolve, reject } = bodyQueue.shift();
+    bodyLoadsRunning++;
+    api.getMessageBody(id)
+      .then(resolve, reject)
+      .finally(() => { bodyLoadsRunning--; pumpBodyQueue(); });
+  }
+}
+
+function loadBody(id) {
+  if (!bodyCache.has(id)) {
+    const promise = new Promise((resolve, reject) => {
+      bodyQueue.push({ id, resolve, reject });
+      pumpBodyQueue();
+    });
+    promise.catch(() => bodyCache.delete(id)); // a failed load is tried again next time
+    bodyCache.set(id, promise);
+  }
+  return bodyCache.get(id);
+}
+
 function ThreadLetterBody({ id, onOpen, t }) {
   const [body, setBody] = useState(null);
   const [failed, setFailed] = useState(false);
@@ -123,7 +154,7 @@ function ThreadLetterBody({ id, onOpen, t }) {
     let live = true;
     setBody(null);
     setFailed(false);
-    api.getMessageBody(id)
+    loadBody(id)
       .then((data) => { if (live) setBody(data); })
       .catch(() => { if (live) setFailed(true); });
     return () => { live = false; };
@@ -163,47 +194,98 @@ function ThreadLetterBody({ id, onOpen, t }) {
         padding: '0 14px', whiteSpace: 'pre-wrap', wordBreak: 'break-word', fontSize: 14, lineHeight: 1.6,
         color: '#1a1a1a', background: 'white', fontFamily: 'var(--font-sans, sans-serif)',
       }}>
-        {showQuote && quote ? `${main}\n\n${quote}` : main}
+        <LinkifiedText text={showQuote && quote ? `${main}\n\n${quote}` : main} />
       </div>
       {footer(Boolean(quote))}
     </>
   );
 }
 
-// An HTML letter in a sandboxed frame that grows to its content.
+// Plain text with its web addresses as links, like the open letter's plain-text body.
+const URL_RE = /https?:\/\/[^\s<>"']+/g;
+function LinkifiedText({ text }) {
+  const parts = [];
+  let last = 0;
+  for (const match of text.matchAll(URL_RE)) {
+    if (match.index > last) parts.push(text.slice(last, match.index));
+    parts.push(
+      <a key={match.index} href={match[0]} target="_blank" rel="noopener noreferrer" style={{ color: 'inherit' }}>{match[0]}</a>,
+    );
+    last = match.index + match[0].length;
+  }
+  if (last < text.length) parts.push(text.slice(last));
+  return <>{parts}</>;
+}
+
+// An HTML letter in a sandboxed frame sized to its content, measured the way the open letter's
+// frame is (utils/emailFrameHeight.js): from the content wrapper, never from documentElement,
+// whose height is floored by the frame itself, so hiding the quote again shrinks the frame.
+// Links open in a real browser tab, as in the open letter; relative ones go nowhere.
 function LetterFrame({ html, showQuote, title }) {
   const ref = useRef(null);
   const [height, setHeight] = useState(80);
+  const font = useMemo(() => emailFontFor(), []);
+  const srcDoc = useMemo(() => conversationSrcDoc(html, { font, showQuote }), [html, font, showQuote]);
 
   useEffect(() => {
     const frame = ref.current;
     if (!frame) return undefined;
+    const heights = createHeightController();
     let observer = null;
+    let clickDoc = null;
+    const onClick = (ev) => {
+      const anchor = ev.target.closest?.('a[href]');
+      if (!anchor) return;
+      ev.preventDefault();
+      let raw = anchor.getAttribute('href') || '';
+      if (raw.startsWith('//')) raw = `https:${raw}`;
+      if (/^(?:https?:\/\/|mailto:)/i.test(raw)) window.open(raw, '_blank', 'noopener,noreferrer');
+    };
     const measure = () => {
       const doc = frame.contentDocument;
-      if (doc?.documentElement) setHeight(Math.max(40, doc.documentElement.scrollHeight));
+      if (!doc?.body) return;
+      const wrapper = doc.getElementById('mf-scale-wrapper');
+      const next = heights.next(measureContentHeight({
+        wrapperOffsetHeight: wrapper ? wrapper.offsetHeight : 0,
+        wrapperOffsetTop: wrapper ? wrapper.offsetTop : 0,
+        bodyScrollHeight: doc.body.scrollHeight,
+        bodyOffsetHeight: doc.body.offsetHeight,
+      }));
+      if (next !== null) setHeight(Math.max(24, next));
     };
     const onLoad = () => {
-      measure();
       const doc = frame.contentDocument;
-      if (doc?.body && typeof ResizeObserver !== 'undefined') {
-        observer?.disconnect();
+      if (!doc?.body) return;
+      heights.reset();
+      forceEagerImages(doc);
+      clickDoc?.removeEventListener('click', onClick);
+      clickDoc = doc;
+      doc.addEventListener('click', onClick);
+      observer?.disconnect();
+      if (typeof ResizeObserver !== 'undefined') {
         observer = new ResizeObserver(measure);
-        observer.observe(doc.body);
+        observer.observe(doc.getElementById('mf-scale-wrapper') || doc.body);
       }
+      measure();
     };
     frame.addEventListener('load', onLoad);
-    return () => { frame.removeEventListener('load', onLoad); observer?.disconnect(); };
-  }, []);
+    // The document may have finished loading before this effect subscribed.
+    if (frame.contentDocument?.readyState === 'complete' && frame.contentDocument.getElementById('mf-scale-wrapper')) onLoad();
+    return () => {
+      frame.removeEventListener('load', onLoad);
+      clickDoc?.removeEventListener('click', onClick);
+      observer?.disconnect();
+    };
+  }, [srcDoc]);
 
   return (
     <iframe
       ref={ref}
-      srcDoc={conversationSrcDoc(html, { font: emailFontFor(), showQuote })}
+      srcDoc={srcDoc}
       scrolling="no"
       sandbox="allow-same-origin allow-popups allow-popups-to-escape-sandbox"
       title={title}
-      style={{ width: '100%', border: 'none', display: 'block', height }}
+      style={{ width: '1px', minWidth: '100%', border: 'none', display: 'block', height }}
     />
   );
 }

@@ -1108,17 +1108,20 @@ export default function MessagePane({ windowMessageId = null, onWindowClose = nu
 
   // The whole conversation under the letter (ConversationThread): loaded on every open so the box
   // knows how many letters it would show, and switched off again for every letter opened.
-  const [conversation, setConversation] = useState(null);
-  const [showThread, setShowThread] = useState(false);
+  // Both are stored with the letter they belong to, so the frame after switching letters never
+  // shows the previous letter's conversation or a ticked box.
+  const [conversationState, setConversationState] = useState({ forId: null, data: null });
+  const [showThreadFor, setShowThreadFor] = useState(null);
   const conversationMessageId = message?.id;
+  const conversation = conversationState.forId === conversationMessageId ? conversationState.data : null;
+  const showThread = !!conversationMessageId && showThreadFor === conversationMessageId;
+  const setShowThread = (on) => setShowThreadFor(on ? conversationMessageId : null);
   useEffect(() => {
     let live = true;
-    setConversation(null);
-    setShowThread(false);
     if (!conversationMessageId) return undefined;
     api.getConversation(conversationMessageId)
-      .then((data) => { if (live) setConversation(data); })
-      .catch(() => { if (live) setConversation(null); });
+      .then((data) => { if (live) setConversationState({ forId: conversationMessageId, data }); })
+      .catch(() => { if (live) setConversationState({ forId: conversationMessageId, data: null }); });
     return () => { live = false; };
   }, [conversationMessageId]);
 

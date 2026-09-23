@@ -85,6 +85,22 @@ describe('conversation', () => {
     expect(result.items.map((i) => i.id)).toEqual([id(9)]);
   });
 
+  it('keeps the newest letters of a thread longer than the cap and counts them all', async () => {
+    const { CONVERSATION_MAX_LETTERS } = await import('./conversation.js');
+    const extra = CONVERSATION_MAX_LETTERS + 5;
+    for (let n = 0; n < extra; n++) {
+      const date = new Date(Date.UTC(2026, 7, 1, 0, n)).toISOString();
+      await db.query(`INSERT INTO messages (id, account_id, thread_key, message_id, folder, date, from_email)
+        VALUES ($1, $2, 'long', $3, 'INBOX', $4, 'maya@c.example')`,
+        [`30000000-0000-0000-0000-${String(n).padStart(12, '0')}`, SALES, `<long-${n}@c>`, date]);
+    }
+    const result = await conversation('30000000-0000-0000-0000-000000000000');
+    expect(result.total).toBe(extra);
+    expect(result.items).toHaveLength(CONVERSATION_MAX_LETTERS);
+    expect(result.items.at(-1).id).toBe(`30000000-0000-0000-0000-${String(extra - 1).padStart(12, '0')}`);
+    expect(result.items[0].id).toBe(`30000000-0000-0000-0000-${String(5).padStart(12, '0')}`);
+  });
+
   it('is null for an unknown or deleted letter', async () => {
     expect(await conversation(id(7))).toBeNull();
     expect(await conversation('20000000-0000-0000-0000-00000000ffff')).toBeNull();

@@ -5,7 +5,8 @@ import { resolveAllDraftsPaths, resolveAllSpamPaths, resolveAllTrashPaths } from
 // letter's thread in the same mailbox, oldest first, each marked with its direction. Only this
 // mailbox (the same conversation in another mailbox is that mailbox's business), never trash or
 // spam; a draft is listed and marked as one. A letter synced into several folders (Gmail labels)
-// counts once, the Inbox or Sent copy preferred.
+// counts once, the Inbox or Sent copy preferred. A thread longer than CONVERSATION_MAX_LETTERS
+// keeps its newest letters; `total` still counts all of them.
 
 export const CONVERSATION_MAX_LETTERS = 100;
 
@@ -48,12 +49,18 @@ export async function conversation(messageId) {
                CASE WHEN m.folder = $4 OR m.folder = $5 THEN 0 ELSE 1 END,
                m.id
     )
-    SELECT * FROM letters ORDER BY date ASC NULLS FIRST, id ASC LIMIT $6
+    SELECT * FROM (
+      SELECT letters.*, count(*) OVER () AS total
+      FROM letters
+      ORDER BY date DESC NULLS LAST, id DESC
+      LIMIT $6
+    ) newest
+    ORDER BY date ASC NULLS FIRST, id ASC
   `, [accountId, threadKey, [...trash, ...spam], inboxPath, sentPath, CONVERSATION_MAX_LETTERS]);
 
   return {
     threadKey,
-    total: rows.length,
+    total: rows.length ? Number(rows[0].total) : 0,
     items: rows.map((r) => ({
       id: r.id,
       folder: r.folder,

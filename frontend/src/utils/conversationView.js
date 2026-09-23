@@ -2,15 +2,16 @@
 // helpers: no DOM, no store, no network, so they run under `node --test`.
 
 // A reply's own text and the quoted history under it. The quote starts at the attribution line a
-// mail client writes above it ("On ... wrote:", "... написал(а):", our "---" form) or, without
+// mail client writes above it after a blank line ("On ... wrote:", "... написал(а):", our "---"
+// form) or, without
 // one, at the first run of "> " lines. A forwarded message is content, not history: never split.
-const ATTRIBUTION_RE = /\n(?:---\n)?(?:On [^\n]{1,300} wrote:|[^\n]{1,300} написал(?:\(а\)|а)?:)[ \t]*\n/;
+const ATTRIBUTION_RE = /\n\n(?:---\n)?(?:On [^\n]{1,300} wrote:|[^\n]{1,300} написал(?:\(а\)|а)?:)[ \t]*\n/;
 const QUOTED_LINES_RE = /\n>[^\n]*(?:\n>[^\n]*|\n[ \t]*)*$/;
 
 export function splitTextQuote(text) {
   const value = String(text ?? '');
   const attribution = value.search(ATTRIBUTION_RE);
-  if (attribution > 0) return { main: value.slice(0, attribution).trimEnd(), quote: value.slice(attribution + 1) };
+  if (attribution > 0) return { main: value.slice(0, attribution).trimEnd(), quote: value.slice(attribution + 2) };
   const quoted = value.search(QUOTED_LINES_RE);
   if (quoted > 0) return { main: value.slice(0, quoted).trimEnd(), quote: value.slice(quoted + 1) };
   return { main: value, quote: '' };
@@ -26,7 +27,7 @@ export const HIDE_QUOTE_CSS = `
 
 // Whether an HTML letter carries quoted history that HIDE_QUOTE_CSS would hide.
 export function htmlHasQuote(html) {
-  return /class=["'][^"']*(?:gmail_quote|moz-cite-prefix)|<blockquote|data-mailexpert-quote-header|id=["'](?:divRplyFwdMsg|appendonsend)["']/i.test(String(html ?? ''));
+  return /class=["'][^"']*(?:gmail_quote|moz-cite-prefix)|<blockquote[^>]*\btype=["']cite["']|data-mailexpert-quote-header|id=["'](?:divRplyFwdMsg|appendonsend)["']/i.test(String(html ?? ''));
 }
 
 // The srcdoc for one stacked letter: the same sandboxing as the open letter (no scripts, links
@@ -37,7 +38,7 @@ export function conversationSrcDoc(html, { font = { family: '', css: '' }, showQ
 <meta name="color-scheme" content="only light">
 <meta http-equiv="Content-Security-Policy" content="script-src 'none'; object-src 'none'; frame-src 'none'; form-action 'none'; style-src 'unsafe-inline';">
 <base target="_blank">
-</head><body>${body}<style>
+</head><body><div id="mf-scale-wrapper">${body}</div><style>
   html, body { height: auto !important; min-height: 0 !important; overflow: hidden !important; }
   ${font.css || ''}
   body { margin: 0 !important; padding: 0 !important; background-color: #ffffff !important; color-scheme: light;

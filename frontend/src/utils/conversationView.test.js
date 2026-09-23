@@ -18,6 +18,11 @@ describe('splitTextQuote', () => {
     assert.deepEqual(splitTextQuote('Agreed.\n> earlier\n> text\n'), { main: 'Agreed.', quote: '> earlier\n> text\n' });
   });
 
+  it('does not take a line of the letter ending in "написал:" for an attribution', () => {
+    const text = 'Коллега написал:\nвсё готово, отправляем.';
+    assert.deepEqual(splitTextQuote(text), { main: text, quote: '' });
+  });
+
   it('keeps a letter without a quote whole, and a forward is never split', () => {
     assert.deepEqual(splitTextQuote('Just text'), { main: 'Just text', quote: '' });
     const fwd = 'See below.\n\n---------- Forwarded message ----------\nFrom: a@b';
@@ -41,7 +46,8 @@ describe('conversationSrcDoc', () => {
 describe('htmlHasQuote', () => {
   it('finds the quote blocks mail clients write and nothing else', () => {
     assert.equal(htmlHasQuote('<p>Hi</p><div class="gmail_quote">old</div>'), true);
-    assert.equal(htmlHasQuote('<p>Hi</p><blockquote>old</blockquote>'), true);
+    assert.equal(htmlHasQuote('<p>Hi</p><blockquote type="cite">old</blockquote>'), true);
+    assert.equal(htmlHasQuote('<p>A plain <blockquote>citation</blockquote> in the text</p>'), false);
     assert.equal(htmlHasQuote('<p data-mailexpert-quote-header>On ... wrote:</p>'), true);
     assert.equal(htmlHasQuote('<div id="divRplyFwdMsg">From:</div>'), true);
     assert.equal(htmlHasQuote('<p>Just a letter</p>'), false);

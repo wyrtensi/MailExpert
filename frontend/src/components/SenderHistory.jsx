@@ -47,7 +47,7 @@ export default function SenderHistory({ messageId, onOpen, onSearch, conversatio
   return (
     <div className="reading-card" style={{
       marginBottom: 16, border: '1px solid var(--border)', borderLeft: '3px solid var(--accent)',
-      borderRadius: 10, background: 'color-mix(in srgb, var(--accent) 5%, var(--bg-primary, #fff))',
+      borderRadius: 10, background: 'color-mix(in srgb, var(--accent) 5%, var(--bg-secondary, #fff))',
     }}>
       <div style={{ display: 'flex', alignItems: 'center', gap: 8, padding: hasHistory ? '4px 10px 4px 4px' : '8px 10px', flexWrap: 'wrap' }}>
         {hasHistory ? (
@@ -73,7 +73,7 @@ export default function SenderHistory({ messageId, onOpen, onSearch, conversatio
               display: 'inline-flex', alignItems: 'center', gap: 7, cursor: 'pointer', flexShrink: 0,
               fontSize: 13, fontWeight: 600, color: showThread ? 'var(--accent)' : 'var(--text-primary)',
               padding: '5px 10px', borderRadius: 8, border: '1px solid var(--border)',
-              background: showThread ? 'color-mix(in srgb, var(--accent) 12%, transparent)' : 'var(--bg-primary, #fff)',
+              background: showThread ? 'color-mix(in srgb, var(--accent) 12%, transparent)' : 'var(--bg-secondary, #fff)',
             }}
           >
             <input

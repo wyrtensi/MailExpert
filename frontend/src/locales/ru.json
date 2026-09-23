@@ -299,7 +299,22 @@
       "more_many": "Ещё {{count}}: найти все письма от него",
       "more_other": "Ещё {{count}}: найти все письма от него",
       "allFrom": "Найти все письма от него",
-      "openFailed": "Не удалось открыть письмо"
+      "openFailed": "Не удалось открыть письмо",
+      "showThread": "Вся цепочка",
+      "showThreadHint": "Показать все письма этой переписки ниже",
+      "threadTitle_one": "Вся цепочка: {{count}} письмо",
+      "threadTitle_few": "Вся цепочка: {{count}} письма",
+      "threadTitle_many": "Вся цепочка: {{count}} писем",
+      "threadTitle_other": "Вся цепочка: {{count}} письма",
+      "threadCurrent": "Это письмо открыто выше",
+      "threadExpandAll": "Развернуть все",
+      "threadCollapseAll": "Свернуть все",
+      "threadOpen": "Открыть письмо",
+      "threadShowQuote": "Показать цитату",
+      "threadHideQuote": "Скрыть цитату",
+      "threadLoading": "Загрузка…",
+      "threadBodyFailed": "Не удалось загрузить текст письма",
+      "threadTo": "кому"
     },
     "threading": {
       "title": "Цепочка",
@@ -472,7 +487,7 @@
     "wrongPin": "Неверный PIN-код"
   },
   "sidebar": {
-    "allInboxes": "Входящие по всем ящикам",
+    "allInboxes": "Входящие по всем",
     "compose": "Написать",
     "toggleSidebar": "Переключить боковую панель",
     "newFolder": "Новая папка",

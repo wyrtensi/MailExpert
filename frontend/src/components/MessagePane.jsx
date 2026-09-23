@@ -17,6 +17,7 @@ import { mailboxBanner } from '../utils/mailboxBanner.js';
 import { emailFontFor } from '../utils/emailFont.js';
 import { buildQuote, identityName, quoteMetaFor, senderLanguage } from '../utils/quoteHeader.js';
 import SenderHistory from './SenderHistory.jsx';
+import ConversationThread from './ConversationThread.jsx';
 import { measureContentHeight, createHeightController, forceEagerImages } from '../utils/emailFrameHeight.js';
 import { copyToClipboard } from '../utils/clipboard.js';
 import { folderMatchesQuery } from '../utils/folderDisplay.js';
@@ -1104,6 +1105,25 @@ export default function MessagePane({ windowMessageId = null, onWindowClose = nu
       el.removeEventListener('touchend', onEnd);
     };
   }, [isMobile, setSelectedMessage, resetPaneSwipeStyles]);
+
+  // The whole conversation under the letter (ConversationThread): loaded on every open so the box
+  // knows how many letters it would show, and switched off again for every letter opened.
+  // Both are stored with the letter they belong to, so the frame after switching letters never
+  // shows the previous letter's conversation or a ticked box.
+  const [conversationState, setConversationState] = useState({ forId: null, data: null });
+  const [showThreadFor, setShowThreadFor] = useState(null);
+  const conversationMessageId = message?.id;
+  const conversation = conversationState.forId === conversationMessageId ? conversationState.data : null;
+  const showThread = !!conversationMessageId && showThreadFor === conversationMessageId;
+  const setShowThread = (on) => setShowThreadFor(on ? conversationMessageId : null);
+  useEffect(() => {
+    let live = true;
+    if (!conversationMessageId) return undefined;
+    api.getConversation(conversationMessageId)
+      .then((data) => { if (live) setConversationState({ forId: conversationMessageId, data }); })
+      .catch(() => { if (live) setConversationState({ forId: conversationMessageId, data: null }); });
+    return () => { live = false; };
+  }, [conversationMessageId]);
 
   // A letter from the sender history may sit in another folder than the list shows: keep it
   // in threadMessages (not cleared by the list) so the pane finds it, then open it as usual.
@@ -2647,7 +2667,14 @@ ${bodyContent}
 
         </div>
 
-        <SenderHistory messageId={message.id} onOpen={openHistoryMessage} onSearch={searchSender} />
+        <SenderHistory
+          messageId={message.id}
+          onOpen={openHistoryMessage}
+          onSearch={searchSender}
+          conversationCount={conversation?.items?.length || 0}
+          showThread={showThread}
+          onToggleThread={setShowThread}
+        />
 
         {/* Attachments */}
         {attachments.length > 0 && (
@@ -3077,6 +3104,9 @@ ${bodyContent}
             dangerouslySetInnerHTML={{ __html: linkifyText(body.text) }}
           />
         </div>
+      )}
+      {showThread && conversation?.items?.length > 1 && (
+        <ConversationThread conversation={conversation} currentId={message.id} onOpen={openHistoryMessage} />
       )}
       </div>{/* end single scroll container */}
 

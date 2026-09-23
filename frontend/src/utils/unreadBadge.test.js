@@ -31,7 +31,7 @@ describe('unreadBadge: what it does show', () => {
 
   test('staleness annotates a badge that already had a reason to exist', () => {
     const b = unreadBadge({ count: 3, stale: true });
-    assert.equal(b.text, '~3');
+    assert.equal(b.text, '3', 'the count itself carries no marker; the title says it is stale');
     assert.equal(b.stale, true);
     assert.match(b.title, /Last observed/);
   });
@@ -43,9 +43,9 @@ describe('unreadBadge: what it does show', () => {
       'no timestamp must not leave a dangling empty parenthesis');
   });
 
-  test('clamps above max, keeping the stale marker outside the clamp', () => {
+  test('clamps above max, stale or not', () => {
     assert.equal(unreadBadge({ count: 1000, max: 999 }).text, '999+');
-    assert.equal(unreadBadge({ count: 1000, max: 999, stale: true }).text, '~999+');
+    assert.equal(unreadBadge({ count: 1000, max: 999, stale: true }).text, '999+');
     assert.equal(unreadBadge({ count: 999, max: 999 }).text, '999');
     assert.equal(unreadBadge({ count: 5 }).text, '5', 'no clamp when max is not given');
   });

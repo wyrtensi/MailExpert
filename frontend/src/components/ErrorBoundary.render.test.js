@@ -77,7 +77,7 @@ describe('ErrorBoundary (#441)', () => {
     try {
       const host = await mount(React.createElement(Boom));
       assert.notEqual(host.textContent.trim(), '', 'boundary left the page blank');
-      assert.match(host.textContent, /MailFlow hit an error and stopped/);
+      assert.match(host.textContent, /MailExpert hit an error and stopped/);
     } finally {
       console.error = realError;
     }

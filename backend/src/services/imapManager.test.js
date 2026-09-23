@@ -17,7 +17,7 @@ vi.mock('../utils/redact.js', () => ({ redactEmail: vi.fn() }));
 vi.mock('./hostValidation.js', () => ({ resolveForConnection: vi.fn(), createPinnedLookup: vi.fn() }));
 vi.mock('./connectionPolicy.js', () => ({ getConnectionPolicy: vi.fn() }));
 
-import { ImapManager, MIN_SYNC_INTERVAL_MS, AUTO_IDLE_DELAY_MS, countMissingInboxCopies, fetchBackfillBatch, providerProfile, makeClientCfg, relocateExemptGuard, insertCopiedSibling, deleteMessageCopyRow, emitSectionsChanged, ensureMailbox, createKeyedSemaphore, isConnectionRefusal, extractImapError, isImapAuthFailure, AUTH_FAILURE_COOLDOWN_MS, connectCooldownMs, effectiveSyncIntervalMs, folderSyncDue, planModseqSync, connectStaggerFor, walkStructure, planBodyParts, extractBodyFromMsg, bodyFallbackApplies, poolSizeFor, rerootThreadChildren, parsePersistentCap, resolvePersistentCap, persistentEligible, shouldRetryIPv4, classifyMoveBySearch } from './imapManager.js';
+import { ImapManager, MIN_SYNC_INTERVAL_MS, AUTO_IDLE_DELAY_MS, countMissingInboxCopies, fetchBackfillBatch, providerProfile, makeClientCfg, relocateExemptGuard, insertCopiedSibling, deleteMessageCopyRow, emitSectionsChanged, ensureMailbox, createKeyedSemaphore, isConnectionRefusal, extractImapError, isImapAuthFailure, AUTH_FAILURE_COOLDOWN_MS, AUTH_FAILURE_COOLDOWN_MAX_MS, authCooldownMs, connectCooldownMs, effectiveSyncIntervalMs, folderSyncDue, planModseqSync, connectStaggerFor, walkStructure, planBodyParts, extractBodyFromMsg, bodyFallbackApplies, poolSizeFor, rerootThreadChildren, parsePersistentCap, resolvePersistentCap, persistentEligible, shouldRetryIPv4, classifyMoveBySearch } from './imapManager.js';
 import { pluginRegistry } from '../plugins/registry.js';
 import { EventEmitter } from 'node:events';
 import { ImapFlow } from 'imapflow';
@@ -2955,6 +2955,36 @@ describe('isImapAuthFailure', () => {
   });
 });
 
+describe('authCooldownMs', () => {
+  it('starts at the 30-minute floor, far above the refusal ladder', () => {
+    expect(authCooldownMs(1)).toBe(30 * 60 * 1000);
+    expect(authCooldownMs(1)).toBeGreaterThan(connectCooldownMs(1));
+  });
+
+  it('doubles, and caps at 6 hours', () => {
+    expect(authCooldownMs(2)).toBe(60 * 60 * 1000);
+    expect(authCooldownMs(3)).toBe(2 * 60 * 60 * 1000);
+    expect(authCooldownMs(4)).toBe(4 * 60 * 60 * 1000);
+    expect(authCooldownMs(5)).toBe(6 * 60 * 60 * 1000);
+    expect(authCooldownMs(50)).toBe(AUTH_FAILURE_COOLDOWN_MAX_MS);
+  });
+
+  it('turns 16 hours of a wrong password into a handful of attempts', () => {
+    // Upstream observed 627 failed logins in 16 hours at a fixed short interval.
+    let elapsed = 0, attempts = 0;
+    while (elapsed < 16 * 60 * 60 * 1000) {
+      attempts += 1;
+      elapsed += authCooldownMs(attempts);
+    }
+    expect(attempts).toBeLessThan(10);
+  });
+
+  it('is never zero, negative or NaN for a degenerate count', () => {
+    // `Date.now() < NaN` is false, so a NaN cooldown would silently never apply.
+    for (const n of [0, -1, NaN, undefined]) expect(authCooldownMs(n)).toBe(AUTH_FAILURE_COOLDOWN_MS);
+  });
+});
+
 describe('connect paths back off on IMAP authentication failure', () => {
   const acct = { id: 'auth-acct', user_id: 'u1', enabled: true, protocol: 'imap', imap_host: 'imap.example.com', imap_port: 993, imap_tls: true, auth_user: 'u', auth_pass: 'enc' };
   let connectError;
@@ -3004,14 +3034,49 @@ describe('connect paths back off on IMAP authentication failure', () => {
     expect(cd.until).toBeLessThanOrEqual(Date.now() + AUTH_FAILURE_COOLDOWN_MS);
   });
 
-  it('keeps the cooldown bounded when auth keeps failing after it expires', async () => {
+  it('climbs the auth ladder and keeps it bounded when auth keeps failing after it expires', async () => {
     const mgr = newManager();
+    const waits = [];
     for (let i = 0; i < 8; i++) {
+      const before = Date.now();
       await mgr.connectAccount(acct);
+      waits.push(mgr._connectCooldown.get(acct.id).until - before);
       mgr._connectCooldown.get(acct.id).until = 0; // let the next attempt through
     }
+    // 30 min, 1 h, 2 h, 4 h, then the 6 h cap (a few ms of slack for the clock between reads).
+    expect(waits[0]).toBeGreaterThanOrEqual(AUTH_FAILURE_COOLDOWN_MS);
+    expect(waits[1]).toBeGreaterThanOrEqual(2 * AUTH_FAILURE_COOLDOWN_MS);
+    expect(waits[3]).toBeGreaterThanOrEqual(8 * AUTH_FAILURE_COOLDOWN_MS);
+    for (const w of waits) expect(w).toBeLessThanOrEqual(AUTH_FAILURE_COOLDOWN_MAX_MS + 1000);
+    expect(waits[7]).toBeGreaterThanOrEqual(AUTH_FAILURE_COOLDOWN_MAX_MS);
+  });
+
+  it('does not let earlier refusals push the first auth wait past the floor, nor reset the ladder', async () => {
+    const mgr = newManager();
+    for (let i = 0; i < 4; i++) mgr._noteConnectionRefusal(acct);
+    let before = Date.now();
+    mgr._noteAuthFailure(acct);
+    expect(mgr._connectCooldown.get(acct.id).until - before).toBeLessThanOrEqual(AUTH_FAILURE_COOLDOWN_MS + 1000);
+    // A refusal in between keeps the ladder's position: the next rejected login waits an hour.
+    mgr._noteConnectionRefusal(acct);
+    before = Date.now();
+    mgr._noteAuthFailure(acct);
+    expect(mgr._connectCooldown.get(acct.id).until - before).toBeGreaterThanOrEqual(2 * AUTH_FAILURE_COOLDOWN_MS);
+  });
+
+  it('takes the auth ladder for AUTHENTICATIONFAILED even when the text reads like a refusal', async () => {
+    connectError = () => imapErr({
+      response: '1 NO [AUTHENTICATIONFAILED] Invalid credentials, try again later',
+      responseStatus: 'NO',
+      responseText: 'Invalid credentials, try again later',
+      serverResponseCode: 'AUTHENTICATIONFAILED',
+      authenticationFailed: true,
+    });
+    const mgr = newManager();
+    const before = Date.now();
     await mgr.connectAccount(acct);
-    expect(mgr._connectCooldown.get(acct.id).until - Date.now()).toBeLessThanOrEqual(AUTH_FAILURE_COOLDOWN_MS);
+    expect(mgr._connectCooldown.get(acct.id).until).toBeGreaterThanOrEqual(before + AUTH_FAILURE_COOLDOWN_MS);
+    expect(mgr._connectCooldown.get(acct.id).authFailures).toBe(1);
   });
 
   it('keeps the health check from reconnecting the account during the cooldown', async () => {
@@ -3067,6 +3132,28 @@ describe('connect paths back off on IMAP authentication failure', () => {
     await mgr._syncTick(acct);
     expect(mgr._connectCooldown.get(acct.id).until).toBeGreaterThanOrEqual(before + AUTH_FAILURE_COOLDOWN_MS);
     expect(syncErrorWrites()).toHaveLength(1);
+  });
+
+  it('arms the auth cooldown and surfaces the error when the sync tick itself is rejected', async () => {
+    // A persistent client is already connected, so the reconnect branch is not taken: the
+    // rejection comes from the sync (on a fresh-login provider, its own login).
+    const mgr = newManager();
+    mgr.connections.set(acct.id, Object.assign(new EventEmitter(), { close: vi.fn(), logout: vi.fn(() => Promise.resolve()) }));
+    mgr.syncFolders = vi.fn().mockResolvedValue({});
+    mgr.syncMessages = vi.fn().mockRejectedValue(gmailXoauthFailure());
+    const before = Date.now();
+    await mgr._syncTick(acct);
+    expect(mgr._connectCooldown.get(acct.id).until).toBeGreaterThanOrEqual(before + AUTH_FAILURE_COOLDOWN_MS);
+    expect(syncErrorWrites()).toHaveLength(1);
+  });
+
+  it('arms the auth cooldown, not the refusal one, when the folder status client is rejected', async () => {
+    const mgr = newManager();
+    query.mockImplementation(async (sql) => ({ rows: sql.startsWith('SELECT * FROM email_accounts') ? [acct] : [] }));
+    const before = Date.now();
+    await expect(mgr._withCountClient(acct, async () => {})).rejects.toThrow();
+    expect(mgr._connectCooldown.get(acct.id).until).toBeGreaterThanOrEqual(before + AUTH_FAILURE_COOLDOWN_MS);
+    expect(mgr._bgConnSem.activeCount('imap.example.com')).toBe(0);
   });
 
   it('arms the same cooldown and surfaces the error when a poll-only tick hits an auth failure', async () => {

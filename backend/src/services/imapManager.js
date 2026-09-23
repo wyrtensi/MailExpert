@@ -283,7 +283,20 @@ export async function stampLastSync(accountId) {
 // throttle us, so wait far longer than any refusal backoff. Bounded rather than permanent so a
 // transient provider-side auth hiccup still heals on its own; editing the account's credentials
 // or an explicit reconnect clears it immediately (clearConnectCooldown).
+//
+// A ladder rather than a fixed wait: 30 min, 1 h, 2 h, 4 h, then 6 h per attempt. A wrong password
+// does not fix itself, and upstream logged 627 failed logins in 16 hours for one account at a
+// fixed short interval, which is how an account gets locked or a server IP flagged. Upstream's
+// ladder starts at 5 minutes; this one keeps the 30-minute floor MailExpert already had.
 export const AUTH_FAILURE_COOLDOWN_MS = 30 * 60 * 1000;
+export const AUTH_FAILURE_COOLDOWN_MAX_MS = 6 * 60 * 60 * 1000;
+
+export function authCooldownMs(failures) {
+  // Guarded: a non-finite count would give NaN, and `Date.now() < NaN` is false, so the cooldown
+  // would silently never apply.
+  const n = Number.isFinite(failures) ? Math.max(1, failures) : 1;
+  return Math.min(AUTH_FAILURE_COOLDOWN_MS * (2 ** Math.min(n - 1, 10)), AUTH_FAILURE_COOLDOWN_MAX_MS);
+}
 
 // Exponential backoff for consecutive connection refusals: 30s, 60s, 120s, 240s, 480s, …
 // capped at CONNECT_COOLDOWN_MAX_MS.
@@ -2424,13 +2437,12 @@ export class ImapManager {
       console.error(`Failed to connect ${logAccount(account)}:`, detail);
       // A failed OAuth token refresh (revoked grant or transient) has its own handling.
       if (await this._handleOAuthRefreshFailure(account, err)) return false;
-      // On a connection-refusal/throttle, back this account off with growing delay so we
-      // stop hammering a provider that's at its limit. A rejected credential gets the long
-      // auth cooldown. Other errors don't set a cooldown — the health check retries them normally.
-      if (isConnectionRefusal(detail)) this._noteConnectionRefusal(account);
+      // A rejected credential gets the long auth ladder; a connection-refusal/throttle backs the
+      // account off with a growing short delay so we stop hammering a provider at its limit.
+      // Other errors don't set a cooldown — the health check retries them normally.
       // For OAuth accounts this is reached only after connectImapClient's forced token refresh
       // and single retry were rejected too, so the bounded auth cooldown applies as for passwords.
-      else if (isImapAuthFailure(err)) this._noteAuthFailure(account);
+      this._noteLoginFailure(account, err, detail);
       await this._recordAccountError(account, detail);
       return false;
     } finally {
@@ -2563,15 +2575,13 @@ export class ImapManager {
         console.warn(`Poll-only sync error for ${logAccount(account)}: ${detail}`);
         return;
       }
-      const refused = isConnectionRefusal(detail);
-      const authFailed = !refused && isImapAuthFailure(err);
-      if (refused) this._noteConnectionRefusal(account);
-      else if (authFailed) this._noteAuthFailure(account);
+      const backedOff = this._noteLoginFailure(account, err, detail);
       console.warn(`Poll-only sync error for ${logAccount(account)}: ${detail}`);
       // Surface only what we actually backed off on. Gated (unlike the connect paths, which
       // record any failure) because this catch also fires on ordinary slow ticks, and one
-      // timed-out poll must not paint a working account red in the sidebar.
-      if (refused || authFailed) await this._recordAccountError(account, detail);
+      // timed-out poll must not paint a working account red in the sidebar. An auth failure is
+      // recorded too: its cooldown runs to hours, and a silently green account would hide it.
+      if (backedOff) await this._recordAccountError(account, detail);
     } finally {
       // close(), not logout(): LOGOUT is a command and queues behind whatever wedged the
       // transport, and the host slot and sync guard below are released only after it. A hung
@@ -2588,9 +2598,11 @@ export class ImapManager {
   _noteConnectionRefusal(account, reason = 'Connection refused') {
     // A late refusal must not replace the non-expiring reconnect-required gate with a finite backoff.
     if (this._connectCooldown.get(account.id)?.oauthReconnectRequired) return 0;
-    const failures = (this._connectCooldown.get(account.id)?.failures || 0) + 1;
+    const prev = this._connectCooldown.get(account.id);
+    const failures = (prev?.failures || 0) + 1;
     const ms = connectCooldownMs(failures);
-    this._connectCooldown.set(account.id, { until: Date.now() + ms, failures });
+    // Carry the auth ladder's position: a refusal between two rejected logins must not reset it.
+    this._connectCooldown.set(account.id, { until: Date.now() + ms, failures, authFailures: prev?.authFailures || 0 });
     recordImapEvent(account.imap_host, 'refusal_cooldown');
     console.warn(`${reason} for ${logAccount(account)} — backing off ${Math.round(ms / 1000)}s (refusal #${failures})`);
     return ms;
@@ -2633,15 +2645,37 @@ export class ImapManager {
 
   // Arm the long cooldown after the provider rejected the account's credentials. Same map (and
   // therefore the same gates in connectAccount, the health check, the sync tick and backfill) as
-  // the refusal backoff, with a 30-minute floor instead of the escalating 30s-15min schedule.
+  // the refusal backoff, on its own ladder (authCooldownMs: 30 min doubling to 6 h). The ladder
+  // counts rejected logins only, so earlier refusals do not push the first auth wait to hours.
   _noteAuthFailure(account) {
     // A late failure must not replace the non-expiring reconnect-required gate with a finite cooldown.
-    if (this._connectCooldown.get(account.id)?.oauthReconnectRequired) return 0;
-    const failures = (this._connectCooldown.get(account.id)?.failures || 0) + 1;
-    const ms = Math.max(AUTH_FAILURE_COOLDOWN_MS, connectCooldownMs(failures));
-    this._connectCooldown.set(account.id, { until: Date.now() + ms, failures });
-    console.warn(`Authentication rejected for ${logAccount(account)} — not retrying for ${Math.round(ms / 60000)}m unless its credentials change or it is reconnected manually`);
+    const prev = this._connectCooldown.get(account.id);
+    if (prev?.oauthReconnectRequired) return 0;
+    const failures = (prev?.failures || 0) + 1;
+    const authFailures = (prev?.authFailures || 0) + 1;
+    const ms = authCooldownMs(authFailures);
+    this._connectCooldown.set(account.id, { until: Date.now() + ms, failures, authFailures });
+    console.warn(`Authentication rejected for ${logAccount(account)} — not retrying for ${Math.round(ms / 60000)}m (attempt #${authFailures}) unless its credentials change or it is reconnected manually`);
     return ms;
+  }
+
+  // Arm the backoff a failed login deserves and report which one: 'auth' (rejected credentials,
+  // the long ladder), 'refused' (a provider at its limit, the short ladder) or null (anything
+  // else, retried normally). Auth is checked first on every path, so a rejection that carries an
+  // RFC 5530 AUTHENTICATIONFAILED code takes the long ladder even when its text also reads like a
+  // refusal ("try again"). Before this, only connectAccount armed the auth ladder; the sync tick
+  // and the folder status client put a rejected password on the 30-second refusal ladder or on
+  // none at all.
+  _noteLoginFailure(account, err, detail = extractImapError(err)) {
+    if (isImapAuthFailure(err)) {
+      this._noteAuthFailure(account);
+      return 'auth';
+    }
+    if (isConnectionRefusal(detail)) {
+      this._noteConnectionRefusal(account);
+      return 'refused';
+    }
+    return null;
   }
 
   // Lift any connect cooldown (refusal or auth) for an account. Called when the user changes the
@@ -2831,9 +2865,8 @@ export class ImapManager {
             if (pendingClient) { try { pendingClient.close(); } catch { /* already closed */ } }
             return;
           }
-          // Back off on a connection-refusal so the interval stops hammering — mirrors connectAccount.
-          if (isConnectionRefusal(detail)) this._noteConnectionRefusal(account);
-          else if (isImapAuthFailure(reconnErr)) this._noteAuthFailure(account);
+          // Back off (auth first, then refusal) so the interval stops hammering — mirrors connectAccount.
+          this._noteLoginFailure(account, reconnErr, detail);
           console.error(`Reconnect failed for ${logAccount(account)}:`, detail);
           // A failed reconnect is the same class of failure as a failed first connect, so record
           // it exactly as connectAccount does. This was the gap: an account whose host died
@@ -2937,16 +2970,17 @@ export class ImapManager {
       if (detail.includes('THROTTLED') || detail.includes('throttl')) {
         this.syncThrottleSkips.set(account.id, 4);
       }
-      // A refusal on the sync path (notably the fresh-login poll, which never reaches the
-      // reconnect gate) must arm the same backoff the connect paths use — otherwise the poll
-      // keeps hammering a provider that's refusing logins. Honored by the check above next tick.
-      // The fresh-login poll refreshes the OAuth token too; a failed refresh is handled first.
+      // A refusal or a rejected login on the sync path (notably the fresh-login poll, which never
+      // reaches the reconnect gate) must arm the same backoff the connect paths use — otherwise
+      // the poll keeps hammering a provider that's refusing logins. Honored by the check above
+      // next tick. The fresh-login poll refreshes the OAuth token too; a failed refresh is
+      // handled first.
       if (await this._handleOAuthRefreshFailure(account, err)) {
         // Handled: backoff armed, or the account was disconnected for reconnect-required.
-      } else if (isConnectionRefusal(detail)) {
-        this._noteConnectionRefusal(account);
-        // Surface what we backed off on, for the same reason as the poll-only tick: gated on the
-        // refusal so a one-off 'Sync wall-clock timeout' doesn't flag an otherwise healthy account.
+      } else if (this._noteLoginFailure(account, err, detail)) {
+        // Surface what we backed off on, for the same reason as the poll-only tick: gated so a
+        // one-off 'Sync wall-clock timeout' doesn't flag an otherwise healthy account. An auth
+        // failure is surfaced too: its cooldown runs to hours, so the account must not stay green.
         await this._recordAccountError(account, detail);
       }
       // Identity-guard: the staleness check may have deleted this connection out from
@@ -3212,7 +3246,9 @@ export class ImapManager {
       return await fn(client);
     } catch (err) {
       if (await this._handleOAuthRefreshFailure(account, err)) throw err;
-      if (isConnectionRefusal(extractImapError(err))) this._noteConnectionRefusal(account);
+      // Auth first, as on every other path: a rejected password takes the long ladder, not the
+      // 30-second refusal ladder.
+      this._noteLoginFailure(account, err);
       throw err;
     } finally {
       if (client) { try { client.close(); } catch { /* already closed */ } }
@@ -4197,11 +4233,14 @@ export class ImapManager {
             // Same handling as the initial login below: a refusal or rejected credentials will not
             // clear by retrying every errorDelay, so report it and let backfillAllFolders stop.
             if (await this._handleOAuthRefreshFailure(account, reconnErr)) return { aborted: 'oauth' };
+            // Auth first, as on the other paths. A rejected login stops the run without arming the
+            // auth cooldown: the account's persistent connection may still be working, and that
+            // cooldown would also stop its sync tick.
+            if (isImapAuthFailure(reconnErr)) return { aborted: 'auth' };
             if (isConnectionRefusal(detail)) {
               this._noteConnectionRefusal(account);
               return { aborted: 'refused' };
             }
-            if (isImapAuthFailure(reconnErr)) return { aborted: 'auth' };
             await new Promise(r => setTimeout(r, cfg.errorDelay));
             continue; // retry same batch after delay
           }
@@ -4453,11 +4492,12 @@ export class ImapManager {
       // the credentials) would otherwise be hit once per remaining folder. Report it so
       // backfillAllFolders stops; a refusal also arms the account's shared backoff.
       if (await this._handleOAuthRefreshFailure(account, err)) return { aborted: 'oauth' };
+      // Auth first, without arming the auth cooldown (see the reconnect branch above).
+      if (isImapAuthFailure(err)) return { aborted: 'auth' };
       if (isConnectionRefusal(detail)) {
         this._noteConnectionRefusal(account);
         return { aborted: 'refused' };
       }
-      if (isImapAuthFailure(err)) return { aborted: 'auth' };
     } finally {
       if (ownsSession) await dropBfClient();
       this.backfillRunning.delete(backfillKey);
@@ -4957,8 +4997,7 @@ export class ImapManager {
       this._noteProviderIdBackfillFailure(account);
       if (await this._handleOAuthRefreshFailure(account, err)) return;
       const detail = extractImapError(err);
-      if (isConnectionRefusal(detail)) this._noteConnectionRefusal(account);
-      else if (isImapAuthFailure(err)) this._noteAuthFailure(account);
+      this._noteLoginFailure(account, err, detail);
       console.warn(`Provider id backfill failed for ${logAccount(account)}: ${detail}`);
       await recordProviderIdBackfillError(query, account.id, detail).catch(() => {});
     } finally {

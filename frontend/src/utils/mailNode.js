@@ -52,6 +52,16 @@ export function domainMailboxFormError({ localPart, domain }) {
   return null;
 }
 
+// Whether the address the form would create is a mailbox of the install already. The server
+// refuses it too (409 mailbox_exists); the form says so while the name is typed. A mailbox that is
+// only on the node, not in MailExpert, is not taken: creating it enables it again.
+export function domainMailboxTaken({ localPart, domain }, accounts = []) {
+  const local = normalizeLocalPart(localPart);
+  if (!local || !domain) return false;
+  const email = `${local}@${String(domain).trim().toLowerCase()}`;
+  return accounts.some((account) => String(account?.email_address ?? '').trim().toLowerCase() === email);
+}
+
 // Domains a mailbox can be created on: active ones, by name.
 export function selectableDomains(domains) {
   return (domains ?? []).filter((d) => d.active).map((d) => d.domain).sort();

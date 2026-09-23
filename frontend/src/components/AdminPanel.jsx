@@ -38,9 +38,9 @@ import { isGoogleAuthMode } from '../utils/authMode.js';
 import GoogleAppsSection from './GoogleAppsSection.jsx';
 import MailNodeSection from './MailNodeSection.jsx';
 import DomainMailboxAddForm from './DomainMailboxAddForm.jsx';
-import AddAccountPicker from './AddAccountPicker.jsx';
+import AddAccountTabs from './AddAccountTabs.jsx';
 import GmailAddForm from './GmailAddForm.jsx';
-import { addAccountOptions } from '../utils/addAccount.js';
+import { addAccountOptions, defaultAddKind } from '../utils/addAccount.js';
 import { mailNodeErrorKey } from '../utils/mailNode.js';
 import { openOAuthWindow } from '../utils/oauthWindow.js';
 import { MICROSOFT_OAUTH_PATH, reconnectUrlFor } from '../utils/accountHealth.js';
@@ -506,14 +506,14 @@ function AccountsTab() {
   const [foldersSaving, setFoldersSaving] = useState(false);
   const [confirmDialog, setConfirmDialog] = useState(null);
 
-  // "Add account": first the way (utils/addAccount.js decides which are offered), then its form.
+  // "Add account": a tab per way (utils/addAccount.js decides which are offered), its form under it.
   const [addKind, setAddKind] = useState(null);
   const [googleStatus, setGoogleStatus] = useState(null);
   const [domainStatus, setDomainStatus] = useState(null);
+  // The statuses are cleared on the way out, so every opening starts from "loading" and no tab is
+  // picked from a stale or half-known status (an admin would see the manual form flash first).
   useEffect(() => {
     if (subview !== 'add') return;
-    setGoogleStatus(null);
-    setDomainStatus(null);
     api.getIntegrationsStatus()
       .then((data) => {
         setGoogleStatus(data?.google || { configured: false, available: false });
@@ -524,7 +524,12 @@ function AccountsTab() {
         setDomainStatus({ configured: false });
       });
   }, [subview]);
-  const closeAdd = useCallback(() => { setAddKind(null); setSubview('list'); }, []);
+  const closeAdd = useCallback(() => {
+    setAddKind(null);
+    setGoogleStatus(null);
+    setDomainStatus(null);
+    setSubview('list');
+  }, []);
 
   useEffect(() => {
     if (!addAccountRequested) return;
@@ -775,13 +780,13 @@ function AccountsTab() {
     // One form per way to add a mailbox, keyed like ADD_ACCOUNT_KINDS.
     const ADD_FORMS = {
       gmail: () => <GmailAddForm accounts={accounts} onDone={closeAdd} />,
-      domain: () => <DomainMailboxAddForm onCreated={(account) => { setAccounts([...accounts, account]); closeAdd(); }} />,
+      domain: () => <DomainMailboxAddForm accounts={accounts} onCreated={(account) => { setAccounts([...accounts, account]); closeAdd(); }} />,
       manual: () => <AccountForm onSave={handleAdd} onCancel={closeAdd} />,
     };
-    const renderForm = addKind ? ADD_FORMS[addKind] : null;
+    const addOptions = addAccountOptions({ isAdmin, googleStatus, domainStatus });
     return (
       <div>
-        <button onClick={() => (renderForm ? setAddKind(null) : closeAdd())} style={{
+        <button onClick={closeAdd} style={{
           display: 'flex', alignItems: 'center', gap: 6,
           background: 'none', border: 'none', color: 'var(--text-secondary)',
           cursor: 'pointer', fontSize: 13, padding: '0 0 16px 0',
@@ -789,14 +794,17 @@ function AccountsTab() {
           <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
             <polyline points="15 18 9 12 15 6"/>
           </svg>
-          {renderForm ? t('admin.accounts.add.backToOptions') : t('sidebar.backToAccounts')}
+          {t('sidebar.backToAccounts')}
         </button>
-        <div style={{ fontSize: 15, fontWeight: 600, color: 'var(--text-primary)', marginBottom: 20 }}>
+        <div style={{ fontSize: 15, fontWeight: 600, color: 'var(--text-primary)', marginBottom: 14 }}>
           {t('admin.accounts.addTitle')}
         </div>
-        {renderForm
-          ? renderForm()
-          : <AddAccountPicker options={addAccountOptions({ isAdmin, googleStatus, domainStatus })} onPick={setAddKind} />}
+        <AddAccountTabs
+          options={addOptions}
+          active={addKind ?? (googleStatus && domainStatus ? defaultAddKind(addOptions) : null)}
+          onSelect={setAddKind}
+          renderForm={(kind) => ADD_FORMS[kind]()}
+        />
       </div>
     );
   }

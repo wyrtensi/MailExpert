@@ -2,6 +2,7 @@ import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
 import {
   domainMailboxFormError,
+  domainMailboxTaken,
   mailNodeConfigError,
   mailNodeErrorDetail,
   mailNodeErrorKey,
@@ -89,5 +90,21 @@ describe('quotaMbInGb', () => {
     assert.equal(quotaMbInGb(1024), '1.0');
     assert.equal(quotaMbInGb('5120'), '5.0');
     assert.equal(quotaMbInGb(102400), '100.0');
+  });
+});
+
+describe('domainMailboxTaken', () => {
+  const accounts = [{ email_address: 'Sales@Example.com' }, { email_address: 'ops@example.org' }];
+
+  it('finds an address that is already a mailbox, whatever the case and spaces', () => {
+    assert.equal(domainMailboxTaken({ localPart: ' sales ', domain: 'example.com' }, accounts), true);
+    assert.equal(domainMailboxTaken({ localPart: 'SALES', domain: 'EXAMPLE.COM' }, accounts), true);
+  });
+
+  it('lets the same name through on another domain, and says nothing for an empty form', () => {
+    assert.equal(domainMailboxTaken({ localPart: 'sales', domain: 'example.org' }, accounts), false);
+    assert.equal(domainMailboxTaken({ localPart: '', domain: 'example.com' }, accounts), false);
+    assert.equal(domainMailboxTaken({ localPart: 'sales', domain: '' }, accounts), false);
+    assert.equal(domainMailboxTaken({ localPart: 'sales', domain: 'example.com' }), false);
   });
 });

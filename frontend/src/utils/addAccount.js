@@ -48,7 +48,7 @@ function gmailUnavailableHint(googleStatus) {
   return 'admin.integrations.google.errorNoAppCapacity';
 }
 
-// Options the dialog lists. Manual server setup is for administrators only (the server answers
+// Options the dialog lists, one tab each. Manual server setup is for administrators only (the server answers
 // 403 to anyone else). Gmail is listed for everyone but stays inactive, with the reason, while no
 // Google app can take a new address; the mailbox on the mail node likewise until an administrator
 // sets the node up. `domainStatus` is the `domainMail` part of GET /api/integrations/status.
@@ -68,6 +68,11 @@ export function addAccountOptions({ isAdmin = false, googleStatus = null, domain
     options.push({ kind, ...OPTION_KEYS[kind], enabled, hintKey });
   }
   return options;
+}
+
+// The tab "Add account" opens on: the first way that can be used now, else the first listed.
+export function defaultAddKind(options = []) {
+  return (options.find((option) => option.enabled) ?? options[0])?.kind ?? null;
 }
 
 // How a mailbox of the install shows up in the suggestions. Mailboxes are shared, so every

@@ -1,3 +1,5 @@
+import { fleetAccounts, fleetDomains, fleetLetters } from './fleet.js';
+
 const ACCOUNT_FIXTURES = [
   {
     id: 'demo-sales',
@@ -34,6 +36,9 @@ const ACCOUNT_FIXTURES = [
     aliases: [],
   },
 ];
+// 48 generated mailboxes (demo/fleet.js) after the two hand-made ones: 50 in all.
+const FLEET_ACCOUNTS = fleetAccounts();
+ACCOUNT_FIXTURES.push(...FLEET_ACCOUNTS);
 
 const FOLDER_FIXTURES = [
   { path: 'INBOX', name: 'Inbox', special_use: '\\Inbox' },
@@ -60,15 +65,25 @@ function message({
   category = 'primary',
   threadId = id,
   toAddresses,
+  ccAddresses = [],
   bodyText = snippet,
+  // Generated letters carry their own headers and threading (demo/fleet.js); the hand-made
+  // ones below leave these out and read through THREADING_OVERRIDES instead.
+  messageId,
+  inReplyTo,
+  references,
+  reason,
+  providerThreadId,
+  providerMessageId,
 }) {
   const account = ACCOUNT_FIXTURES.find(item => item.id === accountId);
-  return {
+  const row = {
     id,
     uid: Number(id.replace(/\D/g, '')) || 1,
-    message_id: `<${id}@demo.mailexpert.local>`,
+    message_id: messageId || `<${id}@demo.mailexpert.local>`,
     thread_id: threadId,
-    thread_key: threadId,
+    // Same as the stored column: COALESCE(thread_id, id).
+    thread_key: threadId ?? id,
     account_id: account.id,
     account_name: account.name,
     account_email: account.email_address,
@@ -78,7 +93,7 @@ function message({
     from_name: fromName,
     from_email: fromEmail,
     to_addresses: toAddresses || [account.email_address],
-    cc_addresses: [],
+    cc_addresses: ccAddresses,
     date,
     snippet,
     is_read: read,
@@ -88,6 +103,16 @@ function message({
     body_html: `<p>${bodyText}</p>`,
     body_text: bodyText,
   };
+  if (reason !== undefined) {
+    Object.assign(row, {
+      in_reply_to: inReplyTo ?? null,
+      thread_references: references ?? [],
+      threading_reason: reason,
+      provider_thread_id: providerThreadId ?? null,
+      provider_message_id: providerMessageId ?? null,
+    });
+  }
+  return row;
 }
 
 const MESSAGE_FIXTURES = [
@@ -144,6 +169,7 @@ const MESSAGE_FIXTURES = [
     fromName: 'Events Team', fromEmail: 'events@conference.example', date: '2026-09-10T14:00:00.000Z',
     snippet: 'Your invitation for the summer conference.', bodyText: 'Your invitation for the summer conference is enclosed.', read: true,
   }),
+  ...fleetLetters(FLEET_ACCOUNTS).map(message),
 ];
 
 const CONTACT_FIXTURES = [
@@ -349,7 +375,39 @@ function listMessages(url, forceSearch = false) {
       .some(value => String(value || '').toLocaleLowerCase().includes(query)));
   }
   result.sort((left, right) => new Date(right.date) - new Date(left.date));
+  if (url.searchParams.get('threaded') === 'true' && !forceSearch && !query) {
+    return threadedPage(result, { accountId, folder, limit, offset });
+  }
   return { messages: result.slice(offset, offset + limit), total: result.length };
+}
+
+// Threaded list, as the server builds it (messageService.listMessages): one row per mailbox and
+// conversation, the newest letter standing for it with the first letter's subject and sender,
+// message_count over distinct letters (INBOX only for an inbox view) and unread_count.
+function threadedPage(filtered, { accountId, folder, limit, offset }) {
+  const groups = new Map();
+  for (const item of filtered) {
+    const key = `${item.account_id}\u0000${item.thread_key}`;
+    if (!groups.has(key)) groups.set(key, []);
+    groups.get(key).push(item);
+  }
+  const inboxOnly = !accountId || folder === 'INBOX';
+  const rows = [...groups.values()].map((group) => {
+    const newest = group[0];
+    const first = group[group.length - 1];
+    const whole = messages.filter(m => m.account_id === newest.account_id && m.thread_key === newest.thread_key
+      && (!inboxOnly || m.folder === 'INBOX'));
+    return {
+      ...newest,
+      thread_id: newest.thread_key,
+      subject: first.subject,
+      from_name: first.from_name,
+      from_email: first.from_email,
+      message_count: Math.max(1, new Set(whole.map(m => m.message_id)).size),
+      unread_count: group.filter(m => !m.is_read).length,
+    };
+  });
+  return { messages: rows.slice(offset, offset + limit), total: rows.length, threaded: true };
 }
 
 function updateMessages(ids, updater) {
@@ -488,13 +546,84 @@ function contactFromPayload(payload, current = {}) {
   };
 }
 
-// The mail node as an admin sees it in the demo: one domain, one mailbox made there, the disk.
+// The mail node as an admin sees it in the demo: its domains, the mailboxes made there, the disk.
 let mailNodeDomains = [
-  { domain: 'demo.mailexpert.local', active: true, maxMailboxes: 500, mailboxes: 1 },
+  { domain: 'demo.mailexpert.local', active: true, maxMailboxes: 500, mailboxes: 0 },
+  ...fleetDomains(FLEET_ACCOUNTS),
 ];
-let mailNodeMailboxes = [
-  { accountId: 'demo-support', email: 'support@demo.mailexpert.local', onNode: true, active: true, quotaMb: 5120, usedBytes: 734003200 },
-];
+let mailNodeMailboxes = FLEET_ACCOUNTS.filter(account => account.mail_node).map((account, index) => ({
+  accountId: account.id, email: account.email_address, onNode: true, active: true, quotaMb: 5120,
+  usedBytes: ((index * 37) % 90 + 3) * 10 * 1048576,
+}));
+
+// Addresses Google granted before (the grant journal) that are no mailbox now: the Gmail field
+// offers them as "Connected before".
+const KNOWN_GOOGLE_EMAILS = ['acme.archive.demo@gmail.com', 'acme.legacy.demo@gmail.com', 'acme.interns.demo@gmail.com'];
+
+function demoError(message, code) {
+  return Object.assign(new Error(message), { code });
+}
+
+const normalizeEmail = value => String(value ?? '').trim().toLowerCase();
+const mailboxWithEmail = email => ACCOUNT_FIXTURES.find(account => normalizeEmail(account.email_address) === normalizeEmail(email));
+
+// A new mailbox is not empty in the demo: one letter says it is ready, threaded the way the
+// mailbox's mode would thread it.
+function welcomeLetter(account) {
+  const sequence = nextMessageSequence++;
+  const id = `demo-${String(sequence).padStart(3, '0')}`;
+  const gmail = account.thread_mode === 'gmail';
+  const threadNumber = `19${String(sequence).padStart(17, '0')}`;
+  messages.push(message({
+    ...(gmail
+      ? { threadId: `gmail:${threadNumber}`, reason: 'gmail-thrid', providerThreadId: threadNumber, providerMessageId: `${threadNumber}1` }
+      : { reason: 'new-root', threadId: `<${id}@demo.mailexpert.local>` }),
+    id, accountId: account.id,
+    subject: 'Ящик подключён к MailExpert', fromName: 'MailExpert', fromEmail: 'noreply@demo.mailexpert.local',
+    date: new Date().toISOString(), snippet: `Письма на ${account.email_address} теперь видны всей команде.`,
+    category: 'automated',
+  }));
+}
+
+// "Mailbox on our domain" in the demo, with the same refusals as POST /api/accounts kind=domain.
+function createDomainMailbox(body) {
+  const localPart = normalizeEmail(body.localPart);
+  if (!/^[a-z0-9](?:[a-z0-9._-]{0,62}[a-z0-9])?$/.test(localPart) || localPart.includes('..')) {
+    throw demoError('Invalid local part', 'local_part_invalid');
+  }
+  const domain = mailNodeDomains.find(d => d.domain === normalizeEmail(body.domain) && d.active);
+  if (!domain) throw demoError('Unknown domain', 'domain_unknown');
+  const email = `${localPart}@${domain.domain}`;
+  if (mailboxWithEmail(email)) throw demoError('This mailbox is already in MailExpert', 'mailbox_exists');
+  const name = String(body.name ?? '').trim() || email;
+  const account = {
+    ...clone(ACCOUNT_FIXTURES[0]), id: `demo-node-${email}`, name, sender_name: name,
+    imap_host: 'mail.demo.mailexpert.local', smtp_host: 'mail.demo.mailexpert.local',
+    email_address: email, color: '#0ea5e9', signature: null, sort_order: ACCOUNT_FIXTURES.length,
+    mail_node: true, thread_mode: 'rfc',
+  };
+  ACCOUNT_FIXTURES.push(account);
+  mailNodeMailboxes = [...mailNodeMailboxes, { accountId: account.id, email, onNode: true, active: true, quotaMb: 5120, usedBytes: 0 }];
+  mailNodeDomains = mailNodeDomains.map(d => (d.domain === domain.domain ? { ...d, mailboxes: d.mailboxes + 1 } : d));
+  welcomeLetter(account);
+  return account;
+}
+
+// The demo stands in for Google's consent: the Gmail form asks "Allow?" itself and then calls
+// start, which here connects the address at once, as the callback would.
+function connectGmail(body) {
+  const email = normalizeEmail(body.email);
+  if (!/^[^\s@]{1,64}@[^\s@]{1,255}$/.test(email)) throw demoError('Invalid email', 'email_invalid');
+  if (mailboxWithEmail(email)) throw demoError('Already connected', 'already_connected');
+  const account = {
+    ...clone(ACCOUNT_FIXTURES[0]), id: `demo-gmail-${email}`, name: email, sender_name: email.split('@')[0],
+    imap_host: 'imap.gmail.com', smtp_host: 'smtp.gmail.com', email_address: email, color: '#ea4335',
+    signature: null, sort_order: ACCOUNT_FIXTURES.length, oauth_provider: 'google', thread_mode: 'gmail',
+  };
+  ACCOUNT_FIXTURES.push(account);
+  welcomeLetter(account);
+  return { path: null, demo: true, result: 'created' };
+}
 
 function demoSenderHistory(id) {
   const current = messageById(id);
@@ -543,10 +672,30 @@ const THREADING_OVERRIDES = {
 // to buildHeadersFromMessage when it cannot re-fetch the original ones from IMAP. Pre-existing
 // gap: the generic demo fallback answered { headers: [] } here, an array MessageHeaderModal's
 // headers.split('\n') cannot handle, crashing the modal on every open in demo mode.
+// What the diagnostics and headers say about a letter: a generated one carries its own fields,
+// a hand-made one reads THREADING_OVERRIDES (anything not listed there is its own root).
+function threadingOf(current) {
+  if ('threading_reason' in current) {
+    return {
+      inReplyTo: current.in_reply_to, references: current.thread_references, reason: current.threading_reason,
+      threadId: current.thread_id, providerThreadId: current.provider_thread_id, providerMessageId: current.provider_message_id,
+    };
+  }
+  const override = THREADING_OVERRIDES[current.id] || {};
+  return {
+    inReplyTo: override.inReplyTo ?? null,
+    references: override.references ?? [],
+    reason: 'reason' in override ? override.reason : 'new-root',
+    threadId: override.threadIdNull ? null : (override.threadId ?? current.message_id),
+    providerThreadId: null,
+    providerMessageId: null,
+  };
+}
+
 function demoHeaders(id) {
   const current = messageById(id);
   if (!current) return null;
-  const override = THREADING_OVERRIDES[id] || {};
+  const override = threadingOf(current);
   const lines = [];
   lines.push(`From: ${current.from_name} <${current.from_email}>`);
   if (current.to_addresses?.length) lines.push(`To: ${current.to_addresses.join(', ')}`);
@@ -566,12 +715,11 @@ function demoThreadingDiagnostics(id) {
   // promise reject with the same message, and MessageHeaderModal's .catch() sees a real failure
   // instead of a silently empty diagnostics object.
   if (!current) throw new Error('Message not found');
-  const override = THREADING_OVERRIDES[id] || {};
+  const threading = threadingOf(current);
 
-  // Same grouping the demo already uses for threads (threadId param of message(), defaulting
-  // to the message's own id) — not the display strings above, which only decorate one row.
-  const threadKey = current.thread_id || current.id;
-  const sameThread = messages.filter(m => m.account_id === current.account_id && (m.thread_id || m.id) === threadKey);
+  // Same grouping the list uses (thread_key), not the display strings above, which only
+  // decorate one row.
+  const sameThread = messages.filter(m => m.account_id === current.account_id && m.thread_key === current.thread_key);
   const byFolder = new Map();
   for (const m of sameThread) byFolder.set(m.folder, (byFolder.get(m.folder) || 0) + 1);
   const folders = [...byFolder.entries()]
@@ -580,14 +728,9 @@ function demoThreadingDiagnostics(id) {
 
   return {
     messageId: current.message_id,
-    inReplyTo: override.inReplyTo ?? null,
-    references: override.references ?? [],
-    providerThreadId: null,
-    providerMessageId: null,
-    threadId: override.threadIdNull ? null : (override.threadId ?? current.message_id),
-    reason: 'reason' in override ? override.reason : 'new-root',
-    mode: 'rfc',
-    conversation: { total: sameThread.length, folders },
+    ...threading,
+    mode: accountFor(current.account_id)?.thread_mode === 'gmail' ? 'gmail' : 'rfc',
+    conversation: { total: new Set(sameThread.map(m => m.message_id)).size, folders },
   };
 }
 
@@ -605,17 +748,11 @@ export async function demoRequest(method, path, body = {}) {
   }
   if (verb === 'GET' && pathname === '/accounts') return clone(ACCOUNT_FIXTURES);
   // "Mailbox on our domain": the demo adds it to the account list for this page session.
-  if (verb === 'POST' && pathname === '/accounts' && body?.kind === 'domain') {
-    const email = `${String(body.localPart || '').toLowerCase()}@${body.domain}`;
-    const account = {
-      ...clone(ACCOUNT_FIXTURES[0]), id: `demo-node-${email}`, name: body.name || email, sender_name: null,
-      imap_host: 'mail.demo.mailexpert.local', smtp_host: 'mail.demo.mailexpert.local',
-      email_address: email, color: '#0ea5e9', signature: null, sort_order: ACCOUNT_FIXTURES.length, mail_node: true,
-    };
-    ACCOUNT_FIXTURES.push(account);
-    mailNodeMailboxes = [...mailNodeMailboxes, { accountId: account.id, email, onNode: true, active: true, quotaMb: 5120, usedBytes: 0 }];
-    mailNodeDomains = mailNodeDomains.map(d => (d.domain === body.domain ? { ...d, mailboxes: d.mailboxes + 1 } : d));
-    return clone(account);
+  if (verb === 'POST' && pathname === '/accounts' && body?.kind === 'domain') return clone(createDomainMailbox(body));
+  if (verb === 'POST' && pathname === '/oauth/google/start') return connectGmail(body);
+  if (verb === 'GET' && pathname === '/oauth/google/known-emails') {
+    const q = normalizeEmail(url.searchParams.get('q'));
+    return { emails: KNOWN_GOOGLE_EMAILS.filter(email => email.includes(q) && !mailboxWithEmail(email)) };
   }
 
   const foldersMatch = pathname.match(/^\/accounts\/([^/]+)\/folders$/);
@@ -702,8 +839,9 @@ export async function demoRequest(method, path, body = {}) {
   const threadMatch = pathname.match(/^\/mail\/thread\/([^/]+)$/);
   if (verb === 'GET' && threadMatch) {
     const threadId = decodeURIComponent(threadMatch[1]);
+    const accountId = url.searchParams.get('accountId');
     const result = visibleMessages()
-      .filter(item => item.thread_id === threadId || item.thread_key === threadId)
+      .filter(item => (item.thread_id === threadId || item.thread_key === threadId) && (!accountId || item.account_id === accountId))
       .sort((left, right) => new Date(left.date) - new Date(right.date));
     return { messages: clone(result) };
   }
@@ -788,7 +926,7 @@ export async function demoRequest(method, path, body = {}) {
 
   if (verb === 'GET' && pathname === '/integrations') return {};
   if (verb === 'GET' && pathname === '/integrations/status') {
-    return { google: { configured: false, available: false }, microsoft: { configured: false }, domainMail: { configured: true } };
+    return { google: { configured: true, available: true }, microsoft: { configured: false }, domainMail: { configured: true } };
   }
   if (verb === 'GET' && pathname === '/admin/google-apps') return { apps: [] };
   if (verb === 'GET' && pathname === '/mail-node/config') {

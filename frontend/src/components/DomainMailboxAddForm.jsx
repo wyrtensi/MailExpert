@@ -3,6 +3,7 @@ import { useTranslation } from 'react-i18next';
 import { api } from '../utils/api.js';
 import {
   domainMailboxFormError,
+  domainMailboxTaken,
   mailNodeErrorDetail,
   mailNodeErrorKey,
   normalizeLocalPart,
@@ -14,17 +15,27 @@ const inputStyle = {
   borderRadius: 7, color: 'var(--text-primary)', fontSize: 13, outline: 'none', boxSizing: 'border-box',
 };
 const labelStyle = { display: 'block', fontSize: 12, color: 'var(--text-secondary)', marginBottom: 5 };
+const buttonStyle = (primary, enabled = true) => ({
+  padding: '9px 16px', borderRadius: 7, fontSize: 13, fontWeight: 500, cursor: enabled ? 'pointer' : 'default',
+  opacity: enabled ? 1 : 0.5,
+  ...(primary
+    ? { border: 'none', background: 'var(--accent)', color: 'var(--accent-text)' }
+    : { border: '1px solid var(--border)', background: 'none', color: 'var(--text-secondary)' }),
+});
 
-// "Add account -> Mailbox on our domain": the name before @ and a domain of the mail node. The
-// server creates the mailbox (or enables it again) with a password only MailExpert knows and
-// connects it; `onCreated` gets the new account row.
-export default function DomainMailboxAddForm({ onCreated }) {
+// "Add account -> Our mailbox": the name before @, a domain of the mail node and the name the
+// mailbox shows under. An address that is already a mailbox of the install is refused while it is
+// typed; the rest is confirmed on a second step before anything is created. The server creates
+// the mailbox (or enables it again) with a password only MailExpert knows and connects it;
+// `onCreated` gets the new account row.
+export default function DomainMailboxAddForm({ accounts = [], onCreated }) {
   const { t } = useTranslation();
   const [domains, setDomains] = useState(null);
   const [loadError, setLoadError] = useState(null);
   const [localPart, setLocalPart] = useState('');
   const [domain, setDomain] = useState('');
   const [name, setName] = useState('');
+  const [confirming, setConfirming] = useState(false);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState(null);
 
@@ -41,12 +52,20 @@ export default function DomainMailboxAddForm({ onCreated }) {
     return () => { live = false; };
   }, []);
 
-  const formError = domainMailboxFormError({ localPart, domain });
-  const canCreate = !busy && !formError;
+  const taken = domainMailboxTaken({ localPart, domain }, accounts);
+  const formError = domainMailboxFormError({ localPart, domain }) ?? (taken ? 'admin.accounts.add.domainErrorExists' : null);
+  const canContinue = !busy && !formError;
+  const email = `${normalizeLocalPart(localPart)}@${domain}`;
 
-  const create = async (e) => {
+  const edit = (setter) => (e) => { setter(e.target.value); setError(null); };
+
+  const review = (e) => {
     e.preventDefault();
-    if (!canCreate) return;
+    if (canContinue) setConfirming(true);
+  };
+
+  const create = async () => {
+    if (!canContinue) return;
     setBusy(true);
     setError(null);
     try {
@@ -54,6 +73,7 @@ export default function DomainMailboxAddForm({ onCreated }) {
       onCreated(account);
     } catch (err) {
       setError({ key: mailNodeErrorKey(err?.code), detail: mailNodeErrorDetail(err) });
+      setConfirming(false);
     } finally {
       setBusy(false);
     }
@@ -69,8 +89,37 @@ export default function DomainMailboxAddForm({ onCreated }) {
   if (!domains) return <div style={{ fontSize: 13, color: 'var(--text-tertiary)' }}>{t('common.loading')}</div>;
   if (!domains.length) return <div style={{ fontSize: 13, color: 'var(--text-secondary)' }}>{t('admin.accounts.add.domainNoDomains')}</div>;
 
+  if (confirming) {
+    return (
+      <div>
+        <div style={{ fontSize: 14, fontWeight: 600, color: 'var(--text-primary)', marginBottom: 12 }}>
+          {t('admin.accounts.add.domainConfirmTitle')}
+        </div>
+        <dl style={{ margin: 0, padding: '12px 14px', borderRadius: 8, background: 'var(--bg-tertiary)', fontSize: 13 }}>
+          <dt style={{ fontSize: 11, color: 'var(--text-tertiary)' }}>{t('admin.accounts.add.domainAddressLabel')}</dt>
+          <dd style={{ margin: '2px 0 10px', color: 'var(--text-primary)', fontWeight: 500 }}>{email}</dd>
+          <dt style={{ fontSize: 11, color: 'var(--text-tertiary)' }}>{t('admin.accounts.add.domainConfirmName')}</dt>
+          <dd style={{ margin: '2px 0 0', color: 'var(--text-primary)' }}>{name.trim() || email}</dd>
+        </dl>
+        <div style={{ marginTop: 10, fontSize: 11, color: 'var(--text-tertiary)', lineHeight: 1.6 }}>
+          {t('admin.accounts.add.domainNote')}
+        </div>
+        {/* The account list can change while this step is open: say why Create went inactive. */}
+        {formError && <div role="alert" style={{ marginTop: 10, fontSize: 12, color: 'var(--red)' }}>{t(formError)}</div>}
+        <div style={{ display: 'flex', gap: 8, marginTop: 16 }}>
+          <button type="button" onClick={create} disabled={!canContinue} style={buttonStyle(true, canContinue)}>
+            {busy ? t('admin.accounts.add.domainCreating') : t('admin.accounts.add.domainCreate')}
+          </button>
+          <button type="button" onClick={() => setConfirming(false)} disabled={busy} style={buttonStyle(false, !busy)}>
+            {t('admin.accounts.add.domainChange')}
+          </button>
+        </div>
+      </div>
+    );
+  }
+
   return (
-    <form onSubmit={create}>
+    <form onSubmit={review}>
       <label htmlFor="domain-add-local" style={labelStyle}>{t('admin.accounts.add.domainAddressLabel')}</label>
       <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
         <input
@@ -78,21 +127,22 @@ export default function DomainMailboxAddForm({ onCreated }) {
           autoComplete="off"
           value={localPart}
           placeholder={t('admin.accounts.add.domainLocalPartPh')}
-          onChange={(e) => { setLocalPart(e.target.value); setError(null); }}
+          aria-invalid={!!(localPart && formError)}
+          onChange={edit(setLocalPart)}
           style={{ ...inputStyle, flex: 1 }}
         />
         <span style={{ color: 'var(--text-tertiary)', fontSize: 13 }}>@</span>
         <select
           aria-label={t('admin.accounts.add.domainDomainLabel')}
           value={domain}
-          onChange={(e) => { setDomain(e.target.value); setError(null); }}
+          onChange={edit(setDomain)}
           style={{ ...inputStyle, flex: 1 }}
         >
           {domains.map((d) => <option key={d} value={d}>{d}</option>)}
         </select>
       </div>
       {localPart && formError && (
-        <div style={{ marginTop: 6, fontSize: 11, color: 'var(--text-tertiary)' }}>{t(formError)}</div>
+        <div style={{ marginTop: 6, fontSize: 11, color: taken ? 'var(--red)' : 'var(--text-tertiary)' }}>{t(formError)}</div>
       )}
 
       <label htmlFor="domain-add-name" style={{ ...labelStyle, marginTop: 14 }}>{t('admin.accounts.add.domainNameLabel')}</label>
@@ -100,19 +150,12 @@ export default function DomainMailboxAddForm({ onCreated }) {
         id="domain-add-name"
         value={name}
         placeholder={t('admin.accounts.add.domainNamePh')}
-        onChange={(e) => setName(e.target.value)}
+        onChange={edit(setName)}
         style={inputStyle}
       />
-      <div style={{ marginTop: 10, fontSize: 11, color: 'var(--text-tertiary)', lineHeight: 1.6 }}>
-        {t('admin.accounts.add.domainNote')}
-      </div>
 
-      <button type="submit" disabled={!canCreate} style={{
-        marginTop: 16, padding: '9px 16px', borderRadius: 7, border: 'none', fontSize: 13, fontWeight: 500,
-        background: 'var(--accent)', color: 'var(--accent-text)', cursor: canCreate ? 'pointer' : 'default',
-        opacity: canCreate ? 1 : 0.5,
-      }}>
-        {busy ? t('admin.accounts.add.domainCreating') : t('admin.accounts.add.domainCreate')}
+      <button type="submit" disabled={!canContinue} style={{ ...buttonStyle(true, canContinue), marginTop: 16 }}>
+        {t('admin.accounts.add.domainNext')}
       </button>
       {error && errorLine(error)}
     </form>

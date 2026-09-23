@@ -6621,6 +6621,9 @@ const TAB_GROUPS = [
   { id: 'admin', labelKey: 'admin.tabs.groupAdmin', tabIds: ['users', 'audit', 'sso'] },
 ];
 
+// A manager (not an administrator) sees only their own mail settings: accounts, notifications,
+// rules, appearance and shortcuts. Categories, cleanup, security (sign-in is Cloudflare Access),
+// integrations, AI actions, plugins and About are for administrators.
 const TABS = [
   // Account & Mail
   {
@@ -6637,10 +6640,12 @@ const TABS = [
   },
   {
     id: 'categories', labelKey: 'admin.tabs.categories',
+    adminOnly: true,
     icon: <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.75"><rect x="3" y="3" width="7" height="7" rx="1"/><rect x="14" y="3" width="7" height="7" rx="1"/><rect x="3" y="14" width="7" height="7" rx="1"/><rect x="14" y="14" width="7" height="7" rx="1"/></svg>,
   },
   {
     id: 'cleanup', labelKey: 'admin.tabs.cleanup', beta: true,
+    adminOnly: true,
     icon: <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.75" strokeLinecap="round" strokeLinejoin="round"><path d="M19 3l-6 6"/><path d="M14 4l6 6"/><path d="M11 8l-7 7c-1 1-1 3 0 4s3 1 4 0l7-7"/><path d="M6 20l-3-3"/></svg>,
   },
   // Display
@@ -6656,10 +6661,12 @@ const TABS = [
   // Security & Integrations
   {
     id: 'security', labelKey: 'admin.tabs.security',
+    adminOnly: true,
     icon: <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.75"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/></svg>,
   },
   {
     id: 'integrations', labelKey: 'admin.tabs.integrations',
+    adminOnly: true,
     icon: <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.75"><circle cx="12" cy="12" r="3"/><path d="M6.343 6.343a8 8 0 000 11.314M17.657 6.343a8 8 0 010 11.314M3 12h1m16 0h1M12 3v1m0 16v1"/></svg>,
   },
   {
@@ -6669,10 +6676,12 @@ const TABS = [
   },
   {
     id: 'ai-actions', labelKey: 'admin.tabs.aiActions',
+    adminOnly: true,
     icon: <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.75" strokeLinecap="round" strokeLinejoin="round"><path d="M15 4V2M15 16v-2M8 9h2M20 9h2M17.8 11.8 19 13M15 9h.01M17.8 6.2 19 5M3 21l9-9M12.2 6.2 11 5"/></svg>,
   },
   {
     id: 'plugins', labelKey: 'admin.tabs.plugins', beta: true,
+    adminOnly: true,
     icon: <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.75" strokeLinecap="round" strokeLinejoin="round"><path d="M6 3v6M18 3v6M6 21v-6M18 21v-6M4 9h16v3a6 6 0 01-6 6h-4a6 6 0 01-6-6V9z"/></svg>,
   },
   // Admin
@@ -6695,6 +6704,7 @@ const TABS = [
   // About (ungrouped, pinned to bottom)
   {
     id: 'about', labelKey: 'admin.tabs.about',
+    adminOnly: true,
     icon: <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.75"><circle cx="12" cy="12" r="10"/><line x1="12" y1="8" x2="12" y2="8"/><line x1="12" y1="12" x2="12" y2="16"/></svg>,
   },
 ];
@@ -8233,6 +8243,13 @@ export default function AdminPanel() {
   const visibleTabs = TABS.filter(tab => (!tab.adminOnly || user?.isAdmin) && (!tab.mobileHidden || !isMobile)
     && (!tab.localAuthOnly || !isGoogleAuthMode(user)));
 
+  // A tab this user may not see (a link from elsewhere, a value left from an administrator's
+  // session) falls back to Accounts.
+  const shownTab = visibleTabs.some(tab => tab.id === adminTab) ? adminTab : 'accounts';
+  useEffect(() => {
+    if (shownTab !== adminTab) setAdminTab(shownTab);
+  }, [shownTab, adminTab, setAdminTab]);
+
   const tabScrollRef = useRef(null);
   const [tabRightOverflow, setTabRightOverflow] = useState(false);
   const isAdmin = !!user?.isAdmin;
@@ -8262,6 +8279,7 @@ export default function AdminPanel() {
   const searchResults = searchQuery.trim()
     ? searchIndex.filter(item => {
         if (item.adminOnly && !user?.isAdmin) return false;
+        if (!visibleTabs.some(tab => tab.id === item.tab)) return false;
         if (item.mobileHidden && isMobile) return false;
         if (item.localAuthOnly && isGoogleAuthMode(user)) return false;
         const q = searchQuery.toLowerCase();
@@ -8307,22 +8325,22 @@ export default function AdminPanel() {
 
   const tabContent = (
     <>
-      {adminTab === 'accounts' && <AccountsTab />}
-      {adminTab === 'rules' && <RulesAndBlockListTab initialSubTab={pendingSubTab} />}
-      {adminTab === 'categories' && <CategoriesSection initialSubTab={pendingSubTab} />}
-      {adminTab === 'cleanup' && <MailboxCleanupTab />}
-      {adminTab === 'appearance' && <AppearanceTab initialSubTab={pendingSubTab} />}
-      {adminTab === 'integrations' && <IntegrationsTab />}
-      {adminTab === 'users' && <UsersTab />}
-      {adminTab === 'audit' && user?.isAdmin && <AuditLogTab />}
-      {adminTab === 'sso' && !isGoogleAuthMode(user) && <SSOTab />}
-      {adminTab === 'security' && <SecurityPrivacyTab initialSubTab={pendingSubTab} />}
-      {adminTab === 'notifications' && <NotificationsTab />}
-      {adminTab === 'shortcuts' && !isMobile && <ShortcutsTab />}
-      {adminTab === 'ai' && <AISection />}
-      {adminTab === 'ai-actions' && <AiActionsTab />}
-      {adminTab === 'plugins' && <PluginsSection onNavigate={navigateTo} />}
-      {adminTab === 'about' && <AboutTab />}
+      {shownTab === 'accounts' && <AccountsTab />}
+      {shownTab === 'rules' && <RulesAndBlockListTab initialSubTab={pendingSubTab} />}
+      {shownTab === 'categories' && <CategoriesSection initialSubTab={pendingSubTab} />}
+      {shownTab === 'cleanup' && <MailboxCleanupTab />}
+      {shownTab === 'appearance' && <AppearanceTab initialSubTab={pendingSubTab} />}
+      {shownTab === 'integrations' && <IntegrationsTab />}
+      {shownTab === 'users' && <UsersTab />}
+      {shownTab === 'audit' && user?.isAdmin && <AuditLogTab />}
+      {shownTab === 'sso' && !isGoogleAuthMode(user) && <SSOTab />}
+      {shownTab === 'security' && <SecurityPrivacyTab initialSubTab={pendingSubTab} />}
+      {shownTab === 'notifications' && <NotificationsTab />}
+      {shownTab === 'shortcuts' && !isMobile && <ShortcutsTab />}
+      {shownTab === 'ai' && <AISection />}
+      {shownTab === 'ai-actions' && <AiActionsTab />}
+      {shownTab === 'plugins' && <PluginsSection onNavigate={navigateTo} />}
+      {shownTab === 'about' && <AboutTab />}
     </>
   );
 

@@ -312,6 +312,8 @@ export default function MessagePane({ windowMessageId = null, onWindowClose = nu
   // Toolbar names (utils/paneToolbar.js): every name is tried when the toolbar gets a width, and
   // while the row overflows one name goes per render, least used first, before anything paints.
   // A letter without its own font reads in the interface font (utils/emailFont.js).
+  // Managing AI actions is a settings tab for administrators only.
+  const isAdminUser = useStore(s => !!s.user?.isAdmin);
   const fontSet = useStore(s => s.fontSet);
   const theme = useStore(s => s.theme);
   // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -2500,8 +2502,8 @@ ${bodyContent}
                   }}>
                     {renderAiItem(BUILTIN_SUMMARIZE.id, t('message.summarize'), () => runAiAction(BUILTIN_SUMMARIZE))}
                     {(aiActions || []).map(a => renderAiItem(a.id, a.label, () => runAiAction(a)))}
-                    <div style={{ height: 1, background: 'var(--border-subtle)', margin: '4px 0' }} />
-                    {renderAiItem('__manage', t('message.manageAiActions'), () => { setShowAiMenu(false); setAdminTab('ai-actions'); setShowAdmin(true); }, { muted: true })}
+                    {isAdminUser && <div style={{ height: 1, background: 'var(--border-subtle)', margin: '4px 0' }} />}
+                    {isAdminUser && renderAiItem('__manage', t('message.manageAiActions'), () => { setShowAiMenu(false); setAdminTab('ai-actions'); setShowAdmin(true); }, { muted: true })}
                   </div>
                 </>)}
               </div>

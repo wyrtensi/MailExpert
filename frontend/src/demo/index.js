@@ -387,6 +387,37 @@ let nextDraftUid = 1000;
 let nextMessageSequence = 10;
 let accessSync = structuredClone(ACCESS_SYNC_FIXTURE);
 
+// ── Mutable state for write endpoints (Part 2 of the demo-settings fix): every write below
+// either answers in the real backend's shape, updating one of these so the matching GET (or a
+// re-mount) reads the change back, or is left unhandled on purpose and rejects through the
+// catch-all at the end of demoRequest — see routeCoverage.test.js's REJECTED table for which and
+// why. Rejecting (never a fake `{ ok: true, demo: true }`) applies to writes now too.
+let adminUsers = structuredClone(ADMIN_USER_FIXTURES);
+let demoInvites = [];
+let demoGoogleApps = [];
+let demoOidcProviders = [];
+let systemEmailConfig = null;
+let integrationsConfig = {};
+let aiConfig = null;
+let demoRules = [];
+let demoBlockList = [];
+let categorySources = [];
+let pluginsState = [{ id: 'gtd', name: 'Getting Things Done', version: '1.0.0', tier: 1, activated: true }];
+// accountId -> extra FOLDER_FIXTURES-shaped rows created via POST /mail/folders.
+let extraFolders = {};
+let recoveryEmailValue = null;
+let demoTotpEnabled = false;
+// Applied on top of whichever of DEMO_USER/DEMO_PLAIN_USER is active, by PATCH /auth/profile and
+// the avatar endpoints — one signed-in identity per browser, so this doesn't need to be per-role.
+let profileOverrides = {};
+let nextInviteSequence = 1;
+let nextGoogleAppSequence = 1;
+let nextOidcSequence = 1;
+let nextRuleSequence = 1;
+let nextBlockListSequence = 1;
+let nextAliasSequence = 1;
+let nextCategorySourceSequence = 1;
+
 function clone(value) {
   return structuredClone(value);
 }
@@ -429,7 +460,8 @@ function unreadCounts() {
 }
 
 function foldersFor(accountId) {
-  return FOLDER_FIXTURES.map((folder, index) => {
+  const all = [...FOLDER_FIXTURES, ...(extraFolders[accountId] || [])];
+  return all.map((folder, index) => {
     const contents = messages.filter(item => item.account_id === accountId && item.folder === folder.path);
     return {
       id: `${accountId}-${index + 1}`,
@@ -949,7 +981,10 @@ export async function demoRequest(method, path, body = {}) {
   const pathname = url.pathname;
 
   if (verb === 'GET' && pathname === '/auth/config') return { mode: 'local', cloudflare: false, googleSignIn: false };
-  if (verb === 'GET' && pathname === '/auth/me') return { user: clone(demoRole() === 'user' ? DEMO_PLAIN_USER : DEMO_USER) };
+  if (verb === 'GET' && pathname === '/auth/me') {
+    const base = demoRole() === 'user' ? DEMO_PLAIN_USER : DEMO_USER;
+    return { user: { ...clone(base), totpEnabled: demoTotpEnabled, ...clone(profileOverrides) } };
+  }
   if (verb === 'GET' && pathname === '/auth/preferences') return clone(preferences);
   if (verb === 'PATCH' && pathname === '/auth/preferences') {
     preferences = { ...preferences, ...clone(body) };
@@ -968,6 +1003,150 @@ export async function demoRequest(method, path, body = {}) {
   if (verb === 'GET' && foldersMatch) return clone(foldersFor(decodeURIComponent(foldersMatch[1])));
   const aliasesMatch = pathname.match(/^\/accounts\/([^/]+)\/aliases$/);
   if (verb === 'GET' && aliasesMatch) return clone(accountFor(decodeURIComponent(aliasesMatch[1]))?.aliases || []);
+  if (verb === 'POST' && aliasesMatch) {
+    const accountId = decodeURIComponent(aliasesMatch[1]);
+    const account = accountFor(accountId);
+    if (!account) throw demoError('Account not found');
+    const alias = {
+      id: `${accountId}-alias-${nextAliasSequence++}`, account_id: accountId,
+      name: body?.name || '', email: body?.email || account.email_address,
+      reply_to: body?.reply_to || null, signature: body?.signature || null,
+    };
+    account.aliases = [...(account.aliases || []), alias];
+    return clone(alias);
+  }
+  const aliasItemMatch = pathname.match(/^\/accounts\/([^/]+)\/aliases\/([^/]+)$/);
+  if (verb === 'PUT' && aliasItemMatch) {
+    const account = accountFor(decodeURIComponent(aliasItemMatch[1]));
+    const alias = account?.aliases?.find(a => a.id === decodeURIComponent(aliasItemMatch[2]));
+    if (!alias) throw demoError('Alias not found');
+    Object.assign(alias, {
+      name: body?.name ?? alias.name, email: body?.email ?? alias.email,
+      reply_to: body?.reply_to ?? alias.reply_to, signature: body?.signature ?? alias.signature,
+    });
+    return clone(alias);
+  }
+  if (verb === 'DELETE' && aliasItemMatch) {
+    const account = accountFor(decodeURIComponent(aliasItemMatch[1]));
+    if (account) account.aliases = (account.aliases || []).filter(a => a.id !== decodeURIComponent(aliasItemMatch[2]));
+    return { ok: true };
+  }
+
+  // Manual "IMAP mailbox" add: the real backend performs a live IMAP connection test the demo
+  // cannot; assume success (same as the "domain" and Gmail add flows above) and add the account
+  // with the submitted connection fields.
+  if (verb === 'POST' && pathname === '/accounts' && !body?.kind) {
+    const email = normalizeEmail(body?.email_address || body?.email);
+    if (email && mailboxWithEmail(email)) throw demoError('This mailbox is already in MailExpert', 'mailbox_exists');
+    const account = {
+      ...clone(ACCOUNT_FIXTURES[0]),
+      id: `demo-manual-${Date.now()}`,
+      name: body?.name || email || 'New mailbox',
+      sender_name: body?.sender_name || null,
+      email_address: email || `mailbox-${Date.now()}@demo.mailexpert.local`,
+      imap_host: body?.imap_host || '', imap_port: Number(body?.imap_port) || 993,
+      smtp_host: body?.smtp_host || '', smtp_port: Number(body?.smtp_port) || 587,
+      smtp_tls: body?.smtp_tls || 'STARTTLS', color: body?.color || '#64748b',
+      protocol: 'imap', enabled: true, aliases: [], health: 'healthy', signature: body?.signature || null,
+      categorization_enabled: !!body?.categorization_enabled, sort_order: ACCOUNT_FIXTURES.length,
+      mail_node: false, thread_mode: 'rfc',
+    };
+    ACCOUNT_FIXTURES.push(account);
+    return clone(account);
+  }
+  const accountMatch = pathname.match(/^\/accounts\/([^/]+)$/);
+  if (verb === 'PUT' && accountMatch) {
+    const account = accountFor(decodeURIComponent(accountMatch[1]));
+    if (!account) throw demoError('Account not found');
+    if (account.mail_node && (body?.imap_host !== undefined || body?.smtp_host !== undefined)) {
+      throw demoError('Connection settings are locked for a mailbox on the mail node', 'mail_node_connection_locked');
+    }
+    const assignable = ['name', 'sender_name', 'color', 'enabled', 'imap_host', 'imap_port', 'smtp_host', 'smtp_port',
+      'smtp_tls', 'folder_mappings', 'signature', 'categorization_enabled', 'sort_order', 'include_in_unified_inbox'];
+    for (const key of assignable) if (body?.[key] !== undefined) account[key] = body[key];
+    return clone(account);
+  }
+  if (verb === 'DELETE' && accountMatch) {
+    const id = decodeURIComponent(accountMatch[1]);
+    const index = ACCOUNT_FIXTURES.findIndex(a => a.id === id);
+    if (index !== -1) ACCOUNT_FIXTURES.splice(index, 1);
+    mailNodeMailboxes = mailNodeMailboxes.filter(m => m.accountId !== id);
+    return { ok: true };
+  }
+  const reconnectMatch = pathname.match(/^\/accounts\/([^/]+)\/reconnect$/);
+  if (verb === 'POST' && reconnectMatch) {
+    const account = accountFor(decodeURIComponent(reconnectMatch[1]));
+    if (account) account.health = 'healthy';
+    return { ok: true };
+  }
+  const reindexMatch = pathname.match(/^\/accounts\/([^/]+)\/reindex$/);
+  if (verb === 'POST' && reindexMatch) return { ok: true, alreadyRunning: false };
+  const threadingPreviewMatch = pathname.match(/^\/accounts\/([^/]+)\/threading\/preview$/);
+  if (verb === 'POST' && threadingPreviewMatch) {
+    const id = decodeURIComponent(threadingPreviewMatch[1]);
+    const mode = body?.mode;
+    const accountMessages = messages.filter(m => m.account_id === id);
+    const threadsNow = new Set(accountMessages.map(m => m.thread_key)).size;
+    return { rows: accountMessages.length, changing: 0, subjectOnly: 0, threadsNow, threadsAfter: mode === 'gmail' ? threadsNow : null };
+  }
+  const threadingModeMatch = pathname.match(/^\/accounts\/([^/]+)\/threading\/mode$/);
+  if (verb === 'POST' && threadingModeMatch) {
+    const account = accountFor(decodeURIComponent(threadingModeMatch[1]));
+    if (!account) throw demoError('Account not found');
+    const mode = body?.mode;
+    if (mode === 'gmail' && account.oauth_provider !== 'google') {
+      const err = demoError('threading_switch_blocked');
+      err.reason = 'not_gmail';
+      throw err;
+    }
+    account.thread_mode = mode;
+    return { ok: true, mode };
+  }
+
+  // Manual sync is per mailbox: the real server answers { ok, skipped } and rejects a request
+  // without one, but has nothing real to sync against in the demo — always succeeds.
+  if (verb === 'POST' && pathname === '/mail/sync') return { ok: true, skipped: false };
+  if (verb === 'POST' && pathname === '/mail/sync-folder') return { ok: true };
+  if (verb === 'POST' && pathname === '/mail/sync-folders') return { ok: true };
+
+  if (verb === 'POST' && pathname === '/mail/folders') {
+    const { accountId, name, parentPath } = body || {};
+    const path = parentPath ? `${parentPath}/${name}` : name;
+    extraFolders[accountId] = [...(extraFolders[accountId] || []), { path, name, special_use: null }];
+    return { ok: true, path };
+  }
+  if (verb === 'POST' && pathname === '/mail/folders/delete') {
+    const { accountId, path } = body || {};
+    extraFolders[accountId] = (extraFolders[accountId] || []).filter(f => f.path !== path);
+    messages = messages.filter(m => !(m.account_id === accountId && m.folder === path));
+    return { ok: true };
+  }
+  if (verb === 'POST' && pathname === '/mail/folders/rename') {
+    const { accountId, oldPath, newName } = body || {};
+    const folder = (extraFolders[accountId] || []).find(f => f.path === oldPath);
+    const newPath = oldPath.includes('/') ? `${oldPath.slice(0, oldPath.lastIndexOf('/'))}/${newName}` : newName;
+    if (folder) { folder.path = newPath; folder.name = newName; }
+    for (const m of messages) if (m.account_id === accountId && m.folder === oldPath) m.folder = newPath;
+    return { ok: true, newPath };
+  }
+  if (verb === 'POST' && pathname === '/mail/folders/empty') {
+    const { accountId, path } = body || {};
+    messages = messages.filter(m => !(m.account_id === accountId && m.folder === path));
+    return { ok: true, started: true };
+  }
+
+  if (verb === 'POST' && pathname === '/diagnostics/report') {
+    return {
+      versions: { backend: '3.3.0-demo', gitSha: 'demo' },
+      server: { uptimeSeconds: 3600, dbOk: true, redisOk: true },
+      accounts: ACCOUNT_FIXTURES.slice(0, 5).map(a => ({ id: a.id, protocol: a.protocol, enabled: a.enabled, health: a.health })),
+      folders: [],
+      counts: { unreadTotal: unreadCounts().total, unreadByAccountRef: {} },
+      warnings: [], syncSignals: [], connection: {}, performance: {},
+      config: { aiEnabled: false, aiProvider: null, plugins: {} },
+      scrub: {},
+    };
+  }
 
   if (verb === 'GET' && pathname === '/mail/unread-counts') return clone(unreadCounts());
   if (verb === 'GET' && pathname === '/mail/messages') return clone(listMessages(url));
@@ -1100,6 +1279,24 @@ export async function demoRequest(method, path, body = {}) {
     return { ok: true, updated };
   }
 
+  const snoozeMatch = pathname.match(/^\/mail\/messages\/([^/]+)\/snooze$/);
+  if (verb === 'POST' && snoozeMatch) {
+    const item = messageById(decodeURIComponent(snoozeMatch[1]));
+    if (!item) throw demoError('Message not found');
+    item.folder = 'Snoozed';
+    return { ok: true };
+  }
+
+  const unsubscribeMatch = pathname.match(/^\/mail\/messages\/([^/]+)\/unsubscribe$/);
+  if (verb === 'POST' && unsubscribeMatch) {
+    const item = messageById(decodeURIComponent(unsubscribeMatch[1]));
+    if (!item) throw demoError('Message not found');
+    // Only the demo newsletter fixture (demo-003) carries a List-Unsubscribe header.
+    if (item.category !== 'newsletter') throw demoError('This message has no unsubscribe link');
+    item.unsubscribed_at = new Date().toISOString();
+    return { ok: true, type: 'mailto', url: null, mailto: 'mailto:unsubscribe@aster.example' };
+  }
+
   if (verb === 'GET' && pathname === '/mail/category-counts') {
     const accountId = url.searchParams.get('accountId');
     const counts = {};
@@ -1151,11 +1348,62 @@ export async function demoRequest(method, path, body = {}) {
     return clone({ contacts: listContacts(url).contacts });
   }
 
-  if (verb === 'GET' && pathname === '/integrations') return {};
+  if (verb === 'GET' && pathname === '/integrations') return clone(integrationsConfig);
   if (verb === 'GET' && pathname === '/integrations/status') {
     return { google: { configured: true, available: true }, microsoft: { configured: false }, domainMail: { configured: true } };
   }
-  if (verb === 'GET' && pathname === '/admin/google-apps') return { apps: [] };
+  const integrationMatch = pathname.match(/^\/integrations\/([^/]+)$/);
+  if (verb === 'POST' && integrationMatch) {
+    const provider = decodeURIComponent(integrationMatch[1]);
+    if (provider === 'google') {
+      const redirectUri = String(body?.redirectUri ?? '').trim();
+      if (redirectUri && !/^https?:\/\//i.test(redirectUri)) throw demoError('redirect_uri must be an absolute URL', 'redirect_uri_invalid');
+      integrationsConfig = { ...integrationsConfig, google: { ...(redirectUri ? { redirectUri } : {}), updated_at: new Date().toISOString() } };
+    } else {
+      const cfg = { ...clone(body || {}) };
+      if (cfg.clientSecret) cfg.clientSecret = '•'.repeat(8);
+      integrationsConfig = { ...integrationsConfig, [provider]: { ...cfg, updated_at: new Date().toISOString() } };
+    }
+    return { ok: true };
+  }
+  if (verb === 'DELETE' && integrationMatch) {
+    const provider = decodeURIComponent(integrationMatch[1]);
+    integrationsConfig = Object.fromEntries(Object.entries(integrationsConfig).filter(([key]) => key !== provider));
+    return { ok: true };
+  }
+  if (verb === 'GET' && pathname === '/admin/google-apps') return { apps: clone(demoGoogleApps) };
+  if (verb === 'POST' && pathname === '/admin/google-apps') {
+    const app = {
+      id: `demo-google-app-${nextGoogleAppSequence++}`,
+      label: String(body?.label ?? '').trim() || 'Google app',
+      clientId: String(body?.clientId ?? '').trim(),
+      projectNumber: null,
+      userLimit: body?.userLimit ?? null,
+      status: 'active',
+      grantsCount: 0,
+      reservedCount: 0,
+      accountsCount: 0,
+      full: false,
+      createdAt: new Date().toISOString(),
+    };
+    demoGoogleApps = [...demoGoogleApps, app];
+    return { app: clone(app) };
+  }
+  const googleAppMatch = pathname.match(/^\/admin\/google-apps\/([^/]+)$/);
+  if (verb === 'PATCH' && googleAppMatch) {
+    const id = decodeURIComponent(googleAppMatch[1]);
+    const app = demoGoogleApps.find(item => item.id === id);
+    if (!app) throw demoError('Google app not found');
+    if (body?.label !== undefined) app.label = String(body.label).trim();
+    if (body?.userLimit !== undefined) app.userLimit = body.userLimit;
+    if (body?.status !== undefined) app.status = body.status;
+    return { app: clone(app) };
+  }
+  if (verb === 'DELETE' && googleAppMatch) {
+    const id = decodeURIComponent(googleAppMatch[1]);
+    demoGoogleApps = demoGoogleApps.filter(item => item.id !== id);
+    return { ok: true };
+  }
   if (verb === 'GET' && pathname === '/mail-node/config') {
     return { configured: true, mailHost: 'mail.demo.mailexpert.local', apiKey: '•'.repeat(8), quotaMb: 5120, diskPingUrl: '' };
   }
@@ -1213,15 +1461,154 @@ export async function demoRequest(method, path, body = {}) {
     };
     return { result: clone(accessSync.lastRun), ...clone(accessSync) };
   }
-  if (verb === 'GET' && pathname === '/admin/ai') return { enabled: false, provider: null };
+  // GET /admin/ai answers { config }, not the unrelated { enabled, provider } shape (that one is
+  // /ai/status above, a different route AdminPanel does not read this from).
+  if (verb === 'GET' && pathname === '/admin/ai') return { config: clone(aiConfig) };
+  if (verb === 'PATCH' && pathname === '/admin/ai') {
+    const cfg = { ...clone(body || {}) };
+    if (cfg.apiKey) cfg.apiKey = '•'.repeat(8);
+    aiConfig = cfg;
+    return { ok: true, config: clone(aiConfig) };
+  }
+  if (verb === 'DELETE' && pathname === '/admin/ai') { aiConfig = null; return { ok: true }; }
+  // A real provider test/classify call cannot happen without a real AI provider behind it.
+  if (verb === 'POST' && pathname === '/admin/ai/test') throw demoError('AI provider test is not available in demo mode');
+  if (verb === 'POST' && pathname === '/admin/ai/codex/device') throw demoError('ChatGPT sign-in is not available in demo mode');
+  if (verb === 'POST' && pathname === '/admin/ai/codex/device/poll') throw demoError('ChatGPT sign-in is not available in demo mode');
+  if (verb === 'DELETE' && pathname === '/admin/ai/codex/device') return { ok: true };
+  if (verb === 'DELETE' && pathname === '/admin/ai/codex') return { status: 'disconnected' };
   if (verb === 'GET' && pathname === '/todoist/status') return { connected: false };
   if (verb === 'GET' && pathname === '/todoist/projects') return { projects: [] };
   if (verb === 'GET' && pathname === '/todoist/labels') return { labels: [] };
-  if (verb === 'GET' && pathname === '/rules') return [];
-  if (verb === 'GET' && pathname === '/block-list') return [];
-  if (verb === 'GET' && pathname === '/categories/sources') return { sources: [], builtinSets: ['social_networks', 'developer_platforms'] };
+  if (verb === 'POST' && pathname === '/todoist/connect') throw demoError('Todoist is not available in demo mode');
+  if (verb === 'DELETE' && pathname === '/todoist/disconnect') return { ok: true };
+  if (verb === 'POST' && pathname === '/todoist/tasks') throw demoError('Todoist is not available in demo mode');
+
+  if (verb === 'GET' && pathname === '/rules') return clone(demoRules);
+  if (verb === 'POST' && pathname === '/rules') {
+    const rule = {
+      id: `demo-rule-${nextRuleSequence++}`,
+      created_by: 'demo-user',
+      account_id: body?.accountId ?? null,
+      name: String(body?.name ?? '').trim() || 'Untitled rule',
+      enabled: body?.enabled !== false,
+      stop_processing: !!body?.stopProcessing,
+      priority: demoRules.length,
+      condition_logic: body?.conditionLogic || 'all',
+      conditions: body?.conditions || [],
+      actions: body?.actions || [],
+      created_at: new Date().toISOString(),
+      updated_at: new Date().toISOString(),
+    };
+    demoRules = [...demoRules, rule];
+    return clone(rule);
+  }
+  const ruleMatch = pathname.match(/^\/rules\/([^/]+)$/);
+  if (verb === 'PUT' && ruleMatch) {
+    const rule = demoRules.find(item => item.id === decodeURIComponent(ruleMatch[1]));
+    if (!rule) throw demoError('Rule not found');
+    Object.assign(rule, {
+      name: body?.name ?? rule.name,
+      enabled: body?.enabled ?? rule.enabled,
+      stop_processing: body?.stopProcessing ?? rule.stop_processing,
+      condition_logic: body?.conditionLogic ?? rule.condition_logic,
+      conditions: body?.conditions ?? rule.conditions,
+      actions: body?.actions ?? rule.actions,
+      updated_at: new Date().toISOString(),
+    });
+    return clone(rule);
+  }
+  if (verb === 'DELETE' && ruleMatch) {
+    demoRules = demoRules.filter(item => item.id !== decodeURIComponent(ruleMatch[1]));
+    return { ok: true };
+  }
+  if (verb === 'PATCH' && pathname === '/rules/reorder') {
+    const order = Array.isArray(body?.ids) ? body.ids : [];
+    demoRules = order.map(id => demoRules.find(item => item.id === id)).filter(Boolean)
+      .concat(demoRules.filter(item => !order.includes(item.id)))
+      .map((rule, index) => ({ ...rule, priority: index }));
+    return { ok: true };
+  }
+  if (verb === 'POST' && pathname === '/rules/run') {
+    // The real server runs rules server-side and reports progress over the WebSocket the demo
+    // doesn't have; fire the same completion event the UI listens for, once, shortly after.
+    const accountId = body?.accountId;
+    const processed = messages.filter(item => item.folder === 'INBOX' && (!accountId || item.account_id === accountId)).length;
+    setTimeout(() => {
+      try { window.dispatchEvent(new CustomEvent('mailexpert:rules-run-complete', { detail: { ok: true, processed, matched: 0 } })); } catch { /* no window (tests) */ }
+    }, 300);
+    return { ok: true, started: true };
+  }
+
+  if (verb === 'GET' && pathname === '/block-list') return clone(demoBlockList);
+  if (verb === 'POST' && pathname === '/block-list') {
+    const accountId = body?.accountId;
+    const emailAddress = normalizeEmail(body?.emailAddress);
+    const existing = demoBlockList.find(item => item.account_id === accountId && item.email_address === emailAddress);
+    if (existing) return clone(existing);
+    const entry = { id: `demo-block-${nextBlockListSequence++}`, account_id: accountId, email_address: emailAddress, created_at: new Date().toISOString() };
+    demoBlockList = [...demoBlockList, entry];
+    return clone(entry);
+  }
+  const blockListMatch = pathname.match(/^\/block-list\/([^/]+)$/);
+  if (verb === 'DELETE' && blockListMatch) {
+    demoBlockList = demoBlockList.filter(item => item.id !== decodeURIComponent(blockListMatch[1]));
+    return { ok: true };
+  }
+
+  if (verb === 'GET' && pathname === '/categories/sources') return { sources: clone(categorySources), builtinSets: ['social_networks', 'developer_platforms'] };
+  if (verb === 'POST' && pathname === '/categories/sources') {
+    const source = {
+      id: `demo-source-${nextCategorySourceSequence++}`,
+      source_type: body?.sourceType,
+      value: String(body?.value ?? '').trim().toLowerCase(),
+      label: body?.label ?? null,
+      enabled: true,
+      last_fetched_at: null,
+      fetch_ok: null,
+      fetch_error: null,
+      created_at: new Date().toISOString(),
+    };
+    categorySources = [...categorySources, source];
+    return { source: clone(source) };
+  }
+  const categorySourceMatch = pathname.match(/^\/categories\/sources\/([^/]+)$/);
+  if (verb === 'PATCH' && categorySourceMatch) {
+    const source = categorySources.find(item => item.id === decodeURIComponent(categorySourceMatch[1]));
+    if (!source) throw demoError('Source not found');
+    if (body?.enabled !== undefined) source.enabled = !!body.enabled;
+    return { source: clone(source) };
+  }
+  if (verb === 'DELETE' && categorySourceMatch) {
+    categorySources = categorySources.filter(item => item.id !== decodeURIComponent(categorySourceMatch[1]));
+    return { ok: true };
+  }
+  const categorySourceRefreshMatch = pathname.match(/^\/categories\/sources\/([^/]+)\/refresh$/);
+  if (verb === 'POST' && categorySourceRefreshMatch) {
+    const source = categorySources.find(item => item.id === decodeURIComponent(categorySourceRefreshMatch[1]));
+    if (!source) throw demoError('Source not found');
+    if (source.source_type !== 'url') return { ok: true, domainCount: 0, error: 'Only URL sources can be refreshed' };
+    source.last_fetched_at = new Date().toISOString();
+    source.fetch_ok = true;
+    source.fetch_error = null;
+    return { ok: true, domainCount: 12, error: null };
+  }
+  const recategorizeMatch = pathname.match(/^\/categories\/recategorize\/([^/]+)$/);
+  if (verb === 'POST' && recategorizeMatch) return { ok: true };
+  // A real classification call needs a real AI provider behind it.
+  const aiClassifyMatch = pathname.match(/^\/categories\/ai-classify\/([^/]+)$/);
+  if (verb === 'POST' && aiClassifyMatch) throw demoError('AI classification is not available in demo mode');
+
   if (verb === 'GET' && pathname === '/gtd/sections') return { sections: [] };
-  if (verb === 'GET' && pathname === '/plugins') return [];
+  if (verb === 'GET' && pathname === '/plugins') return clone(pluginsState);
+  const pluginMatch = pathname.match(/^\/plugins\/([^/]+)$/);
+  if (verb === 'PATCH' && pluginMatch) {
+    const id = decodeURIComponent(pluginMatch[1]);
+    const plugin = pluginsState.find(item => item.id === id);
+    if (!plugin) throw demoError('Plugin not found');
+    plugin.activated = !!body?.activated;
+    return { id: plugin.id, activated: plugin.activated };
+  }
 
   // ── Admin settings screens ────────────────────────────────────────────────
   if (verb === 'GET' && pathname === '/admin/settings') return { settings: clone(systemSettings) };
@@ -1232,27 +1619,179 @@ export async function demoRequest(method, path, body = {}) {
     }
     return { ok: true };
   }
-  if (verb === 'GET' && pathname === '/admin/users') return { users: clone(ADMIN_USER_FIXTURES), total: ADMIN_USER_FIXTURES.length };
-  if (verb === 'GET' && pathname === '/admin/invites') return { invites: [], total: 0 };
+  if (verb === 'GET' && pathname === '/admin/users') return { users: clone(adminUsers), total: adminUsers.length };
+  if (verb === 'POST' && pathname === '/admin/users') {
+    const email = normalizeEmail(body?.email);
+    if (!email) throw demoError('A valid email address is required', 'email_invalid');
+    if (adminUsers.some(u => normalizeEmail(u.email) === email)) throw demoError('A user with this email already exists', 'user_exists');
+    const user = {
+      id: `demo-added-user-${nextInviteSequence++}`, username: email, email,
+      isAdmin: false, totpEnabled: false, disabledAt: null, created_at: new Date().toISOString(), isBootstrapAdmin: false,
+    };
+    adminUsers = [...adminUsers, user];
+    return { user: clone(user) };
+  }
+  const adminUserMatch = pathname.match(/^\/admin\/users\/([^/]+)$/);
+  if (verb === 'PATCH' && adminUserMatch) {
+    const id = decodeURIComponent(adminUserMatch[1]);
+    const user = adminUsers.find(item => item.id === id);
+    if (!user) throw demoError('User not found');
+    if (id === 'demo-user' && body?.isAdmin === false) throw demoError('Cannot remove your own admin status', 'self_change');
+    if (id === 'demo-user' && body?.disabled === true) throw demoError('Cannot disable your own account', 'self_change');
+    if (body?.isAdmin !== undefined) user.isAdmin = !!body.isAdmin;
+    if (body?.disabled !== undefined) user.disabledAt = body.disabled ? new Date().toISOString() : null;
+    if (body?.email !== undefined) user.email = normalizeEmail(body.email) || null;
+    return { ok: true, user: clone(user) };
+  }
+  if (verb === 'DELETE' && adminUserMatch) {
+    const id = decodeURIComponent(adminUserMatch[1]);
+    if (id === 'demo-user') throw demoError('Cannot delete your own account');
+    adminUsers = adminUsers.filter(item => item.id !== id);
+    return { ok: true };
+  }
+  const totpDisableMatch = pathname.match(/^\/admin\/users\/([^/]+)\/totp\/disable$/);
+  if (verb === 'POST' && totpDisableMatch) {
+    const id = decodeURIComponent(totpDisableMatch[1]);
+    if (id === 'demo-user') throw demoError('Use your account settings to manage your own 2FA.');
+    const user = adminUsers.find(item => item.id === id);
+    if (!user) throw demoError('User not found');
+    user.totpEnabled = false;
+    return { ok: true };
+  }
+
+  if (verb === 'GET' && pathname === '/admin/invites') return { invites: clone(demoInvites), total: demoInvites.length };
+  if (verb === 'POST' && pathname === '/admin/invites') {
+    const email = String(body?.email ?? '').trim();
+    if (!email || !/^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(email)) throw demoError('Valid email address required');
+    const invite = {
+      id: `demo-invite-${nextInviteSequence++}`, email: email.toLowerCase(),
+      token: `demo-token-${nextInviteSequence}`, created_at: new Date().toISOString(),
+      expires_at: new Date(Date.now() + 7 * 24 * 60 * 60 * 1000).toISOString(), used_at: null, used_by_username: null,
+    };
+    demoInvites = [invite, ...demoInvites];
+    return { ok: true, inviteUrl: `https://demo.mailexpert.local/register?invite=${invite.token}`, emailSent: false, emailError: null };
+  }
+  const inviteMatch = pathname.match(/^\/admin\/invites\/([^/]+)$/);
+  if (verb === 'DELETE' && inviteMatch) {
+    demoInvites = demoInvites.filter(item => item.id !== decodeURIComponent(inviteMatch[1]));
+    return { ok: true };
+  }
+
   if (verb === 'GET' && pathname === '/admin/auth-events') return { events: clone(AUTH_EVENT_FIXTURES), total: AUTH_EVENT_FIXTURES.length };
-  if (verb === 'GET' && pathname === '/admin/system-email') return { config: null };
-  if (verb === 'GET' && pathname === '/admin/oidc') return { providers: [] };
+
+  if (verb === 'GET' && pathname === '/admin/system-email') {
+    if (!systemEmailConfig) return { config: null };
+    return { config: { ...clone(systemEmailConfig), pass: systemEmailConfig.pass ? '••••••••' : '' } };
+  }
+  if (verb === 'POST' && pathname === '/admin/system-email') {
+    const { host, user } = body || {};
+    if (!host || !user) throw demoError('SMTP host and username are required');
+    systemEmailConfig = clone(body);
+    return { ok: true };
+  }
+  // A real SMTP handshake cannot happen without a real mail server behind it.
+  if (verb === 'POST' && pathname === '/admin/system-email/test') throw demoError('Sending a test email is not available in demo mode');
+  if (verb === 'DELETE' && pathname === '/admin/system-email') { systemEmailConfig = null; return { ok: true }; }
+
+  if (verb === 'GET' && pathname === '/admin/oidc') return { providers: clone(demoOidcProviders) };
+  if (verb === 'POST' && pathname === '/admin/oidc') {
+    const { name, slug, issuer_url, client_id, client_secret } = body || {};
+    if (!name || !slug || !issuer_url || !client_id || !client_secret) throw demoError('name, slug, issuer_url, client_id and client_secret are required');
+    if (demoOidcProviders.some(p => p.slug === slug)) throw demoError('A provider with this slug already exists', 'slug_taken');
+    const provider = {
+      id: `demo-oidc-${nextOidcSequence++}`, name, slug, issuer_url, client_id,
+      scopes: body.scopes || 'openid email profile', provisioning_mode: body.provisioning_mode || 'login_existing_only',
+      allowed_domains: body.allowed_domains ?? null, enabled: body.enabled !== false,
+      require_email_verified: body.require_email_verified !== false, allow_insecure: !!body.allow_insecure,
+      admin_group_claim: body.admin_group_claim ?? null, admin_group_value: body.admin_group_value ?? null,
+      rp_initiated_logout: !!body.rp_initiated_logout, login_match_claim: body.login_match_claim || 'email',
+      created_at: new Date().toISOString(), updated_at: new Date().toISOString(),
+    };
+    demoOidcProviders = [...demoOidcProviders, provider];
+    return { provider: clone(provider) };
+  }
+  const oidcProviderMatch = pathname.match(/^\/admin\/oidc\/([^/]+)$/);
+  if (verb === 'PATCH' && oidcProviderMatch) {
+    const provider = demoOidcProviders.find(item => item.id === decodeURIComponent(oidcProviderMatch[1]));
+    if (!provider) throw demoError('Provider not found');
+    for (const [key, value] of Object.entries(body || {})) {
+      if (key === 'client_secret' && (!value || value === '••••••••')) continue;
+      provider[key] = value;
+    }
+    provider.updated_at = new Date().toISOString();
+    return { provider: clone(provider) };
+  }
+  if (verb === 'DELETE' && oidcProviderMatch) {
+    const id = decodeURIComponent(oidcProviderMatch[1]);
+    const provider = demoOidcProviders.find(item => item.id === id);
+    const remainingEnabled = demoOidcProviders.filter(item => item.id !== id && item.enabled).length;
+    if (provider?.enabled && remainingEnabled === 0 && systemSettings.internal_auth_disabled === 'true') {
+      throw demoError('Cannot remove the last SSO provider while password login is disabled');
+    }
+    demoOidcProviders = demoOidcProviders.filter(item => item.id !== id);
+    return { ok: true };
+  }
   if (verb === 'GET' && pathname === '/admin/ai/codex/status') return { connected: false, state: 'disconnected', reconnectRequired: false };
 
   // ── Account security / SSO screens ────────────────────────────────────────
+  // No OIDC login ever really happens in the demo, so no identity is ever linked — an empty
+  // list is the real shape for an account that never signed in through SSO, not a fallback.
   if (verb === 'GET' && pathname === '/auth/oidc/identities') return { identities: [] };
-  if (verb === 'GET' && pathname === '/auth/oidc/providers') return { providers: [] };
-  if (verb === 'GET' && pathname === '/auth/profile/recovery-email') return { email: null };
+  const oidcIdentityMatch = pathname.match(/^\/auth\/oidc\/identities\/([^/]+)$/);
+  if (verb === 'DELETE' && oidcIdentityMatch) throw demoError('Cannot unlink your only login method. Set a password first.');
+  if (verb === 'GET' && pathname === '/auth/oidc/providers') {
+    return { providers: demoOidcProviders.filter(p => p.enabled).map(p => ({ id: p.id, name: p.name, slug: p.slug })) };
+  }
+  if (verb === 'GET' && pathname === '/auth/profile/recovery-email') return { email: recoveryEmailValue };
+  if (verb === 'PATCH' && pathname === '/auth/profile/recovery-email') {
+    const email = body?.email;
+    if (email === undefined) throw demoError('email required');
+    const trimmed = email ? String(email).trim().toLowerCase() : null;
+    if (trimmed && !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(trimmed)) throw demoError('Invalid email address');
+    recoveryEmailValue = trimmed || null;
+    return { ok: true };
+  }
   if (verb === 'GET' && pathname === '/auth/registration-status') {
     return { open: systemSettings.registration_open === 'true', internalAuthDisabled: systemSettings.internal_auth_disabled === 'true' };
   }
   // The real server answers 503 when no VAPID keys are configured; the demo never has any, and
-  // usePushNotifications already reads that rejection as "push unavailable here".
+  // usePushNotifications already reads that rejection as "push unavailable here" — so the
+  // subscribe/unsubscribe toggle this gates is never reachable either.
   if (verb === 'GET' && pathname === '/auth/push/vapid-key') throw demoError('Push notifications are not configured on this server.');
-  // Forced-enrollment 2FA setup only exists mid-login (a pending, unauthenticated session); the
-  // demo is always already signed in, so this matches the real server's own refusal.
+  if (verb === 'POST' && pathname === '/auth/push/subscribe') throw demoError('Push notifications are not configured on this server.');
+  if (verb === 'POST' && pathname === '/auth/push/unsubscribe') throw demoError('Push notifications are not configured on this server.');
+  // Forced-enrollment 2FA setup/enable only exist mid-login (a pending, unauthenticated
+  // session); the demo is always already signed in, so this matches the real server's own
+  // refusal for both the GET that starts it and the POST that would complete it.
   if (verb === 'GET' && pathname === '/auth/2fa/enrollment/setup') throw demoError('No pending enrollment');
-  if (verb === 'GET' && pathname === '/totp/setup') return { secret: DEMO_TOTP_SECRET, qrCode: DEMO_TOTP_QR_DATA_URL };
+  if (verb === 'POST' && pathname === '/auth/2fa/enrollment/enable') throw demoError('No pending enrollment');
+  if (verb === 'GET' && pathname === '/totp/setup') {
+    if (demoTotpEnabled) throw demoError('Two-factor authentication is already enabled.');
+    return { secret: DEMO_TOTP_SECRET, qrCode: DEMO_TOTP_QR_DATA_URL };
+  }
+  if (verb === 'POST' && pathname === '/totp/enable') {
+    if (!body?.code) throw demoError('Code required');
+    demoTotpEnabled = true;
+    return { ok: true };
+  }
+  if (verb === 'POST' && pathname === '/totp/disable') { demoTotpEnabled = false; return { ok: true }; }
+  if (verb === 'POST' && pathname === '/totp/cancel') return { ok: true };
+  if (verb === 'POST' && pathname === '/auth/preferences/whitelist-add') return { ok: true };
+
+  // ── Session / profile ──────────────────────────────────────────────────────
+  if (verb === 'POST' && pathname === '/auth/logout') return { ok: true, endSessionUrl: null };
+  if (verb === 'POST' && pathname === '/auth/lock') return { ok: true };
+  // directApi.unlock() in utils/api.js returns this demo answer straight to the caller (it
+  // bypasses the generic request() wrapper); frontend/src/utils/api.demo.test.js pins this shape.
+  if (verb === 'POST' && pathname === '/auth/unlock') return { ok: true };
+  if (verb === 'POST' && pathname === '/auth/lock-pin') return { ok: true };
+  if (verb === 'DELETE' && pathname === '/auth/lock-pin') return { ok: true };
+  if (verb === 'PATCH' && pathname === '/auth/profile') {
+    if (body?.displayName !== undefined) profileOverrides.displayName = body.displayName || null;
+    return { ok: true };
+  }
+  if (verb === 'POST' && pathname === '/auth/avatar') { profileOverrides.avatar = body?.avatar ?? null; return { ok: true }; }
+  if (verb === 'DELETE' && pathname === '/auth/avatar') { profileOverrides.avatar = null; return { ok: true }; }
 
   // ── Mailbox cleanup ────────────────────────────────────────────────────────
   if (verb === 'GET' && pathname === '/mail/mailbox-usage') return clone(mailboxUsageFor(url.searchParams.get('accountId')));
@@ -1261,13 +1800,40 @@ export async function demoRequest(method, path, body = {}) {
   }
 
   // No pet was ever imported in the demo (GtdSettings' import flow has nothing to upload to),
-  // so this matches the real 404 a slug with no stored pet gets.
+  // so this matches the real 404 a slug with no stored pet gets; importing one is unavailable
+  // for the same reason — there's nowhere in the demo to store it.
   const petMetaMatch = pathname.match(/^\/gtd\/pet\/([^/]+)\/meta$/);
   if (verb === 'GET' && petMetaMatch) throw demoError('Pet not found');
+  if (verb === 'POST' && pathname === '/gtd/pet/import') throw demoError('Importing a pet is not available in demo mode');
 
-  // An unhandled GET must fail like a real request the UI already knows how to handle, never
-  // silently succeed with a shape the caller doesn't expect (see request() in utils/api.js).
-  if (verb === 'GET') throw demoError('Not available in demo mode');
+  // ── GTD classify / done / folders ──────────────────────────────────────────
+  const DEFAULT_GTD_FOLDERS = { next: 'GTD/Next', waiting: 'GTD/Waiting', someday: 'GTD/Someday' };
+  if (verb === 'POST' && pathname === '/gtd/classify') {
+    const { messageId, state } = body || {};
+    const folder = DEFAULT_GTD_FOLDERS[state] || `GTD/${state}`;
+    return { ok: true, folder, applied: true, undoToken: { messageId, state, folder, uid: 1 } };
+  }
+  if (verb === 'POST' && pathname === '/gtd/classify/undo') {
+    return { ok: true, removed: true, folder: DEFAULT_GTD_FOLDERS[body?.state] || null };
+  }
+  if (verb === 'DELETE' && pathname === '/gtd/classify') {
+    return { ok: true, removed: true, folder: DEFAULT_GTD_FOLDERS[body?.state] || null };
+  }
+  if (verb === 'POST' && pathname === '/gtd/done') {
+    const item = messageById(body?.id);
+    if (item) { item.folder = 'Archive'; item.is_read = true; }
+    return { ok: true, removed: [], archived: true, noArchiveFolder: false, archiveFailed: false };
+  }
+  if (verb === 'POST' && pathname === '/gtd/folders/ensure') {
+    const folders = Array.isArray(body?.folders) ? body.folders : [];
+    return { results: folders.map(folder => ({ folder, path: folder, created: true })) };
+  }
 
-  return { ok: true, demo: true };
+  // An unhandled request must fail like a real failed request the UI already knows how to
+  // handle, never silently succeed with a shape the caller doesn't expect (see request() in
+  // utils/api.js) — this covers both GET and every write with no answer above, including the
+  // ones deliberately left unhandled because the demo has nothing real behind them (login,
+  // register, forgot/reset password, the pre-login 2FA challenge/OTP steps, and anything else
+  // routeCoverage.test.js lists in its REJECTED table).
+  throw demoError('Not available in demo mode');
 }

@@ -5,35 +5,42 @@ import { fileURLToPath } from 'node:url';
 import test from 'node:test';
 import { demoRequest } from './index.js';
 
-// Guards against the crash class fixed alongside this test: an unhandled GET in demo mode used
-// to fall through to a fake `{ ok: true, demo: true }` success, so a settings screen expecting
-// `{ users: [...] }` (or similar) read `undefined` off it and crashed the whole app. Every GET
-// path pattern api.js can call must now either have a concrete demo answer below, or be listed
-// in REJECTED with the reason it legitimately has none — so a newly added endpoint with no demo
-// support fails this test instead of shipping a silent crash.
+// Guards against the crash class fixed alongside this test: an unhandled request in demo mode
+// used to fall through to a fake `{ ok: true, demo: true }` success, so a screen expecting
+// `{ users: [...] }` (or similar) off a GET read `undefined` off it and crashed the whole app,
+// or a write's caller (`const { user } = await api.admin.createUser(...)`) crashed the same way
+// on click. Every path pattern api.js can call — GET and write alike — must now either have a
+// concrete demo answer, or be listed in a REJECTED table with the reason it legitimately has
+// none, so a newly added endpoint with no demo support fails this test instead of shipping a
+// silent crash.
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const API_PATH = path.join(__dirname, '../utils/api.js');
 
-// Mirrors how the pattern api.js actually calls GET with: a literal string/template passed to
-// request(...) or (for the couple of calls that bypass it) demoRequestImpl(...). `${expr}`
-// segments become ':param'; anything from a literal '?' onward (a query string) is dropped,
-// since query params are supplied per-call below, not part of the route pattern.
-function extractGetPatterns(source) {
-  const re = /(?:request|demoRequestImpl)\(\s*'GET'\s*,\s*(?:'([^']*)'|`([^`]*)`)/g;
+// Mirrors how api.js actually calls the server: a literal string/template passed to request(...)
+// or (for the couple of calls that bypass it) demoRequestImpl(...). `${expr}` segments become
+// ':param'; anything from a literal '?' onward (a query string) is dropped, since query params
+// are supplied per-call below, not part of the route pattern.
+function extractPatterns(source, methods) {
+  const re = new RegExp(`(?:request|demoRequestImpl)\\(\\s*'(${methods.join('|')})'\\s*,\\s*(?:'([^']*)'|\`([^\`]*)\`)`, 'g');
   const patterns = new Set();
   let m;
   while ((m = re.exec(source))) {
-    const raw = m[1] ?? m[2];
+    const verb = m[1];
+    const raw = m[2] ?? m[3];
     const normalized = raw.split(/\$\{[^}]*\}/).join(':param');
     const q = normalized.indexOf('?');
-    patterns.add(q === -1 ? normalized : normalized.slice(0, q));
+    patterns.add(`${verb} ${q === -1 ? normalized : normalized.slice(0, q)}`);
   }
   return patterns;
 }
 
-// pattern (as extractGetPatterns produces it) -> a concrete path, with real demo fixture ids
-// substituted for every :param, to actually call.
+// ─────────────────────────────────────────────────────────────────────────────
+// GET coverage
+// ─────────────────────────────────────────────────────────────────────────────
+
+// pattern (as extractPatterns produces it, minus the "GET " prefix) -> a concrete path, with real
+// demo fixture ids substituted for every :param, to actually call.
 const CONCRETE_PATH = {
   '/oauth/microsoft/device/poll': '/oauth/microsoft/device/poll',
   '/mail/messages/:param/attachments/:param': '/mail/messages/demo-001/attachments/1',
@@ -96,7 +103,7 @@ const CONCRETE_PATH = {
 
 // Patterns the demo deliberately has no success answer for — it must still reject the way a
 // real failed request does (never the generic fallback), and each entry says why.
-const REJECTED = {
+const REJECTED_GET = {
   '/auth/invite/:param': {
     path: '/auth/invite/some-invite-token',
     reason: 'public pre-login registration flow; the demo signs straight in and never renders it',
@@ -123,10 +130,10 @@ const REJECTED = {
 
 test('every GET path pattern api.js can call has an explicit demo answer', async () => {
   const source = fs.readFileSync(API_PATH, 'utf8');
-  const patterns = extractGetPatterns(source);
+  const patterns = new Set([...extractPatterns(source, ['GET'])].map(key => key.slice('GET '.length)));
   assert.ok(patterns.size > 40, 'sanity check: the extractor should find dozens of GET call sites in api.js');
 
-  const covered = new Set([...Object.keys(CONCRETE_PATH), ...Object.keys(REJECTED)]);
+  const covered = new Set([...Object.keys(CONCRETE_PATH), ...Object.keys(REJECTED_GET)]);
   const missing = [...patterns].filter(p => !covered.has(p));
   assert.deepEqual(
     missing, [],
@@ -143,7 +150,7 @@ test('every GET path pattern api.js can call has an explicit demo answer', async
     );
   }
 
-  for (const [pattern, { path: rejectPath, reason, match }] of Object.entries(REJECTED)) {
+  for (const [pattern, { path: rejectPath, reason, match }] of Object.entries(REJECTED_GET)) {
     await assert.rejects(
       () => demoRequest('GET', rejectPath),
       match || /./,
@@ -157,13 +164,6 @@ test('an unhandled GET in demo mode rejects instead of returning a fake success'
     () => demoRequest('GET', '/some/made-up/endpoint'),
     /Not available in demo mode/,
   );
-});
-
-test('a write with no demo answer still falls back to a generic success (unlike GET)', async () => {
-  // The systemic fix (reject an unhandled GET) is GET-only: writes several call sites rely on
-  // the old fallback behavior for actions the demo never persists (see api.demo.test.js's
-  // `unlock`/`savePreferencesOnExit` coverage for the createDirectApi side of this).
-  assert.deepEqual(await demoRequest('POST', '/some/made-up/write'), { ok: true, demo: true });
 });
 
 test('/auth/me answers the signed-in role (admin by default, plain user via demoUser=user)', async () => {
@@ -180,4 +180,266 @@ test('/auth/me answers the signed-in role (admin by default, plain user via demo
   } finally {
     globalThis.localStorage = originalStorage;
   }
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Write coverage (POST/PUT/PATCH/DELETE)
+// ─────────────────────────────────────────────────────────────────────────────
+//
+// Many writes are CRUD chains (a POST creates a row, a PATCH/PUT/DELETE then needs its real id),
+// so this runs as one ordered sequence with a shared `ctx` carrying ids forward, instead of a
+// flat table. `answer(...)` calls a pattern and asserts it resolves (the real backend shape is
+// spot-checked with extra assertions where it matters); `reject(...)` asserts it rejects with a
+// reason. Both record the pattern as covered so the final test can catch anything api.js gained
+// that neither function above ever exercised.
+
+const coveredWritePatterns = new Set();
+
+async function answer(pattern, method, requestPath, body) {
+  coveredWritePatterns.add(`${method} ${pattern}`);
+  return demoRequest(method, requestPath, body).catch((err) => {
+    throw new Error(`${method} ${pattern} (${requestPath}) should resolve in demo mode, but rejected: ${err.message}`);
+  });
+}
+
+async function reject(pattern, method, requestPath, body, match) {
+  coveredWritePatterns.add(`${method} ${pattern}`);
+  await assert.rejects(() => demoRequest(method, requestPath, body), match || /./, `${method} ${pattern} (${requestPath}) should reject`);
+}
+
+test('login-flow writes reject: unreachable in demo (App.jsx bypasses sign-in entirely)', async () => {
+  await reject('/auth/login', 'POST', '/auth/login', { username: 'demo', password: 'x' });
+  await reject('/auth/register', 'POST', '/auth/register', { username: 'x', password: 'y' });
+  await reject('/auth/forgot-password', 'POST', '/auth/forgot-password', { email: 'x@example.com' });
+  await reject('/auth/reset-password', 'POST', '/auth/reset-password', { token: 'x', password: 'y' });
+  await reject('/auth/2fa/challenge', 'POST', '/auth/2fa/challenge', { code: '123456' });
+  await reject('/auth/2fa/send-email-otp', 'POST', '/auth/2fa/send-email-otp');
+  await reject('/auth/2fa/verify-email-otp', 'POST', '/auth/2fa/verify-email-otp', { code: '123456' });
+  await reject('/auth/2fa/enrollment/enable', 'POST', '/auth/2fa/enrollment/enable', { code: '123456' }, /No pending enrollment/);
+});
+
+test('a real AI chat call rejects — no provider behind it in demo', async () => {
+  await reject('/ai/chat', 'POST', '/ai/chat', { messages: [{ role: 'user', content: 'hi' }] }, /demo mode/);
+});
+
+test('session, profile, avatar, recovery-email and 2FA-management writes answer', async () => {
+  const logout = await answer('/auth/logout', 'POST', '/auth/logout');
+  assert.equal(logout.ok, true);
+  await answer('/auth/lock', 'POST', '/auth/lock');
+  await answer('/auth/unlock', 'POST', '/auth/unlock', { pin: '1234' });
+  await answer('/auth/lock-pin', 'POST', '/auth/lock-pin', { pin: '1234' });
+  await answer('/auth/lock-pin', 'DELETE', '/auth/lock-pin', { currentPin: '1234' });
+  await answer('/auth/profile', 'PATCH', '/auth/profile', { displayName: 'Coverage Name' });
+  await answer('/auth/avatar', 'POST', '/auth/avatar', { avatar: 'data:image/png;base64,AA==' });
+  await answer('/auth/avatar', 'DELETE', '/auth/avatar');
+  const recovery = await answer('/auth/profile/recovery-email', 'PATCH', '/auth/profile/recovery-email', { email: 'me@example.com' });
+  assert.equal(recovery.ok, true);
+  await answer('/totp/enable', 'POST', '/totp/enable', { code: '123456' });
+  await answer('/totp/disable', 'POST', '/totp/disable', { password: 'x' });
+  await answer('/totp/cancel', 'POST', '/totp/cancel');
+  await answer('/auth/preferences/whitelist-add', 'POST', '/auth/preferences/whitelist-add', { domain: 'example.com' });
+});
+
+test('push subscribe/unsubscribe reject: gated behind vapid-key, which the demo never has', async () => {
+  await reject('/auth/push/subscribe', 'POST', '/auth/push/subscribe', { endpoint: 'x', keys: { p256dh: 'a', auth: 'b' } }, /not configured/);
+  await reject('/auth/push/unsubscribe', 'POST', '/auth/push/unsubscribe', {}, /not configured/);
+});
+
+test('admin user management round-trips through in-memory state', async () => {
+  const created = await answer('/admin/users', 'POST', '/admin/users', { email: 'newadmin@example.com' });
+  assert.equal(created.user.email, 'newadmin@example.com');
+  const id = created.user.id;
+  const patched = await answer('/admin/users/:param', 'PATCH', `/admin/users/${id}`, { isAdmin: true });
+  assert.equal(patched.user.isAdmin, true);
+  await answer('/admin/users/:param/totp/disable', 'POST', '/admin/users/demo-colleague/totp/disable');
+  await answer('/admin/users/:param', 'DELETE', `/admin/users/${id}`);
+  const list = await demoRequest('GET', '/admin/users');
+  assert.equal(list.users.some(u => u.id === id), false);
+});
+
+test('admin invites round-trip through in-memory state', async () => {
+  const created = await answer('/admin/invites', 'POST', '/admin/invites', { email: 'invitee@example.com' });
+  assert.equal(typeof created.inviteUrl, 'string');
+  const { invites } = await demoRequest('GET', '/admin/invites');
+  const invite = invites.find(i => i.email === 'invitee@example.com');
+  assert.ok(invite, 'the created invite should be listed');
+  await answer('/admin/invites/:param', 'DELETE', `/admin/invites/${invite.id}`);
+});
+
+test('admin system email round-trips and its test send rejects', async () => {
+  await answer('/admin/system-email', 'POST', '/admin/system-email', {
+    host: 'smtp.demo.local', port: 587, user: 'demo', pass: 'x', fromName: 'MailExpert', fromEmail: 'demo@demo.local',
+  });
+  await reject('/admin/system-email/test', 'POST', '/admin/system-email/test', {}, /test email/);
+  await answer('/admin/system-email', 'DELETE', '/admin/system-email');
+});
+
+test('admin Google Workspace apps round-trip through in-memory state', async () => {
+  const created = await answer('/admin/google-apps', 'POST', '/admin/google-apps', { label: 'Demo Google App', clientId: 'client-123' });
+  const id = created.app.id;
+  const patched = await answer('/admin/google-apps/:param', 'PATCH', `/admin/google-apps/${id}`, { label: 'Renamed' });
+  assert.equal(patched.app.label, 'Renamed');
+  await answer('/admin/google-apps/:param', 'DELETE', `/admin/google-apps/${id}`);
+});
+
+test('admin SSO provider CRUD round-trips, and unlinking your only identity rejects', async () => {
+  const created = await answer('/admin/oidc', 'POST', '/admin/oidc', {
+    name: 'Demo IdP', slug: 'demo-idp', issuer_url: 'https://idp.example.com', client_id: 'client', client_secret: 'secret',
+  });
+  const id = created.provider.id;
+  const patched = await answer('/admin/oidc/:param', 'PATCH', `/admin/oidc/${id}`, { name: 'Renamed IdP' });
+  assert.equal(patched.provider.name, 'Renamed IdP');
+  await answer('/admin/oidc/:param', 'DELETE', `/admin/oidc/${id}`);
+  await reject('/auth/oidc/identities/:param', 'DELETE', '/auth/oidc/identities/some-identity-id', undefined, /only login method/);
+});
+
+test('manual IMAP mailbox add, edit, aliases and delete round-trip through ACCOUNT_FIXTURES', async () => {
+  const account = await answer('/accounts', 'POST', '/accounts', {
+    name: 'Demo Manual', email_address: 'manual@demo.mailexpert.local',
+    imap_host: 'imap.demo.local', imap_port: 993, smtp_host: 'smtp.demo.local', smtp_port: 587, smtp_tls: 'STARTTLS',
+  });
+  const id = account.id;
+  const edited = await answer('/accounts/:param', 'PUT', `/accounts/${id}`, { name: 'Renamed Mailbox' });
+  assert.equal(edited.name, 'Renamed Mailbox');
+  await answer('/accounts/:param/reconnect', 'POST', `/accounts/${id}/reconnect`);
+  await answer('/accounts/:param/reindex', 'POST', `/accounts/${id}/reindex`);
+  await answer('/accounts/:param/threading/preview', 'POST', `/accounts/${id}/threading/preview`, { mode: 'rfc' });
+  await answer('/accounts/:param/threading/mode', 'POST', `/accounts/${id}/threading/mode`, { mode: 'rfc' });
+  const alias = await answer('/accounts/:param/aliases', 'POST', `/accounts/${id}/aliases`, { name: 'Alt Name', email: 'alt@demo.mailexpert.local' });
+  const aliasedEdit = await answer('/accounts/:param/aliases/:param', 'PUT', `/accounts/${id}/aliases/${alias.id}`, { name: 'Alt Renamed' });
+  assert.equal(aliasedEdit.name, 'Alt Renamed');
+  await answer('/accounts/:param/aliases/:param', 'DELETE', `/accounts/${id}/aliases/${alias.id}`);
+  await answer('/accounts/:param', 'DELETE', `/accounts/${id}`);
+});
+
+test('mailbox and message-list actions answer with real ids', async () => {
+  await answer('/mail/messages/bulk-read', 'POST', '/mail/messages/bulk-read', { ids: ['demo-006'], read: true });
+  await answer('/mail/messages/:param/star', 'PATCH', '/mail/messages/demo-006/star', { starred: true });
+  await answer('/mail/mark-all-read', 'POST', '/mail/mark-all-read', { accountId: 'demo-ops', folder: 'Projects/Launch' });
+  await answer('/mail/messages/bulk-move', 'POST', '/mail/messages/bulk-move', { ids: ['demo-007'], folder: 'Archive' });
+  await answer('/mail/messages/bulk-archive', 'POST', '/mail/messages/bulk-archive', { ids: ['demo-004'] });
+  await answer('/mail/messages/:param/spam', 'POST', '/mail/messages/demo-005/spam');
+  await answer('/mail/messages/:param/ham', 'POST', '/mail/messages/demo-008/ham');
+  await answer('/mail/messages/:param/snooze', 'POST', '/mail/messages/demo-009/snooze');
+  const unsub = await answer('/mail/messages/:param/unsubscribe', 'POST', '/mail/messages/demo-003/unsubscribe');
+  assert.equal(unsub.type, 'mailto');
+  await answer('/mail/messages/:param/category', 'PATCH', '/mail/messages/demo-002/category', { category: 'primary' });
+  await answer('/mail/messages/bulk-delete', 'POST', '/mail/messages/bulk-delete', { ids: ['demo-002'] });
+  await answer('/mail/messages/:param', 'DELETE', '/mail/messages/demo-004');
+});
+
+test('drafts, sync and folder management answer', async () => {
+  const draft = await answer('/mail/draft', 'POST', '/mail/draft', { accountId: 'demo-sales', subject: 'Draft for coverage', body: 'Hello' });
+  await answer('/mail/draft/:param', 'DELETE', `/mail/draft/${draft.uid}?accountId=demo-sales&folder=Drafts`);
+  await answer('/mail/sync', 'POST', '/mail/sync', { accountId: 'demo-sales' });
+  await answer('/mail/sync-folder', 'POST', '/mail/sync-folder', { accountId: 'demo-sales', folder: 'INBOX' });
+  await answer('/mail/sync-folders', 'POST', '/mail/sync-folders', { accountId: 'demo-sales' });
+  const folder = await answer('/mail/folders', 'POST', '/mail/folders', { accountId: 'demo-sales', name: 'Coverage' });
+  const renamed = await answer('/mail/folders/rename', 'POST', '/mail/folders/rename', { accountId: 'demo-sales', oldPath: folder.path, newName: 'CoverageRenamed' });
+  await answer('/mail/folders/empty', 'POST', '/mail/folders/empty', { accountId: 'demo-sales', path: renamed.newPath });
+  await answer('/mail/folders/delete', 'POST', '/mail/folders/delete', { accountId: 'demo-sales', path: renamed.newPath });
+});
+
+test('diagnostics report answers a sanitized snapshot', async () => {
+  const report = await answer('/diagnostics/report', 'POST', '/diagnostics/report', { salt: 'x' });
+  assert.equal(typeof report.counts.unreadTotal, 'number');
+});
+
+test('integrations config round-trips per provider', async () => {
+  await answer('/integrations/:param', 'POST', '/integrations/microsoft', { clientId: 'x' });
+  await answer('/integrations/:param', 'DELETE', '/integrations/microsoft');
+});
+
+test('contacts CRUD answers (already covered functionally in demo/index.test.js; here for pattern coverage)', async () => {
+  const contact = await answer('/contacts', 'POST', '/contacts', { displayName: 'Coverage Contact', emails: [{ value: 'coverage@example.com' }] });
+  await answer('/contacts/:param', 'PATCH', `/contacts/${contact.id}`, { notes: 'updated' });
+  await answer('/contacts/:param', 'DELETE', `/contacts/${contact.id}`);
+});
+
+test('inbox rules round-trip through in-memory state', async () => {
+  const rule = await answer('/rules', 'POST', '/rules', { accountId: 'demo-sales', name: 'Coverage rule', conditions: [], actions: [] });
+  await answer('/rules/:param', 'PUT', `/rules/${rule.id}`, { name: 'Renamed rule' });
+  await answer('/rules/reorder', 'PATCH', '/rules/reorder', { ids: [rule.id] });
+  await answer('/rules/run', 'POST', '/rules/run', { accountId: 'demo-sales' });
+  await answer('/rules/:param', 'DELETE', `/rules/${rule.id}`);
+});
+
+test('block list round-trips through in-memory state', async () => {
+  const entry = await answer('/block-list', 'POST', '/block-list', { accountId: 'demo-sales', emailAddress: 'blocked@example.com' });
+  await answer('/block-list/:param', 'DELETE', `/block-list/${entry.id}`);
+});
+
+test('admin AI config round-trips; provider test/codex sign-in reject', async () => {
+  await answer('/admin/ai', 'PATCH', '/admin/ai', { provider: 'openai', apiKey: 'sk-test' });
+  await reject('/admin/ai/test', 'POST', '/admin/ai/test', {}, /demo mode/);
+  await reject('/admin/ai/codex/device', 'POST', '/admin/ai/codex/device', {}, /demo mode/);
+  await reject('/admin/ai/codex/device/poll', 'POST', '/admin/ai/codex/device/poll', { flowId: '11111111-1111-1111-1111-111111111111' }, /demo mode/);
+  await answer('/admin/ai/codex/device', 'DELETE', '/admin/ai/codex/device');
+  await answer('/admin/ai/codex', 'DELETE', '/admin/ai/codex');
+  await answer('/admin/ai', 'DELETE', '/admin/ai');
+});
+
+test('category sources round-trip; AI classification rejects', async () => {
+  const source = await answer('/categories/sources', 'POST', '/categories/sources', { sourceType: 'manual', value: 'spam.example.com' });
+  await answer('/categories/sources/:param', 'PATCH', `/categories/sources/${source.source.id}`, { enabled: false });
+  await answer('/categories/sources/:param/refresh', 'POST', `/categories/sources/${source.source.id}/refresh`);
+  await answer('/categories/sources/:param', 'DELETE', `/categories/sources/${source.source.id}`);
+  await answer('/categories/recategorize/:param', 'POST', '/categories/recategorize/demo-sales');
+  await reject('/categories/ai-classify/:param', 'POST', '/categories/ai-classify/demo-001', undefined, /demo mode/);
+});
+
+test('GTD classify/done/folders answer; pet import rejects', async () => {
+  await answer('/gtd/classify', 'POST', '/gtd/classify', { messageId: 'demo-001', state: 'next' });
+  await answer('/gtd/classify/undo', 'POST', '/gtd/classify/undo', { messageId: 'demo-001', state: 'next' });
+  await answer('/gtd/classify', 'DELETE', '/gtd/classify', { messageId: 'demo-001', state: 'next' });
+  await answer('/gtd/done', 'POST', '/gtd/done', { id: 'demo-006', states: ['next'] });
+  await answer('/gtd/folders/ensure', 'POST', '/gtd/folders/ensure', { accountId: 'demo-sales', folders: ['GTD/Next'] });
+  await reject('/gtd/pet/import', 'POST', '/gtd/pet/import', {}, /demo mode/);
+});
+
+test('plugin activation answers; Todoist connect/tasks reject', async () => {
+  const plugin = await answer('/plugins/:param', 'PATCH', '/plugins/gtd', { activated: false });
+  assert.equal(plugin.activated, false);
+  await reject('/todoist/connect', 'POST', '/todoist/connect', { token: 'x' }, /demo mode/);
+  await answer('/todoist/disconnect', 'DELETE', '/todoist/disconnect');
+  await reject('/todoist/tasks', 'POST', '/todoist/tasks', {}, /demo mode/);
+});
+
+test('already-handled writes from part 1 of the demo-settings fix still answer', async () => {
+  await answer('/auth/preferences', 'PATCH', '/auth/preferences', { theme: 'dark' });
+  await answer('/oauth/microsoft/device', 'POST', '/oauth/microsoft/device');
+  await answer('/admin/settings', 'PATCH', '/admin/settings', { registration_open: true });
+  await answer('/admin/access-sync', 'PUT', '/admin/access-sync', { enabled: false });
+  await answer('/admin/access-sync/run', 'POST', '/admin/access-sync/run');
+  await answer('/mail-node/config', 'PUT', '/mail-node/config', {});
+  await answer('/mail-node/domains', 'POST', '/mail-node/domains', { domain: 'coverage.demo.mailexpert.local' });
+  const mailboxes = await demoRequest('GET', '/mail-node/mailboxes');
+  if (mailboxes.mailboxes[0]) {
+    await answer('/mail-node/mailboxes/:param/quota', 'PUT', `/mail-node/mailboxes/${mailboxes.mailboxes[0].accountId}/quota`, { quotaMb: 8192 });
+  } else {
+    coveredWritePatterns.add('PUT /mail-node/mailboxes/:param/quota'); // no fixture mailbox this run; shape already covered in demo/index.test.js
+  }
+  await answer('/oauth/google/start', 'POST', '/oauth/google/start', { email: `coverage-${Date.now()}@gmail.com` });
+});
+
+test('every write path pattern api.js can call was exercised above, answered or rejected', async () => {
+  const source = fs.readFileSync(API_PATH, 'utf8');
+  const patterns = extractPatterns(source, ['POST', 'PUT', 'PATCH', 'DELETE']);
+  assert.ok(patterns.size > 100, 'sanity check: the extractor should find over a hundred write call sites in api.js');
+
+  const missing = [...patterns].filter(p => !coveredWritePatterns.has(p));
+  assert.deepEqual(
+    missing, [],
+    `add a demo answer or a rejection (with reason) above for: ${missing.join(', ')}`,
+  );
+});
+
+test('an unhandled write in demo mode rejects instead of returning a fake success', async () => {
+  // Writes used to fall back to a fake { ok: true, demo: true } here; that fallback is gone too
+  // now, so a write with no demo support fails loudly instead of a caller silently crashing on
+  // a field it expected off the response.
+  await assert.rejects(
+    () => demoRequest('POST', '/some/made-up/write'),
+    /Not available in demo mode/,
+  );
 });

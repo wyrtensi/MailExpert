@@ -4343,7 +4343,11 @@ function ThreadRow({ message, account, isExpanded, threadMsgs, isLoadingThread, 
             }}>
               {account && (
                 <DirectionBadge
-                  direction={mailboxBanner(message, account).direction}
+                  // The row's own from_email is the thread ROOT's sender (for display); a
+                  // thread row's direction must reflect its latest letter instead, carried
+                  // separately as latest_from_email (messageService.js / demo/index.js) since
+                  // a thread that opened incoming and ended with our reply is still "Sent".
+                  direction={mailboxBanner({ ...message, from_email: message.latest_from_email ?? message.from_email }, account).direction}
                   compact={isNarrow || isMobile}
                 />
               )}

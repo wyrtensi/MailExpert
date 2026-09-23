@@ -407,6 +407,9 @@ function threadedPage(filtered, { accountId, folder, limit, offset }) {
       subject: first.subject,
       from_name: first.from_name,
       from_email: first.from_email,
+      // The row displays the thread ROOT's sender (from_email above), but a direction badge
+      // must reflect the newest letter — mirrors messageService.js's latest_from_email.
+      latest_from_email: newest.from_email,
       message_count: Math.max(1, new Set(whole.map(m => m.message_id)).size),
       unread_count: group.filter(m => !m.is_read).length,
     };

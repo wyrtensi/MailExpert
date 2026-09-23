@@ -16,6 +16,7 @@ export default function DirectionBadge({ direction, compact = false }) {
 
   return (
     <span
+      role="img"
       title={label}
       aria-label={label}
       style={{

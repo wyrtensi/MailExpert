@@ -152,6 +152,12 @@ export async function listMessages({ accountId, folder = 'INBOX', limit = 50, of
       )
       SELECT id, uid, folder, message_id, thread_id, thread_subject AS subject,
              thread_from_name AS from_name, thread_from_email AS from_email,
+             -- The row itself (rn=1) is already the thread's latest message by date, so its own
+             -- from_email (before the thread_from_email override above swaps in the thread ROOT's
+             -- sender for display) is the latest message's sender — direction badges must use
+             -- this one, not the displayed from_email, or a thread that opened with an incoming
+             -- letter and ended with our reply would still badge as "Received".
+             from_email AS latest_from_email,
              to_addresses, cc_addresses, reply_to, in_reply_to,
              date, snippet, is_starred, is_read, has_attachments, account_id,
              account_name, account_email, account_color,

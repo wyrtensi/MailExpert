@@ -1034,7 +1034,7 @@ export default function MessageList() {
             addNotification({
               type: 'error',
               title: t('messageList.bulkDeleted.failTitle'),
-              body: t('messageList.bulkDeleted.failBody', { count: failedIds.length }),
+              body: mailboxBusyOr(result, t, t('messageList.bulkDeleted.failBody', { count: failedIds.length })),
             });
           }
         } else {
@@ -1556,7 +1556,7 @@ export default function MessageList() {
         if (failedCount > 0) {
           const failedMsgs = msgs.filter(msg => !movedSet.has(msg.id));
           if (failedMsgs.length > 0) useStore.getState().restoreMessages(failedMsgs);
-          addNotification({ title: t('messageList.bulkMoved.failTitle'), body: t('messageList.bulkMoved.failBody', { count: failedCount }) });
+          addNotification({ title: t('messageList.bulkMoved.failTitle'), body: mailboxBusyOr(result, t, t('messageList.bulkMoved.failBody', { count: failedCount })) });
         } else if (msgs[0]?.account_id) {
           useStore.getState().recordRecentFolder({ accountId: msgs[0].account_id, path: folder });
         }
@@ -2197,7 +2197,7 @@ export default function MessageList() {
                 useStore.getState().restoreMessages([moved]);
                 if (!moved.is_read) incrementUnread(moved.account_id);
               }
-              addNotification({ type: 'error', title: t('message.moved.failTitle'), body: t('messageList.bulkMoved.failBody', { count: failedCount }) });
+              addNotification({ type: 'error', title: t('message.moved.failTitle'), body: mailboxBusyOr(result, t, t('messageList.bulkMoved.failBody', { count: failedCount })) });
             } else {
               useStore.getState().recordRecentFolder({ accountId: moved.account_id, path: folder });
             }
@@ -2237,7 +2237,7 @@ export default function MessageList() {
           console.error('Snooze failed:', err.message);
           useStore.getState().restoreMessages([snoozedMsg]);
           if (!snoozedMsg.is_read) incrementUnread(snoozedMsg.account_id);
-          addNotification({ title: t('message.snoozed.failTitle'), body: t('message.snoozed.failBody') });
+          addNotification({ title: t('message.snoozed.failTitle'), body: mailboxBusyOr(err, t, t('message.snoozed.failBody')) });
         });
         break;
       }

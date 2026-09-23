@@ -38,11 +38,12 @@ import { imapManager } from '../index.js';
 const ACCOUNT_ID = 'c3c3c3c3-3333-4333-8333-c3c3c3c3c3c3';
 const INBOX_ID = 'a1a1a1a1-1111-4111-8111-a1a1a1a1a1a1';
 const TRASH_ID = 'b2b2b2b2-2222-4222-8222-b2b2b2b2b2b2';
+const SENT_ID = 'e5e5e5e5-5555-4555-8555-e5e5e5e5e5e5';
 const MSG = (id, folder, uid) => ({
   id, account_id: ACCOUNT_ID, uid, folder, is_read: true, message_id: `<${uid}@example.com>`,
   subject: 'Board minutes', from_email: 'sender@example.com', folder_mappings: null,
 });
-const rows = { [INBOX_ID]: MSG(INBOX_ID, 'INBOX', 11), [TRASH_ID]: MSG(TRASH_ID, 'Trash', 22) };
+const rows = { [INBOX_ID]: MSG(INBOX_ID, 'INBOX', 11), [TRASH_ID]: MSG(TRASH_ID, 'Trash', 22), [SENT_ID]: MSG(SENT_ID, 'Sent', 33) };
 const busy = () => Object.assign(new Error('IMAP pool busy, please retry'), { poolExhausted: true });
 
 let server;
@@ -104,6 +105,39 @@ describe('a busy mailbox answers 503 mailbox_busy', () => {
   it('on mark as spam', async () => {
     imapManager.moveMessage.mockRejectedValue(busy());
     expectBusy(await call('POST', `/messages/${INBOX_ID}/spam`));
+  });
+
+  it('commits the groups that went through when a later group finds the pool busy', async () => {
+    // Two source folders, two IMAP groups. INBOX moves to Trash; Sent then finds the pool busy.
+    // The INBOX move happened on the server, so its row, counts and audit must be written and
+    // the response must name it, or the UI restores a message that is already in Trash.
+    imapManager.bulkMoveMessages.mockImplementation(async (_account, uids, src) => {
+      if (src === 'Sent') throw busy();
+      return { uidMap: new Map([[11, 901]]), succeeded: uids, failed: [] };
+    });
+    const res = await call('POST', '/messages/bulk-delete', { ids: [INBOX_ID, SENT_ID] });
+    expect(res.status).toBe(200);
+    expect(res.body.deleted).toEqual([INBOX_ID]);
+    expect(res.body.busy).toBe(true);
+    const relocate = query.mock.calls.find(([sql]) => /WITH deleted AS/.test(sql));
+    expect(relocate[1][0]).toEqual([INBOX_ID]);
+    const audit = query.mock.calls.filter(([sql]) => sql.includes('INSERT INTO mailbox_audit_log'));
+    expect(audit).toHaveLength(1);
+    expect(JSON.parse(audit[0][1][0]).map(e => e.details.messageId)).toEqual(['<11@example.com>']);
+  });
+
+  it('does the same for bulk move and archive', async () => {
+    imapManager.bulkMoveMessages.mockImplementation(async (_account, uids, src) => {
+      if (src === 'Sent') throw busy();
+      return { uidMap: new Map([[11, 901]]), succeeded: uids, failed: [] };
+    });
+    const moved = await call('POST', '/messages/bulk-move', { ids: [INBOX_ID, SENT_ID], folder: 'Archive' });
+    expect(moved.status).toBe(200);
+    expect(moved.body.moved).toEqual([INBOX_ID]);
+    expect(moved.body.busy).toBe(true);
+    const archived = await call('POST', '/messages/bulk-archive', { ids: [INBOX_ID, SENT_ID] });
+    expect(archived.status).toBe(200);
+    expect(archived.body.archived).toEqual([INBOX_ID]);
   });
 
   it('keeps other failures as they were', async () => {

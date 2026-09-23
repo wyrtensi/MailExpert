@@ -11,6 +11,9 @@ describe('mailbox busy errors', () => {
     assert.equal(isMailboxBusy(Object.assign(new Error('x'), { code: 'mailbox_busy' })), true);
     assert.equal(isMailboxBusy(new Error('IMAP pool busy, please retry')), false);
     assert.equal(isMailboxBusy(null), false);
+    // A partial-success bulk response body carries the same code.
+    assert.equal(isMailboxBusy({ ok: true, moved: ['a'], busy: true, code: 'mailbox_busy' }), true);
+    assert.equal(isMailboxBusy({ ok: true, moved: ['a'] }), false);
   });
 
   it('shows the busy text for a busy mailbox and the old message otherwise', () => {

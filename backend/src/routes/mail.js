@@ -449,6 +449,32 @@ function sendMailboxBusy(res) {
   return res.status(503).json({ error: MAILBOX_BUSY_ERROR, code: MAILBOX_BUSY_CODE, busy: true });
 }
 
+// The bulk routes run one IMAP call per (account, source folder) group. A busy pool fails only
+// the group it hit: groups the server already applied must still be committed (DB rows, folder
+// counts, audit), or the UI restores mail that is gone on the server and a retry fails on UIDs
+// that no longer exist. So the routes answer 503 mailbox_busy only when NO group succeeded, and
+// otherwise their usual partial-success shape (the ids that went through) plus busy: true.
+// Once an account is busy its remaining groups are skipped: each would wait out the same pool.
+function bulkBusyTracker() {
+  const busyAccounts = new Set();
+  return {
+    skip: accountId => busyAccounts.has(accountId),
+    // fn's result, or null when the pool was busy for this group.
+    async run(accountId, fn) {
+      try {
+        return await fn();
+      } catch (err) {
+        if (!err?.poolExhausted) throw err;
+        busyAccounts.add(accountId);
+        return null;
+      }
+    },
+    get busy() { return busyAccounts.size > 0; },
+    // Spread into a partial-success response.
+    flag() { return busyAccounts.size ? { busy: true, code: MAILBOX_BUSY_CODE } : {}; },
+  };
+}
+
 router.get('/messages/:id/body', async (req, res) => {
   const { id } = req.params;
   if (!UUID_RE.test(id)) return res.status(400).json({ error: 'Invalid message id' });
@@ -1271,6 +1297,7 @@ router.post('/messages/bulk-delete', async (req, res) => {
   }
 
   const moveGuards = [];
+  const busy = bulkBusyTracker();
   try {
     const result = await query(
       `SELECT m.*, a.folder_mappings FROM messages m
@@ -1326,8 +1353,11 @@ router.post('/messages/bulk-delete', async (req, res) => {
           (byExpungeFolder[msg.folder] = byExpungeFolder[msg.folder] || []).push(msg);
         }
         for (const [expungeFolder, folderMsgs] of Object.entries(byExpungeFolder)) {
+          if (busy.skip(accountId)) break;
           const uidToMsg = new Map(folderMsgs.map(m => [String(m.uid), m]));
-          const { succeeded, failed } = await imapManager.bulkPermanentDelete(account, folderMsgs.map(m => m.uid), expungeFolder);
+          const outcome = await busy.run(accountId, () => imapManager.bulkPermanentDelete(account, folderMsgs.map(m => m.uid), expungeFolder));
+          if (!outcome) continue;
+          const { succeeded, failed } = outcome;
           for (const uid of succeeded) expungeSucceeded.push(uidToMsg.get(String(uid)));
           for (const uid of failed) console.error(`bulk-delete IMAP expunge uid ${uid} from ${expungeFolder}: IMAP delete failed`);
         }
@@ -1340,8 +1370,11 @@ router.post('/messages/bulk-delete', async (req, res) => {
           (byFolder[msg.folder] = byFolder[msg.folder] || []).push(msg);
         }
         for (const [srcFolder, folderMsgs] of Object.entries(byFolder)) {
+          if (busy.skip(accountId)) break;
           const uidToMsg = new Map(folderMsgs.map(m => [String(m.uid), m]));
-          const { uidMap, succeeded, failed } = await imapManager.bulkMoveMessages(account, folderMsgs.map(m => m.uid), srcFolder, trashPath);
+          const outcome = await busy.run(accountId, () => imapManager.bulkMoveMessages(account, folderMsgs.map(m => m.uid), srcFolder, trashPath));
+          if (!outcome) continue;
+          const { uidMap, succeeded, failed } = outcome;
           for (const uid of succeeded) {
             trashMoveSucceeded.push({ msg: uidToMsg.get(String(uid)), trashPath, newUid: uidMap.get(Number(uid)) || null });
           }
@@ -1349,6 +1382,9 @@ router.post('/messages/bulk-delete', async (req, res) => {
         }
       }
     }
+
+    // Nothing went through and a pool was busy: the whole request is "busy, try again".
+    if (busy.busy && !expungeSucceeded.length && !trashMoveSucceeded.length) return sendMailboxBusy(res);
 
     // Permanently deleted: remove DB rows immediately.
     if (expungeSucceeded.length) {
@@ -1446,7 +1482,7 @@ router.post('/messages/bulk-delete', async (req, res) => {
     // Refresh GTD section data for any deleted thread that still carries a GTD label sibling.
     notifyMailMutation(owned);
 
-    res.json({ ok: true, deleted: allSucceeded });
+    res.json({ ok: true, deleted: allSucceeded, ...busy.flag() });
   } catch (err) {
     console.error('bulk-delete error:', err);
     if (err.poolExhausted) return sendMailboxBusy(res);
@@ -1549,6 +1585,7 @@ router.post('/messages/bulk-move', async (req, res) => {
   }
 
   const moveGuards = [];
+  const busy = bulkBusyTracker();
   try {
     const result = await query(
       `SELECT m.* FROM messages m
@@ -1596,8 +1633,11 @@ router.post('/messages/bulk-move', async (req, res) => {
       }
       let accountMissingUid = false;
       for (const [srcFolder, folderMsgs] of Object.entries(byFolder)) {
+        if (busy.skip(accountId)) break;
         const uidToMsg = new Map(folderMsgs.map(m => [String(m.uid), m]));
-        const { uidMap, succeeded, failed } = await imapManager.bulkMoveMessages(account, folderMsgs.map(m => m.uid), srcFolder, folder);
+        const outcome = await busy.run(accountId, () => imapManager.bulkMoveMessages(account, folderMsgs.map(m => m.uid), srcFolder, folder));
+        if (!outcome) continue;
+        const { uidMap, succeeded, failed } = outcome;
         for (const uid of succeeded) {
           const msg = uidToMsg.get(String(uid));
           movedIds.push(msg.id);
@@ -1609,6 +1649,8 @@ router.post('/messages/bulk-move', async (req, res) => {
       }
       if (accountMissingUid) resyncAccounts.push(account);
     }
+
+    if (busy.busy && movedIds.length === 0) return sendMailboxBusy(res);
 
     if (movedIds.length > 0) {
       // DELETE source rows and, when we have UIDPLUS-provided new UIDs, immediately
@@ -1665,7 +1707,7 @@ router.post('/messages/bulk-move', async (req, res) => {
     // Refresh GTD section data for any moved thread that still carries a GTD label sibling.
     notifyMailMutation(owned);
 
-    res.json({ ok: true, moved: movedIds });
+    res.json({ ok: true, moved: movedIds, ...busy.flag() });
   } catch (err) {
     console.error('bulk-move error:', err);
     if (err.poolExhausted) return sendMailboxBusy(res);
@@ -1689,6 +1731,7 @@ router.post('/messages/bulk-archive', async (req, res) => {
   }
 
   const moveGuards = [];
+  const busy = bulkBusyTracker();
   try {
     const result = await query(
       `SELECT m.*, a.folder_mappings FROM messages m
@@ -1739,8 +1782,11 @@ router.post('/messages/bulk-archive', async (req, res) => {
         (byFolder[msg.folder] = byFolder[msg.folder] || []).push(msg);
       }
       for (const [srcFolder, folderMsgs] of Object.entries(byFolder)) {
+        if (busy.skip(accountId)) break;
         const uidToMsg = new Map(folderMsgs.map(m => [String(m.uid), m]));
-        const { uidMap, succeeded, failed } = await imapManager.bulkMoveMessages(account, folderMsgs.map(m => m.uid), srcFolder, archiveFolder);
+        const outcome = await busy.run(accountId, () => imapManager.bulkMoveMessages(account, folderMsgs.map(m => m.uid), srcFolder, archiveFolder));
+        if (!outcome) continue;
+        const { uidMap, succeeded, failed } = outcome;
         for (const uid of succeeded) {
           const msg = uidToMsg.get(String(uid));
           archivedIds.push({ id: msg.id, accountId, folder: archiveFolder, newUid: uidMap.get(Number(uid)) || null });
@@ -1748,6 +1794,8 @@ router.post('/messages/bulk-archive', async (req, res) => {
         for (const uid of failed) console.error(`bulk-archive IMAP uid ${uid}: IMAP move failed`);
       }
     }
+
+    if (busy.busy && archivedIds.length === 0) return sendMailboxBusy(res);
 
     // Update DB: same CTE DELETE+INSERT pattern as bulk-move — except when the
     // destination is Gmail's All Mail, where the message just vanishes from our view
@@ -1834,7 +1882,7 @@ router.post('/messages/bulk-archive', async (req, res) => {
     // Refresh GTD section data for any archived thread that still carries a GTD label sibling.
     notifyMailMutation(owned);
 
-    res.json({ ok: true, archived: archivedIds.map(a => a.id), noArchiveFolder });
+    res.json({ ok: true, archived: archivedIds.map(a => a.id), noArchiveFolder, ...busy.flag() });
   } catch (err) {
     console.error('bulk-archive error:', err);
     if (err.poolExhausted) return sendMailboxBusy(res);

@@ -1817,7 +1817,7 @@ ${bodyContent}
             console.error('Snooze failed:', err.message);
             useStore.getState().restoreMessages([snoozedMsg]);
             if (!snoozedMsg.is_read) incrementUnread(snoozedMsg.account_id);
-            addNotification({ title: t('message.snoozed.failTitle'), body: t('message.snoozed.failBody') });
+            addNotification({ title: t('message.snoozed.failTitle'), body: mailboxBusyOr(err, t, t('message.snoozed.failBody')) });
           });
         }
         break;

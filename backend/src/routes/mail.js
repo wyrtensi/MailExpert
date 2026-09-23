@@ -4,6 +4,7 @@ import { ZipArchive } from 'archiver';
 import { query } from '../services/db.js';
 import { SENDER_HISTORY_DEFAULT_LIMIT, SENDER_HISTORY_MAX_LIMIT, senderHistory } from '../services/senderHistory.js';
 import { conversation } from '../services/conversation.js';
+import { shouldBlockImages } from '../utils/imageBlocking.js';
 import { threadingDiagnostics } from '../services/threadingDiagnostics.js';
 import { requireAuth } from '../middleware/auth.js';
 import { imapManager } from '../index.js';
@@ -285,21 +286,6 @@ router.get('/resolve-message', async (req, res) => {
     res.status(500).json({ error: 'Failed to resolve message' });
   }
 });
-
-// Returns true if remote images should be blocked for this message given the user's preferences.
-// Default behaviour (no preference set) is to block.
-function shouldBlockImages(prefs, message) {
-  if (prefs?.blockRemoteImages === false) return false;
-  const senderEmail = (message.from_email || '').toLowerCase();
-  const atIdx = senderEmail.indexOf('@');
-  const senderDomain = atIdx >= 0 ? senderEmail.slice(atIdx + 1) : '';
-  const whitelist = prefs?.imageWhitelist || {};
-  const allowedAddresses = Array.isArray(whitelist.addresses) ? whitelist.addresses.filter(a => typeof a === 'string').map(a => a.toLowerCase()) : [];
-  const allowedDomains   = Array.isArray(whitelist.domains)   ? whitelist.domains.filter(d => typeof d === 'string').map(d => d.toLowerCase())   : [];
-  if (senderEmail && allowedAddresses.includes(senderEmail)) return false;
-  if (senderDomain && allowedDomains.some(d => senderDomain === d || senderDomain.endsWith('.' + d))) return false;
-  return true;
-}
 
 // Get all messages belonging to a thread (for threaded view expansion)
 router.get('/thread/:threadId', async (req, res) => {

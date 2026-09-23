@@ -879,8 +879,9 @@ export const useStore = create((set, get) => ({
     schedulePrefSave({ layout: clean });
   },
 
-  // Image privacy
-  blockRemoteImages: true,
+  // Image privacy. Remote images show by default (owner's choice, 2026-09-23): the team reads
+  // business mail and wants letters as the sender sent them; blocking stays one switch away.
+  blockRemoteImages: false,
   imageWhitelist: { addresses: [], domains: [] },
   senderFaviconsLoaded: false,
   senderFavicons: false,
@@ -1108,7 +1109,7 @@ export const useStore = create((set, get) => ({
         set({ swipeActions });
       }
       if (prefs.syncInterval) set({ syncInterval: parseInt(prefs.syncInterval) || 60 });
-      // blockRemoteImages: explicit false disables blocking; anything else keeps the default (true)
+      // blockRemoteImages: explicit true turns blocking on, explicit false off; anything else keeps the default (off)
       if (prefs.blockRemoteImages === false) set({ blockRemoteImages: false });
       else if (prefs.blockRemoteImages === true) set({ blockRemoteImages: true });
       if (prefs.autoLockMinutes != null) {

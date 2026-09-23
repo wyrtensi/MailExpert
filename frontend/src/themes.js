@@ -1,4 +1,73 @@
+// The first two lead the picker: Daylight is the default for a new browser, Dusk is its dark
+// counterpart that keeps the letter itself on light paper (cardVars) for reading.
 export const THEMES = {
+  daylight: {
+    label: 'Daylight',
+    description: 'Soft light, easy on the eyes — the default',
+    preview: ['#f3f4f7', '#ffffff', '#3d63dd', '#1d2330'],
+    vars: {
+      '--bg-primary': '#f3f4f7',
+      '--bg-secondary': '#ffffff',
+      '--bg-tertiary': '#f6f7fa',
+      '--bg-elevated': '#ffffff',
+      '--bg-hover': '#eceef4',
+      '--border': '#d9dde6',
+      '--border-subtle': '#e7e9ef',
+      '--text-primary': '#1d2330',
+      '--text-secondary': '#475063',
+      '--text-tertiary': '#6b7385',
+      '--accent': '#3d63dd',
+      '--accent-text': '#ffffff',
+      '--accent-dim': '#e3e9fb',
+      '--accent-glow': 'rgba(61,99,221,0.12)',
+      '--green': '#1f8a4c',
+      '--red': '#c93c3c',
+      '--amber': '#b7791f',
+    }
+  },
+
+  dusk: {
+    label: 'Dusk',
+    description: 'Soft dark, the letter on light paper',
+    preview: ['#1b1e24', '#22262e', '#6e95f0', '#ffffff'],
+    vars: {
+      '--bg-primary': '#1b1e24',
+      '--bg-secondary': '#22262e',
+      '--bg-tertiary': '#2a2f38',
+      '--bg-elevated': '#2f343e',
+      '--bg-hover': '#353b46',
+      '--border': '#3a404c',
+      '--border-subtle': '#2d323b',
+      '--text-primary': '#e6e8ee',
+      '--text-secondary': '#b4bac6',
+      '--text-tertiary': '#8d94a3',
+      '--accent': '#6e95f0',
+      '--accent-text': '#10131a',
+      '--accent-dim': '#26324d',
+      '--accent-glow': 'rgba(110,149,240,0.16)',
+      '--green': '#5fcf8f',
+      '--red': '#f0797a',
+      '--amber': '#e8b458',
+    },
+    // The letter's cards (subject and sender, earlier letters, the body) read as light paper.
+    cardVars: {
+      '--bg-secondary': '#ffffff',
+      '--bg-tertiary': '#f4f5f8',
+      '--bg-elevated': '#ffffff',
+      '--bg-hover': '#eceef4',
+      '--border': '#d9dde6',
+      '--border-subtle': '#e4e7ee',
+      '--text-primary': '#1d2330',
+      '--text-secondary': '#475063',
+      '--text-tertiary': '#6b7385',
+      '--accent': '#3d63dd',
+      '--accent-text': '#ffffff',
+      '--green': '#1f8a4c',
+      '--red': '#c93c3c',
+      '--amber': '#b7791f',
+    },
+  },
+
   dark: {
     label: 'Dark',
     description: 'Default dark theme',
@@ -670,13 +739,19 @@ export function applyCustomCss(css) {
 // ── Theme application ─────────────────────────────────────────────────────────
 
 // The theme to use before any stored/server preference is known — i.e. on the
-// login screen and the very first visit. Honors the OS light/dark setting and
-// falls back to dark. matchMedia is guarded so a missing API never throws.
+// login screen and the very first visit: Daylight, whatever the OS setting.
+export const DEFAULT_THEME = 'daylight';
 export function getInitialTheme() {
-  try {
-    if (window.matchMedia?.('(prefers-color-scheme: light)').matches) return 'light';
-  } catch { /* matchMedia unavailable — fall through to dark */ }
-  return 'dark';
+  return DEFAULT_THEME;
+}
+
+// CSS for the theme: its variables on :root, and for a theme with cardVars the same variables
+// again inside the letter's cards (.msg-card, .reading-card), which then read in that palette.
+export function themeCss(theme) {
+  const block = vars => Object.entries(vars).map(([k, v]) => `  ${k}: ${v};`).join('\n');
+  const root = `:root {\n${block(theme.vars)}\n}`;
+  if (!theme.cardVars) return root;
+  return `${root}\n.msg-card, .reading-card {\n${block(theme.cardVars)}\n  color: var(--text-primary);\n  background-color: var(--bg-secondary);\n}`;
 }
 
 // ── Effective accent (theme value, or a custom-CSS override of --accent) ───────
@@ -723,9 +798,7 @@ export function applyTheme(themeName) {
     themeEl.id = 'mailexpert-theme';
     document.head.appendChild(themeEl);
   }
-  themeEl.textContent = `:root {\n${
-    Object.entries(theme.vars).map(([k, v]) => `  ${k}: ${v};`).join('\n')
-  }\n}`;
+  themeEl.textContent = themeCss(theme);
 
   // Recompute favicon and PWA theme color from the effective accent. If a
   // custom-CSS override of --accent is present, getComputedStyle picks it up here;

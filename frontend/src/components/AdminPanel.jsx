@@ -23,7 +23,7 @@ import {
   selectAiConnectionMethod,
 } from '../utils/aiConfig.js';
 import { THEMES, applyTheme, applyCustomCss } from '../themes.js';
-import { FONT_SETS, loadFontSet, isRetroFont } from '../fonts.js';
+import { FONT_SETS, loadFontSet, isRetroFont, DEFAULT_FONT_SIZE } from '../fonts.js';
 import { LAYOUTS, applyLayout } from '../layouts.js';
 import { NOTIFICATION_SOUNDS, playNotificationSound, playCustomSound, warmUpAudioContext } from '../utils/notificationSounds.js';
 import { usePushNotifications } from '../hooks/usePushNotifications.js';
@@ -1517,15 +1517,15 @@ function FontsTab() {
           />
           <span style={{ fontSize: 11, color: 'var(--text-tertiary)', minWidth: 32, textAlign: 'right' }}>130%</span>
         </div>
-        {fontSize !== 100 && (
+        {fontSize !== DEFAULT_FONT_SIZE && (
           <button
-            onClick={() => setFontSize(100)}
+            onClick={() => setFontSize(DEFAULT_FONT_SIZE)}
             style={{
               marginTop: 8, fontSize: 12, color: 'var(--text-secondary)',
               background: 'none', border: 'none', cursor: 'pointer', padding: 0,
             }}
           >
-            {t('admin.appearance.fontSizeReset')}
+            {t('admin.appearance.fontSizeReset', { percent: DEFAULT_FONT_SIZE })}
           </button>
         )}
       </div>

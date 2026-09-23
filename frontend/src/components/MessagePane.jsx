@@ -1,4 +1,4 @@
-import { useEffect, useLayoutEffect, useState, useRef, useCallback, useMemo } from 'react';
+import { createContext, useContext, useEffect, useLayoutEffect, useState, useRef, useCallback, useMemo } from 'react';
 import { useTranslation } from 'react-i18next';
 import { useStore, selectAccountFolders } from '../store/index.js';
 import { api } from '../utils/api.js';
@@ -44,6 +44,8 @@ if (USE_DIV_RENDER) {
 import { senderColor } from '../themes.js';
 import MessageHeaderModal from './MessageHeaderModal.jsx';
 import FolderIcon from './FolderIcon.jsx';
+import { fewerLabels, initialLabelCount, showsLabel } from '../utils/paneToolbar.js';
+import { useUiScale } from '../hooks/useUiScale.js';
 import TodoistTaskModal from './TodoistTaskModal.jsx';
 import SenderAvatarImage from './SenderAvatarImage.jsx';
 import ContextMenu from './ContextMenu.jsx';
@@ -302,6 +304,40 @@ export default function MessagePane({ windowMessageId = null, onWindowClose = nu
   const [showReplyMenu, setShowReplyMenu] = useState(false);
   const [savingAllow, setSavingAllow] = useState(false);
   const [paneScrolled, setPaneScrolled] = useState(false);
+  // Toolbar names (utils/paneToolbar.js): every name is tried when the toolbar gets a width, and
+  // while the row overflows one name goes per render, least used first, before anything paints.
+  const toolbarElRef = useRef(null);
+  const toolbarObserverRef = useRef(null);
+  const [labelCount, setLabelCount] = useState(0);
+  // Every measured width reruns the overflow check below, also when the count it resets to is the
+  // one already in state (all names fitted, then the pane got narrower).
+  const [toolbarWidth, setToolbarWidth] = useState(0);
+  const uiScale = useUiScale();
+  const uiScaleRef = useRef(uiScale);
+  uiScaleRef.current = uiScale;
+  const isMobileRef = useRef(isMobile);
+  isMobileRef.current = isMobile;
+  const toolbarRef = useCallback((node) => {
+    toolbarObserverRef.current?.disconnect();
+    toolbarObserverRef.current = null;
+    toolbarElRef.current = node;
+    if (!node || !window.ResizeObserver) return;
+    const ro = new ResizeObserver(([entry]) => {
+      const width = Math.round(entry.contentRect.width);
+      setToolbarWidth(width);
+      setLabelCount(initialLabelCount(width, isMobileRef.current));
+    });
+    ro.observe(node);
+    toolbarObserverRef.current = ro;
+  }, []);
+  useLayoutEffect(() => {
+    if (isMobile && labelCount) setLabelCount(0);
+  }, [isMobile, labelCount]);
+  useLayoutEffect(() => {
+    const el = toolbarElRef.current;
+    if (el && labelCount > 0 && el.scrollWidth > el.clientWidth + 1) setLabelCount(fewerLabels(labelCount));
+    // The buttons on the row follow the letter (spam or not, read or not, AI once the body is in).
+  }, [labelCount, toolbarWidth, message, body]);
   const [showHeaderModal, setShowHeaderModal] = useState(false);
   const [resolvedSubject, setResolvedSubject] = useState(null);
   const [showMovePicker, setShowMovePicker] = useState(false);
@@ -737,8 +773,11 @@ export default function MessagePane({ windowMessageId = null, onWindowClose = nu
       iframeContextMenuHandler = (ev) => {
         if (hasNativeContextTarget(ev, doc)) return;
         ev.preventDefault();
+        // ev.client* is in the iframe's own pixels, which the app's scale wrapper enlarges on
+        // screen; the menu takes screen pixels like any other right-click.
         const rect = iframe.getBoundingClientRect();
-        openPaneContextMenu(rect.left + ev.clientX, rect.top + ev.clientY, {
+        const s = uiScaleRef.current;
+        openPaneContextMenu(rect.left + ev.clientX * s, rect.top + ev.clientY * s, {
           source: 'iframe',
           selectedText: doc.getSelection?.().toString() || '',
         });
@@ -2028,7 +2067,8 @@ ${bodyContent}
       )}
 
       {/* Toolbar — always pinned at top, never scrolls */}
-      <div style={{
+      <PaneLabelsContext.Provider value={labelCount}>
+      <div ref={toolbarRef} style={{
         padding: '8px 16px', borderBottom: '1px solid var(--border-subtle)',
         display: 'flex', alignItems: 'center', gap: 6, flexShrink: 0,
         boxShadow: paneScrolled ? '0 1px 10px rgba(0,0,0,0.2)' : 'none',
@@ -2036,7 +2076,7 @@ ${bodyContent}
       }}>
         {/* Split Reply button */}
         <div style={{ position: 'relative', display: 'flex' }}>
-          <PaneBtn onClick={() => handleReply(defaultReplyAll)} style={{ borderRadius: '6px 0 0 6px' }} title={isMobile ? (defaultReplyAll ? t('message.replyAll') : t('message.reply')) : `${defaultReplyAll ? t('message.replyAll') : t('message.reply')}${shortcutLabel(defaultReplyAll ? 'replyAll' : 'reply') ? ` (${shortcutLabel(defaultReplyAll ? 'replyAll' : 'reply')})` : ''}`}>
+          <PaneBtn onClick={() => handleReply(defaultReplyAll)} kind="reply" label={defaultReplyAll ? t('message.toolbar.replyAll') : t('message.toolbar.reply')} style={{ borderRadius: '6px 0 0 6px' }} title={isMobile ? (defaultReplyAll ? t('message.replyAll') : t('message.reply')) : `${defaultReplyAll ? t('message.replyAll') : t('message.reply')}${shortcutLabel(defaultReplyAll ? 'replyAll' : 'reply') ? ` (${shortcutLabel(defaultReplyAll ? 'replyAll' : 'reply')})` : ''}`}>
             {defaultReplyAll ? (
               <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.75">
                 <polyline points="7 17 2 12 7 7"/><polyline points="13 17 8 12 13 7"/><path d="M20 18v-2a4 4 0 00-4-4H2"/>
@@ -2098,13 +2138,13 @@ ${bodyContent}
           </>)}
         </div>
 
-        <PaneBtn onClick={handleForward} title={isMobile ? t('message.forward') : `${t('message.forward')}${shortcutLabel('forward') ? ` (${shortcutLabel('forward')})` : ''}`}>
+        <PaneBtn onClick={handleForward} kind="forward" label={t('message.toolbar.forward')} title={isMobile ? t('message.forward') : `${t('message.forward')}${shortcutLabel('forward') ? ` (${shortcutLabel('forward')})` : ''}`}>
           <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.75">
             <polyline points="15 17 20 12 15 7"/><path d="M4 18v-2a4 4 0 014-4h12"/>
           </svg>
         </PaneBtn>
 
-        <PaneBtn onClick={handleArchive} title={isMobile ? t('message.archive') : `${t('message.archive')}${shortcutLabel('archive') ? ` (${shortcutLabel('archive')})` : ''}`}>
+        <PaneBtn onClick={handleArchive} kind="archive" label={t('message.toolbar.archive')} title={isMobile ? t('message.archive') : `${t('message.archive')}${shortcutLabel('archive') ? ` (${shortcutLabel('archive')})` : ''}`}>
           <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.75">
             <rect x="2" y="3" width="20" height="5" rx="1"/>
             <path d="M4 8v11a1 1 0 001 1h14a1 1 0 001-1V8"/>
@@ -2115,7 +2155,7 @@ ${bodyContent}
 
         {/* Move to folder */}
         <div style={{ position: 'relative' }} ref={moveBtnRef}>
-          <PaneBtn onClick={handleOpenMovePicker} title={t('contextMenu.moveToFolder')}>
+          <PaneBtn onClick={handleOpenMovePicker} kind="move" label={t('message.toolbar.move')} title={t('contextMenu.moveToFolder')}>
             <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.75">
               <path d="M22 19a2 2 0 01-2 2H4a2 2 0 01-2-2V5a2 2 0 012-2h5l2 3h9a2 2 0 012 2z"/>
             </svg>
@@ -2378,7 +2418,7 @@ ${bodyContent}
         ) : (
           <>
             {hasSpamFolder && !inSpamFolder && message && (
-              <PaneBtn onClick={() => performSingleSpamLabel('spam')} title={t('contextMenu.markAsSpam')}>
+              <PaneBtn onClick={() => performSingleSpamLabel('spam')} kind="spam" label={t('message.toolbar.spam')} title={t('contextMenu.markAsSpam')}>
                 <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.75">
                   <path d="M12 3L4 7v5c0 5 3.5 9.3 8 10.3C16.5 21.3 20 17 20 12V7L12 3z"/>
                   <line x1="12" y1="9" x2="12" y2="13"/><line x1="12" y1="16" x2="12.01" y2="16"/>
@@ -2386,7 +2426,7 @@ ${bodyContent}
               </PaneBtn>
             )}
             {inSpamFolder && message && (
-              <PaneBtn onClick={() => performSingleSpamLabel('ham')} title={t('contextMenu.markAsHam')}>
+              <PaneBtn onClick={() => performSingleSpamLabel('ham')} kind="spam" label={t('message.toolbar.notSpam')} title={t('contextMenu.markAsHam')}>
                 <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.75">
                   <path d="M12 3L4 7v5c0 5 3.5 9.3 8 10.3C16.5 21.3 20 17 20 12V7L12 3z"/>
                   <polyline points="9 12 11 14 15 10"/>
@@ -2394,14 +2434,14 @@ ${bodyContent}
               </PaneBtn>
             )}
             {todoistConnected && (
-              <PaneBtn onClick={() => setShowTodoistModal(true)} title={t('todoist.title')}>
+              <PaneBtn onClick={() => setShowTodoistModal(true)} kind="task" label={t('message.toolbar.task')} title={t('todoist.title')}>
                 <svg width="15" height="15" viewBox="0 0 24 24" fill="currentColor">
                   <path d="M21 0H3C1.35 0 0 1.35 0 3v3.858s3.854 2.24 4.098 2.38c.31.18.694.177 1.004 0 .26-.147 8.02-4.608 8.136-4.675.279-.161.58-.107.748-.01.164.097.606.348.84.48.232.134.221.502.013.622l-9.712 5.59c-.346.2-.69.204-1.048.002C3.478 10.907.998 9.463 0 8.882v2.02l4.098 2.38c.31.18.694.177 1.004 0 .26-.147 8.02-4.609 8.136-4.676.279-.16.58-.106.748-.008.164.096.606.347.84.48.232.133.221.5.013.62-.208.121-9.288 5.346-9.712 5.59-.346.2-.69.205-1.048.002C3.478 14.951.998 13.506 0 12.926v2.02l4.098 2.38c.31.18.694.177 1.004 0 .26-.147 8.02-4.609 8.136-4.676.279-.16.58-.106.748-.009.164.097.606.348.84.48.232.133.221.502.013.622l-9.712 5.59c-.346.199-.69.204-1.048.001C3.478 18.994.998 17.55 0 16.97V21c0 1.65 1.35 3 3 3h18c1.65 0 3-1.35 3-3V3c0-1.65-1.35-3-3-3z"/>
                 </svg>
               </PaneBtn>
             )}
             {message.is_read && (
-              <PaneBtn onClick={handleMarkUnread} title={t('contextMenu.markUnread')}>
+              <PaneBtn onClick={handleMarkUnread} kind="unread" label={t('message.toolbar.unread')} title={t('contextMenu.markUnread')}>
                 <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.75">
                   <path style={{strokeLinecap: 'round'}} d="M22,10.91v7.09c0,1.1-.9,2-2,2H4c-1.1,0-2-.9-2-2V6c0-1.1.9-2,2-2h11"/>
                   <polyline style={{strokeLinecap: 'round'} } points="16.36 9.95 12 13 2 6"/>
@@ -2409,13 +2449,13 @@ ${bodyContent}
                 </svg>
               </PaneBtn>
             )}
-            <PaneBtn onClick={() => setShowHeaderModal(true)} title={t('contextMenu.viewHeaders')}>
+            <PaneBtn onClick={() => setShowHeaderModal(true)} kind="headers" label={t('message.toolbar.headers')} title={t('contextMenu.viewHeaders')}>
               <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.75">
                 <line x1="8" y1="6" x2="21" y2="6"/><line x1="8" y1="12" x2="21" y2="12"/><line x1="8" y1="18" x2="21" y2="18"/>
                 <line x1="3" y1="6" x2="3.01" y2="6"/><line x1="3" y1="12" x2="3.01" y2="12"/><line x1="3" y1="18" x2="3.01" y2="18"/>
               </svg>
             </PaneBtn>
-            <PaneBtn onClick={handlePrint} title={`${t('message.print')}${shortcutLabel('printMessage') ? ` (${shortcutLabel('printMessage')})` : ''}`}>
+            <PaneBtn onClick={handlePrint} kind="print" label={t('message.toolbar.print')} title={`${t('message.print')}${shortcutLabel('printMessage') ? ` (${shortcutLabel('printMessage')})` : ''}`}>
               <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.75">
                 <polyline points="6 9 6 2 18 2 18 9"/>
                 <path d="M6 18H4a2 2 0 01-2-2v-5a2 2 0 012-2h16a2 2 0 012 2v5a2 2 0 01-2 2h-2"/>
@@ -2424,7 +2464,7 @@ ${bodyContent}
             </PaneBtn>
             {aiStatus?.enabled && aiStatus?.features?.summarize && body && (
               <div style={{ position: 'relative' }} ref={aiMenuRef}>
-                <PaneBtn onClick={() => setShowAiMenu(v => !v)} title={t('message.aiActions')}
+                <PaneBtn onClick={() => setShowAiMenu(v => !v)} kind="ai" label={t('message.toolbar.ai')} title={t('message.aiActions')}
                   style={Object.keys(aiResults).length ? { color: 'var(--accent)' } : {}}>
                   <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.75" strokeLinecap="round" strokeLinejoin="round">
                     <path d="m12 3-1.912 5.813a2 2 0 0 1-1.275 1.275L3 12l5.813 1.912a2 2 0 0 1 1.275 1.275L12 21l1.912-5.813a2 2 0 0 1 1.275-1.275L21 12l-5.813-1.912a2 2 0 0 1-1.275-1.275L12 3Z"/>
@@ -2450,7 +2490,7 @@ ${bodyContent}
           </>
         )}
 
-        <PaneBtn onClick={handleStarToggle} title={t('message.star')}>
+        <PaneBtn onClick={handleStarToggle} kind="star" label={message.is_starred ? t('message.toolbar.unstar') : t('message.toolbar.star')} title={t('message.star')}>
           <svg width="15" height="15" viewBox="0 0 24 24"
             fill={message.is_starred ? 'var(--amber)' : 'none'}
             stroke={message.is_starred ? 'var(--amber)' : 'currentColor'} strokeWidth="1.75">
@@ -2458,13 +2498,14 @@ ${bodyContent}
           </svg>
         </PaneBtn>
 
-        <PaneBtn onClick={handleDelete} title={t('message.delete')} danger>
+        <PaneBtn onClick={handleDelete} kind="delete" label={t('message.toolbar.delete')} title={t('message.delete')} danger>
           <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.75">
             <polyline points="3 6 5 6 21 6"/>
             <path d="M19 6v14a2 2 0 01-2 2H7a2 2 0 01-2-2V6m3 0V4a1 1 0 011-1h4a1 1 0 011 1v2"/>
           </svg>
         </PaneBtn>
       </div>
+      </PaneLabelsContext.Provider>
 
       {/* Single scroll container — sender card + email body scroll together */}
       <div
@@ -2520,106 +2561,63 @@ ${bodyContent}
               />
             </div>
 
-            {/* Sender info */}
+            {/* Sender info: who, through whom, to whom, then when and in which mailbox, all in one
+                left-aligned column so the eye reads it top to bottom. */}
             <div style={{ flex: 1, minWidth: 0 }}>
-              {isMobile ? (
-                <>
-                  <div style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
-                    <SenderContactLink message={message} style={{ fontSize: 14, fontWeight: 600 }} />
-                  </div>
-                  {message.from_name && (
-                    <div style={{ fontSize: 12, color: 'var(--text-tertiary)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
-                      {message.from_email}
+              {(() => {
+                const line = { fontSize: 13, color: 'var(--text-tertiary)', marginTop: 3, ...(isMobile && { overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }) };
+                const person = (r) => (isMobile ? (r.name || r.email) : (r.name ? `${r.name} <${r.email}>` : r.email));
+                // The Sender header only says something when it names another address than From.
+                const via = body?.senderEmail && body.senderEmail.toLowerCase() !== String(message.from_email || '').toLowerCase();
+                return (
+                  <>
+                    <div style={{ display: 'flex', alignItems: 'baseline', gap: 8, flexWrap: 'wrap', ...(isMobile && { overflow: 'hidden' }) }}>
+                      <SenderContactLink message={message} style={{ fontSize: 16, fontWeight: 600 }} />
+                      {message.from_name && (
+                        <span style={{ fontSize: 13, color: 'var(--text-secondary)', overflow: 'hidden', textOverflow: 'ellipsis' }}>
+                          {isMobile ? message.from_email : <>&lt;{message.from_email}&gt;</>}
+                        </span>
+                      )}
                     </div>
-                  )}
-                  {body?.senderEmail && (
-                    <div style={{ fontSize: 12, color: 'var(--text-tertiary)', marginTop: 2, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
-                      <span>{t('message.via')} </span>
-                      <span style={{ color: 'var(--text-secondary)' }}>{body.senderName ? `${body.senderName} <${body.senderEmail}>` : body.senderEmail}</span>
-                    </div>
-                  )}
-                  <div style={{ fontSize: 12, color: 'var(--text-tertiary)', marginTop: 2, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
-                    <span>{t('message.to')} </span>
-                    <span style={{ color: 'var(--text-secondary)' }}>
-                      {toList.length > 0
-                        ? toList.map((r, i) => (
-                            <span key={i}>{r.name || r.email}{i < toList.length - 1 ? ', ' : ''}</span>
-                          ))
-                        : (message.account_email || message.account_name || '')}
-                    </span>
-                  </div>
-                  {ccList.length > 0 && (
-                    <div style={{ fontSize: 12, color: 'var(--text-tertiary)', marginTop: 2, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
-                      <span>Cc </span>
-                      <span style={{ color: 'var(--text-secondary)' }}>
-                        {ccList.map((r, i) => (
-                          <span key={i}>{r.name || r.email}{i < ccList.length - 1 ? ', ' : ''}</span>
-                        ))}
-                      </span>
-                    </div>
-                  )}
-                </>
-              ) : (
-                <>
-                  <div style={{ display: 'flex', alignItems: 'baseline', gap: 8, flexWrap: 'wrap' }}>
-                    <SenderContactLink message={message} style={{ fontSize: 14, fontWeight: 600 }} />
-                    {message.from_name && (
-                      <span style={{ fontSize: 12, color: 'var(--text-tertiary)' }}>
-                        &lt;{message.from_email}&gt;
-                      </span>
+                    {via && (
+                      <div style={line}>
+                        <span>{t('message.via')} </span>
+                        <span style={{ color: 'var(--text-secondary)' }}>{body.senderName ? `${body.senderName} <${body.senderEmail}>` : body.senderEmail}</span>
+                      </div>
                     )}
-                  </div>
-                  {body?.senderEmail && (
-                    <div style={{ fontSize: 12, color: 'var(--text-tertiary)', marginTop: 3 }}>
-                      <span>{t('message.via')} </span>
-                      <span style={{ color: 'var(--text-secondary)' }}>{body.senderName ? `${body.senderName} <${body.senderEmail}>` : body.senderEmail}</span>
-                    </div>
-                  )}
-                  <div style={{ fontSize: 12, color: 'var(--text-tertiary)', marginTop: 3 }}>
-                    <span>{t('message.to')} </span>
-                    <span style={{ color: 'var(--text-secondary)' }}>
-                      {toList.length > 0
-                        ? toList.map((r, i) => (
-                            <span key={i}>
-                              {r.name ? `${r.name} <${r.email}>` : r.email}
-                              {i < toList.length - 1 ? ', ' : ''}
-                            </span>
-                          ))
-                        : (message.account_email || message.account_name || '')}
-                    </span>
-                  </div>
-                  {ccList.length > 0 && (
-                    <div style={{ fontSize: 12, color: 'var(--text-tertiary)', marginTop: 2 }}>
-                      <span>Cc </span>
+                    <div style={line}>
+                      <span>{t('message.to')} </span>
                       <span style={{ color: 'var(--text-secondary)' }}>
-                        {ccList.map((r, i) => (
-                          <span key={i}>
-                            {r.name ? `${r.name} <${r.email}>` : r.email}
-                            {i < ccList.length - 1 ? ', ' : ''}
-                          </span>
-                        ))}
+                        {toList.length > 0
+                          ? toList.map((r, i) => (
+                              <span key={i}>{person(r)}{i < toList.length - 1 ? ', ' : ''}</span>
+                            ))
+                          : (message.account_email || message.account_name || '')}
                       </span>
                     </div>
-                  )}
-                </>
-              )}
-            </div>
-
-            {/* Date + account */}
-            <div style={{ flexShrink: 0, textAlign: 'right' }}>
-              <div style={{ fontSize: 12, color: 'var(--text-tertiary)', whiteSpace: 'nowrap' }}>
-                {message.date ? format(new Date(message.date), isMobile ? 'MMM d, h:mm a' : 'MMM d, yyyy h:mm a') : ''}
-              </div>
-              <div style={{
-                fontSize: 11, marginTop: 4,
-                display: 'flex', alignItems: 'center', gap: 4, justifyContent: 'flex-end',
-              }}>
-                <div style={{
-                  width: 6, height: 6, borderRadius: '50%',
-                  background: message.account_color || 'var(--accent)',
-                }} />
-                <span style={{ color: 'var(--text-tertiary)' }}>{message.account_name}</span>
-              </div>
+                    {ccList.length > 0 && (
+                      <div style={line}>
+                        <span>Cc </span>
+                        <span style={{ color: 'var(--text-secondary)' }}>
+                          {ccList.map((r, i) => (
+                            <span key={i}>{person(r)}{i < ccList.length - 1 ? ', ' : ''}</span>
+                          ))}
+                        </span>
+                      </div>
+                    )}
+                    <div style={{ ...line, marginTop: 6, display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap' }}>
+                      <span style={{ whiteSpace: 'nowrap' }}>
+                        {message.date ? format(new Date(message.date), isMobile ? 'MMM d, h:mm a' : 'MMM d, yyyy h:mm a') : ''}
+                      </span>
+                      <span aria-hidden style={{ color: 'var(--border)' }}>·</span>
+                      <span style={{ display: 'inline-flex', alignItems: 'center', gap: 5, minWidth: 0 }}>
+                        <span style={{ width: 8, height: 8, borderRadius: '50%', flexShrink: 0, background: message.account_color || 'var(--accent)' }} />
+                        <span style={{ color: 'var(--text-secondary)', overflow: 'hidden', textOverflow: 'ellipsis' }}>{message.account_name}</span>
+                      </span>
+                    </div>
+                  </>
+                );
+              })()}
             </div>
           </div>
 
@@ -3326,8 +3324,13 @@ ${bodyContent}
   );
 }
 
-function PaneBtn({ children, onClick, title, danger, style: extraStyle }) {
+// How many toolbar buttons show their name, by rank (utils/paneToolbar.js).
+const PaneLabelsContext = createContext(0);
+
+function PaneBtn({ children, onClick, title, danger, label, kind, style: extraStyle }) {
   const [hov, setHov] = useState(false);
+  const labelCount = useContext(PaneLabelsContext);
+  const showLabel = label && showsLabel(kind, labelCount);
   return (
     <button
       onClick={onClick}
@@ -3348,6 +3351,7 @@ function PaneBtn({ children, onClick, title, danger, style: extraStyle }) {
       }}
     >
       {children}
+      {showLabel && <span style={{ whiteSpace: 'nowrap' }}>{label}</span>}
     </button>
   );
 }

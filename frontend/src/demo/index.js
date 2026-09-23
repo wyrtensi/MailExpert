@@ -50,6 +50,10 @@ const FOLDER_FIXTURES = [
   { path: 'Projects/Launch', name: 'Launch', special_use: null },
 ];
 
+// Recipients as the server stores them: { name, email } objects. Fixtures and compose payloads
+// give plain addresses.
+const recipients = list => (list || []).map(entry => (typeof entry === 'string' ? { name: '', email: entry } : entry));
+
 function message({
   id,
   accountId,
@@ -92,8 +96,8 @@ function message({
     subject,
     from_name: fromName,
     from_email: fromEmail,
-    to_addresses: toAddresses || [account.email_address],
-    cc_addresses: ccAddresses,
+    to_addresses: recipients(toAddresses || [account.email_address]),
+    cc_addresses: recipients(ccAddresses),
     date,
     snippet,
     is_read: read,
@@ -274,7 +278,7 @@ const ACCESS_SYNC_FIXTURE = {
 };
 
 const DEFAULT_PREFERENCES = {
-  theme: 'system',
+  theme: 'daylight',
   language: 'en',
   pageSize: 50,
   threadedView: true,
@@ -425,6 +429,15 @@ function moveMessages(ids, folder) {
   return updateMessages(ids, item => { item.folder = folder; });
 }
 
+// A letter moved to Trash is a new row on the server (the IMAP move gives it a new UID), so it
+// gets a new id here too. Keeping the old one hid it in Trash: the client guards a deleted id
+// for a few seconds so a stale refresh cannot bring it back (utils/pendingDeletes.js).
+let nextTrashSequence = 1;
+function moveToTrash(item) {
+  item.folder = 'Trash';
+  item.id = `${item.id.replace(/~trash\d+$/, '')}~trash${nextTrashSequence++}`;
+}
+
 function deleteMessages(ids) {
   const deleted = [];
   const remove = new Set();
@@ -433,7 +446,7 @@ function deleteMessages(ids) {
     if (!item) continue;
     deleted.push(id);
     if (item.folder === 'Trash' || item.folder === 'Drafts') remove.add(id);
-    else item.folder = 'Trash';
+    else moveToTrash(item);
   }
   if (remove.size) messages = messages.filter(item => !remove.has(item.id));
   return deleted;
@@ -462,8 +475,8 @@ function createDraft(body) {
     uid,
     folder: 'Drafts',
     subject: body.subject || '',
-    to_addresses: body.to || [],
-    cc_addresses: body.cc || [],
+    to_addresses: recipients(body.to),
+    cc_addresses: recipients(body.cc),
     snippet: String(body.body || '').replace(/<[^>]*>/g, ' ').trim().slice(0, 240),
     body_html: body.bodyIsHtml ? body.body || '' : `<p>${body.body || ''}</p>`,
     body_text: body.bodyIsHtml ? String(body.body || '').replace(/<[^>]*>/g, ' ').trim() : body.body || '',
@@ -630,10 +643,10 @@ function demoSenderHistory(id) {
   if (!current) return { correspondent: null, total: 0, items: [] };
   const account = ACCOUNT_FIXTURES.find(item => item.id === current.account_id);
   const own = account?.email_address;
-  const other = current.from_email === own ? current.to_addresses[0] : current.from_email;
+  const other = current.from_email === own ? current.to_addresses[0]?.email : current.from_email;
   const earlier = MESSAGE_FIXTURES
     .filter(m => m.id !== id && m.account_id === current.account_id && m.date < current.date)
-    .filter(m => m.from_email === other || (m.from_email === own && m.to_addresses.includes(other)))
+    .filter(m => m.from_email === other || (m.from_email === own && m.to_addresses.some(r => r.email === other)))
     .sort((a, b) => b.date.localeCompare(a.date));
   return {
     correspondent: other || null,
@@ -698,7 +711,7 @@ function demoHeaders(id) {
   const override = threadingOf(current);
   const lines = [];
   lines.push(`From: ${current.from_name} <${current.from_email}>`);
-  if (current.to_addresses?.length) lines.push(`To: ${current.to_addresses.join(', ')}`);
+  if (current.to_addresses?.length) lines.push(`To: ${current.to_addresses.map(r => r.email).join(', ')}`);
   if (current.subject) lines.push(`Subject: ${current.subject}`);
   lines.push(`Message-ID: ${current.message_id}`);
   if (current.date) lines.push(`Date: ${new Date(current.date).toUTCString()}`);
@@ -789,8 +802,9 @@ export async function demoRequest(method, path, body = {}) {
         size: 45,
       }] : [],
       hasBlockedRemoteImages: false,
-      senderEmail: item.from_email,
-      senderName: item.from_name,
+      // No Sender header distinct from From in the demo letters, as for most real mail.
+      senderEmail: null,
+      senderName: null,
     }) : {};
   }
 
@@ -832,7 +846,7 @@ export async function demoRequest(method, path, body = {}) {
     const id = decodeURIComponent(messageMatch[1]);
     const item = messageById(id);
     if (item?.folder === 'Trash' || item?.folder === 'Drafts') messages = messages.filter(candidate => candidate.id !== id);
-    else if (item) item.folder = 'Trash';
+    else if (item) moveToTrash(item);
     return { ok: true };
   }
 

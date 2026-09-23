@@ -19,6 +19,7 @@ import CommandPalette from './CommandPalette.jsx';
 import DemoBadge from './DemoBadge.jsx';
 import { usePluginSlot, PluginRuntime } from '../plugins/PluginSlot.jsx';
 import { isDemoMode } from '../demo/mode.js';
+import LanguagePicker from './LanguagePicker.jsx';
 
 const ContactsPage = lazy(() => import('./ContactsPage.jsx'));
 const WindowLayer  = lazy(() => import('./WindowLayer.jsx'));
@@ -78,6 +79,8 @@ export default function MailApp() {
   const syncInterval = useStore(s => s.syncInterval);
   const autoLockMinutes = useStore(s => s.autoLockMinutes);
   const lockScreen = useStore(s => s.lockScreen);
+  const languagePickerOpen = useStore(s => s.languagePickerOpen);
+  const setLanguagePickerOpen = useStore(s => s.setLanguagePickerOpen);
 
   // Auto-lock after inactivity (#235). MailApp only mounts while unlocked, so this
   // timer runs only when unlocked; hitting the timeout locks and unmounts this tree.
@@ -143,7 +146,8 @@ export default function MailApp() {
     document.body.style.userSelect = 'none';
 
     const onMouseMove = (mv) => {
-      const dx = mv.clientX - startX;
+      // Pointer travel is in screen pixels; the width lives inside the scale(fontSize) wrapper.
+      const dx = (mv.clientX - startX) / scale;
       const clamped = Math.min(400, Math.max(160, startWidth + dx));
       setSidebarWidth(clamped);
     };
@@ -207,7 +211,7 @@ export default function MailApp() {
     document.body.style.userSelect = 'none';
 
     const onMouseMove = (mv) => {
-      const dx = mv.clientX - startX;
+      const dx = (mv.clientX - startX) / scale;
       const clamped = Math.max(180, Math.min(700, startWidth + dx));
       document.documentElement.style.setProperty('--list-width', clamped + 'px');
     };
@@ -238,7 +242,7 @@ export default function MailApp() {
     document.body.style.userSelect = 'none';
 
     const onMouseMove = (mv) => {
-      const dx = mv.clientX - startX;
+      const dx = (mv.clientX - startX) / scale;
       const clamped = Math.max(200, Math.min(600, startWidth - dx));
       document.documentElement.style.setProperty('--right-sidebar-width', clamped + 'px');
     };
@@ -932,6 +936,7 @@ export default function MailApp() {
       <PluginRuntime />
       <CommandPalette open={paletteOpen} onClose={() => setPaletteOpen(false)} />
       {isDemoMode && <DemoBadge enabled={isDemoMode} />}
+      {languagePickerOpen && <LanguagePicker onDone={() => setLanguagePickerOpen(false)} />}
 
       {/* Keyboard shortcut help overlay — toggled by the '?' key */}
       {showShortcutHelp && (

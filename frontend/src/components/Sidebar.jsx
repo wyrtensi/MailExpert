@@ -1187,8 +1187,13 @@ export default function Sidebar() {
             the selection or unread counts. The "+" next to it is a second, more discoverable
             entry point into the same add-account flow the user menu's "Add account" triggers
             (openAddAccount sets addAccountRequested, which AdminPanel's AccountsTab consumes). */}
+        {/* Sticky: the filter stays in reach while the list of mailboxes scrolls under it. It runs
+            to the nav's edges (the negative margins undo its padding) so rows do not show through. */}
         {showAccountFilter && (
-          <div style={{ position: 'relative', margin: '2px 2px 6px', display: 'flex', alignItems: 'center', gap: 6 }}>
+          <div style={{
+            position: 'sticky', top: -4, zIndex: 2, background: 'var(--bg-secondary)',
+            margin: '0 -8px 4px', padding: '6px 10px', display: 'flex', alignItems: 'center', gap: 6,
+          }}>
             <input
               type="search"
               value={accountFilter}
@@ -1248,6 +1253,12 @@ export default function Sidebar() {
           const showingHidden = showHiddenFor.has(account.id);
 
           const selectInbox = () => setSelectedAccount(account.id, 'INBOX');
+          // A click on the mailbox already open at its inbox shows or hides its folders; any
+          // other click opens its inbox.
+          const onAccountClick = () => {
+            if (!sidebarCollapsed && isSelected && selectedFolder === 'INBOX') toggleAccount(account.id);
+            else selectInbox();
+          };
           // The server sends `health`; an account patched before that (or by an older
           // backend) falls back to the same rule computed locally.
           const health = HEALTH_LABEL_KEYS[account.health] ? account.health : computeAccountHealth(account);
@@ -1294,7 +1305,7 @@ export default function Sidebar() {
                   if (!isAccountActive)
                     e.currentTarget.style.background = 'transparent';
                 }}
-                onClick={selectInbox}
+                onClick={onAccountClick}
                 onContextMenu={!sidebarCollapsed ? (e) => openAccountCtxMenu(e, account) : undefined}
                 title={rowLabel}
                 aria-label={rowLabel}

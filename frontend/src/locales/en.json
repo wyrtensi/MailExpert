@@ -333,6 +333,11 @@
       "ai": "AI",
       "star": "Star",
       "unstar": "Unstar"
+    },
+    "mailbox": {
+      "deliveredTo": "Delivered to",
+      "sentFrom": "Sent from",
+      "via": "at {{address}}"
     }
   },
   "messageList": {

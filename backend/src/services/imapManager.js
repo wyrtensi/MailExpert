@@ -1,4 +1,5 @@
 import { FolderStatusMonitor, checkpointFolderStatus } from './folderStatus.js';
+import { recordUnfetchable, suppressedUids, clearUnfetchable, hasRealGap } from './unfetchableUids.js';
 import { ImapFlow } from 'imapflow';
 import { query } from './db.js';
 import { DEFAULT_FOLDER_SYNC_INTERVAL_SEC, DEFAULT_SYNC_INTERVAL_SEC, SYNC_INTERVAL_CHOICES_SEC } from './syncSettings.js';
@@ -3332,7 +3333,13 @@ export class ImapManager {
           const changed = await this._applyFlagUpdates(account, path, flags);
           const { rows } = await query('SELECT uid, synced_at FROM messages WHERE account_id=$1 AND folder=$2', [account.id, path]);
           const local = new Set(rows.map(r => Number(r.uid)));
-          missing = [...server].some(uid => !local.has(uid));
+          // UIDs the server lists but has repeatedly refused to hand over do not count as a gap.
+          // Without this the integrity check and the backfill loop on them for good: the check
+          // finds them missing, the backfill asks and gets nothing, and the next check finds
+          // them missing again (upstream: 35 cycles in five hours on iCloud). Scoped to the
+          // epoch checked above, so a renumbered folder suppresses nothing.
+          const suppressed = await suppressedUids(account.id, path, observed.uidValidity);
+          missing = hasRealGap(server, local, suppressed);
           const gone = rows.filter(r => !server.has(Number(r.uid)) && (!r.synced_at || new Date(r.synced_at) < cutoff)
             && !this._isMoveUidGuarded(account.id, path, Number(r.uid))).map(r => Number(r.uid));
           if (expired) throw new Error('Folder integrity sync expired');
@@ -4090,6 +4097,9 @@ export class ImapManager {
       // UID SEARCH ALL is a single lightweight command that returns a flat list of
       // integers — no message data transferred, even for 50 000-message mailboxes.
       let serverUids;
+      // The epoch the UID set below was read in. Unfetchable UIDs are filtered and recorded only
+      // against it: a UID number means nothing outside its UIDVALIDITY generation.
+      let bfUidValidity = null;
       {
         const lock = await sess.client.getMailboxLock(folder);
         try {
@@ -4107,6 +4117,7 @@ export class ImapManager {
           // UIDVALIDITY check — if this backfill connection sees a different epoch than
           // what is stored, purge stale rows so the diff below re-fetches everything.
           const currentValidity = sess.client.mailbox?.uidValidity ? Number(sess.client.mailbox.uidValidity) : null;
+          bfUidValidity = currentValidity;
           if (currentValidity) {
             const foldRow = await query(
               'SELECT uid_validity FROM folders WHERE account_id = $1 AND path = $2',
@@ -4162,8 +4173,18 @@ export class ImapManager {
         return;
       }
 
+      // UIDs the server has repeatedly refused to hand over are skipped here as well as in the
+      // integrity check. That check stops SCHEDULING a backfill for them, but a backfill reached
+      // any other way (connect, reindex, the folder walk) would still ask for them every pass,
+      // spending FETCH load on messages the server will not produce. suppressedUids returns
+      // nothing without an epoch, and the guard keeps that reason next to the call: a
+      // suppression that cannot be scoped to a generation could hide a real message that reused
+      // a ghost's UID number after a renumbering.
+      const ghosts = bfUidValidity == null
+        ? new Set()
+        : await suppressedUids(account.id, folder, bfUidValidity);
       const missingUids = serverUids
-        .filter(uid => !existingUids.has(uid))
+        .filter(uid => !existingUids.has(uid) && !ghosts.has(Number(uid)))
         .sort((a, b) => b - a);
 
       if (missingUids.length === 0) {
@@ -4247,10 +4268,15 @@ export class ImapManager {
         }
 
         const batch = missingUids.slice(i, i + cfg.batchSize);
+        // What the server actually returned for this batch, and the epoch it was fetched in.
+        // Declared outside the lock: the unfetchable bookkeeping runs after the lock is released.
+        const receivedUids = new Set();
+        let batchUidValidity = null;
 
         try {
           const lock = await sess.client.getMailboxLock(folder);
           try {
+            batchUidValidity = sess.client.mailbox?.uidValidity ? Number(sess.client.mailbox.uidValidity) : null;
             // Third arg { uid: true } issues UID FETCH instead of sequence FETCH.
             // bodyParts omitted for Gmail (empty array) — metadata only, no throttling.
             const bfQuery = {
@@ -4262,7 +4288,10 @@ export class ImapManager {
             if (bodyParts.length > 0) bfQuery.bodyParts = bodyParts;
             if (cfg.gmailThreadIds) bfQuery.threadId = true;
 
+            // fetchBackfillBatch already retried anything the first FETCH omitted with minimal
+            // metadata, so a UID still absent after it is one the server will not produce.
             for await (const msg of fetchBackfillBatch(sess.client, batch, bfQuery)) {
+              receivedUids.add(Number(msg.uid));
               try {
                 const parsed = await parseMessage(msg);
                 enrichParsedMetadata(parsed, {
@@ -4421,6 +4450,22 @@ export class ImapManager {
             }
           } finally {
             lock.release();
+          }
+
+          // Whatever the server withheld climbs toward the write-off threshold; whatever it
+          // produced has its record cleared, so a transient miss never accumulates. Recorded only
+          // when the batch ran in the epoch the UID list was read in (a reconnect between batches
+          // could land on a renumbered folder, where these numbers are other messages).
+          if (bfUidValidity != null && batchUidValidity === bfUidValidity) {
+            const withheld = batch.filter(uid => !receivedUids.has(Number(uid))).map(Number);
+            const returned = batch.filter(uid => receivedUids.has(Number(uid))).map(Number);
+            try {
+              if (withheld.length) await recordUnfetchable(account.id, folder, withheld, bfUidValidity);
+              if (returned.length) await clearUnfetchable(account.id, folder, returned);
+            } catch (uErr) {
+              // Bookkeeping must never fail a backfill that is otherwise working.
+              console.warn(`Unfetchable UID bookkeeping failed for ${logAccount(account)}/${folder}: ${uErr.message}`);
+            }
           }
 
           i += batch.length;

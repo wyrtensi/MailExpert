@@ -2635,6 +2635,20 @@ describe('folder integrity reconciliation safety', () => {
     expect(checkpoint[1]).toEqual([acct.id, 'Sent', 20, '8', '22']);
     expect(checkpoint[0]).toContain('uid_validity=$4');
   });
+  it('does not count a UID the server keeps refusing as a gap, so the backfill loop ends', async () => {
+    // Upstream observed the check and the backfill looping 35 times in five hours over the same
+    // five UIDs. A written-off UID in the current epoch settles the folder instead.
+    const { mgr } = setup([1, 2]);
+    query.mockImplementation(async (sql) => {
+      if (sql.includes('FROM unfetchable_uids')) return { rows: [{ uid: '2' }] };
+      return { rows: [{ uid: '1' }], rowCount: 0 };
+    });
+    await mgr._refreshObservedFolder(acct, 'Sent', observed);
+    expect(mgr.backfillMessages).not.toHaveBeenCalled();
+    const lookup = query.mock.calls.find(([sql]) => sql.includes('FROM unfetchable_uids'));
+    expect(lookup[1][4]).toBe('8'); // scoped to the epoch this pass verified
+    expect(query.mock.calls.some(([sql]) => sql.includes('status_synced_at'))).toBe(true);
+  });
   it('a rebuilt mailbox cannot use the previous epoch observation as a checkpoint', async () => {
     const { mgr, client } = setup([1]);
     client.mailbox.uidValidity = 9n;
@@ -3680,6 +3694,104 @@ describe('backfillAllFolders reuses one connection across folders', () => {
     expect(clients).toHaveLength(1);
     expect(clients[0].close).toHaveBeenCalledTimes(1);
     expect(clients[0].logout).not.toHaveBeenCalled();
+  });
+});
+
+describe('backfill and UIDs the server will not hand over', () => {
+  const acct = { id: 'bf-ghost', user_id: 'u1', enabled: true, imap_host: 'imap.example.com', imap_tls: true };
+  let fetchedRanges;
+  let suppressedRows;
+  let uidValidity;
+
+  function install({ serverUids, returns }) {
+    fetchedRanges = [];
+    ImapFlow.mockImplementation(function () {
+      return Object.assign(new EventEmitter(), {
+        usable: true,
+        mailbox: null,
+        connect: vi.fn().mockResolvedValue(),
+        close: vi.fn(),
+        logout: vi.fn().mockResolvedValue(),
+        getMailboxLock: vi.fn(async function (path) {
+          this.mailbox = { path, exists: serverUids.length, uidValidity };
+          return { release: vi.fn() };
+        }),
+        search: vi.fn().mockResolvedValue(serverUids),
+        fetch: vi.fn(async function* (range) {
+          fetchedRanges.push(range);
+          for (const uid of String(range).split(',').map(Number)) if (returns.has(uid)) yield { uid };
+        }),
+      });
+    });
+  }
+
+  function manager() {
+    return {
+      backfillRunning: new Set(),
+      _connectCooldown: new Map(),
+      broadcast: vi.fn(),
+      pluginFacade: {},
+      _noteConnectionRefusal: vi.fn(),
+      _handleOAuthRefreshFailure: ImapManager.prototype._handleOAuthRefreshFailure,
+    };
+  }
+
+  const unfetchableCalls = () => query.mock.calls.filter(([sql]) => /unfetchable_uids/.test(sql));
+
+  beforeEach(() => {
+    vi.clearAllMocks();
+    vi.useFakeTimers();
+    suppressedRows = [];
+    uidValidity = 7;
+    getConnectionPolicy.mockResolvedValue({ allowPrivateHosts: true });
+    resolveForConnection.mockResolvedValue({ host: '127.0.0.1', addresses: ['127.0.0.1'] });
+    query.mockReset();
+    query.mockImplementation(async (sql) => {
+      if (sql.startsWith('SELECT * FROM email_accounts')) return { rows: [acct] };
+      if (sql.startsWith('SELECT id, enabled FROM email_accounts')) return { rows: [{ id: acct.id, enabled: true }] };
+      if (sql.startsWith('SELECT uid_validity FROM folders')) return { rows: [{ uid_validity: uidValidity == null ? null : String(uidValidity) }] };
+      if (sql.startsWith('SELECT COUNT(*)')) return { rows: [{ count: '1', max_uid: '1' }] };
+      if (sql.startsWith('SELECT uid FROM messages')) return { rows: [{ uid: '1' }] };
+      if (/FROM unfetchable_uids/.test(sql)) return { rows: suppressedRows };
+      return { rows: [], rowCount: 0 };
+    });
+    vi.spyOn(console, 'error').mockImplementation(() => {});
+    vi.spyOn(console, 'warn').mockImplementation(() => {});
+    vi.spyOn(console, 'log').mockImplementation(() => {});
+  });
+  afterEach(() => { vi.useRealTimers(); vi.restoreAllMocks(); });
+
+  async function backfill() {
+    const run = ImapManager.prototype.backfillMessages.call(manager(), acct, 'INBOX');
+    await vi.advanceTimersByTimeAsync(60000);
+    return run;
+  }
+
+  it('records a withheld UID against the epoch and clears one that arrived', async () => {
+    install({ serverUids: [1, 2, 3], returns: new Set([3]) });
+    await backfill();
+    const insert = unfetchableCalls().find(([sql]) => /^INSERT INTO unfetchable_uids/.test(sql.trim()));
+    expect(insert[1]).toEqual([acct.id, 'INBOX', ['2'], '7']);
+    const clear = unfetchableCalls().find(([sql]) => /^DELETE FROM unfetchable_uids/.test(sql.trim()));
+    expect(clear[1]).toEqual([acct.id, 'INBOX', ['3']]);
+  });
+
+  it('does not ask again for a UID the server has refused often enough', async () => {
+    suppressedRows = [{ uid: '2' }];
+    install({ serverUids: [1, 2, 3], returns: new Set([3]) });
+    await backfill();
+    expect(fetchedRanges).toEqual(['3']);
+    expect(unfetchableCalls().some(([sql]) => /^INSERT/.test(sql.trim()))).toBe(false);
+  });
+
+  it('neither suppresses nor records anything when the server reports no UIDVALIDITY', async () => {
+    uidValidity = undefined;
+    suppressedRows = [{ uid: '2' }];
+    install({ serverUids: [1, 2, 3], returns: new Set([3]) });
+    await backfill();
+    // UID 2 is still requested: without an epoch a suppression could hide a real message.
+    expect(fetchedRanges[0]).toBe('3,2');
+    expect(unfetchableCalls()).toHaveLength(0);
   });
 });
 describe('rerootThreadChildren', () => {

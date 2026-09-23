@@ -5,6 +5,7 @@ import { generateVCard } from '../utils/vcard.js';
 import { safeFetch } from '../services/safeFetch.js';
 import { defaultAddressBookId } from '../services/addressBooks.js';
 import { normalizeContactUrls } from '../utils/contactUrls.js';
+import { contactLetters, CONTACT_LETTERS_DEFAULT_LIMIT } from '../services/contactLetters.js';
 import crypto from 'crypto';
 
 const router = Router();
@@ -193,6 +194,23 @@ router.get('/:id', async (req, res) => {
   } catch (err) {
     console.error('Contact get error:', err);
     res.status(500).json({ error: 'Failed to fetch contact' });
+  }
+});
+
+// GET /api/contacts/:id/letters?limit=20&offset=0
+// Correspondence with this contact across every enabled mailbox, computed from cached messages.
+// Must remain ABOVE the generic /:id if that route is ever loosened to match multi-segment
+// paths; Express already treats them as distinct patterns, but keeping this near /:id keeps the
+// two read routes for a contact together.
+router.get('/:id/letters', async (req, res) => {
+  try {
+    const { limit = CONTACT_LETTERS_DEFAULT_LIMIT, offset = 0 } = req.query;
+    const result = await contactLetters(req.params.id, { limit, offset });
+    if (!result) return res.status(404).json({ error: 'Contact not found' });
+    res.json(result);
+  } catch (err) {
+    console.error('Contact letters error:', err);
+    res.status(500).json({ error: 'Failed to fetch contact letters' });
   }
 });
 

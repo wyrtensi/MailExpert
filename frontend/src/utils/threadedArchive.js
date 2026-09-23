@@ -1,4 +1,5 @@
 import { threadCacheKey } from './threadKey.js';
+import { isMailboxBusy } from './mailboxBusy.js';
 
 export function findVisibleArchiveMessage(messages, selectedMessageId, threadMessages = {}) {
   if (!selectedMessageId || !Array.isArray(messages)) return null;
@@ -88,19 +89,23 @@ export async function archiveTargetGroupsForRows(
   return groups;
 }
 
+// `busy` is true when a chunk that got partly through said the mailbox was busy (a 200 with the
+// mailbox_busy code), so the caller can say why the rest did not go through.
 export async function archiveInChunks(ids, archive, chunkSize = 500) {
   const archived = [];
   const noArchiveFolder = [];
+  let busy = false;
   for (let offset = 0; offset < ids.length; offset += chunkSize) {
     try {
       const result = await archive(ids.slice(offset, offset + chunkSize));
       archived.push(...(result?.archived || []));
       noArchiveFolder.push(...(result?.noArchiveFolder || []));
+      if (isMailboxBusy(result)) busy = true;
     } catch (error) {
-      return { archived, noArchiveFolder, unconfirmed: ids.slice(offset), error };
+      return { archived, noArchiveFolder, unconfirmed: ids.slice(offset), error, busy };
     }
   }
-  return { archived, noArchiveFolder, unconfirmed: [], error: null };
+  return { archived, noArchiveFolder, unconfirmed: [], error: null, busy };
 }
 
 export function unreadCountsByAccount(messages) {

@@ -3,7 +3,12 @@ import { pickReplyAlias } from '../utils/replyAlias.js';
 import { useTranslation } from 'react-i18next';
 import { useStore, selectSelectedMessageMid } from '../store/index.js';
 import { api } from '../utils/api.js';
-import { mailboxBusyOr } from '../utils/mailboxBusy.js';
+import { mailboxBusyOr, isMailboxBusy, MAILBOX_BUSY_CODE } from '../utils/mailboxBusy.js';
+import { priorityFromHeaders } from '../utils/draftPriority.js';
+
+// What made an archive fall short: the request's error, or a busy mailbox reported by a chunk
+// that got partly through.
+const archiveFailure = (result) => result.error || (result.busy ? { code: MAILBOX_BUSY_CODE } : null);
 import { LAYOUTS } from '../layouts.js';
 import { senderColor } from '../themes.js';
 import { useMobile } from '../hooks/useMobile.js';
@@ -1510,7 +1515,9 @@ export default function MessageList() {
           const delta = parseInt(msg.unread_count) || (msg.is_read ? 0 : 1);
           if (delta > 0) incrementUnread(msg.account_id, delta);
         });
-        addNotification({ type: 'error', title: t('messageList.bulkDeleted.failTitle'), body: t('messageList.bulkDeleted.failBody', { count: failedIds.length }) });
+        // A chunk that failed or got partly through because the mailbox was busy says so.
+        const busy = results.find(r => isMailboxBusy(r.status === 'rejected' ? r.reason : r.value));
+        addNotification({ type: 'error', title: t('messageList.bulkDeleted.failTitle'), body: busy ? t('common.mailboxBusy') : t('messageList.bulkDeleted.failBody', { count: failedIds.length }) });
       }
       if (useStore.getState().searchQuery.trim()) {
         setSearchReloadToken(token => token + 1);
@@ -1704,7 +1711,7 @@ export default function MessageList() {
             if (!result.error && result.noArchiveFolder.length) {
               addNotification({ title: t('messageList.bulkArchived.noFolderTitle'), body: t('messageList.bulkArchived.noFolderBody') });
             } else {
-              addNotification({ title: t('messageList.bulkArchived.failTitle'), body: mailboxBusyOr(result.error, t, t('messageList.bulkArchived.failBody', { count: failedTargets.length })) });
+              addNotification({ title: t('messageList.bulkArchived.failTitle'), body: mailboxBusyOr(archiveFailure(result), t, t('messageList.bulkArchived.failBody', { count: failedTargets.length })) });
             }
           }
         } catch (err) {
@@ -1813,7 +1820,7 @@ export default function MessageList() {
         title: t(noArchiveFolder ? 'messageList.noArchiveFolder.title' : 'messageList.bulkArchived.failTitle'),
         body: noArchiveFolder
           ? t('messageList.noArchiveFolder.body')
-          : mailboxBusyOr(result.error, t, t('messageList.bulkArchived.failBody', { count: failed.length })),
+          : mailboxBusyOr(archiveFailure(result), t, t('messageList.bulkArchived.failBody', { count: failed.length })),
       });
     } catch (err) {
       [...initialGuards, ...ids].forEach(clearDeleteGuard);
@@ -2354,7 +2361,11 @@ export default function MessageList() {
   const handleSelect = async (message) => {
     if (isDraftsFolder) {
       try {
-        const bodyData = await api.getMessageBody(message.id);
+        // The headers carry the draft's priority; without them the draft reopens as normal.
+        const [bodyData, headerData] = await Promise.all([
+          api.getMessageBody(message.id),
+          api.getMessageHeaders(message.id).catch(() => null),
+        ]);
         openCompose({
           accountId: message.account_id,
           draftUid: message.uid,
@@ -2363,6 +2374,7 @@ export default function MessageList() {
           cc: formatAddressArray(message.cc_addresses),
           bcc: formatAddressArray(bodyData?.bccAddresses),
           subject: message.subject || '',
+          priority: priorityFromHeaders(headerData?.headers),
           // Split the stored signature out of the body so the composer does not add a second
           // copy (#432); draftSignature seeds the composer's signature editor instead.
           ...draftComposeFields(bodyData, { plaintext: useStore.getState().plaintextEmail }),

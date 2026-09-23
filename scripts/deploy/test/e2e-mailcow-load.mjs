@@ -7,9 +7,19 @@
 //   PHASE=sessions   10 sessions of the shared user: a read flag set in one is seen by the rest
 //
 // Each phase prints one `RESULT {json}` line. Env: PANEL, MAIL_HOST, API_KEY, MAILBOXES, DOMAIN.
+//
+// LOAD_KIND=gmail runs the same phases with the mailboxes added the way a Gmail mailbox is: IMAP
+// imap.gmail.com:993 and SMTP smtp.gmail.com:587, names the script points at the mailcow node. The
+// panel then applies its Gmail rules (provider profile: pool size, background connections per
+// host, status on the pool, connect stagger, IMAP_MAX_PERSISTENT_PER_HOST when set). What it cannot
+// show: Google's own limits and throttling, OAuth token refresh, X-GM-THRID threading.
 import assert from 'node:assert/strict';
 
 const { PANEL, MAIL_HOST, API_KEY, PHASE } = process.env;
+const GMAIL = process.env.LOAD_KIND === 'gmail';
+const GMAIL_IMAP = 'imap.gmail.com';
+const GMAIL_SMTP = 'smtp.gmail.com';
+const BOX_PASSWORD = 'e2e-Gmail-like-password-1';
 const MAILBOXES = Number(process.env.MAILBOXES || 100);
 const DOMAIN = process.env.DOMAIN;
 const USER = { username: 'admin', password: 'e2e-admin-password-1' };
@@ -47,7 +57,33 @@ function percentiles(values) {
   return { p50: at(50), p95: at(95), max: sorted[sorted.length - 1] };
 }
 
-const nodeAccounts = async (s) => (await s.call('GET', '/accounts')).data.filter((a) => a.mail_node);
+// The mailboxes under test: the mail node's, or the Gmail-like ones.
+const nodeAccounts = async (s) => (await s.call('GET', '/accounts')).data
+  .filter((a) => (GMAIL ? a.imap_host === GMAIL_IMAP : a.mail_node));
+
+// A mailbox created straight in mailcow with a known password, for adding it as a Gmail account.
+async function mailcowMailbox(localPart, domain) {
+  const res = await fetch(`https://${MAIL_HOST}/api/v1/add/mailbox`, {
+    method: 'POST',
+    headers: { 'X-API-Key': API_KEY, 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      local_part: localPart, domain, name: localPart, quota: 1024, active: '1',
+      password: BOX_PASSWORD, password2: BOX_PASSWORD, force_pw_update: '0', tls_enforce_in: '0', tls_enforce_out: '0',
+    }),
+  });
+  const body = await res.json().catch(() => null);
+  const ok = res.ok && Array.isArray(body) && body.every((entry) => entry.type === 'success');
+  assert.ok(ok, `mailcow add/mailbox ${localPart}@${domain}: ${res.status} ${JSON.stringify(body)}`);
+}
+
+async function addGmailLikeAccount(s, email) {
+  return s.call('POST', '/accounts', {
+    name: email, email_address: email,
+    imap_host: GMAIL_IMAP, imap_port: 993,
+    smtp_host: GMAIL_SMTP, smtp_port: 587, smtp_tls: 'STARTTLS',
+    auth_user: email, auth_pass: BOX_PASSWORD,
+  });
+}
 
 // Connected: the row has a first sync and no error. Returns seconds from `since` for each mailbox.
 async function waitConnected(s, since, timeoutMs) {
@@ -68,6 +104,15 @@ async function waitConnected(s, since, timeoutMs) {
 
 const result = (data) => console.log(`RESULT ${JSON.stringify({ phase: PHASE, ...data })}`);
 
+// Before anything logs in: the Gmail names must lead to the node, never to the real Gmail.
+if (GMAIL) {
+  const { resolve4 } = await import('node:dns/promises');
+  for (const host of [GMAIL_IMAP, GMAIL_SMTP]) {
+    const ips = await resolve4(host);
+    assert.deepEqual(ips, [process.env.GMAIL_IP], `${host} resolves to ${ips.join(', ')}, not the node`);
+  }
+}
+
 if (PHASE === 'setup') {
   const s = new Session();
   let r = await s.call('POST', '/auth/register', USER);
@@ -82,14 +127,19 @@ if (PHASE === 'setup') {
   const since = Date.now();
   const createMs = [];
   for (let i = 0; i < MAILBOXES; i++) {
+    const localPart = `box${String(i).padStart(3, '0')}`;
+    if (GMAIL) await mailcowMailbox(localPart, DOMAIN);
     const t0 = Date.now();
-    r = await s.call('POST', '/accounts', { kind: 'domain', localPart: `box${String(i).padStart(3, '0')}`, domain: DOMAIN });
+    r = GMAIL
+      ? await addGmailLikeAccount(s, `${localPart}@${DOMAIN}`)
+      : await s.call('POST', '/accounts', { kind: 'domain', localPart, domain: DOMAIN });
     assert.equal(r.status, 200, JSON.stringify(r.data));
     createMs.push(Date.now() - t0);
   }
   const created = Date.now() - since;
   const c = await waitConnected(s, since, 600000);
   result({
+    kind: GMAIL ? 'gmail' : 'node',
     mailboxes: MAILBOXES,
     createSeconds: seconds(created),
     createPerMailboxMs: percentiles(createMs),

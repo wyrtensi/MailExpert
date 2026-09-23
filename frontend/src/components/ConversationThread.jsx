@@ -241,16 +241,32 @@ function LetterFrame({ html, showQuote, title }) {
       if (raw.startsWith('//')) raw = `https:${raw}`;
       if (/^(?:https?:\/\/|mailto:)/i.test(raw)) window.open(raw, '_blank', 'noopener,noreferrer');
     };
+    // A fixed-width newsletter wider than the card (a phone) is scaled down to fit, like the open
+    // letter, instead of being cut off on the right.
+    const fitWidth = (doc, wrapper) => {
+      if (!wrapper) return 1;
+      wrapper.style.transform = '';
+      wrapper.style.width = '';
+      const available = frame.clientWidth;
+      const content = Math.max(wrapper.scrollWidth, doc.documentElement.scrollWidth);
+      if (!available || content <= available + 1) return 1;
+      const scale = available / content;
+      wrapper.style.width = `${content}px`;
+      wrapper.style.transformOrigin = '0 0';
+      wrapper.style.transform = `scale(${scale})`;
+      return scale;
+    };
     const measure = () => {
       const doc = frame.contentDocument;
       if (!doc?.body) return;
       const wrapper = doc.getElementById('mf-scale-wrapper');
+      const scale = fitWidth(doc, wrapper);
       const next = heights.next(measureContentHeight({
         wrapperOffsetHeight: wrapper ? wrapper.offsetHeight : 0,
         wrapperOffsetTop: wrapper ? wrapper.offsetTop : 0,
-        bodyScrollHeight: doc.body.scrollHeight,
-        bodyOffsetHeight: doc.body.offsetHeight,
-      }));
+        bodyScrollHeight: scale === 1 ? doc.body.scrollHeight : 0,
+        bodyOffsetHeight: scale === 1 ? doc.body.offsetHeight : 0,
+      }), scale);
       if (next !== null) setHeight(Math.max(24, next));
     };
     const onLoad = () => {

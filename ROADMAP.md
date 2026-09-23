@@ -23,6 +23,12 @@ the target architecture is [docs/architecture/team-mail-system-handoff.md](docs/
 - Sidebar mailbox filter and per-mailbox connection health.
 - Selected upstream MailFlow fixes (see [upstream PR assessment](docs/architecture/upstream-pr-assessment.md)).
 - Mailboxes on owned domains through a mailcow mail node: any signed-in user creates one from "Add account" (the server picks host, ports and a password nobody sees), deleting it only disables it on the node and creating the same address again enables it back; administrators add domains, set the default quota (5 GB) and per-mailbox quotas, and see usage and the mail disk, which the panel also reports to a ping URL. mailcow, EOP, DNS and DKIM are set up by hand: [docs/operations/mail-node.md](docs/operations/mail-node.md).
+- Working with many mailboxes: "Add account" with Gmail and "Our mailbox" tabs (a mailbox on an owned domain, name plus domain, no duplicates), two sender names per mailbox (Russian and English) chosen when sending, reply headers and dates in the sender name's language, the mailbox a letter arrived in shown on the letter itself, and "Sent", "Received" or "Draft" marked on every letter in every list.
+- Reading: "Earlier with this person" above an open letter and, on request, the whole conversation stacked under it the way Gmail shows it; contacts with the letters exchanged across all mailboxes; one inbox for every mailbox.
+- Interface: two default themes (a light one and a dark one with light letter cards), one font for Latin and Cyrillic, larger default sizes, labelled toolbar buttons, a language choice at first sign-in, SVG icons instead of emoji, remote images shown by default.
+- Managers see only their own mail settings; system settings are for administrators.
+- Upstream MailFlow IMAP connection fixes (#474): a full pool queues instead of opening unbounded logins, teardown never waits on LOGOUT, rejected passwords back off from 30 minutes to 6 hours, unfetchable UIDs stop re-triggering backfill, the folder integrity pass fits a large mailbox.
+- Demo mode for the whole product: 50 mailboxes, every settings screen, both roles (administrator and manager).
 - Scripted production deployment for both sign-in hosts: `install.sh`/`configure.sh`, edge (Caddy or Cloudflare Tunnel), encrypted and verified restic backups, `update.sh`, a documented manual rollback and moving the panel to another server without losing data. Runbook: [docs/operations/deployment.md](docs/operations/deployment.md).
 
 ## Now

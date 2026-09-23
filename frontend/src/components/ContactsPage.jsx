@@ -513,7 +513,12 @@ export default function ContactsPage() {
       : t('contacts.title');
 
     return (
-      <div style={{ display: 'flex', flexDirection: 'column', height: '100%', overflow: 'hidden', background: 'var(--bg-secondary)' }}>
+      // flex: 1 — this is a flex item of MailApp's (row-direction, no explicit stretch) content
+      // wrapper, same as the desktop branch's root below. Without it the panel sized to its
+      // content's natural width instead of the full pane, leaving an empty strip on the right
+      // (pre-existing on main; not introduced by this branch, but hit while building the
+      // contact-letters UI here, so fixed here too).
+      <div style={{ display: 'flex', flexDirection: 'column', flex: 1, minWidth: 0, height: '100%', overflow: 'hidden', background: 'var(--bg-secondary)' }}>
         {/* Mobile header — matches MessageList header style */}
         <div style={{
           display: 'flex', alignItems: 'center', gap: 4,

@@ -194,6 +194,17 @@ test('the demo contact letters cover every mailbox and report direction, counts 
   assert.equal(letters.lastDate, letters.items[0].date);
 });
 
+test('the demo contact letters precedence matches mailboxBanner: an own address never counts as received', async () => {
+  // A contact whose address happens to equal one of our own mailboxes (demo-sales). demo-005 is
+  // that mailbox's own Sent reply to Maya — its from_email matches the contact's address, but an
+  // own address must win precedence and it's not addressed back to itself, so it must not appear
+  // at all (neither in nor out).
+  const contact = await demoRequest('POST', '/contacts', { displayName: 'Sales (self)', emails: [{ value: 'sales@demo.mailexpert.local' }] });
+  const letters = await demoRequest('GET', `/contacts/${contact.id}/letters?limit=20&offset=0`);
+  assert.equal(letters.items.some(i => i.id === 'demo-005'), false);
+  assert.equal(letters.total, 0);
+});
+
 test('the demo contact letters reject like the real 404 for an unknown contact', async () => {
   await assert.rejects(
     () => demoRequest('GET', '/contacts/does-not-exist/letters'),

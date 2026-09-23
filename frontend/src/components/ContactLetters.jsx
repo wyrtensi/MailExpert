@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useState } from 'react';
 import { useStore } from '../store/index.js';
+import { useMobile } from '../hooks/useMobile.js';
 import { api } from '../utils/api.js';
 import DirectionBadge from './DirectionBadge.jsx';
 import { formatDay, formatDate } from '../utils/formatDate.js';
@@ -12,6 +13,7 @@ const PAGE_SIZE = 20;
 // 20 at a time, newest first. Renders nothing for a contact with no correspondence at all.
 export default function ContactLetters({ contactId, onOpenLetter, t }) {
   const accounts = useStore((state) => state.accounts);
+  const isMobile = useMobile();
   const [summary, setSummary] = useState(null);
   const [items, setItems] = useState([]);
   const [expanded, setExpanded] = useState(false);
@@ -77,6 +79,7 @@ export default function ContactLetters({ contactId, onOpenLetter, t }) {
               item={item}
               account={accounts.find((a) => a.id === item.account_id)}
               onOpen={() => onOpenLetter(item)}
+              narrow={isMobile}
               t={t}
             />
           ))}
@@ -115,8 +118,44 @@ function SummaryRow({ label, children }) {
   );
 }
 
-function LetterRow({ item, account, onOpen, t }) {
+function LetterRow({ item, account, onOpen, narrow, t }) {
   const label = account?.name || account?.email_address || item.account_id;
+  const mailboxTag = (
+    <span style={{ flexShrink: 0, display: 'inline-flex', alignItems: 'center', gap: 4, maxWidth: narrow ? '60%' : '26%', overflow: 'hidden' }}>
+      <span style={{ width: 6, height: 6, borderRadius: '50%', flexShrink: 0, background: account?.color || 'var(--text-tertiary)' }} />
+      <span style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{label}</span>
+    </span>
+  );
+
+  // Narrow panes (a phone-width contact detail, or the mobile app) don't have room for one line
+  // per letter: badge + date + mailbox on their own line, subject on the next, snippet on a
+  // third — instead of squeezing all four into an unreadable single line.
+  if (narrow) {
+    return (
+      <button
+        type="button"
+        onClick={onOpen}
+        style={{
+          display: 'flex', flexDirection: 'column', gap: 3, width: '100%', textAlign: 'left',
+          background: 'transparent', border: 'none', borderBottom: '1px solid var(--border-subtle)',
+          padding: '10px 16px', cursor: 'pointer', color: 'var(--text-primary)', fontSize: 12,
+        }}
+      >
+        <span style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+          <DirectionBadge direction={item.direction} compact />
+          <span style={{ color: 'var(--text-tertiary)', whiteSpace: 'nowrap' }}>{formatDay(item.date)}</span>
+          {mailboxTag}
+        </span>
+        <span style={{ fontWeight: 500, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+          {item.subject || t('message.noSubject')}
+        </span>
+        <span style={{ color: 'var(--text-tertiary)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+          {item.snippet || ''}
+        </span>
+      </button>
+    );
+  }
+
   return (
     <button
       type="button"
@@ -133,10 +172,7 @@ function LetterRow({ item, account, onOpen, t }) {
       <span style={{ flexShrink: 0, color: 'var(--text-tertiary)', whiteSpace: 'nowrap' }}>
         {formatDay(item.date)}
       </span>
-      <span style={{ flexShrink: 0, display: 'inline-flex', alignItems: 'center', gap: 4, maxWidth: '26%', overflow: 'hidden' }}>
-        <span style={{ width: 6, height: 6, borderRadius: '50%', flexShrink: 0, background: account?.color || 'var(--text-tertiary)' }} />
-        <span style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{label}</span>
-      </span>
+      {mailboxTag}
       <span style={{ flexShrink: 0, maxWidth: '30%', fontWeight: 500, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
         {item.subject || t('message.noSubject')}
       </span>

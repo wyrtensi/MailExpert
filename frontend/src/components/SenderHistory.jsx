@@ -9,6 +9,7 @@ import {
 } from '../utils/senderHistory.js';
 import { formatDay } from '../utils/formatDate.js';
 import DirectionBadge from './DirectionBadge.jsx';
+import { useMobile } from '../hooks/useMobile.js';
 
 const rowButtonStyle = {
   display: 'flex', alignItems: 'baseline', gap: 8, width: '100%', textAlign: 'left',
@@ -21,6 +22,7 @@ const rowButtonStyle = {
 // renders nothing when there is no earlier correspondence.
 export default function SenderHistory({ messageId, onOpen, onSearch }) {
   const { t } = useTranslation();
+  const isMobile = useMobile();
   const [history, setHistory] = useState(null);
   const [open, setOpen] = useState(false);
 
@@ -65,7 +67,7 @@ export default function SenderHistory({ messageId, onOpen, onSearch }) {
               onMouseEnter={(e) => { e.currentTarget.style.background = 'var(--bg-hover)'; }}
               onMouseLeave={(e) => { e.currentTarget.style.background = 'transparent'; }}
             >
-              <DirectionBadge direction={item.direction} />
+              <DirectionBadge direction={item.direction} compact={isMobile} />
               <span style={{ flexShrink: 0, color: 'var(--text-tertiary)', whiteSpace: 'nowrap' }}>
                 {formatDay(item.date)}
               </span>

@@ -3,23 +3,18 @@ import { useTranslation } from 'react-i18next';
 import { api } from '../utils/api.js';
 import {
   SENDER_HISTORY_LIMIT,
-  directionKey,
   hasSenderHistory,
   moreCount,
   senderSearchQuery,
 } from '../utils/senderHistory.js';
 import { formatDay } from '../utils/formatDate.js';
+import DirectionBadge from './DirectionBadge.jsx';
 
 const rowButtonStyle = {
   display: 'flex', alignItems: 'baseline', gap: 8, width: '100%', textAlign: 'left',
   background: 'transparent', border: 'none', borderRadius: 6, padding: '6px 8px', cursor: 'pointer',
   color: 'var(--text-primary)', fontSize: 12,
 };
-const badgeStyle = (out) => ({
-  flexShrink: 0, fontSize: 10, fontWeight: 600, padding: '1px 6px', borderRadius: 10,
-  background: out ? 'rgba(34,197,94,0.12)' : 'rgba(124,106,247,0.12)',
-  color: out ? 'var(--green, #22c55e)' : 'var(--accent)',
-});
 
 // "Before this letter" under the header of an open letter: the mailbox's earlier letters from
 // the same person and its letters to them, each marked with its direction. Collapsed by default;
@@ -70,7 +65,7 @@ export default function SenderHistory({ messageId, onOpen, onSearch }) {
               onMouseEnter={(e) => { e.currentTarget.style.background = 'var(--bg-hover)'; }}
               onMouseLeave={(e) => { e.currentTarget.style.background = 'transparent'; }}
             >
-              <span style={badgeStyle(item.direction === 'out')}>{t(directionKey(item.direction))}</span>
+              <DirectionBadge direction={item.direction} />
               <span style={{ flexShrink: 0, color: 'var(--text-tertiary)', whiteSpace: 'nowrap' }}>
                 {formatDay(item.date)}
               </span>

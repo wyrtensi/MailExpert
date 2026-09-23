@@ -1,4 +1,4 @@
-import { useEffect, useLayoutEffect, useRef, useCallback, useState } from 'react';
+import { useEffect, useLayoutEffect, useRef, useCallback, useState, useMemo } from 'react';
 import { pickReplyAlias } from '../utils/replyAlias.js';
 import { useTranslation } from 'react-i18next';
 import { useStore, selectSelectedMessageMid } from '../store/index.js';
@@ -15,6 +15,8 @@ import { useSwipeRow } from '../hooks/useSwipeRow.js';
 import ContextMenu from './ContextMenu.jsx';
 import RowHoverActions from './RowHoverActions.jsx';
 import GtdTabList from './GtdTabList.jsx';
+import DirectionBadge from './DirectionBadge.jsx';
+import { mailboxBanner } from '../utils/mailboxBanner.js';
 import { useUiScale, descale } from '../hooks/useUiScale.js';
 import {
   gtdActiveForContext, buildGtdDisplaySections, GTD_COLORS, GTD_CHIP_BG, sectionBadge, isSelectedRow,
@@ -142,6 +144,12 @@ export default function MessageList() {
   const isMobile = useMobile();
   const isUnified = selectedAccountId === null;
   const selectedAccount = accounts.find(a => a.id === selectedAccountId);
+  // Looked up per row to compute its direction badge (mailboxBanner needs the account's own
+  // address and aliases, not just the account_color already denormalized onto the message).
+  const accountsById = useMemo(
+    () => Object.fromEntries(accounts.map(account => [account.id, account])),
+    [accounts],
+  );
   const unifiedInboxAccountKey = accounts
     .filter(isAccountInUnifiedInbox)
     .map(account => account.id)
@@ -3650,6 +3658,7 @@ export default function MessageList() {
               <ThreadRow
                 key={cacheKey}
                 message={message}
+                account={accountsById[message.account_id]}
                 isExpanded={expandedThreadId === cacheKey}
                 threadMsgs={threadMessages[cacheKey] || null}
                 isLoadingThread={loadingThread === cacheKey}
@@ -3695,6 +3704,7 @@ export default function MessageList() {
               <MessageRow
                 key={message.id}
                 message={message}
+                account={accountsById[message.account_id]}
                 selected={isSelectedRow(message, selectedMessageId, selectedMid)}
                 lastViewed={lastViewedMessageId === message.id && selectedMessageId !== message.id}
                 isChecked={selectedIds.has(message.id)}
@@ -4148,7 +4158,7 @@ function EmptyState({ folderSyncing, searchQuery, searchError, unreadOnly, selec
   );
 }
 
-function ThreadRow({ message, isExpanded, threadMsgs, isLoadingThread, selectedMessageId, selectedMid, lastViewedMessageId, showAccount, isNarrow, onThreadClick, onThreadToggle, showMobileAvatars, showMessagePreviews, onSelect, onOpenWindow, onMarkRead, onStar, onDelete, hoverQuickActions, onContextMenu, onMove, onDragStart, isMobile, swipeLeftAction, swipeRightAction, onSwipeLeft, onSwipeRight, isChecked, selectionMode, onToggleSelect, onRangeSelect, onLongPress }) {
+function ThreadRow({ message, account, isExpanded, threadMsgs, isLoadingThread, selectedMessageId, selectedMid, lastViewedMessageId, showAccount, isNarrow, onThreadClick, onThreadToggle, showMobileAvatars, showMessagePreviews, onSelect, onOpenWindow, onMarkRead, onStar, onDelete, hoverQuickActions, onContextMenu, onMove, onDragStart, isMobile, swipeLeftAction, swipeRightAction, onSwipeLeft, onSwipeRight, isChecked, selectionMode, onToggleSelect, onRangeSelect, onLongPress }) {
   const { t } = useTranslation();
   const [hovered, setHovered] = useState(false);
   const messageCount = message.message_count || 1;
@@ -4331,6 +4341,12 @@ function ThreadRow({ message, isExpanded, threadMsgs, isLoadingThread, selectedM
             <div style={{
               display: 'flex', alignItems: 'center', gap: 4, flexShrink: 0, marginLeft: 8,
             }}>
+              {account && (
+                <DirectionBadge
+                  direction={mailboxBanner(message, account).direction}
+                  compact={isNarrow || isMobile}
+                />
+              )}
               {message.has_attachments && (
                 <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="var(--text-tertiary)" strokeWidth="2">
                   <path d="M21.44 11.05l-9.19 9.19a6 6 0 01-8.49-8.49l9.19-9.19a4 4 0 015.66 5.66l-9.2 9.19a2 2 0 01-2.83-2.83l8.49-8.48"/>
@@ -4449,7 +4465,7 @@ function ThreadRow({ message, isExpanded, threadMsgs, isLoadingThread, selectedM
   );
 }
 
-function MessageRow({ message, selected, lastViewed, isChecked, selectionMode, showAccount, isNarrow, onSelect, onOpenWindow, onToggleSelect, onRangeSelect, onAvatarClick, showMobileAvatars, showMessagePreviews, onMarkRead, onStar, onDelete, hoverQuickActions, onContextMenu, onMove, onDragStart, isMobile, swipeLeftAction, swipeRightAction, onSwipeLeft, onSwipeRight, onLongPress }) {
+function MessageRow({ message, account, selected, lastViewed, isChecked, selectionMode, showAccount, isNarrow, onSelect, onOpenWindow, onToggleSelect, onRangeSelect, onAvatarClick, showMobileAvatars, showMessagePreviews, onMarkRead, onStar, onDelete, hoverQuickActions, onContextMenu, onMove, onDragStart, isMobile, swipeLeftAction, swipeRightAction, onSwipeLeft, onSwipeRight, onLongPress }) {
   const { t } = useTranslation();
   const [hovered, setHovered] = useState(false);
   const [avatarHovered, setAvatarHovered] = useState(false);
@@ -4647,6 +4663,12 @@ function MessageRow({ message, selected, lastViewed, isChecked, selectionMode, s
             </span>
           </div>
           <div style={{ display: 'flex', alignItems: 'center', gap: 4, flexShrink: 0, marginLeft: 8 }}>
+            {account && (
+              <DirectionBadge
+                direction={mailboxBanner(message, account).direction}
+                compact={isNarrow || isMobile}
+              />
+            )}
             {message.has_attachments && (
               <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="var(--text-tertiary)" strokeWidth="2">
                 <path d="M21.44 11.05l-9.19 9.19a6 6 0 01-8.49-8.49l9.19-9.19a4 4 0 015.66 5.66l-9.2 9.19a2 2 0 01-2.83-2.83l8.49-8.48"/>

@@ -205,6 +205,10 @@
     },
     "selectToRead": "Выберите сообщение для чтения",
     "noSubject": "(без темы)",
+    "direction": {
+      "received": "Получено",
+      "sent": "Отправлено"
+    },
     "to": "Кому:",
     "via": "через",
     "attachment_one": "{{count}} вложение",

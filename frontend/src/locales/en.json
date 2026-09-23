@@ -205,6 +205,10 @@
     },
     "selectToRead": "Select a message to read",
     "noSubject": "(no subject)",
+    "direction": {
+      "received": "Received",
+      "sent": "Sent"
+    },
     "to": "To:",
     "via": "via",
     "attachment_one": "{{count}} attachment",

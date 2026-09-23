@@ -3550,14 +3550,16 @@ describe('backfillAllFolders reuses one connection across folders', () => {
   });
   afterEach(() => { vi.restoreAllMocks(); });
 
-  it('logs in once for every folder and logs out once at the end', async () => {
+  it('logs in once for every folder and closes once at the end', async () => {
     trackClients();
     const mgr = manager();
     await ImapManager.prototype.backfillAllFolders.call(mgr, acct);
     expect(mgr.backfillMessages.mock.calls.map(c => c[1])).toEqual(['INBOX', 'A', 'B']);
     expect(clients).toHaveLength(1);
     expect(lockedPaths(clients[0])).toEqual(['INBOX', 'A', 'B']);
-    expect(clients[0].logout).toHaveBeenCalledTimes(1);
+    // close(), not an awaited LOGOUT: the host slot is released only after the teardown.
+    expect(clients[0].close).toHaveBeenCalledTimes(1);
+    expect(clients[0].logout).not.toHaveBeenCalled();
     expect(mgr._bgConnSem.activeCount('imap.example.com')).toBe(0);
   });
 
@@ -3571,7 +3573,8 @@ describe('backfillAllFolders reuses one connection across folders', () => {
     expect(lockedPaths(clients[0])).toEqual(['INBOX', 'A']);
     expect(clients[0].close).toHaveBeenCalled();
     expect(lockedPaths(clients[1])).toEqual(['B']);
-    expect(clients[1].logout).toHaveBeenCalledTimes(1);
+    expect(clients[1].close).toHaveBeenCalledTimes(1);
+    expect(clients[1].logout).not.toHaveBeenCalled();
   });
 
   it('logs in again instead of skipping a folder when the server closed the connection in between', async () => {
@@ -3588,7 +3591,8 @@ describe('backfillAllFolders reuses one connection across folders', () => {
     const mgr = manager();
     await ImapManager.prototype.backfillMessages.call(mgr, acct, 'A');
     expect(clients).toHaveLength(1);
-    expect(clients[0].logout).toHaveBeenCalledTimes(1);
+    expect(clients[0].close).toHaveBeenCalledTimes(1);
+    expect(clients[0].logout).not.toHaveBeenCalled();
   });
 });
 describe('rerootThreadChildren', () => {

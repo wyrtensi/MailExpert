@@ -114,7 +114,9 @@ async function connectImapClientOnce(account, resolved, cfgOpts, timeoutMs, labe
     client.on('error', (err) => {
       // Refusal detection stays unconditional: it drives the caller's backoff decision and
       // must observe a refusal that arrives while we are tearing the attempt down.
-      if (isConnectionRefusal(err?.message)) sawRefusal = true;
+      // extractImapError, as in every other refusal check: a bare 'Command failed' hides the
+      // [LIMIT] / too-many-connections text this needs to see.
+      if (isConnectionRefusal(extractImapError(err))) sawRefusal = true;
       if (abandoned) return;
       recordWarning('imap_error', account?.id);
       console.error(`IMAP error for ${logAccount(account)}:`, err.message);
@@ -376,6 +378,14 @@ const BODY_PREFETCH_PARTS = ['1', '1.1', '1.2', '2', '2.1', '2.2', '1.1.1', '1.2
 // race so it is never confused with a real fetch error.
 const FLAG_SCAN_TIMEOUT_MS = 20000;
 const FLAG_SCAN_TIMED_OUT = Symbol('flagScanTimedOut');
+
+// Teardown convention for the IMAP clients in this file: close(), not an awaited logout().
+// LOGOUT is a command, so it queues behind whatever wedged the transport and can hang
+// indefinitely, and most teardown paths release a _bgConnSem host slot or a sync guard only
+// AFTER the teardown runs. One hung logout would stop background work for every account on the
+// host, or stop an account syncing, until the process restarts. The one graceful LOGOUT left is
+// the pool's idle close (armPoolIdleClose): a healthy idle session, fire-and-forget, and nothing
+// waits on it.
 
 // Upper bound on how far back the delta flag scan looks. iCloud advertises CONDSTORE (so we take
 // the delta path) but IGNORES the changedSince fetch modifier — it returns EVERY message in the
@@ -2563,7 +2573,10 @@ export class ImapManager {
       // timed-out poll must not paint a working account red in the sidebar.
       if (refused || authFailed) await this._recordAccountError(account, detail);
     } finally {
-      if (client) { try { await client.logout(); } catch { /* already closed */ } }
+      // close(), not logout(): LOGOUT is a command and queues behind whatever wedged the
+      // transport, and the host slot and sync guard below are released only after it. A hung
+      // logout here would stall background work for every account on this host.
+      if (client) { try { client.close(); } catch { /* already closed */ } }
       if (slotHeld) this._bgConnSem.release(host);
       this.syncingAccounts.delete(account.id);
     }
@@ -4002,7 +4015,9 @@ export class ImapManager {
       if (!sess.client) return;
       const client = sess.client;
       sess.client = null;
-      try { await client.logout(); } catch { /* already disconnected */ }
+      // close(), not logout(): this runs after a failed batch (the transport may be wedged) and
+      // while the caller holds a per-host background slot, released only after the run ends.
+      try { client.close(); } catch { /* already disconnected */ }
     };
 
     // Re-check the account on every call, then log in only when there is no usable connection.
@@ -4548,7 +4563,8 @@ export class ImapManager {
         }
         console.warn(`Bulk flag refresh error for ${logAccount(account)}/${folder}: ${err.message}`);
       } finally {
-        if (client) { try { await client.logout(); } catch { /* ignore */ } }
+        // close(), not logout(): the host slot below is released only after this.
+        if (client) { try { client.close(); } catch { /* ignore */ } }
         this._bgConnSem.release(host);
       }
     }
@@ -4626,7 +4642,8 @@ export class ImapManager {
       }
 
     } finally {
-      if (session.client) { try { await session.client.logout(); } catch { /* already disconnected */ } }
+      // close(), not logout(): the host slot below is released only after this.
+      if (session.client) { try { session.client.close(); } catch { /* already disconnected */ } }
       if (slotHeld) this._bgConnSem.release(host); // free the per-host slot for the next background job
       this.backfillAllRunning.delete(account.id);
       this.broadcast({ type: 'backfill_all_complete', accountId: account.id });
@@ -4700,7 +4717,7 @@ export class ImapManager {
       slotHeld = true;
 
       const openClient = async () => {
-        if (siClient) { try { await siClient.logout(); } catch { /* already disconnected */ } siClient = null; }
+        if (siClient) { try { siClient.close(); } catch { /* already disconnected */ } siClient = null; }
         const row = (await query('SELECT * FROM email_accounts WHERE id = $1', [account.id])).rows[0];
         if (!row) throw new Error('Account deleted');
         const fresh = await ensureFreshToken(row);
@@ -4796,7 +4813,9 @@ export class ImapManager {
             // can starve the live sync/IDLE connection — the exact failure that lets new mail slip
             // through. Stop this run and back the whole host off hard instead; the 10-minute
             // scheduler resumes the backlog once the provider is calm.
-            if (isConnectionRefusal(err.message)) {
+            // extractImapError, not err.message: a server rejection is the generic 'Command
+            // failed' until its own text is pulled out, so this never armed the host backoff.
+            if (isConnectionRefusal(extractImapError(err))) {
               failed = true;
               refused = true;
               console.log(`Snippet indexer backing off ${logAccount(account)} — provider refusing connections (at limit)`);
@@ -4830,7 +4849,9 @@ export class ImapManager {
       failed = true;
       console.error(`Snippet indexer error ${logAccount(account)}:`, err.message);
     } finally {
-      if (siClient) { try { await siClient.logout(); } catch { /* already disconnected */ } }
+      // close(), not logout(): the per-host slot below is released only after this, so a hung
+      // logout would stop background work for every account on the host.
+      if (siClient) { try { siClient.close(); } catch { /* already disconnected */ } }
       if (slotHeld) this._bgConnSem.release(host); // free the per-host slot for the next background job
       this.snippetIndexerRunning.delete(account.id);
       // HOST-level circuit breaker: a run that failed without indexing a single batch (e.g. the
@@ -4941,7 +4962,8 @@ export class ImapManager {
       console.warn(`Provider id backfill failed for ${logAccount(account)}: ${detail}`);
       await recordProviderIdBackfillError(query, account.id, detail).catch(() => {});
     } finally {
-      if (client) { try { await client.logout(); } catch { /* already disconnected */ } }
+      // close(), not logout(): the host slot below is released only after this.
+      if (client) { try { client.close(); } catch { /* already disconnected */ } }
       if (slotHeld) this._bgConnSem.release(host);
       this.providerIdBackfillRunning.delete(account.id);
       this.providerIdProgress.delete(account.id);
@@ -6311,7 +6333,9 @@ export class ImapManager {
         if (!usedFreshSyncClient) {
           const conn = this.connections.get(account.id);
           if (conn && conn === client) {
-            try { await conn.logout(); } catch { /* already disconnected */ }
+            // close(), not logout(): the sync already failed, so the transport may be wedged,
+            // and syncingAccounts/syncStartedAt are cleared only in the finally after this.
+            try { conn.close(); } catch { /* already disconnected */ }
             this.connections.delete(account.id);
           }
         }

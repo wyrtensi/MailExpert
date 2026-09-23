@@ -62,6 +62,9 @@ export const THEMES = {
       '--text-tertiary': '#6b7385',
       '--accent': '#3d63dd',
       '--accent-text': '#ffffff',
+      '--green': '#1f8a4c',
+      '--red': '#c93c3c',
+      '--amber': '#b7791f',
     },
   },
 

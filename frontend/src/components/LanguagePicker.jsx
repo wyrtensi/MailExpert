@@ -1,4 +1,4 @@
-import { useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import { useStore } from '../store/index.js';
 import { LANGUAGES, suggestedLanguage } from '../utils/language.js';
@@ -10,6 +10,25 @@ export default function LanguagePicker({ onDone }) {
   const { t } = useTranslation();
   const setLanguage = useStore((s) => s.setLanguage);
   const [focus] = useState(() => suggestedLanguage(typeof navigator === 'undefined' ? [] : navigator.languages || [navigator.language]));
+  const dialogRef = useRef(null);
+
+  // The app's shortcuts listen on the document: while the question is open no key reaches them
+  // (j would open a letter, c a new one behind the dialog). Keys inside the dialog still work.
+  useEffect(() => {
+    const block = (e) => {
+      if (dialogRef.current?.contains(e.target)) return;
+      e.stopPropagation();
+      if (e.key !== 'Tab') e.preventDefault();
+    };
+    const keepInside = (e) => { if (dialogRef.current?.contains(e.target)) e.stopPropagation(); };
+    document.addEventListener('keydown', block, true);
+    const el = dialogRef.current;
+    el?.addEventListener('keydown', keepInside);
+    return () => {
+      document.removeEventListener('keydown', block, true);
+      el?.removeEventListener('keydown', keepInside);
+    };
+  }, []);
 
   const choose = (code) => {
     setLanguage(code);
@@ -17,7 +36,7 @@ export default function LanguagePicker({ onDone }) {
   };
 
   return (
-    <div role="dialog" aria-modal="true" aria-labelledby="language-picker-title" style={{
+    <div ref={dialogRef} role="dialog" aria-modal="true" aria-labelledby="language-picker-title" style={{
       position: 'fixed', inset: 0, zIndex: 1000, display: 'flex', alignItems: 'center', justifyContent: 'center',
       background: 'rgba(15,17,22,0.55)', padding: 16,
     }}>

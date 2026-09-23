@@ -45,6 +45,7 @@ import { senderColor } from '../themes.js';
 import MessageHeaderModal from './MessageHeaderModal.jsx';
 import FolderIcon from './FolderIcon.jsx';
 import { fewerLabels, initialLabelCount, showsLabel } from '../utils/paneToolbar.js';
+import { useUiScale } from '../hooks/useUiScale.js';
 import TodoistTaskModal from './TodoistTaskModal.jsx';
 import SenderAvatarImage from './SenderAvatarImage.jsx';
 import ContextMenu from './ContextMenu.jsx';
@@ -308,6 +309,12 @@ export default function MessagePane({ windowMessageId = null, onWindowClose = nu
   const toolbarElRef = useRef(null);
   const toolbarObserverRef = useRef(null);
   const [labelCount, setLabelCount] = useState(0);
+  // Every measured width reruns the overflow check below, also when the count it resets to is the
+  // one already in state (all names fitted, then the pane got narrower).
+  const [toolbarWidth, setToolbarWidth] = useState(0);
+  const uiScale = useUiScale();
+  const uiScaleRef = useRef(uiScale);
+  uiScaleRef.current = uiScale;
   const isMobileRef = useRef(isMobile);
   isMobileRef.current = isMobile;
   const toolbarRef = useCallback((node) => {
@@ -316,7 +323,9 @@ export default function MessagePane({ windowMessageId = null, onWindowClose = nu
     toolbarElRef.current = node;
     if (!node || !window.ResizeObserver) return;
     const ro = new ResizeObserver(([entry]) => {
-      setLabelCount(initialLabelCount(Math.round(entry.contentRect.width), isMobileRef.current));
+      const width = Math.round(entry.contentRect.width);
+      setToolbarWidth(width);
+      setLabelCount(initialLabelCount(width, isMobileRef.current));
     });
     ro.observe(node);
     toolbarObserverRef.current = ro;
@@ -328,7 +337,7 @@ export default function MessagePane({ windowMessageId = null, onWindowClose = nu
     const el = toolbarElRef.current;
     if (el && labelCount > 0 && el.scrollWidth > el.clientWidth + 1) setLabelCount(fewerLabels(labelCount));
     // The buttons on the row follow the letter (spam or not, read or not, AI once the body is in).
-  }, [labelCount, message, body]);
+  }, [labelCount, toolbarWidth, message, body]);
   const [showHeaderModal, setShowHeaderModal] = useState(false);
   const [resolvedSubject, setResolvedSubject] = useState(null);
   const [showMovePicker, setShowMovePicker] = useState(false);
@@ -764,8 +773,11 @@ export default function MessagePane({ windowMessageId = null, onWindowClose = nu
       iframeContextMenuHandler = (ev) => {
         if (hasNativeContextTarget(ev, doc)) return;
         ev.preventDefault();
+        // ev.client* is in the iframe's own pixels, which the app's scale wrapper enlarges on
+        // screen; the menu takes screen pixels like any other right-click.
         const rect = iframe.getBoundingClientRect();
-        openPaneContextMenu(rect.left + ev.clientX, rect.top + ev.clientY, {
+        const s = uiScaleRef.current;
+        openPaneContextMenu(rect.left + ev.clientX * s, rect.top + ev.clientY * s, {
           source: 'iframe',
           selectedText: doc.getSelection?.().toString() || '',
         });

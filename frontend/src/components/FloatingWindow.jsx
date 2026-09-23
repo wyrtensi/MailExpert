@@ -1,4 +1,5 @@
 import { useCallback, useLayoutEffect, useRef } from 'react';
+import { useUiScale } from '../hooks/useUiScale.js';
 
 // Generic draggable / resizable in-app window frame (#219). The message-window
 // feature renders a MessagePane inside one of these. The drag/resize technique
@@ -27,6 +28,12 @@ export default function FloatingWindow({
   const elRef = useRef(null);
   const gestureCleanupRef = useRef(null);
   const gestureActiveRef = useRef(false);
+  // The window sits inside the app's scale(fontSize) wrapper: getBoundingClientRect, clientX and
+  // window.inner* are screen pixels, left/top/width/height are layout pixels. Gestures convert
+  // once at the start (hooks/useUiScale.js).
+  const uiScale = useUiScale();
+  const scaleRef = useRef(uiScale);
+  scaleRef.current = uiScale;
 
   // Geometry (left/top/width/height) is applied imperatively rather than through the
   // style prop so that an unrelated re-render (a background sync, another window gaining
@@ -54,7 +61,11 @@ export default function FloatingWindow({
     const pointerId = e.pointerId;
     captureEl.setPointerCapture(pointerId);
     gestureActiveRef.current = true;
-    const startRect = el.getBoundingClientRect();
+    const s = scaleRef.current;
+    const visual = el.getBoundingClientRect();
+    const startRect = { left: visual.left / s, top: visual.top / s, width: visual.width / s, height: visual.height / s };
+    const viewW = window.innerWidth / s;
+    const viewH = window.innerHeight / s;
     const startMouseX = e.clientX;
     const startMouseY = e.clientY;
     const w = startRect.width;
@@ -64,8 +75,8 @@ export default function FloatingWindow({
     let curX = startRect.left;
     let curY = startRect.top;
     const onMove = (ev) => {
-      curX = Math.max(0, Math.min(window.innerWidth - w, startRect.left + ev.clientX - startMouseX));
-      curY = Math.max(0, Math.min(Math.max(0, window.innerHeight - h), startRect.top + ev.clientY - startMouseY));
+      curX = Math.max(0, Math.min(viewW - w, startRect.left + (ev.clientX - startMouseX) / s));
+      curY = Math.max(0, Math.min(Math.max(0, viewH - h), startRect.top + (ev.clientY - startMouseY) / s));
       el.style.left = curX + 'px';
       el.style.top = curY + 'px';
     };
@@ -101,7 +112,11 @@ export default function FloatingWindow({
     const pointerId = e.pointerId;
     captureEl.setPointerCapture(pointerId);
     gestureActiveRef.current = true;
-    const startRect = el.getBoundingClientRect();
+    const s = scaleRef.current;
+    const visual = el.getBoundingClientRect();
+    const startRect = { left: visual.left / s, top: visual.top / s, width: visual.width / s, height: visual.height / s };
+    const viewW = window.innerWidth / s;
+    const viewH = window.innerHeight / s;
     const startMouseX = e.clientX;
     const startMouseY = e.clientY;
     const x = startRect.left;
@@ -111,8 +126,8 @@ export default function FloatingWindow({
     let curW = startRect.width;
     let curH = startRect.height;
     const onMove = (ev) => {
-      curW = Math.min(window.innerWidth - x - 4, Math.max(MIN_W, startRect.width + ev.clientX - startMouseX));
-      curH = Math.min(window.innerHeight - y - 4, Math.max(MIN_H, startRect.height + ev.clientY - startMouseY));
+      curW = Math.min(viewW - x - 4, Math.max(MIN_W, startRect.width + (ev.clientX - startMouseX) / s));
+      curH = Math.min(viewH - y - 4, Math.max(MIN_H, startRect.height + (ev.clientY - startMouseY) / s));
       el.style.width = curW + 'px';
       el.style.height = curH + 'px';
     };

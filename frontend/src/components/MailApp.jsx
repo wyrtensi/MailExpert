@@ -146,7 +146,8 @@ export default function MailApp() {
     document.body.style.userSelect = 'none';
 
     const onMouseMove = (mv) => {
-      const dx = mv.clientX - startX;
+      // Pointer travel is in screen pixels; the width lives inside the scale(fontSize) wrapper.
+      const dx = (mv.clientX - startX) / scale;
       const clamped = Math.min(400, Math.max(160, startWidth + dx));
       setSidebarWidth(clamped);
     };
@@ -210,7 +211,7 @@ export default function MailApp() {
     document.body.style.userSelect = 'none';
 
     const onMouseMove = (mv) => {
-      const dx = mv.clientX - startX;
+      const dx = (mv.clientX - startX) / scale;
       const clamped = Math.max(180, Math.min(700, startWidth + dx));
       document.documentElement.style.setProperty('--list-width', clamped + 'px');
     };
@@ -241,7 +242,7 @@ export default function MailApp() {
     document.body.style.userSelect = 'none';
 
     const onMouseMove = (mv) => {
-      const dx = mv.clientX - startX;
+      const dx = (mv.clientX - startX) / scale;
       const clamped = Math.max(200, Math.min(600, startWidth - dx));
       document.documentElement.style.setProperty('--right-sidebar-width', clamped + 'px');
     };

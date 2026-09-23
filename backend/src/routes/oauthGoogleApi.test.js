@@ -65,10 +65,10 @@ beforeEach(() => {
   query.mockResolvedValue({ rows: [] });
 });
 
-const start = (email, user = 'u1') => fetch(`${base}/start`, {
+const start = (email, user = 'u1', names = {}) => fetch(`${base}/start`, {
   method: 'POST',
   headers: { 'Content-Type': 'application/json', ...(user ? { 'x-test-user': user } : {}) },
-  body: JSON.stringify({ email }),
+  body: JSON.stringify({ email, ...names }),
 });
 
 describe('POST /api/oauth/google/start', () => {
@@ -89,6 +89,19 @@ describe('POST /api/oauth/google/start', () => {
     const google = new URL(url);
     expect(google.searchParams.get('client_id')).toBe(CLIENT_ID);
     expect(google.searchParams.get('login_hint')).toBe('a@gmail.com');
+  });
+
+  it('carries the sender names from the form to the callback through the state', async () => {
+    const res = await start('a@gmail.com', 'u1', { senderName: ' Иван Петров ', senderNameAlt: 'Ivan Petrov' });
+    expect(res.status).toBe(200);
+    expect(createOAuthState).toHaveBeenCalledWith(expect.objectContaining({ senderName: 'Иван Петров', senderNameAlt: 'Ivan Petrov' }));
+  });
+
+  it('refuses a sender name that would add a header, before selecting an app', async () => {
+    const res = await start('a@gmail.com', 'u1', { senderName: 'x\r\nBcc: y@evil.example' });
+    expect(res.status).toBe(400);
+    expect(await res.json()).toMatchObject({ code: 'sender_name_invalid' });
+    expect(createOAuthState).not.toHaveBeenCalled();
   });
 
   it('refuses a malformed email', async () => {

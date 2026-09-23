@@ -1,7 +1,11 @@
 import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 
 vi.mock('../services/auditLog.js', () => ({ recordAudit: vi.fn(async () => {}) }));
-vi.mock('../services/db.js', () => ({ query: vi.fn() }));
+// The account row and its second sender name are written in one transaction on the same mock.
+vi.mock('../services/db.js', () => {
+  const query = vi.fn();
+  return { query, withTransaction: vi.fn(async (fn) => fn({ query })) };
+});
 // Every request runs as an ordinary signed-in user: the domain mailbox is open to everyone.
 vi.mock('../middleware/auth.js', () => ({
   requireAuth: (req, _res, next) => { req.session = { userId: 'user-1' }; next(); },
@@ -53,15 +57,21 @@ describe('domain mailboxes in /api/accounts', () => {
   afterAll(async () => { await new Promise((resolve) => server.close(resolve)); });
 
   let inserted;
+  let aliasInserted;
   beforeEach(() => {
     vi.clearAllMocks();
     node.cfg = CFG;
     inserted = null;
+    aliasInserted = null;
     query.mockReset().mockImplementation(async (sql, params) => {
       if (sql.includes('lower(email_address)')) return { rows: [] };
       if (sql.includes('INSERT INTO email_accounts')) {
         inserted = { sql, params };
-        return { rows: [{ id: ID, email_address: params[2], name: params[1], protocol: 'imap', mail_node: true, auth_pass: params[4] }] };
+        return { rows: [{ id: ID, email_address: params[2], name: params[1], protocol: 'imap', mail_node: true, auth_pass: params[4], sender_name: params[5] }] };
+      }
+      if (sql.includes('INSERT INTO account_aliases')) {
+        aliasInserted = params;
+        return { rows: [{ id: 'alias-1', name: params[1], email: params[2], reply_to: null, signature: null }] };
       }
       return { rows: [] };
     });
@@ -84,13 +94,36 @@ describe('domain mailboxes in /api/accounts', () => {
     expect(body).toMatchObject({ id: ID, email_address: 'info@example.com', mail_node: true });
     expect(JSON.stringify(body)).not.toContain('generated-password');
     expect(provisionMailbox).toHaveBeenCalledWith(CFG, { localPart: 'info', domain: 'example.com', name: 'Info desk' });
-    expect(inserted.params).toEqual(['user-1', 'Info desk', 'info@example.com', 'mail.example.com', 'enc:generated-password']);
+    expect(inserted.params).toEqual(['user-1', 'Info desk', 'info@example.com', 'mail.example.com', 'enc:generated-password', null]);
+    expect(aliasInserted).toBeNull();
+    expect(body.aliases).toEqual([]);
     expect(inserted.sql).toContain("993,true,false,$4,587,'STARTTLS'");
     expect(JSON.stringify(inserted.params)).not.toContain('evil');
     expect(imapManager.connectAccount).toHaveBeenCalledTimes(1);
     expect(recordAudit).toHaveBeenCalledWith(expect.objectContaining({
       action: 'mailbox.added', details: expect.objectContaining({ mailNode: true }),
     }));
+  });
+
+  it('sends under the sender name, and the second name becomes an alias with the same address', async () => {
+    const res = await post({
+      kind: 'domain', localPart: 'sales', domain: 'example.com', name: 'Sales desk',
+      senderName: ' Иван Петров ', senderNameAlt: 'Ivan Petrov',
+    });
+    expect(res.status).toBe(200);
+    const body = await res.json();
+    expect(inserted.params[5]).toBe('Иван Петров');
+    expect(inserted.sql).toContain('sender_name');
+    expect(aliasInserted).toEqual([ID, 'Ivan Petrov', 'sales@example.com']);
+    expect(body.sender_name).toBe('Иван Петров');
+    expect(body.aliases).toEqual([expect.objectContaining({ name: 'Ivan Petrov', email: 'sales@example.com' })]);
+  });
+
+  it('refuses a sender name that would add a header, before touching mailcow', async () => {
+    const res = await post({ kind: 'domain', localPart: 'sales', domain: 'example.com', senderName: 'Sales\r\nBcc: x@evil.example' });
+    expect(res.status).toBe(400);
+    expect((await res.json()).code).toBe('sender_name_invalid');
+    expect(provisionMailbox).not.toHaveBeenCalled();
   });
 
   it('keeps manual server setup behind the admin check', async () => {

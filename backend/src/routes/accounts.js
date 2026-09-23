@@ -1,6 +1,6 @@
 import { publicFolderCounts } from '../services/folderStatus.js';
 import { Router } from 'express';
-import { query } from '../services/db.js';
+import { query, withTransaction } from '../services/db.js';
 import { requireAuth, requireAdmin } from '../middleware/auth.js';
 import { imapManager } from '../index.js';
 import { providerProfile } from '../services/imapManager.js';
@@ -13,6 +13,7 @@ import { pluginRegistry } from '../plugins/registry.js';
 import { recordAudit } from '../services/auditLog.js';
 import { createKeyedSerializer } from '../utils/keyedSerializer.js';
 import { uuidParam } from '../utils/uuid.js';
+import { addSecondSenderName, parseSenderNames } from '../utils/senderNames.js';
 import { THREAD_MODE_GMAIL, THREAD_MODE_RFC } from '../services/threading/threadId.js';
 import { previewRecompute } from '../services/threading/recompute.js';
 import { providerThreadIndexState } from '../services/threading/providerThreadIndex.js';
@@ -168,6 +169,9 @@ async function createDomainMailboxNow(req, res) {
   if (hasHeaderInjectionChars(name)) {
     return res.status(400).json({ error: 'Name and email address cannot contain control characters' });
   }
+  // The form asks for the sender name; a caller without one sends under the mailbox name.
+  const names = parseSenderNames(req.body);
+  if (names.error) return res.status(400).json({ error: names.error, code: 'sender_name_invalid' });
   const cfg = await getMailNodeConfig();
   if (!cfg) return refuseMailNode(res, 'mail_node_not_configured');
 
@@ -186,16 +190,20 @@ async function createDomainMailboxNow(req, res) {
   }
 
   let account;
+  let secondName;
   try {
-    const result = await query(`
-      INSERT INTO email_accounts (
-        added_by, name, email_address, protocol,
-        imap_host, imap_port, imap_tls, imap_skip_tls_verify, smtp_host, smtp_port, smtp_tls,
-        auth_user, auth_pass, mail_node
-      ) VALUES ($1,$2,$3,'imap',$4,993,true,false,$4,587,'STARTTLS',$3,$5,true)
-      RETURNING *
-    `, [req.session.userId, name, email, cfg.mailHost, encrypt(created.password)]);
-    account = result.rows[0];
+    ({ account, secondName } = await withTransaction(async (client) => {
+      const result = await client.query(`
+        INSERT INTO email_accounts (
+          added_by, name, email_address, protocol,
+          imap_host, imap_port, imap_tls, imap_skip_tls_verify, smtp_host, smtp_port, smtp_tls,
+          auth_user, auth_pass, mail_node, sender_name
+        ) VALUES ($1,$2,$3,'imap',$4,993,true,false,$4,587,'STARTTLS',$3,$5,true,$6)
+        RETURNING *
+      `, [req.session.userId, name, email, cfg.mailHost, encrypt(created.password), names.senderName]);
+      const row = result.rows[0];
+      return { account: row, secondName: await addSecondSenderName(client, { accountId: row.id, email, senderNameAlt: names.senderNameAlt }) };
+    }));
   } catch (err) {
     console.error('Domain mailbox insert error:', err);
     // Nobody else knows the new password: leave the mailbox disabled rather than active and unused.
@@ -210,7 +218,8 @@ async function createDomainMailboxNow(req, res) {
     details: { protocol: 'imap', oauthProvider: null, mailNode: true, reused: created.reused },
   });
   imapManager.connectAccount(account).catch(console.error);
-  res.json(safeAccount(account));
+  // The store takes this row as is, so the second name is on it for compose's From list.
+  res.json({ ...safeAccount(account), aliases: secondName ? [secondName] : [] });
 }
 
 // Manual server setup is an admin task: an ordinary user adds Gmail through the Google flow or a

@@ -17,9 +17,11 @@ function stateKey(provider, state) {
 // the state and the challenge leave the server. `appId` pins the Google app whose client
 // must finish the flow; a sign-in flow has no user yet. `mode` (`add` from the Gmail
 // form, `reconnect` by mailbox id) and `email` tell the callback what to check;
-// `accountId` names which mailbox is being reconnected.
+// `accountId` names which mailbox is being reconnected. `senderName` and `senderNameAlt` are the
+// names a mailbox added from the Gmail form sends under (utils/senderNames.js).
 export async function createOAuthState({
   provider, userId = null, loginHint = null, appId = null, mode = null, email = null, accountId = null,
+  senderName = null, senderNameAlt = null,
 }) {
   const state = randomBytes(32).toString('base64url');
   const codeVerifier = randomBytes(32).toString('base64url');
@@ -35,6 +37,8 @@ export async function createOAuthState({
       mode: mode || null,
       email: email ? email.toLowerCase() : null,
       accountId: accountId || null,
+      senderName: senderName || null,
+      senderNameAlt: senderNameAlt || null,
     }),
     { NX: true, EX: OAUTH_STATE_TTL_SECONDS },
   );
@@ -61,6 +65,8 @@ export async function consumeOAuthState({ provider, state, anonymous = false }) 
       mode: typeof data.mode === 'string' ? data.mode : null,
       email: typeof data.email === 'string' ? data.email : null,
       accountId: typeof data.accountId === 'string' ? data.accountId : null,
+      senderName: typeof data.senderName === 'string' ? data.senderName : null,
+      senderNameAlt: typeof data.senderNameAlt === 'string' ? data.senderNameAlt : null,
     };
   } catch {
     return null;

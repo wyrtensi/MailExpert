@@ -17,6 +17,7 @@ import MessagePane from './MessagePane.jsx';
 import NotificationToasts from './NotificationToasts.jsx';
 import CommandPalette from './CommandPalette.jsx';
 import DemoBadge from './DemoBadge.jsx';
+import { demoRole, switchDemoRole } from '../utils/demoRole.js';
 import { usePluginSlot, PluginRuntime } from '../plugins/PluginSlot.jsx';
 import { isDemoMode } from '../demo/mode.js';
 import LanguagePicker from './LanguagePicker.jsx';
@@ -935,7 +936,14 @@ export default function MailApp() {
       <NotificationToasts />
       <PluginRuntime />
       <CommandPalette open={paletteOpen} onClose={() => setPaletteOpen(false)} />
-      {isDemoMode && <DemoBadge enabled={isDemoMode} />}
+      {isDemoMode && (
+        <DemoBadge
+          enabled={isDemoMode}
+          roleLabel={t(demoRole() === 'user' ? 'demo.roleUser' : 'demo.roleAdmin')}
+          switchLabel={t(demoRole() === 'user' ? 'demo.viewAsAdmin' : 'demo.viewAsUser')}
+          onSwitch={() => switchDemoRole(demoRole())}
+        />
+      )}
       {languagePickerOpen && <LanguagePicker onDone={() => setLanguagePickerOpen(false)} />}
 
       {/* Keyboard shortcut help overlay — toggled by the '?' key */}

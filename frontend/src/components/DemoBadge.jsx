@@ -4,10 +4,30 @@ export function demoBadgeLabel(enabled) {
   return enabled ? 'Demo mode' : '';
 }
 
-export default function DemoBadge({ enabled = false }) {
+// `switchLabel` and `onSwitch` add a button that signs the demo in as the other role (admin or
+// ordinary user); the badge itself stays click-through, only the button takes clicks.
+export default function DemoBadge({ enabled = false, roleLabel = '', switchLabel = '', onSwitch = null }) {
   const label = demoBadgeLabel(enabled);
 
   if (!label) return null;
+
+  const switchButton = switchLabel && onSwitch ? createElement('button', {
+    type: 'button',
+    onClick: onSwitch,
+    style: {
+      pointerEvents: 'auto',
+      marginLeft: 8,
+      padding: '2px 8px',
+      border: '1px solid var(--border)',
+      borderRadius: 999,
+      background: 'var(--bg-tertiary)',
+      color: 'var(--accent)',
+      fontSize: 12,
+      fontWeight: 600,
+      cursor: 'pointer',
+      fontFamily: 'inherit',
+    },
+  }, switchLabel) : null;
 
   return createElement('div', {
     'aria-live': 'polite',
@@ -27,6 +47,9 @@ export default function DemoBadge({ enabled = false }) {
       fontSize: 12,
       fontWeight: 600,
       pointerEvents: 'none',
+      display: 'flex',
+      alignItems: 'center',
+      whiteSpace: 'nowrap',
     },
-  }, `${label} — local data`);
+  }, `${label} — local data${roleLabel ? ` · ${roleLabel}` : ''}`, switchButton);
 }

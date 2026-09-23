@@ -9,19 +9,25 @@ import LoginPage from './components/LoginPage.jsx';
 import GoogleLoginPage from './components/GoogleLoginPage.jsx';
 import { isGoogleAuthMode } from './utils/authMode.js';
 import { isDemoMode } from './demo/mode.js';
+import { demoRole } from './utils/demoRole.js';
 import { needsLanguageChoice } from './utils/language.js';
 import MailApp from './components/MailApp.jsx';
 import LockScreen from './components/LockScreen.jsx';
 
-const demoUser = {
-  id: 'demo-user',
-  email: 'demo@mailexpert.local',
-  username: 'Demo Administrator',
-  isAdmin: true,
-  hasLockPin: false,
-  locked: false,
-  totpEnabled: false,
-};
+// The demo signs in as the administrator or as an ordinary user (utils/demoRole.js), matching
+// what the demo's /auth/me answers.
+function demoUser() {
+  const plain = demoRole() === 'user';
+  return {
+    id: plain ? 'demo-colleague' : 'demo-user',
+    email: plain ? 'colleague@demo.mailexpert.local' : 'demo@mailexpert.local',
+    username: plain ? 'Demo User' : 'Demo Administrator',
+    isAdmin: !plain,
+    hasLockPin: false,
+    locked: false,
+    totpEnabled: false,
+  };
+}
 
 export default function App() {
   const { user, setUser, loadPreferences, isLocked, setLocked } = useStore();
@@ -62,7 +68,7 @@ export default function App() {
       if (localStorage.getItem('mailexpert_threaded_view') === null) useStore.getState().setThreadedView(true);
       // No preferences to load in the demo: this browser's own choice is all there is.
       if (needsLanguageChoice({ stored: localStorage.getItem('mailexpert_language') })) useStore.getState().setLanguagePickerOpen(true);
-      setUser(demoUser);
+      setUser(demoUser());
       setLocked(false);
       // Theme, font, and layout were applied above from localStorage. Do not use
       // loadPreferences here: demo mode must not call an API before the adapter is ready.

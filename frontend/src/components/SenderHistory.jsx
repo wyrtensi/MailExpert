@@ -18,20 +18,20 @@ const rowButtonStyle = {
 };
 
 // "Before this letter" under the header of an open letter: the mailbox's earlier letters from
-// the same person and its letters to them, each marked with its direction. Open by default so it
-// is seen; renders nothing when there is neither earlier correspondence nor a conversation of
+// the same person and its letters to them, each marked with its direction. Collapsed by default,
+// the header stands out so it is still seen; renders nothing when there is neither earlier correspondence nor a conversation of
 // more than this letter. The "Whole conversation" box stacks every letter of the thread under the
 // open letter (ConversationThread); the pane owns that state and resets it on every open.
 export default function SenderHistory({ messageId, onOpen, onSearch, conversationCount = 0, showThread = false, onToggleThread }) {
   const { t } = useTranslation();
   const isMobile = useMobile();
   const [history, setHistory] = useState(null);
-  const [open, setOpen] = useState(true);
+  const [open, setOpen] = useState(false);
 
   useEffect(() => {
     let live = true;
     setHistory(null);
-    setOpen(true);
+    setOpen(false);
     if (!messageId) return undefined;
     api.getSenderHistory(messageId, SENDER_HISTORY_LIMIT)
       .then((data) => { if (live) setHistory(data); })

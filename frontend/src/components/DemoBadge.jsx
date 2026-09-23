@@ -12,9 +12,11 @@ export default function DemoBadge({ enabled = false }) {
   return createElement('div', {
     'aria-live': 'polite',
     style: {
+      // Bottom centre, click-through: the corners hold the compose window's buttons and the user menu.
       position: 'fixed',
-      right: 16,
-      bottom: 16,
+      left: '50%',
+      bottom: 12,
+      transform: 'translateX(-50%)',
       zIndex: 1100,
       padding: '6px 10px',
       border: '1px solid var(--border)',

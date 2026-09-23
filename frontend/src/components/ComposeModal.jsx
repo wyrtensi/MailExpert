@@ -99,6 +99,8 @@ function ResizableImageView({ node, updateAttributes, selected }) {
   );
 }
 
+// Wide enough for the formatting toolbar on one row and a From name with its address.
+const COMPOSE_DEFAULT_WIDTH = 760;
 const ResizableImage = Image.extend({
   addAttributes() {
     return {
@@ -284,7 +286,8 @@ export default function ComposeModal() {
   const [replyAll, setReplyAll] = useState(() => !!composeData?.isReplyAll);
   const [sending, setSending] = useState(false);
   const [error, setError] = useState('');
-  const [priority, setPriority] = useState('normal');
+  // High by default (owner decision 2026-09-23): the writer lowers it per letter.
+  const [priority, setPriority] = useState('high');
   const [minimized, setMinimized] = useState(false);
   const [maximized, setMaximized] = useState(false);
   const [pos, setPos] = useState(null);
@@ -439,7 +442,7 @@ export default function ComposeModal() {
   useEffect(() => {
     const clamp = () => {
       if (!posRef.current) return;
-      const w = customSizeRef.current?.width || 540;
+      const w = customSizeRef.current?.width || COMPOSE_DEFAULT_WIDTH;
       setPos(prev => prev ? {
         x: Math.max(0, Math.min(window.innerWidth - w, prev.x)),
         y: Math.max(0, Math.min(window.innerHeight - 40, prev.y)),
@@ -1714,9 +1717,9 @@ export default function ComposeModal() {
 
   const inputStyle = {
     width: '100%', padding: '8px 12px',
-    background: 'var(--bg-tertiary)', border: 'none',
+    background: 'transparent', border: 'none',
     borderBottom: '1px solid var(--border-subtle)',
-    color: 'var(--text-primary)', fontSize: 13,
+    color: 'var(--text-primary)', fontSize: 14,
     outline: 'none',
   };
 
@@ -1766,7 +1769,7 @@ export default function ComposeModal() {
         zIndex: 1000, display: 'flex', flexDirection: 'column',
       } : pos ? {
         position: 'fixed', top: pos.y, left: pos.x,
-        width: customSize?.width || 540,
+        width: customSize?.width || COMPOSE_DEFAULT_WIDTH,
         ...(customSize?.height ? { height: customSize.height } : { maxHeight: '75vh' }),
         maxWidth: 'calc(100vw - 16px)',
         background: 'var(--bg-secondary)', border: '1px solid var(--border)',
@@ -1774,7 +1777,7 @@ export default function ComposeModal() {
         zIndex: 1000, display: 'flex', flexDirection: 'column',
       } : {
         position: 'fixed', bottom: 0, right: 24,
-        width: customSize?.width || 540, maxWidth: 'calc(100vw - 48px)',
+        width: customSize?.width || COMPOSE_DEFAULT_WIDTH, maxWidth: 'calc(100vw - 48px)',
         ...(customSize?.height ? { height: customSize.height } : { maxHeight: '75vh' }),
         background: 'var(--bg-secondary)', border: '1px solid var(--border)',
         borderRadius: 10,
@@ -1895,11 +1898,11 @@ export default function ComposeModal() {
       <div style={{ flexShrink: 0 }}>
         {/* From */}
         <div style={{ display: 'flex', alignItems: 'center', borderBottom: '1px solid var(--border-subtle)', padding: '0 12px' }}>
-          <span style={{ fontSize: 12, color: 'var(--text-tertiary)', width: 52, flexShrink: 0 }}>{t('compose.from')}</span>
+          <span style={{ fontSize: 13, color: 'var(--text-tertiary)', width: 72, flexShrink: 0 }}>{t('compose.from')}</span>
           <select
             value={fromValue}
             onChange={e => setFromValue(e.target.value)}
-            style={{ flex: 1, padding: '8px 4px', background: 'transparent', border: 'none', color: 'var(--text-primary)', fontSize: 13, outline: 'none', cursor: 'pointer' }}
+            style={{ flex: 1, padding: '9px 4px', background: 'transparent', border: 'none', color: 'var(--text-primary)', fontSize: 14, fontWeight: 500, outline: 'none', cursor: 'pointer' }}
           >
             {accounts.map(a => {
               const aliases = a.aliases || [];
@@ -1929,7 +1932,7 @@ export default function ComposeModal() {
 
         {/* To */}
         <div style={{ display: 'flex', alignItems: 'flex-start', borderBottom: '1px solid var(--border-subtle)', padding: '0 12px' }}>
-          <span style={{ fontSize: 12, color: 'var(--text-tertiary)', width: 52, flexShrink: 0, paddingTop: 9 }}>{t('compose.to')}</span>
+          <span style={{ fontSize: 13, color: 'var(--text-tertiary)', width: 72, flexShrink: 0, paddingTop: 9 }}>{t('compose.to')}</span>
           <ChipInput
             chips={toChips} onChipsChange={setToChips}
             value={toInput} onChange={setToInput}
@@ -1941,12 +1944,12 @@ export default function ComposeModal() {
           {(!showCc || !showBcc) && (
             <div className="compose-ccbcc-quickadd" style={{ display: 'flex', flexShrink: 0 }}>
               {!showCc && (
-                <button onClick={() => setShowCc(true)} style={{ background: 'none', border: 'none', color: 'var(--text-tertiary)', cursor: 'pointer', fontSize: 11, padding: '9px 0 4px 6px' }}>
+                <button onClick={() => setShowCc(true)} style={{ background: 'none', border: 'none', color: 'var(--text-secondary)', cursor: 'pointer', fontSize: 12, padding: '9px 0 4px 8px' }}>
                   {t('compose.cc')}
                 </button>
               )}
               {!showBcc && (
-                <button onClick={() => setShowBcc(true)} style={{ background: 'none', border: 'none', color: 'var(--text-tertiary)', cursor: 'pointer', fontSize: 11, padding: '9px 0 4px 6px' }}>
+                <button onClick={() => setShowBcc(true)} style={{ background: 'none', border: 'none', color: 'var(--text-secondary)', cursor: 'pointer', fontSize: 12, padding: '9px 0 4px 8px' }}>
                   {t('compose.bcc')}
                 </button>
               )}
@@ -1957,7 +1960,7 @@ export default function ComposeModal() {
         {/* Cc */}
         {showCc && (
           <div style={{ display: 'flex', alignItems: 'flex-start', borderBottom: '1px solid var(--border-subtle)', padding: '0 12px' }}>
-            <span style={{ fontSize: 12, color: 'var(--text-tertiary)', width: 52, flexShrink: 0, paddingTop: 9 }}>{t('compose.cc')}</span>
+            <span style={{ fontSize: 13, color: 'var(--text-tertiary)', width: 72, flexShrink: 0, paddingTop: 9 }}>{t('compose.cc')}</span>
             <ChipInput
               chips={ccChips} onChipsChange={setCcChips}
               value={ccInput} onChange={setCcInput}
@@ -1971,7 +1974,7 @@ export default function ComposeModal() {
         {/* Bcc */}
         {showBcc && (
           <div style={{ display: 'flex', alignItems: 'flex-start', borderBottom: '1px solid var(--border-subtle)', padding: '0 12px' }}>
-            <span style={{ fontSize: 12, color: 'var(--text-tertiary)', width: 52, flexShrink: 0, paddingTop: 9 }}>{t('compose.bcc')}</span>
+            <span style={{ fontSize: 13, color: 'var(--text-tertiary)', width: 72, flexShrink: 0, paddingTop: 9 }}>{t('compose.bcc')}</span>
             <ChipInput
               chips={bccChips} onChipsChange={setBccChips}
               value={bccInput} onChange={setBccInput}
@@ -1984,11 +1987,11 @@ export default function ComposeModal() {
 
         {/* Subject */}
         <div style={{ display: 'flex', alignItems: 'center', borderBottom: '1px solid var(--border-subtle)', padding: '0 12px' }}>
-          <span style={{ fontSize: 12, color: 'var(--text-tertiary)', width: 52, flexShrink: 0 }}>{t('compose.subject')}</span>
+          <span style={{ fontSize: 13, color: 'var(--text-tertiary)', width: 72, flexShrink: 0 }}>{t('compose.subject')}</span>
           <input
             type="text" value={subject} onChange={e => setSubject(e.target.value)}
             placeholder={t('compose.subject')}
-            style={{ flex: 1, ...inputStyle, borderBottom: 'none', padding: '8px 4px' }}
+            style={{ flex: 1, ...inputStyle, borderBottom: 'none', padding: '9px 4px', fontWeight: 500 }}
           />
         </div>
       </div>
@@ -2044,8 +2047,8 @@ export default function ComposeModal() {
         <AttachmentChips attachments={attachments} onRemove={i => setAttachments(prev => prev.filter((_, j) => j !== i))} />
       )}
 
-      {/* Scrollable body area */}
-      <div style={{ flex: 1, overflow: 'auto', minHeight: 0 }}>
+      {/* Scrollable body area: the letter's paper (.reading-card, light in Dusk too) */}
+      <div className="reading-card" style={{ flex: 1, overflow: 'auto', minHeight: 0, background: 'var(--bg-secondary)' }}>
         {/* Body */}
         {plaintextEmail ? (
           <textarea
@@ -2139,9 +2142,9 @@ export default function ComposeModal() {
           disabled={sending || !hasRecipients}
           title={sending ? undefined : t('compose.sendTooltip')}
           style={{
-            padding: '8px 20px', background: 'var(--accent)',
+            padding: '0 22px', height: 34, background: 'var(--accent)',
             border: 'none', borderRadius: 7, color: 'var(--accent-text)',
-            fontSize: 13, fontWeight: 500,
+            fontSize: 14, fontWeight: 600,
             cursor: sending || !hasRecipients ? 'not-allowed' : 'pointer',
             opacity: sending || !hasRecipients ? 0.6 : 1,
             display: 'flex', alignItems: 'center', gap: 6,
@@ -2170,7 +2173,7 @@ export default function ComposeModal() {
 
         {error && <span style={{ fontSize: 12, color: 'var(--red)', flex: 1 }}>{error}</span>}
 
-        <label htmlFor="compose-priority" title={t('compose.priorityHint')} style={{ marginLeft: 'auto', fontSize: 12, color: 'var(--text-tertiary)' }}>
+        <label htmlFor="compose-priority" title={t('compose.priorityHint')} style={{ marginLeft: 'auto', fontSize: 13, color: 'var(--text-tertiary)' }}>
           {t('compose.priority')}
         </label>
         <select
@@ -2180,7 +2183,7 @@ export default function ComposeModal() {
           title={t('compose.priorityHint')}
           style={{
             background: 'var(--bg-tertiary)', border: '1px solid var(--border)',
-            borderRadius: 4, fontSize: 11, padding: '2px 4px',
+            borderRadius: 7, fontSize: 13, padding: '6px 8px', height: 34,
             cursor: 'pointer', outline: 'none',
             color: priority === 'high' ? 'var(--red)' : priority === 'low' ? 'var(--text-tertiary)' : 'var(--text-secondary)',
           }}
@@ -2193,7 +2196,7 @@ export default function ComposeModal() {
         <button
           onClick={() => handleSaveDraft()}
           disabled={savingDraft}
-          style={{ background: 'none', border: 'none', color: 'var(--text-tertiary)', cursor: savingDraft ? 'default' : 'pointer', fontSize: 12, padding: '4px 8px' }}
+          style={{ background: 'none', border: '1px solid var(--border)', borderRadius: 7, color: 'var(--text-secondary)', cursor: savingDraft ? 'default' : 'pointer', fontSize: 13, padding: '0 12px', height: 34 }}
         >
           {savingDraft ? t('compose.savingDraft') : t('compose.saveDraft')}
         </button>
@@ -2731,8 +2734,8 @@ function RichToolbar({ editor, onAttach, onInsertImage, htmlMode, onToggleHtml, 
           }}
           style={{
             background: 'var(--bg-tertiary)', border: '1px solid var(--border)',
-            borderRadius: 4, color: 'var(--text-secondary)', fontSize: 11,
-            padding: '2px 4px', cursor: 'pointer', outline: 'none', maxWidth: 100,
+            borderRadius: 5, color: 'var(--text-secondary)', fontSize: 12,
+            padding: '3px 6px', cursor: 'pointer', outline: 'none', width: 128,
           }}
         >
           <option value="">{t('compose.toolbar.fontDefault')}</option>
@@ -2758,8 +2761,8 @@ function RichToolbar({ editor, onAttach, onInsertImage, htmlMode, onToggleHtml, 
           }}
           style={{
             background: 'var(--bg-tertiary)', border: '1px solid var(--border)',
-            borderRadius: 4, color: 'var(--text-secondary)', fontSize: 11,
-            padding: '2px 4px', cursor: 'pointer', outline: 'none', width: 50,
+            borderRadius: 5, color: 'var(--text-secondary)', fontSize: 12,
+            padding: '3px 6px', cursor: 'pointer', outline: 'none', width: 62,
           }}
         >
           {FONT_SIZES.map(s => <option key={s.value} value={s.value}>{s.label}</option>)}

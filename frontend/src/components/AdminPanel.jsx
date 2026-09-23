@@ -3133,10 +3133,10 @@ function SSOTab() {
     // made a broken fetch indistinguishable from "no providers configured", which can
     // hide a live SSO provider from the admin who believes it is gone.
     const fetchProviders = api.admin.oidc.getProviders()
-      .then(d => setProviders(d.providers))
+      .then(d => setProviders(d.providers || []))
       .catch(err => setLoadError(err.message));
     const fetchSettings = api.admin.getSettings()
-      .then(d => setInternalAuthDisabled(d.settings.internal_auth_disabled === 'true'))
+      .then(d => setInternalAuthDisabled(d.settings?.internal_auth_disabled === 'true'))
       .catch(err => setLoadError(err.message));
     Promise.all([fetchProviders, fetchSettings]).finally(() => setLoading(false));
   }, []);
@@ -4146,7 +4146,7 @@ function CategoriesSection({ initialSubTab }) {
 
   useEffect(() => {
     api.categories.getSources()
-      .then(({ sources: s, builtinSets: bs }) => { setSources(s); setBuiltinSets(bs); })
+      .then(({ sources: s = [], builtinSets: bs = [] } = {}) => { setSources(s); setBuiltinSets(bs); })
       .catch(console.error)
       .finally(() => setLoading(false));
   }, []);
@@ -6522,7 +6522,7 @@ function MailboxCleanupTab() {
         <>
           <div style={card}>
             <div style={{ fontSize: 14, fontWeight: 600, color: 'var(--text-primary)' }}>
-              {t('admin.cleanup.summary', { bulk: data.bulkTotal.toLocaleString(), total: data.inboxTotal.toLocaleString(), pct: bloatPct })}
+              {t('admin.cleanup.summary', { bulk: (data.bulkTotal ?? 0).toLocaleString(), total: (data.inboxTotal ?? 0).toLocaleString(), pct: bloatPct })}
             </div>
           </div>
 
@@ -8025,7 +8025,7 @@ function LinkedIdentitiesSection() {
       api.oidc.getIdentities(),
       api.oidc.getProviders(),
     ]).then(([idData, provData]) => {
-      setIdentities(idData.identities);
+      setIdentities(idData.identities || []);
       setProviders(provData.providers || []);
     }).catch(() => setIdentities([]));
   }, []);

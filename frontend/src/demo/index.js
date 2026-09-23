@@ -304,6 +304,82 @@ const DEFAULT_PREFERENCES = {
   aiActions: [],
 };
 
+// User admin list (GET /admin/users), same shape as publicUser() in backend/src/routes/admin.js —
+// not the /auth/me shape above (DEMO_USER/DEMO_PLAIN_USER), which carries different fields.
+const ADMIN_USER_FIXTURES = [
+  {
+    id: 'demo-user', username: 'demo@mailexpert.local', email: 'demo@mailexpert.local',
+    isAdmin: true, totpEnabled: false, disabledAt: null, created_at: '2026-08-01T09:00:00.000Z',
+    isBootstrapAdmin: true,
+  },
+  {
+    id: 'demo-colleague', username: 'colleague@demo.mailexpert.local', email: 'colleague@demo.mailexpert.local',
+    isAdmin: false, totpEnabled: false, disabledAt: null, created_at: '2026-08-10T09:00:00.000Z',
+    isBootstrapAdmin: false,
+  },
+];
+
+// Sign-in history (GET /admin/auth-events), same columns the server selects.
+const AUTH_EVENT_FIXTURES = [
+  { id: '3', event_type: 'login', username: 'demo@mailexpert.local', user_id: 'demo-user', ip: '203.0.113.10', success: true, created_at: '2026-09-17T08:05:00.000Z' },
+  { id: '2', event_type: 'login', username: 'colleague@demo.mailexpert.local', user_id: 'demo-colleague', ip: '203.0.113.24', success: true, created_at: '2026-09-16T14:22:00.000Z' },
+  { id: '1', event_type: 'login_failed', username: 'demo@mailexpert.local', user_id: null, ip: '198.51.100.7', success: false, created_at: '2026-09-15T21:40:00.000Z' },
+];
+
+// System settings (GET/PATCH /admin/settings). Values are strings, as system_settings stores
+// them and every reader compares with === 'true'.
+let systemSettings = {
+  registration_open: 'false',
+  internal_auth_disabled: 'false',
+  allow_private_hosts: 'false',
+  allow_insecure_tls: 'false',
+  allow_nonstandard_ports: 'false',
+  mfa_enforcement: 'off',
+  mfa_device_trust: '30d',
+  auth_max_attempts: '5',
+  auth_window_minutes: '15',
+  custom_css: '',
+};
+
+// A fixed base32 secret and a tiny placeholder QR so the setup screen renders without a real
+// authenticator flow — scanning it would not work in the demo, same as everything else here.
+const DEMO_TOTP_SECRET = 'JBSWY3DPEHPK3PXPJBSWY3DPEHPK3PXP';
+const DEMO_TOTP_QR_DATA_URL = 'data:image/gif;base64,R0lGODlhAQABAAD/ACwAAAAAAQABAAACADs=';
+
+// A category reads as "bulk" the way messageService's is_bulk column would flag it: a
+// newsletter, a promotion, or an automated notice — never primary mail.
+const BULK_CATEGORIES = new Set(['newsletter', 'promotion', 'automated']);
+const CLEANUP_KEYWORDS = ['% off', 'deal', 'sale', 'newsletter', 'coupon', 'webinar', 'last chance'];
+
+function mailboxUsageFor(accountId) {
+  const inbox = messages.filter(item => item.account_id === accountId && item.folder === 'INBOX');
+  const bulk = inbox.filter(item => BULK_CATEGORIES.has(item.category));
+  const bySender = new Map();
+  for (const item of bulk) {
+    const key = normalizeEmail(item.from_email);
+    if (!bySender.has(key)) bySender.set(key, { fromEmail: item.from_email, fromName: item.from_name || '', count: 0 });
+    bySender.get(key).count += 1;
+  }
+  const tier1Senders = [...bySender.values()].sort((a, b) => b.count - a.count).slice(0, 25);
+  const tier2Keywords = CLEANUP_KEYWORDS.map(keyword => ({
+    keyword,
+    count: inbox.filter(item => `${item.subject} ${item.snippet}`.toLocaleLowerCase().includes(keyword)).length,
+  }));
+  return {
+    accountId, inboxTotal: inbox.length, bulkTotal: bulk.length, archiveAvailable: true,
+    tier1Senders, tier2Keywords,
+  };
+}
+
+function cleanupPreviewFor(accountId, fromEmail) {
+  const target = normalizeEmail(fromEmail);
+  const ids = messages
+    .filter(item => item.account_id === accountId && item.folder === 'INBOX'
+      && BULK_CATEGORIES.has(item.category) && normalizeEmail(item.from_email) === target)
+    .map(item => item.id);
+  return { accountId, fromEmail: String(fromEmail || '').trim(), count: ids.length, ids };
+}
+
 let messages = structuredClone(MESSAGE_FIXTURES);
 let contacts = structuredClone(CONTACT_FIXTURES);
 let preferences = structuredClone(DEFAULT_PREFERENCES);
@@ -1143,9 +1219,55 @@ export async function demoRequest(method, path, body = {}) {
   if (verb === 'GET' && pathname === '/todoist/labels') return { labels: [] };
   if (verb === 'GET' && pathname === '/rules') return [];
   if (verb === 'GET' && pathname === '/block-list') return [];
-  if (verb === 'GET' && pathname === '/categories/sources') return [];
+  if (verb === 'GET' && pathname === '/categories/sources') return { sources: [], builtinSets: ['social_networks', 'developer_platforms'] };
   if (verb === 'GET' && pathname === '/gtd/sections') return { sections: [] };
   if (verb === 'GET' && pathname === '/plugins') return [];
+
+  // ── Admin settings screens ────────────────────────────────────────────────
+  if (verb === 'GET' && pathname === '/admin/settings') return { settings: clone(systemSettings) };
+  if (verb === 'PATCH' && pathname === '/admin/settings') {
+    for (const [key, value] of Object.entries(body || {})) {
+      if (value === undefined) continue;
+      systemSettings[key] = typeof value === 'boolean' ? (value ? 'true' : 'false') : String(value);
+    }
+    return { ok: true };
+  }
+  if (verb === 'GET' && pathname === '/admin/users') return { users: clone(ADMIN_USER_FIXTURES), total: ADMIN_USER_FIXTURES.length };
+  if (verb === 'GET' && pathname === '/admin/invites') return { invites: [], total: 0 };
+  if (verb === 'GET' && pathname === '/admin/auth-events') return { events: clone(AUTH_EVENT_FIXTURES), total: AUTH_EVENT_FIXTURES.length };
+  if (verb === 'GET' && pathname === '/admin/system-email') return { config: null };
+  if (verb === 'GET' && pathname === '/admin/oidc') return { providers: [] };
+  if (verb === 'GET' && pathname === '/admin/ai/codex/status') return { connected: false, state: 'disconnected', reconnectRequired: false };
+
+  // ── Account security / SSO screens ────────────────────────────────────────
+  if (verb === 'GET' && pathname === '/auth/oidc/identities') return { identities: [] };
+  if (verb === 'GET' && pathname === '/auth/oidc/providers') return { providers: [] };
+  if (verb === 'GET' && pathname === '/auth/profile/recovery-email') return { email: null };
+  if (verb === 'GET' && pathname === '/auth/registration-status') {
+    return { open: systemSettings.registration_open === 'true', internalAuthDisabled: systemSettings.internal_auth_disabled === 'true' };
+  }
+  // The real server answers 503 when no VAPID keys are configured; the demo never has any, and
+  // usePushNotifications already reads that rejection as "push unavailable here".
+  if (verb === 'GET' && pathname === '/auth/push/vapid-key') throw demoError('Push notifications are not configured on this server.');
+  // Forced-enrollment 2FA setup only exists mid-login (a pending, unauthenticated session); the
+  // demo is always already signed in, so this matches the real server's own refusal.
+  if (verb === 'GET' && pathname === '/auth/2fa/enrollment/setup') throw demoError('No pending enrollment');
+  if (verb === 'GET' && pathname === '/totp/setup') return { secret: DEMO_TOTP_SECRET, qrCode: DEMO_TOTP_QR_DATA_URL };
+
+  // ── Mailbox cleanup ────────────────────────────────────────────────────────
+  if (verb === 'GET' && pathname === '/mail/mailbox-usage') return clone(mailboxUsageFor(url.searchParams.get('accountId')));
+  if (verb === 'GET' && pathname === '/mail/cleanup-preview') {
+    return clone(cleanupPreviewFor(url.searchParams.get('accountId'), url.searchParams.get('fromEmail')));
+  }
+
+  // No pet was ever imported in the demo (GtdSettings' import flow has nothing to upload to),
+  // so this matches the real 404 a slug with no stored pet gets.
+  const petMetaMatch = pathname.match(/^\/gtd\/pet\/([^/]+)\/meta$/);
+  if (verb === 'GET' && petMetaMatch) throw demoError('Pet not found');
+
+  // An unhandled GET must fail like a real request the UI already knows how to handle, never
+  // silently succeed with a shape the caller doesn't expect (see request() in utils/api.js).
+  if (verb === 'GET') throw demoError('Not available in demo mode');
 
   return { ok: true, demo: true };
 }

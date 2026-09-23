@@ -494,8 +494,18 @@ export function appendMessagesByIdentity(existing, incoming) {
   if (items.length === 0) return existing;
 
   const existingIds = new Set(existing.map(m => m.id));
+  // EVERY row index per Message-ID, not just the last one. Since #476 the list can hold one
+  // row per account for a single Message-ID, and a single-index map pointed at whichever
+  // landed last: a reindexed row from any other account then compared itself against the
+  // wrong copy, concluded the two were independent deliveries, and appended instead of
+  // replacing. That is the duplicate #378 exists to stop, and only the last account in the
+  // list happened to behave.
   const idxByMid = new Map();
-  existing.forEach((m, i) => { if (m.message_id) idxByMid.set(m.message_id, i); });
+  existing.forEach((m, i) => {
+    if (!m.message_id) return;
+    const seen = idxByMid.get(m.message_id);
+    if (seen) seen.push(i); else idxByMid.set(m.message_id, [i]);
+  });
 
   let messages = existing;
   let mutated = false;
@@ -515,7 +525,26 @@ export function appendMessagesByIdentity(existing, incoming) {
     if (takenKeys.has(key)) continue;      // a same-delivery incoming row was already handled
     takenKeys.add(key);
     if (m.message_id && idxByMid.has(m.message_id)) {
-      const at = idxByMid.get(m.message_id);
+      const candidates = idxByMid.get(m.message_id);
+      // The incoming row belongs to ONE delivery, so pick the held row representing that same
+      // delivery: the copy from its own account. A row with no account on either side keeps
+      // the old behavior and is treated as a candidate, since its provenance is unknown.
+      const sameDelivery = i => {
+        const held = messages[i];
+        return !held?.account_id || !m.account_id || held.account_id === m.account_id;
+      };
+      let at = candidates.find(sameDelivery);
+      if (at === undefined) {
+        // No copy from this account. If every row already here is an independent delivery,
+        // this is simply another one and gets its own row.
+        if (candidates.every(i => areIndependentDeliveries(messages[i], m))) {
+          additions.push(m);
+          continue;
+        }
+        // Otherwise rank against a copy that is NOT independent of it: the cross-account
+        // Sent twin, which still collapses (#378).
+        at = candidates.find(i => !areIndependentDeliveries(messages[i], m));
+      }
       const held = messages[at];
       // Two different things share a Message-ID here, and they need opposite handling.
       //

@@ -576,6 +576,84 @@ describe('appendMessagesByIdentity', () => {
     assert.equal(appendMessagesByIdentity(existing, incoming)[0].id, 'new');
   });
 
+  it('replaces a same-account reindexed row while the OTHER account copy is on screen', () => {
+    // Regression found in review. The merge index mapped Message-ID to a single row, so once
+    // #476 let two accounts' copies coexist, it pointed at whichever landed last. A reindexed
+    // row from the FIRST account then compared itself against the second account's copy,
+    // decided the two were independent deliveries, and appended instead of replacing. That
+    // put two rows for one account back on screen, which is the duplicate #378 exists to stop.
+    // Reachable on the default All Inboxes view through pagination and live merges.
+    const existing = [
+      { id: 'work-old', message_id: '<m1>', folder: 'INBOX', account_id: 'work' },
+      { id: 'home',     message_id: '<m1>', folder: 'INBOX', account_id: 'home' },
+    ];
+    const result = appendMessagesByIdentity(existing, [
+      { id: 'work-new', message_id: '<m1>', folder: 'INBOX', account_id: 'work' },
+    ]);
+    assert.equal(result.length, 2, 'still one row per account');
+    assert.deepEqual(result.map(m => m.id), ['work-new', 'home'], 'the stale work row is replaced in place');
+  });
+
+  it('replaces the reindexed row whichever account copy came first', () => {
+    // The old index kept the LAST match, so the last account happened to work and every
+    // earlier one did not. Both orders have to behave the same.
+    const existing = [
+      { id: 'home',     message_id: '<m1>', folder: 'INBOX', account_id: 'home' },
+      { id: 'work-old', message_id: '<m1>', folder: 'INBOX', account_id: 'work' },
+    ];
+    const result = appendMessagesByIdentity(existing, [
+      { id: 'work-new', message_id: '<m1>', folder: 'INBOX', account_id: 'work' },
+    ]);
+    assert.equal(result.length, 2);
+    assert.deepEqual(result.map(m => m.id), ['home', 'work-new']);
+  });
+
+  it('adds a third account copy without disturbing the other two', () => {
+    const existing = [
+      { id: 'work', message_id: '<m1>', folder: 'INBOX', account_id: 'work' },
+      { id: 'home', message_id: '<m1>', folder: 'INBOX', account_id: 'home' },
+    ];
+    const result = appendMessagesByIdentity(existing, [
+      { id: 'third', message_id: '<m1>', folder: 'INBOX', account_id: 'third' },
+    ]);
+    assert.deepEqual(result.map(m => m.id), ['work', 'home', 'third']);
+  });
+
+  it('resolves an incoming Sent twin against its OWN account copy, not whichever is last', () => {
+    // The Sent copy belongs to `work`, so it must be matched against work's row rather than
+    // waved through as an independent delivery because home's copy happened to be indexed.
+    // Landing on work's row means the same-account rule applies and it replaces in place,
+    // which is what this does with a single account on main and is unchanged by #476. The
+    // point here is the row COUNT: the Sent twin must never add a row.
+    const existing = [
+      { id: 'work', message_id: '<m1>', folder: 'INBOX', account_id: 'work' },
+      { id: 'home', message_id: '<m1>', folder: 'INBOX', account_id: 'home' },
+    ];
+    const result = appendMessagesByIdentity(existing, [
+      { id: 'work-sent', message_id: '<m1>', folder: 'Sent', account_id: 'work' },
+    ]);
+    assert.equal(result.length, 2, 'the Sent twin adds no row');
+    assert.deepEqual(result.map(m => m.account_id), ['work', 'home'], 'still one row per account');
+  });
+
+  it('keeps a new account delivery when a cross-account Sent twin is indexed ahead of it', () => {
+    // Three accounts on one Message-ID: another account's INBOX copy, home's Sent copy, and
+    // an arriving INBOX delivery for `work`. Because the Sent copy is not an independent
+    // delivery, this does not take the straight append path, so it has to rank against the
+    // copy it is NOT independent of. Ranking against an arbitrary copy instead loses the
+    // work delivery entirely: it ties with the other INBOX row, fails the strict-improvement
+    // check, and is silently dropped.
+    const existing = [
+      { id: 'other', message_id: '<m1>', folder: 'INBOX', account_id: 'other' },
+      { id: 'home-sent', message_id: '<m1>', folder: 'Sent', account_id: 'home' },
+    ];
+    const result = appendMessagesByIdentity(existing, [
+      { id: 'work', message_id: '<m1>', folder: 'INBOX', account_id: 'work' },
+    ]);
+    assert.ok(result.some(m => m.id === 'work'), 'the arriving delivery must not be dropped');
+    assert.ok(!result.some(m => m.id === 'home-sent'), 'the Sent twin still collapses');
+  });
+
   it('agrees with dedupeByIdentity on a cross-account pair: every path keeps both', () => {
     // The merge paths disagreeing is what let the row flip between refreshes. They still have
     // to agree; what they agree on is now that both deliveries are real rows.

@@ -53,6 +53,7 @@ describe('GET /messages/:id/body when the account is busy', () => {
     const body = await res.json();
     expect(res.status).toBe(503);
     expect(body.busy).toBe(true);
+    expect(body.code).toBe('mailbox_busy');
   });
 
   it('still answers 500 for any other failure', async () => {

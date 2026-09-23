@@ -21,7 +21,8 @@
     "error": "Error: {{message}}",
     "dismiss": "Dismiss",
     "loadMore": "Load more",
-    "adminOnly": "Only an administrator can change this."
+    "adminOnly": "Only an administrator can change this.",
+    "mailboxBusy": "The mailbox is busy, try again in a few seconds"
   },
   "login": {
     "google": {

@@ -262,7 +262,7 @@ async function saveGoogleAccount(pending, identity, tokens, appId) {
           'smtp.gmail.com', 465, 'SSL',
           $3,
           'google', $5, $6, $7,
-          false, false, false,
+          false, false, true,
           $8, $9, $10, $11)
         RETURNING id
       `, [pending.userId, identity.name || email, email, color, encryptedAccess, encryptedRefresh, tokens.expiresAt, appId, identity.sub, THREAD_MODE_GMAIL, pending.senderName]);

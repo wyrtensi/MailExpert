@@ -305,7 +305,7 @@ describe('GET /oauth/google/callback', () => {
     expect(insertSql).toMatch(/'smtp\.gmail\.com', 465, 'SSL'/);
     expect(insertSql).toMatch(/'google'/);
     expect(insertSql).toMatch(/include_in_unified_inbox,\s*oauth_app_id, oauth_subject, thread_mode/);
-    expect(insertSql).toMatch(/false, false, false,\s*\$8, \$9, \$10, \$11\)\s*RETURNING id/);
+    expect(insertSql).toMatch(/false, false, true,\s*\$8, \$9, \$10, \$11\)\s*RETURNING id/);
     expect(insertParams).toContain('enc(access-tok)');
     expect(insertParams).toContain('enc(refresh-tok)');
     expect(insertParams).not.toContain('access-tok');

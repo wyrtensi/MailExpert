@@ -7,16 +7,18 @@
 #
 #   scripts/deploy/test/e2e-mailcow.sh --image ghcr.io/wyrtensi/mailexpert-backend:sha-<12>
 #   scripts/deploy/test/e2e-mailcow.sh --image ... --scenario load [--mailboxes 100] [--imap-process-limit 2048]
-#     [--kind gmail] [--panel-env NAME=VALUE ...]
+#     [--node-tuning] [--kind gmail] [--panel-env NAME=VALUE ...]
 #
+# --node-tuning applies the node settings docs/operations/mail-node.md recommends: the Dovecot
+# overrides from scripts/deploy/mail-node/dovecot-extra.conf.
 # --kind gmail adds the load mailboxes as Gmail mailboxes (imap.gmail.com / smtp.gmail.com, names
 # that point at the mailcow node inside the container), so the panel applies its Gmail rules.
 # --panel-env passes a setting to the panel, e.g. IMAP_MAX_PERSISTENT_PER_HOST=15.
 #
 # The default scenario checks the flows once (e2e-mailcow-driver.mjs). The load scenario
 # (e2e-mailcow-load.mjs) creates many mailboxes and measures connecting, delivery to all of them,
-# reconnecting after a backend restart and ten parallel sessions, sampling the backend's memory
-# and CPU and the IMAP sessions on the node every 5 seconds.
+# reconnecting after a backend restart and ten parallel sessions, sampling the memory of every
+# container (mailcow and the panel) and the IMAP sessions and processes on the node every 5 seconds.
 #
 # Needs about 6 GB of memory for Docker and pulls a few GB of mailcow images on every run; it is
 # a manual check, not part of CI. From Git Bash on Windows run it with MSYS_NO_PATHCONV=1, so
@@ -30,13 +32,14 @@ TEST_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 # shellcheck source=../lib/common.sh
 . "$TEST_DIR/../lib/common.sh"
 
-IMAGE='' SCENARIO=functional MAILBOXES=100 IMAP_PROCESS_LIMIT='' KIND=node PANEL_ENV=''
+IMAGE='' SCENARIO=functional MAILBOXES=100 IMAP_PROCESS_LIMIT='' NODE_TUNING=0 KIND=node PANEL_ENV=''
 while [ $# -gt 0 ]; do
   case $1 in
     --image) IMAGE=$2 && shift 2 ;;
     --scenario) SCENARIO=$2 && shift 2 ;;
     --mailboxes) MAILBOXES=$2 && shift 2 ;;
     --imap-process-limit) IMAP_PROCESS_LIMIT=$2 && shift 2 ;;
+    --node-tuning) NODE_TUNING=1 && shift ;;
     --kind) KIND=$2 && shift 2 ;;
     --panel-env)
       [[ $2 =~ ^[A-Z][A-Z0-9_]*=[A-Za-z0-9._:/-]*$ ]] || die "--panel-env must be NAME=VALUE" 2
@@ -103,6 +106,10 @@ if [ -n "$IMAP_PROCESS_LIMIT" ]; then
   log "raising the dovecot imap process_limit to $IMAP_PROCESS_LIMIT"
   inner "printf 'service imap {\n  process_limit = %s\n}\n' $IMAP_PROCESS_LIMIT >> /opt/mailcow/data/conf/dovecot/extra.conf"
 fi
+if [ "$NODE_TUNING" = 1 ]; then
+  log "applying the recommended node settings"
+  docker exec -i "$NAME" sh -c 'cat >> /opt/mailcow/data/conf/dovecot/extra.conf' <"$TEST_DIR/../mail-node/dovecot-extra.conf"
+fi
 
 log "starting mailcow (pulls its images)"
 inner 'cd /opt/mailcow && docker compose pull -q >/dev/null 2>&1 && docker compose up -d >/dev/null 2>&1'
@@ -119,10 +126,24 @@ if [ -n "$IMAP_PROCESS_LIMIT" ]; then
   [ "$applied" = "$IMAP_PROCESS_LIMIT" ] || die "dovecot imap process_limit is $applied, expected $IMAP_PROCESS_LIMIT"
   log "dovecot imap process_limit is $applied"
 fi
+if [ "$NODE_TUNING" = 1 ]; then
+  dove_setting() { inner "cd /opt/mailcow && docker compose exec -T dovecot-mailcow doveconf -h $1" | tr -d '\r'; }
+  applied=$(dove_setting service/imap-login/service_count)
+  [ "$applied" = 0 ] || die "dovecot imap-login service_count is $applied, expected 0"
+  applied=$(dove_setting imap_hibernate_timeout)
+  case $applied in '' | 0 | '0 secs') die "dovecot imap_hibernate_timeout is '$applied', hibernation is off" ;; esac
+  log "dovecot runs the recommended settings (login service_count 0, hibernation after $applied)"
+fi
 
 log "starting the panel from $IMAGE"
 secret() { gen_hex 32; }
-inner "docker pull -q $IMAGE >/dev/null && docker network create panel >/dev/null \
+# An image the host already has (for example, built locally from a branch) is copied in, not pulled.
+if docker image inspect "$IMAGE" >/dev/null 2>&1; then
+  docker save "$IMAGE" | docker exec -i "$NAME" docker load -q >/dev/null
+else
+  inner "docker pull -q $IMAGE >/dev/null"
+fi
+inner "docker network create panel >/dev/null \
   && docker run -d --name pg --network panel -e POSTGRES_USER=mailexpert -e POSTGRES_PASSWORD=pw -e POSTGRES_DB=mailexpert postgres:16-alpine >/dev/null \
   && docker run -d --name redis --network panel redis:7-alpine >/dev/null"
 sleep 5
@@ -166,14 +187,24 @@ if [ "$SCENARIO" = functional ]; then
   exit 0
 fi
 
-# Load: one sample line every 5 seconds: backend memory and CPU, IMAP sessions on the node.
+# Load: every 5 seconds, the memory and CPU of every container (STATS: time, name, memory, CPU) and,
+# on the node, the IMAP sessions and the imap, imap-login and imap-hibernate processes (SAMPLES).
 SAMPLES=$(mktemp)
+STATS=$(mktemp)
 sample() {
+  # A failed probe loses one reading, not the sampler: a process that exits between listing /proc and
+  # reading it makes cat fail, and under errexit and pipefail that would end the whole loop.
+  set +e +o pipefail
   while :; do
-    local stats who
-    stats=$(inner "docker stats --no-stream --format '{{.MemUsage}} {{.CPUPerc}}' backend" 2>/dev/null | awk '{print $1, $4}')
-    who=$(inner "cd /opt/mailcow && docker compose exec -T dovecot-mailcow doveadm who -1 2>/dev/null | grep -c imap" 2>/dev/null || echo 0)
-    printf '%s %s %s\n' "$(date +%s)" "$stats" "$who" >>"$SAMPLES"
+    local now who procs
+    now=$(date +%s)
+    inner "docker stats --no-stream --format '{{.Name}} {{.MemUsage}} {{.CPUPerc}}'" 2>/dev/null \
+      | awk -v t="$now" 'NF { print t, $1, $2, $NF }' >>"$STATS"
+    who=$(inner "cd /opt/mailcow && docker compose exec -T dovecot-mailcow doveadm who -1 2>/dev/null | grep -c imap" 2>/dev/null)
+    procs=$(inner "cd /opt/mailcow && docker compose exec -T dovecot-mailcow sh -c 'cat /proc/[0-9]*/comm 2>/dev/null'" 2>/dev/null \
+      | tr -d '\r' | awk '$1 == "imap" { i++ } $1 == "imap-login" { l++ } $1 == "imap-hibernate" { h++ } END { printf "%d %d %d", i, l, h }')
+    who=$(printf '%s' "$who" | tr -d '\r')
+    printf '%s %s %s\n' "$now" "${who:-0}" "$procs" >>"$SAMPLES"
     sleep 5
   done
 }
@@ -201,9 +232,26 @@ done
 phase restart "-e RESTARTED_AT=$restarted_at"
 kill "$SAMPLER_PID" 2>/dev/null || true
 SAMPLER_PID=''
-# The busiest moments: highest memory (MiB) and CPU, and the most IMAP sessions on the node.
-awk '{ mem=$2; if (mem ~ /GiB/) { sub(/GiB/, "", mem); mem*=1024 } else sub(/MiB/, "", mem);
-       cpu=$3; sub(/%/, "", cpu);
-       if (mem+0 > m) m=mem+0; if (cpu+0 > c) c=cpu+0; if ($4+0 > w) w=$4+0 }
-     END { printf "PEAK backend memory %.0f MiB, backend CPU %.0f%%, IMAP sessions on the node %d\n", m, c, w }' "$SAMPLES"
-log "samples ($(wc -l <"$SAMPLES") lines): $SAMPLES"
+# The busiest moments. Memory in MiB: the peak of each container, and the peak of the sum over
+# mailcow's containers, over the panel's (backend, pg, redis) and over both at the same moment; the
+# first sample is the idle node before any mailbox exists.
+awk 'function mib(v) { if (v ~ /GiB$/) return v * 1024; if (v ~ /MiB$/) return v + 0; if (v ~ /KiB$/) return v / 1024; return 0 }
+     { m = mib($3); cpu = $4; sub(/%/, "", cpu); name = $2; sub(/^mailcowdockerized-/, "", name); sub(/-1$/, "", name)
+       if (m > peak[name]) peak[name] = m
+       if (name == "backend" && cpu + 0 > bcpu) bcpu = cpu + 0
+       group = $2 ~ /^mailcowdockerized-/ ? "mailcow" : (name ~ /^(backend|pg|redis)$/ ? "panel" : "")
+       if (group != "") { sum[$1, group] += m; sum[$1, "both"] += m; times[$1] = 1 } }
+     END {
+       first = ""; for (t in times) if (first == "" || t + 0 < first + 0) first = t
+       split("mailcow panel both", gs, " ")
+       for (i = 1; i <= 3; i++) { g = gs[i]; for (t in times) if (sum[t, g] > top[g]) top[g] = sum[t, g] }
+       printf "PEAK backend memory %.0f MiB, backend CPU %.0f%%\n", peak["backend"], bcpu
+       printf "PEAK memory together: mailcow %.0f MiB, panel %.0f MiB, both %.0f MiB (idle at start: mailcow %.0f MiB, panel %.0f MiB)\n",
+         top["mailcow"], top["panel"], top["both"], sum[first, "mailcow"], sum[first, "panel"]
+       for (n in peak) printf "PEAK container %s %.0f MiB\n", n, peak[n] | "sort -k4 -n -r"
+     }' "$STATS"
+awk -v end="$(date +%s)" '{ if ($2 + 0 > w) w = $2 + 0; if ($3 + 0 > i) i = $3 + 0; if ($4 + 0 > l) l = $4 + 0; if ($5 + 0 > h) h = $5 + 0
+       if (NR == 1) first = $1; last = $1 }
+     END { printf "PEAK on the node: IMAP sessions %d, imap processes %d, imap-login %d, imap-hibernate %d\n", w, i, l, h
+           printf "SAMPLES %d over %d s, the last one %d s before the end\n", NR, last - first, end - last }' "$SAMPLES"
+log "samples: $SAMPLES (node) and $STATS (containers)"

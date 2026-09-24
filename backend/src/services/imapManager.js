@@ -1453,8 +1453,8 @@ export function makeClientCfg(account, resolved, { enableIdle = false, policy = 
   // reconnect loop.) MUST stay below MIN_SYNC_INTERVAL_MS — see the makeClientCfg tests.
   if (enableIdle) cfg.autoIdleDelay = AUTO_IDLE_DELAY_MS;
   // No COMPRESS=DEFLATE to our own mail node: Dovecot 2.3 cannot hibernate a compressed session, so
-  // every IDLE would keep its own imap process on the node (about 2.5 GB at 500 mailboxes instead of
-  // about 0.5 GB, docs/operations/mail-node.md section 6a), and the node is close enough that
+  // every IDLE would keep its own imap process on the node (Dovecot at 500 mailboxes: about 2.5 GB
+  // instead of about 0.5 GB, docs/operations/mail-node.md section 6a), and the node is close enough that
   // compression saves nothing worth that. Other servers keep ImapFlow's default.
   if (account.mail_node) cfg.disableCompression = true;
   // OAuth2 XOAUTH2 for Gmail and Microsoft

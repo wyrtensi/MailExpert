@@ -244,6 +244,20 @@ describe('makeClientCfg — auto-IDLE arming', () => {
   });
 });
 
+// ── makeClientCfg — COMPRESS ─────────────────────────────────────────────────
+
+describe('makeClientCfg — COMPRESS', () => {
+  it('turns compression off for a mailbox on the mail node, so Dovecot can hibernate its IDLE', () => {
+    const cfg = makeClientCfg({ ...baseAccount, mail_node: true }, resolved, { enableIdle: true });
+    expect(cfg.disableCompression).toBe(true);
+  });
+
+  it('leaves compression to ImapFlow for any other mailbox', () => {
+    expect(makeClientCfg({ ...baseAccount, mail_node: false }, resolved).disableCompression).toBeUndefined();
+    expect(makeClientCfg(baseAccount, resolved).disableCompression).toBeUndefined();
+  });
+});
+
 // ── makeClientCfg — TLS enforcement ──────────────────────────────────────────
 
 describe('makeClientCfg — TLS enforcement', () => {

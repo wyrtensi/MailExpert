@@ -108,7 +108,9 @@ export function trashFolderExclusionCondition() {
 // (SQLSTATE 54000), so an oversized body would 500 the whole search. Cap the
 // text fed to to_tsvector at 600k chars — matching msgvault's maxFTSBodyChars
 // (internal/store/dialect_pg.go) — so one huge email can't crash the query.
-// Exported because slice 02's search_fts trigger caps the same way.
+// The body index (migration 0072, idx_messages_body_capped) is built on this exact expression,
+// cap included: change one and the search stops using the index and reads every letter
+// (search.pglite.test.js checks the plan).
 export const FTS_BODY_CHAR_CAP = 600000;
 
 // Builds the per-term free-text OR-condition: a term matches if it appears in

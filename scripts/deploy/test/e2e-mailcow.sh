@@ -269,13 +269,14 @@ sample() {
     sleep 5
   done
 }
-# The resident memory (MiB) of the Dovecot processes that serve the Gmail-like mailboxes (gbox*),
-# which the real server does not carry. Shared pages count in every process, so it is an upper bound.
-# mailcow's process titles carry no user name, so the processes come from doveadm who (user, protocol,
-# pid, address); a hibernated session points at the shared imap-hibernate process, counted once.
+# The memory (MiB) of the Dovecot processes that serve the Gmail-like mailboxes (gbox*), which the real
+# server does not carry: their anonymous resident memory (RssAnon, own to each process; smaps and PSS
+# are not readable without ptrace). mailcow's process titles carry no user name, so the processes come
+# from doveadm who (user, protocol, pid, address); a hibernated session points at the shared
+# imap-hibernate process, counted once.
 docker exec -i "$NAME" sh -c 'cat > /opt/gmail-rss.sh' <<'RSS'
 doveadm who -1 2>/dev/null | awk '$1 ~ /^gbox/ { print $3 }' | sort -u | while read -r pid; do
-  sed -n 's/^VmRSS: *\([0-9]*\).*/\1/p' "/proc/$pid/status" 2>/dev/null
+  sed -n 's/^RssAnon:[[:space:]]*\([0-9]*\).*/\1/p' "/proc/$pid/status" 2>/dev/null
 done | awk '{ s += $1 } END { print int(s / 1024) }'
 RSS
 sample &
@@ -298,6 +299,20 @@ restart_backend() {
     if panel_ok; then break; fi
     sleep 3
   done
+}
+# After a restart: seconds until every mailbox has a session on the node again. The panel's
+# last_sync is no proof of that: the folder status monitor syncs a mailbox over a background
+# connection before its own connection is back.
+wait_sessions() {
+  local want=$((MAILBOXES + GMAIL_MAILBOXES)) have=0
+  for _ in $(seq 360); do
+    have=$(inner "docker exec mailcowdockerized-dovecot-mailcow-1 doveadm who -1" 2>/dev/null | awk 'NR > 1 { print $1 }' | sort -u | wc -l)
+    [ "$have" -ge "$want" ] && break
+    sleep 5
+  done
+  printf 'RESULT {"phase":"restart-sessions","mailboxes":%d,"of":%d,"seconds":%d}\n' \
+    "$have" "$want" $(( $(date +%s) - restarted_at / 1000 ))
+  [ "$have" -ge "$want" ] || die "only $have of $want mailboxes have a session on the node after the restart"
 }
 # Memory (MiB) and CPU (% of one core) peaks between two times, for one search level.
 level_peaks() {
@@ -347,6 +362,7 @@ if [ "$SCENARIO" = search ]; then
     phase search "-e SEARCH_LABEL=restart -e SEARCH_SECONDS=120" &
     search_pid=$!
     phase restart "-e RESTARTED_AT=$restarted_at"
+    wait_sessions
     wait "$search_pid"
     level_peaks "$level" "$level_started" "$(date +%s)"
     if [ "$GMAIL_MAILBOXES" != 0 ]; then
@@ -359,6 +375,7 @@ else
   phase sessions
   restart_backend
   phase restart "-e RESTARTED_AT=$restarted_at"
+  wait_sessions
 fi
 kill "$SAMPLER_PID" 2>/dev/null || true
 SAMPLER_PID=''
@@ -382,6 +399,6 @@ awk 'function mib(v) { if (v ~ /GiB$/) return v * 1024; if (v ~ /MiB$/) return v
      }' "$STATS"
 awk -v end="$(date +%s)" '{ if ($2 + 0 > w) w = $2 + 0; if ($3 + 0 > i) i = $3 + 0; if ($4 + 0 > l) l = $4 + 0; if ($5 + 0 > h) h = $5 + 0; if ($6 + 0 > g) g = $6 + 0
        if (NR == 1) first = $1; last = $1 }
-     END { printf "PEAK on the node: IMAP sessions %d, imap processes %d, imap-login %d, imap-hibernate %d, gmail-like RSS %d MiB\n", w, i, l, h, g
+     END { printf "PEAK on the node: IMAP sessions %d, imap processes %d, imap-login %d, imap-hibernate %d, Gmail-like sessions %d MiB\n", w, i, l, h, g
            printf "SAMPLES %d over %d s, the last one %d s before the end\n", NR, last - first, end - last }' "$SAMPLES"
 log "samples: $SAMPLES (node) and $STATS (containers)"

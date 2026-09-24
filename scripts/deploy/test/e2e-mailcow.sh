@@ -9,8 +9,15 @@
 #   scripts/deploy/test/e2e-mailcow.sh --image ... --scenario load [--mailboxes 100] [--imap-process-limit 2048]
 #     [--node-tuning] [--kind gmail] [--panel-env NAME=VALUE ...]
 #   scripts/deploy/test/e2e-mailcow.sh --image ... --scenario search --mailboxes 500 --node-tuning \
-#     --levels 1000,5000,10000,30000,50000,100000
+#     --levels 1000,5000,10000,30000,50000,100000 [--gmail-mailboxes 125]
+#     [--server-cpuset 0-3 --server-cpus 2.8 --server-memory 8g --server-swap 2g]
 #
+# --gmail-mailboxes adds that many Gmail mailboxes next to the node's (load and search scenarios):
+# mailcow mailboxes the panel reaches as imap.gmail.com, see --kind gmail. They get as many letters
+# each as a node mailbox. On the real server Gmail's side is Google's: the Dovecot memory their
+# sessions take here is the test's own, and the load summary reports it apart (gmail-like RSS).
+# --server-* cap the whole container (mailcow, the panel and the inner Docker) like one server:
+# the CPUs it may run on, the CPU time (in CPUs), the memory and the swap on top of it.
 # --node-tuning applies the node settings docs/operations/mail-node.md recommends: the Dovecot
 # overrides from scripts/deploy/mail-node/dovecot-extra.conf.
 # --kind gmail adds the load mailboxes as Gmail mailboxes (imap.gmail.com / smtp.gmail.com, names
@@ -42,12 +49,26 @@ TEST_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 . "$TEST_DIR/../lib/common.sh"
 
 IMAGE='' SCENARIO=functional MAILBOXES=100 IMAP_PROCESS_LIMIT='' NODE_TUNING=0 KIND=node PANEL_ENV='' LEVELS=''
+GMAIL_MAILBOXES=0 SERVER_LIMITS=''
 while [ $# -gt 0 ]; do
   case $1 in
     --image) IMAGE=$2 && shift 2 ;;
     --scenario) SCENARIO=$2 && shift 2 ;;
     --mailboxes) MAILBOXES=$2 && shift 2 ;;
+    --gmail-mailboxes) GMAIL_MAILBOXES=$2 && shift 2 ;;
     --levels) LEVELS=$2 && shift 2 ;;
+    --server-cpuset)
+      [[ $2 =~ ^[0-9]+([-,][0-9]+)*$ ]] || die "--server-cpuset must be a CPU list such as 0-3" 2
+      SERVER_LIMITS="$SERVER_LIMITS --cpuset-cpus $2" && shift 2 ;;
+    --server-cpus)
+      [[ $2 =~ ^[0-9]+(\.[0-9]+)?$ ]] || die "--server-cpus must be a number such as 2.8" 2
+      SERVER_LIMITS="$SERVER_LIMITS --cpus $2" && shift 2 ;;
+    --server-memory)
+      [[ $2 =~ ^[1-9][0-9]*g$ ]] || die "--server-memory must be in gigabytes, such as 8g" 2
+      SERVER_MEMORY=${2%g} && shift 2 ;;
+    --server-swap)
+      [[ $2 =~ ^[0-9]+g$ ]] || die "--server-swap must be in gigabytes, such as 2g" 2
+      SERVER_SWAP=${2%g} && shift 2 ;;
     --imap-process-limit) IMAP_PROCESS_LIMIT=$2 && shift 2 ;;
     --node-tuning) NODE_TUNING=1 && shift ;;
     --kind) KIND=$2 && shift 2 ;;
@@ -60,6 +81,17 @@ done
 [ -n "$IMAGE" ] || die "--image <backend image> is required" 2
 case $SCENARIO in functional | load | search) ;; *) die "--scenario must be functional, load or search" 2 ;; esac
 [[ $MAILBOXES =~ ^[1-9][0-9]{0,3}$ ]] || die "--mailboxes must be a number from 1 to 9999" 2
+[[ $GMAIL_MAILBOXES =~ ^[0-9]{1,3}$ ]] || die "--gmail-mailboxes must be a number from 0 to 999" 2
+if [ -n "${SERVER_MEMORY:-}" ]; then
+  # Docker's --memory-swap is memory and swap together.
+  SERVER_LIMITS="$SERVER_LIMITS --memory ${SERVER_MEMORY}g --memory-swap $((SERVER_MEMORY + ${SERVER_SWAP:-0}))g"
+elif [ -n "${SERVER_SWAP:-}" ]; then
+  die "--server-swap needs --server-memory" 2
+fi
+if [ "$GMAIL_MAILBOXES" != 0 ]; then
+  [ "$KIND" = node ] || die "--gmail-mailboxes adds to node mailboxes; drop --kind gmail" 2
+  [ "$SCENARIO" != functional ] || die "--gmail-mailboxes is for the load and search scenarios" 2
+fi
 if [ "$SCENARIO" = search ]; then
   [ "$KIND" = node ] || die "--scenario search runs on node mailboxes only" 2
   [[ $LEVELS =~ ^[1-9][0-9]*(,[1-9][0-9]*)*$ ]] || die "--levels must be a comma-separated list of letter counts" 2
@@ -91,8 +123,9 @@ trap cleanup EXIT
 
 inner() { docker exec "$NAME" sh -c "$1"; }
 
-log "starting $NAME from $DIND_IMAGE"
-docker run -d --privileged --name "$NAME" "$DIND_IMAGE" >/dev/null
+log "starting $NAME from $DIND_IMAGE${SERVER_LIMITS:+ with$SERVER_LIMITS}"
+# shellcheck disable=SC2086 # SERVER_LIMITS is a list of options
+docker run -d --privileged $SERVER_LIMITS --name "$NAME" "$DIND_IMAGE" >/dev/null
 for _ in $(seq 60); do
   if docker exec "$NAME" docker info >/dev/null 2>&1; then break; fi
   sleep 1
@@ -163,9 +196,10 @@ if docker image inspect "$IMAGE" >/dev/null 2>&1; then
 else
   inner "docker pull -q $IMAGE >/dev/null"
 fi
-# Memory caps and database settings as in deploy/compose.prod.yml.
+# Memory caps and database settings as in docker-compose.yml and deploy/compose.prod.yml, /dev/shm
+# included: at 64 MB, PostgreSQL's parallel work fails on a large messages table.
 inner "docker network create panel >/dev/null \
-  && docker run -d --name pg --network panel --memory 2g -e POSTGRES_USER=mailexpert -e POSTGRES_PASSWORD=pw -e POSTGRES_DB=mailexpert \
+  && docker run -d --name pg --network panel --memory 2g --shm-size 256m -e POSTGRES_USER=mailexpert -e POSTGRES_PASSWORD=pw -e POSTGRES_DB=mailexpert \
     postgres:16-alpine postgres -c shared_buffers=1GB -c effective_cache_size=3GB -c random_page_cost=1.1 >/dev/null \
   && docker run -d --name redis --network panel redis:7-alpine \
     redis-server --save 60 1 --loglevel warning --maxmemory 256mb --maxmemory-policy noeviction >/dev/null"
@@ -178,7 +212,7 @@ PANEL_ARGS="--network panel --add-host $MAIL_HOST:host-gateway -v /opt/testca/ca
 # the two Gmail names with the node's address and every other outside name with NXDOMAIN; container
 # names still resolve through Docker's own DNS, and the node's name through --add-host as before.
 GMAIL_IP=''
-if [ "$KIND" = gmail ]; then
+if [ "$KIND" = gmail ] || [ "$GMAIL_MAILBOXES" != 0 ]; then
   GMAIL_IP=$(inner "docker network inspect bridge -f '{{(index .IPAM.Config 0).Gateway}}'" | tr -d '\r')
   [[ $GMAIL_IP =~ ^[0-9.]+$ ]] || die "could not find the inner Docker gateway address"
   inner "docker run -d --name dns --network panel alpine:3.22 sh -c 'apk add -q --no-cache dnsmasq \
@@ -228,10 +262,24 @@ sample() {
     procs=$(inner "cd /opt/mailcow && docker compose exec -T dovecot-mailcow sh -c 'cat /proc/[0-9]*/comm 2>/dev/null'" 2>/dev/null \
       | tr -d '\r' | awk '$1 == "imap" { i++ } $1 == "imap-login" { l++ } $1 == "imap-hibernate" { h++ } END { printf "%d %d %d", i, l, h }')
     who=$(printf '%s' "$who" | tr -d '\r')
-    printf '%s %s %s\n' "$now" "${who:-0}" "$procs" >>"$SAMPLES"
+    gmail=0
+    if [ "$GMAIL_MAILBOXES" != 0 ]; then
+      gmail=$(inner "docker exec -i mailcowdockerized-dovecot-mailcow-1 sh -s < /opt/gmail-rss.sh" 2>/dev/null | tr -d '\r')
+    fi
+    printf '%s %s %s %s\n' "$now" "${who:-0}" "$procs" "${gmail:-0}" >>"$SAMPLES"
     sleep 5
   done
 }
+# The memory (MiB) of the Dovecot processes that serve the Gmail-like mailboxes (gbox*), which the real
+# server does not carry: their anonymous resident memory (RssAnon, own to each process; smaps and PSS
+# are not readable without ptrace). mailcow's process titles carry no user name, so the processes come
+# from doveadm who (user, protocol, pid, address); a hibernated session points at the shared
+# imap-hibernate process, counted once.
+docker exec -i "$NAME" sh -c 'cat > /opt/gmail-rss.sh' <<'RSS'
+doveadm who -1 2>/dev/null | awk '$1 ~ /^gbox/ { print $3 }' | sort -u | while read -r pid; do
+  sed -n 's/^RssAnon:[[:space:]]*\([0-9]*\).*/\1/p' "/proc/$pid/status" 2>/dev/null
+done | awk '{ s += $1 } END { print int(s / 1024) }'
+RSS
 sample &
 SAMPLER_PID=$!
 
@@ -241,8 +289,8 @@ phase() {
   log "load phase: $1"
   inner "docker run --rm $PANEL_ARGS -v /opt/load.mjs:/app/e2e-mailcow-load.mjs:ro -w /app \
     -e PANEL=http://backend:3000 -e MAIL_HOST=$MAIL_HOST -e API_KEY=$API_KEY -e MAILBOXES=$MAILBOXES \
-    -e DOMAIN=$DOMAIN -e LOAD_KIND=$KIND -e GMAIL_IP=$GMAIL_IP -e PGHOST=pg -e PGUSER=mailexpert -e PGPASSWORD=pw \
-    -e PGDATABASE=mailexpert -e PHASE=$1 ${2:-} $IMAGE node e2e-mailcow-load.mjs" | grep '^RESULT '
+    -e DOMAIN=$DOMAIN -e LOAD_KIND=$KIND -e GMAIL_IP=$GMAIL_IP -e GMAIL_MAILBOXES=$GMAIL_MAILBOXES \
+    -e PGHOST=pg -e PGUSER=mailexpert -e PGPASSWORD=pw -e PGDATABASE=mailexpert -e PHASE=$1 ${2:-} $IMAGE node e2e-mailcow-load.mjs" | grep '^RESULT '
 }
 restart_backend() {
   log "restarting the backend"
@@ -252,6 +300,20 @@ restart_backend() {
     if panel_ok; then break; fi
     sleep 3
   done
+}
+# After a restart: seconds until every mailbox has a session on the node again. The panel's
+# last_sync is no proof of that: the folder status monitor syncs a mailbox over a background
+# connection before its own connection is back.
+wait_sessions() {
+  local want=$((MAILBOXES + GMAIL_MAILBOXES)) have=0
+  for _ in $(seq 360); do
+    have=$(inner "docker exec mailcowdockerized-dovecot-mailcow-1 doveadm who -1" 2>/dev/null | awk 'NR > 1 { print $1 }' | sort -u | wc -l)
+    [ "$have" -ge "$want" ] && break
+    sleep 5
+  done
+  printf 'RESULT {"phase":"restart-sessions","mailboxes":%d,"of":%d,"seconds":%d}\n' \
+    "$have" "$want" $(( $(date +%s) - restarted_at / 1000 ))
+  [ "$have" -ge "$want" ] || die "only $have of $want mailboxes have a session on the node after the restart"
 }
 # Memory (MiB) and CPU (% of one core) peaks between two times, for one search level.
 level_peaks() {
@@ -278,12 +340,12 @@ if [ "$SCENARIO" = search ]; then
   for level in ${LEVELS//,/ }; do
     per=$((level / MAILBOXES))
     level_started=$(date +%s)
-    log "level $level letters: $((per - have)) new per mailbox, $per in all"
+    log "level $level letters on the node's mailboxes, $((per * (MAILBOXES + GMAIL_MAILBOXES))) with the Gmail ones: $((per - have)) new per mailbox, $per in all"
     inner 'rm -rf /opt/seed && mkdir -m 777 /opt/seed'
     phase seed "-v /opt/seed:/seed -e SEED_FROM=$have -e SEED_COUNT=$((per - have))"
     inner "docker cp /opt/seed/. $DOVECOT:/tmp/seed && rm -rf /opt/seed"
     # Dovecot takes the letters and the panel syncs them while the employees search.
-    phase search "-e SEARCH_LABEL=sync -e SEARCH_UNTIL_ROWS=$level" &
+    phase search "-e SEARCH_LABEL=sync -e SEARCH_UNTIL_ROWS=$((per * (MAILBOXES + GMAIL_MAILBOXES)))" &
     search_pid=$!
     # doveadm logs every letter it copies; its output is shown only when an import fails.
     inner "docker exec $DOVECOT sh -c 'chown -R vmail:vmail /tmp/seed \
@@ -301,14 +363,20 @@ if [ "$SCENARIO" = search ]; then
     phase search "-e SEARCH_LABEL=restart -e SEARCH_SECONDS=120" &
     search_pid=$!
     phase restart "-e RESTARTED_AT=$restarted_at"
+    wait_sessions
     wait "$search_pid"
     level_peaks "$level" "$level_started" "$(date +%s)"
+    if [ "$GMAIL_MAILBOXES" != 0 ]; then
+      awk -v label="$level" -v a="$level_started" -v b="$(date +%s)" '$1 >= a && $1 <= b && $6 + 0 > g { g = $6 + 0 }
+        END { printf "LEVEL %s letters: the Gmail-like sessions take up to %d MiB of the node (not on the real server)\n", label, g }' "$SAMPLES"
+    fi
   done
 else
   phase delivery
   phase sessions
   restart_backend
   phase restart "-e RESTARTED_AT=$restarted_at"
+  wait_sessions
 fi
 kill "$SAMPLER_PID" 2>/dev/null || true
 SAMPLER_PID=''
@@ -330,8 +398,8 @@ awk 'function mib(v) { if (v ~ /GiB$/) return v * 1024; if (v ~ /MiB$/) return v
          top["mailcow"], top["panel"], top["both"], sum[first, "mailcow"], sum[first, "panel"]
        for (n in peak) printf "PEAK container %s %.0f MiB\n", n, peak[n] | "sort -k4 -n -r"
      }' "$STATS"
-awk -v end="$(date +%s)" '{ if ($2 + 0 > w) w = $2 + 0; if ($3 + 0 > i) i = $3 + 0; if ($4 + 0 > l) l = $4 + 0; if ($5 + 0 > h) h = $5 + 0
+awk -v end="$(date +%s)" '{ if ($2 + 0 > w) w = $2 + 0; if ($3 + 0 > i) i = $3 + 0; if ($4 + 0 > l) l = $4 + 0; if ($5 + 0 > h) h = $5 + 0; if ($6 + 0 > g) g = $6 + 0
        if (NR == 1) first = $1; last = $1 }
-     END { printf "PEAK on the node: IMAP sessions %d, imap processes %d, imap-login %d, imap-hibernate %d\n", w, i, l, h
+     END { printf "PEAK on the node: IMAP sessions %d, imap processes %d, imap-login %d, imap-hibernate %d, Gmail-like sessions %d MiB\n", w, i, l, h, g
            printf "SAMPLES %d over %d s, the last one %d s before the end\n", NR, last - first, end - last }' "$SAMPLES"
 log "samples: $SAMPLES (node) and $STATS (containers)"

@@ -196,9 +196,10 @@ if docker image inspect "$IMAGE" >/dev/null 2>&1; then
 else
   inner "docker pull -q $IMAGE >/dev/null"
 fi
-# Memory caps and database settings as in deploy/compose.prod.yml.
+# Memory caps and database settings as in docker-compose.yml and deploy/compose.prod.yml, /dev/shm
+# included: at 64 MB, PostgreSQL's parallel work fails on a large messages table.
 inner "docker network create panel >/dev/null \
-  && docker run -d --name pg --network panel --memory 2g -e POSTGRES_USER=mailexpert -e POSTGRES_PASSWORD=pw -e POSTGRES_DB=mailexpert \
+  && docker run -d --name pg --network panel --memory 2g --shm-size 256m -e POSTGRES_USER=mailexpert -e POSTGRES_PASSWORD=pw -e POSTGRES_DB=mailexpert \
     postgres:16-alpine postgres -c shared_buffers=1GB -c effective_cache_size=3GB -c random_page_cost=1.1 >/dev/null \
   && docker run -d --name redis --network panel redis:7-alpine \
     redis-server --save 60 1 --loglevel warning --maxmemory 256mb --maxmemory-policy noeviction >/dev/null"

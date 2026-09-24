@@ -19,9 +19,9 @@ TEST_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 # shellcheck source=../lib/backup.sh
 . "$TEST_DIR/../lib/backup.sh"
 
-# Stands in for the S3 provider inside the test; pinned like every other image. Docker Hub
-# minio/minio needs a login; MinIO publishes the same tags on quay.io.
-MINIO_IMAGE=quay.io/minio/minio:RELEASE.2025-04-22T22-12-26Z
+# Stands in for the S3 provider inside the test (`rclone serve s3`); pinned like every other image.
+# MinIO, used before, is no longer published without a login.
+S3_IMAGE=rclone/rclone:1.71.1
 
 VERSION='' IMAGE_PREFIX='' ONLY=''
 while [ $# -gt 0 ]; do
@@ -55,7 +55,7 @@ cleanup() {
 trap cleanup EXIT
 
 IMAGES=("$IMAGE_PREFIX/mailexpert-backend:$VERSION" "$IMAGE_PREFIX/mailexpert-frontend:$VERSION"
-  "$IMAGE_PREFIX/mailexpert-edge:$VERSION" postgres:16-alpine redis:7-alpine "$RESTIC_IMAGE" "$MINIO_IMAGE")
+  "$IMAGE_PREFIX/mailexpert-edge:$VERSION" postgres:16-alpine redis:7-alpine "$RESTIC_IMAGE" "$S3_IMAGE")
 for image in "${IMAGES[@]}"; do
   if docker image inspect "$image" >/dev/null 2>&1; then continue; fi
   case $image in
@@ -87,6 +87,6 @@ if [ "$ONLY" != backup ]; then
 fi
 if [ "$ONLY" != install ]; then
   MSYS_NO_PATHCONV=1 docker exec "$NAME" bash /e2e/src/scripts/deploy/test/e2e-backup.sh \
-    --version "$VERSION" --image-prefix "$IMAGE_PREFIX" --repo-url /e2e/repo.bundle --minio-image "$MINIO_IMAGE"
+    --version "$VERSION" --image-prefix "$IMAGE_PREFIX" --repo-url /e2e/repo.bundle --s3-image "$S3_IMAGE"
 fi
 log "deploy e2e passed"

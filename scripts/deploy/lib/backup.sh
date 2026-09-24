@@ -28,7 +28,7 @@ RESTIC_PROBE_TIMEOUT=30
 RESTIC_INIT_TIMEOUT=60
 
 # restic_repository_ok <url>: s3:https://<endpoint>/<bucket>[/<path>]; plain http only on the
-# loopback (MinIO in the e2e test).
+# loopback (the S3 stand-in of the e2e test).
 restic_repository_ok() {
   [[ $1 =~ ^s3:https://[A-Za-z0-9.-]+(:[0-9]{1,5})?/[A-Za-z0-9._-]+(/[A-Za-z0-9._/-]*)?$ ]] ||
     [[ $1 =~ ^s3:http://(127\.0\.0\.1|localhost)(:[0-9]{1,5})?/[A-Za-z0-9._-]+(/[A-Za-z0-9._/-]*)?$ ]]

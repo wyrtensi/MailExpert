@@ -2,8 +2,8 @@
 # Backup, restore, update and rollback scenario of the deploy e2e test. Runs inside the throwaway
 # Docker-in-Docker container started by e2e.sh and must never run on a host with real data.
 # Server A is the compose project me-e2e-a in /e2e/a; server B, installed once A is frozen, is
-# me-e2e-b in /e2e/b; MinIO in the project me-e2e-s3 stands in for the S3 provider. Everything it
-# creates is removed at exit.
+# me-e2e-b in /e2e/b; rclone's S3 server in the project me-e2e-s3 stands in for the S3 provider.
+# Everything it creates is removed at exit.
 # shellcheck source-path=SCRIPTDIR
 set -euo pipefail
 # A failure inside a `$(...)` command substitution (derive_version's git calls, run as
@@ -33,19 +33,19 @@ A_PROJECT=me-e2e-a B_PROJECT=me-e2e-b S3_PROJECT=me-e2e-s3
 A=/e2e/a B=/e2e/b ORIGIN=/e2e/origin.git WORK=/e2e/work STAGE=/e2e/stage
 A_PORT=18081 B_PORT=18082 S3_PORT=19000
 BUCKET=me-e2e-backups
-VERSION='' IMAGE_PREFIX='' REPO_URL='' MINIO_IMAGE=''
+VERSION='' IMAGE_PREFIX='' REPO_URL='' S3_IMAGE=''
 
 while [ $# -gt 0 ]; do
   case $1 in
     --version) VERSION=$2 && shift 2 ;;
     --image-prefix) IMAGE_PREFIX=$2 && shift 2 ;;
     --repo-url) REPO_URL=$2 && shift 2 ;;
-    --minio-image) MINIO_IMAGE=$2 && shift 2 ;;
+    --s3-image) S3_IMAGE=$2 && shift 2 ;;
     *) die "unknown option: $1" 2 ;;
   esac
 done
-if [ -z "$VERSION" ] || [ -z "$IMAGE_PREFIX" ] || [ -z "$REPO_URL" ] || [ -z "$MINIO_IMAGE" ]; then
-  die "--version, --image-prefix, --repo-url and --minio-image are required" 2
+if [ -z "$VERSION" ] || [ -z "$IMAGE_PREFIX" ] || [ -z "$REPO_URL" ] || [ -z "$S3_IMAGE" ]; then
+  die "--version, --image-prefix, --repo-url and --s3-image are required" 2
 fi
 
 for p in "$A_PROJECT" "$B_PROJECT" "$S3_PROJECT"; do
@@ -109,15 +109,15 @@ snapshots_here() {
 
 backup_keys() {
   printf 'RESTIC_REPOSITORY=s3:http://127.0.0.1:%s/%s\nRESTIC_PASSWORD=%s\nAWS_ACCESS_KEY_ID=%s\nAWS_SECRET_ACCESS_KEY=%s\n' \
-    "$S3_PORT" "$BUCKET" "$RESTIC_PW" "$MINIO_ROOT_USER" "$MINIO_ROOT_PASSWORD"
+    "$S3_PORT" "$BUCKET" "$RESTIC_PW" "$S3_ACCESS_KEY" "$S3_SECRET_KEY"
 }
 
-export MINIO_ROOT_USER=e2e-s3-user MINIO_ROOT_PASSWORD E2E_EMAIL=box@example.test E2E_PLAIN
-MINIO_ROOT_PASSWORD=$(gen_hex 16)
+export S3_ACCESS_KEY=e2e-s3-user S3_SECRET_KEY E2E_EMAIL=box@example.test E2E_PLAIN
+S3_SECRET_KEY=$(gen_hex 16)
 E2E_PLAIN=e2e-mailbox-password-$(gen_hex 4)
 RESTIC_PW=$(gen_hex 24)
 
-# 1. MinIO stands in for the S3 provider (restic creates the bucket); a bare origin repository
+# 1. rclone's S3 server stands in for S3 (restic creates the bucket); a bare origin repository
 # lets the update stages add commits. `$REPO_URL` is a bundle of the host checkout's HEAD, which
 # may itself be a shallow clone (locally, or from a CI checkout with a shallow default) — cloning
 # it leaves `$ORIGIN` with a detached HEAD and no branch, so a later `git push` out of it has
@@ -126,18 +126,20 @@ RESTIC_PW=$(gen_hex 24)
 # makes every later push self-contained: negotiation only ever needs objects at or after this
 # tip, never anything from the host clone's own ancestry.
 docker run -d --name me-e2e-s3 --label "com.docker.compose.project=$S3_PROJECT" -p "127.0.0.1:$S3_PORT:9000" \
-  -e MINIO_ROOT_USER -e MINIO_ROOT_PASSWORD "$MINIO_IMAGE" server /data >/dev/null
+  "$S3_IMAGE" serve s3 /data --addr :9000 --auth-key "$S3_ACCESS_KEY,$S3_SECRET_KEY" >/dev/null
+# Any HTTP answer means it listens: an unsigned request gets an error status, not 200.
+s3_up() { [ "$(curl -s -o /dev/null -w '%{http_code}' "http://127.0.0.1:$S3_PORT/")" != 000 ]; }
 for _ in $(seq 60); do
-  if curl -fs -o /dev/null "http://127.0.0.1:$S3_PORT/minio/health/live"; then break; fi
+  if s3_up; then break; fi
   sleep 1
 done
-curl -fs -o /dev/null "http://127.0.0.1:$S3_PORT/minio/health/live" || fail "MinIO did not start"
+s3_up || fail "the S3 server did not start"
 git clone --bare --quiet "$REPO_URL" "$ORIGIN"
 HEAD_SHA=$(git -C "$ORIGIN" rev-parse HEAD)
 [ "sha-${HEAD_SHA:0:12}" = "$VERSION" ] || fail "the bundle's HEAD is not $VERSION"
 git -C "$ORIGIN" update-ref refs/heads/main "$HEAD_SHA"
 git -C "$ORIGIN" symbolic-ref HEAD refs/heads/main
-pass "MinIO and the origin repository"
+pass "the S3 server and the origin repository"
 
 # 2. Server A without restic keys: the panel runs, install.sh warns that backups are off.
 expect_exit 0 deploy install.sh --prefix "$A" --version "$VERSION" --image-prefix "$IMAGE_PREFIX" \
@@ -149,7 +151,7 @@ pass "server A runs without backups and says so"
 # 3. The restic keys through configure.sh; the next install.sh creates the repository. Without a
 # terminal the recovery key is not printed; --show-recovery-key prints it on request.
 out=$(backup_keys | deploy configure.sh --prefix "$A" 2>&1)
-[[ $out != *"$RESTIC_PW"* && $out != *"$MINIO_ROOT_PASSWORD"* ]] || fail "configure.sh printed a restic secret"
+[[ $out != *"$RESTIC_PW"* && $out != *"$S3_SECRET_KEY"* ]] || fail "configure.sh printed a restic secret"
 expect_exit 0 deploy install.sh --prefix "$A"
 [[ $OUT == *"creating the restic repository"* ]] || fail "the repository was not created"
 [[ $OUT == *"--show-recovery-key"* && $OUT != *"$RESTIC_PW"* ]] || fail "the recovery key without a terminal"

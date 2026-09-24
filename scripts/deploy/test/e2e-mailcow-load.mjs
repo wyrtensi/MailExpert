@@ -6,7 +6,18 @@
 //   PHASE=restart    after the script restarted the backend: time until all connected again
 //   PHASE=sessions   10 sessions of the shared user: a read flag set in one is seen by the rest
 //
-// Each phase prints one `RESULT {json}` line. Env: PANEL, MAIL_HOST, API_KEY, MAILBOXES, DOMAIN.
+// The search scenario adds (letters are generated, not real mail; the same box and index always
+// give the same letter, so the phases agree on what was seeded):
+//
+//   PHASE=users      ten employees, invited by the admin, each with their own login
+//   PHASE=seed       writes SEED_COUNT letters per mailbox, from index SEED_FROM, as Maildir files
+//                    under /seed/<box>/ for the script to import into mailcow
+//   PHASE=bodies     fills body_text of the seeded rows, as if every letter had been opened
+//   PHASE=search     the ten employees search, each every 2 seconds, for SEARCH_SECONDS or, with
+//                    SEARCH_UNTIL_ROWS, until the panel has that many seeded rows
+//
+// Each phase prints one `RESULT {json}` line. Env: PANEL, MAIL_HOST, API_KEY, MAILBOXES, DOMAIN;
+// the search scenario also PGHOST, PGUSER, PGPASSWORD, PGDATABASE for the panel's database.
 //
 // LOAD_KIND=gmail runs the same phases with the mailboxes added the way a Gmail mailbox is: IMAP
 // imap.gmail.com:993 and SMTP smtp.gmail.com:587, names the script points at the mailcow node. The
@@ -29,9 +40,10 @@ const seconds = (ms) => Math.round(ms / 100) / 10;
 class Session {
   constructor() { this.cookie = ''; }
 
-  async call(method, path, body) {
+  async call(method, path, body, { timeoutMs } = {}) {
     const res = await fetch(`${PANEL}/api${path}`, {
       method,
+      signal: timeoutMs ? AbortSignal.timeout(timeoutMs) : undefined,
       headers: {
         'X-Requested-With': 'MailExpert',
         ...(this.cookie ? { Cookie: this.cookie } : {}),
@@ -44,8 +56,8 @@ class Session {
     return { status: res.status, data: await res.json().catch(() => null) };
   }
 
-  async login() {
-    const r = await this.call('POST', '/auth/login', USER);
+  async login(user = USER) {
+    const r = await this.call('POST', '/auth/login', user);
     assert.equal(r.status, 200, JSON.stringify(r.data));
     return this;
   }
@@ -187,7 +199,7 @@ if (PHASE === 'delivery') {
 if (PHASE === 'restart') {
   const since = Number(process.env.RESTARTED_AT);
   const s = await new Session().login();
-  const c = await waitConnected(s, since, 600000);
+  const c = await waitConnected(s, since, 1200000);
   result({
     connected: c.connected,
     reconnectSeconds: c.times.length ? percentiles(c.times.map(seconds)) : null,
@@ -216,4 +228,260 @@ if (PHASE === 'sessions') {
   }));
   result({ sessions: sessions.length, othersSeeRead: views.filter(Boolean).length });
   assert.equal(views.every(Boolean), true, 'a session did not see the read flag');
+}
+
+// ── Search scenario ─────────────────────────────────────────────────────────
+
+const EMPLOYEES = 10;
+const EMPLOYEE_PASSWORD = 'e2e-employee-password-1';
+const employee = (i) => ({ username: `emp${String(i + 1).padStart(2, '0')}`, password: EMPLOYEE_PASSWORD });
+const SEED_ID_DOMAIN = 'seed.invalid';
+
+// Deterministic letters: mostly Russian business mail with some English, senders from a fixed
+// pool of people and companies, 1-6 KB of text, dates over the last two years.
+const FIRST = ['Иван', 'Пётр', 'Анна', 'Мария', 'Сергей', 'Ольга', 'Дмитрий', 'Елена', 'Алексей', 'Наталья',
+  'Андрей', 'Татьяна', 'Михаил', 'Ирина', 'Николай', 'Светлана', 'Павел', 'Юлия', 'Олег', 'Екатерина'];
+const LAST = {
+  Петров: 'petrov', Иванов: 'ivanov', Смирнов: 'smirnov', Кузнецов: 'kuznetsov', Попов: 'popov',
+  Соколов: 'sokolov', Лебедев: 'lebedev', Козлов: 'kozlov', Новиков: 'novikov', Морозов: 'morozov',
+  Волков: 'volkov', Соловьёв: 'soloviev', Васильев: 'vasiliev', Зайцев: 'zaitsev', Павлов: 'pavlov',
+  Семёнов: 'semenov', Голубев: 'golubev', Виноградов: 'vinogradov', Богданов: 'bogdanov', Воробьёв: 'vorobiev',
+  Фёдоров: 'fedorov', Михайлов: 'mikhailov', Беляев: 'belyaev', Тарасов: 'tarasov', Белов: 'belov',
+  Комаров: 'komarov', Орлов: 'orlov', Киселёв: 'kiselev', Макаров: 'makarov', Андреев: 'andreev',
+};
+const SURNAMES = Object.keys(LAST);
+const COMPANIES = Array.from({ length: 60 }, (_, i) => `company${i + 1}.example`);
+// The words follow a Zipf law over about 6000 words, as in real text: a few very frequent ones and
+// a long tail of rare ones. The words the employees search for stay out of it and go into a fixed
+// share of letters instead (see letter()), so a search matches about as much as it would in real mail.
+const COMMON = 'и в не на что с по это как к для от о из у за мы вы но а то все так уже бы до'.split(' ');
+const BUSINESS = ('поставка договор счёт оплата отгрузка заказ акт сверка склад доставка согласование приложение '
+  + 'сроки график встреча звонок проект смета спецификация цена скидка условия контракт партия товар '
+  + 'сертификат качество таможня декларация маршрут перевозчик водитель клиент менеджер бухгалтерия директор '
+  + 'отдел запрос ответ уточнение подтверждение изменение ошибка срочно важно пожалуйста спасибо уважаемый '
+  + 'коллеги прошу направляю высылаю получили оплатили order shipment delivery contract payment quote '
+  + 'meeting report schedule agreement').split(' ');
+const SYLLABLES = 'ба ве ги до ку ла ме ни по ра се ти фу ха це чи ша бор вел гон дар жук зим кол лот мир нос пар рок сол'.split(' ');
+const TAIL = Array.from({ length: 6000 }, (_, i) => SYLLABLES[i % 30] + SYLLABLES[Math.floor(i / 30) % 30]
+  + SYLLABLES[Math.floor(i / 900)] + 'н');
+const VOCABULARY = [...COMMON, ...BUSINESS, ...TAIL];
+const ZIPF = (() => {
+  let total = 0;
+  const cumulative = VOCABULARY.map((_, rank) => { total += 1 / (rank + 1); return total; });
+  return cumulative.map((c) => c / total);
+})();
+function zipfWord(r) {
+  const x = r();
+  let lo = 0;
+  let hi = ZIPF.length - 1;
+  while (lo < hi) {
+    const mid = (lo + hi) >> 1;
+    if (ZIPF[mid] < x) lo = mid + 1; else hi = mid;
+  }
+  return VOCABULARY[lo];
+}
+const SUBJECTS = [
+  (n) => `Счёт №${n} на оплату`, (n) => `Договор поставки ${n}`, (n, w) => `Заказ ${n}: ${w}`,
+  (n, w) => `Re: ${w} по заказу ${n}`, (n) => `Акт сверки ${n}`, (n) => `Order ${n}`,
+  (n, w) => `Встреча: ${w}`, (n, w) => `Fwd: ${w} ${n}`, (n) => `Отгрузка партии ${n}`, (n, w) => `Вопрос: ${w}`];
+
+function rng(seed) {
+  let a = seed >>> 0;
+  return () => {
+    a = (a + 0x6d2b79f5) >>> 0;
+    let t = a;
+    t = Math.imul(t ^ (t >>> 15), t | 1);
+    t ^= t + Math.imul(t ^ (t >>> 7), t | 61);
+    return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+  };
+}
+
+function letter(box, index) {
+  const r = rng(box * 1000003 + index * 7919 + 17);
+  const pick = (list) => list[Math.floor(r() * list.length)];
+  const last = pick(SURNAMES);
+  const first = pick(FIRST);
+  const company = pick(COMPANIES);
+  const number = 10000 + Math.floor(r() * 90000);
+  const sentences = Array.from({ length: 15 + Math.floor(r() * 50) }, () => {
+    const words = Array.from({ length: 6 + Math.floor(r() * 10) }, () => zipfWord(r));
+    if (r() < 0.2) words.push(String(10000 + Math.floor(r() * 90000)));
+    return words;
+  });
+  // The searched words: «накладная» in 5% of letters, «претензия» in 4% (half of them with
+  // «возврат», which is in 8% in all), «invoice» in 3%.
+  const mention = (word) => { const s = pick(sentences); s.splice(Math.floor(r() * s.length), 0, word); };
+  let subject = pick(SUBJECTS)(number, pick(BUSINESS));
+  if (r() < 0.05) { mention('накладная'); if (r() < 0.3) subject = `Накладная ${number}`; }
+  const claim = r() < 0.04;
+  if (claim) { mention('претензия'); if (r() < 0.5) subject = `Претензия по заказу ${number}`; }
+  if ((claim && r() < 0.5) || r() < 0.06) mention('возврат');
+  if (r() < 0.03) { mention('invoice'); if (r() < 0.5) subject = `Invoice ${number}`; }
+  const greeting = pick(['Добрый день', 'Здравствуйте', 'Уважаемые коллеги']);
+  return {
+    messageId: `seed-${box}-${index}@${SEED_ID_DOMAIN}`,
+    fromName: `${first} ${last}`,
+    fromEmail: `${LAST[last]}@${company}`,
+    subject,
+    date: new Date(Date.UTC(2026, 8, 20) - Math.floor(r() * 730 * 86400000)),
+    seen: r() < 0.7,
+    body: `${greeting}!\n\n${sentences.map((s) => `${s.join(' ')}.`).join(' ')}\n\n--\n${first} ${last}\n${company}\n`,
+  };
+}
+
+const boxName = (box) => `box${String(box).padStart(3, '0')}`;
+const encodedWord = (text) => `=?UTF-8?B?${Buffer.from(text).toString('base64')}?=`;
+
+function rfc822(l, box) {
+  const body = Buffer.from(l.body).toString('base64').match(/.{1,76}/g).join('\r\n');
+  return [
+    `From: ${encodedWord(l.fromName)} <${l.fromEmail}>`, `To: ${boxName(box)}@${DOMAIN}`,
+    `Subject: ${encodedWord(l.subject)}`, `Date: ${l.date.toUTCString()}`, `Message-ID: <${l.messageId}>`,
+    'MIME-Version: 1.0', 'Content-Type: text/plain; charset=utf-8', 'Content-Transfer-Encoding: base64',
+    '', body, '',
+  ].join('\r\n');
+}
+
+async function panelDb() {
+  const { default: pg } = await import('pg');
+  const client = new pg.Client();
+  await client.connect();
+  return client;
+}
+
+// Seeded rows the panel holds, and how many of them still wait for a snippet.
+async function seededRows(client) {
+  const { rows: [row] } = await client.query(`SELECT count(*)::int AS rows,
+      count(*) FILTER (WHERE snippet IS NULL AND snippet_attempted_at IS NULL)::int AS pending
+    FROM messages WHERE message_id LIKE $1`, [`%@${SEED_ID_DOMAIN}%`]);
+  return row;
+}
+
+async function dbSize(client) {
+  const { rows: [row] } = await client.query(`SELECT pg_database_size(current_database())::bigint AS db,
+      pg_total_relation_size('messages')::bigint AS messages`);
+  return { dbMb: Math.round(Number(row.db) / 1048576), messagesTableMb: Math.round(Number(row.messages) / 1048576) };
+}
+
+if (PHASE === 'users') {
+  const admin = await new Session().login();
+  // Every employee here signs in from the driver's one address; the per-address limit on sign-ins
+  // (10 in 15 minutes by default) is meant for guessing passwords, not for a whole office.
+  const limits = await admin.call('PATCH', '/admin/settings', { auth_max_attempts: 100, auth_window_minutes: 1 });
+  assert.equal(limits.status, 200, JSON.stringify(limits.data));
+  for (let i = 0; i < EMPLOYEES; i++) {
+    const { username } = employee(i);
+    let r = await admin.call('POST', '/admin/invites', { email: `${username}@staff.invalid` });
+    assert.equal(r.status, 200, JSON.stringify(r.data));
+    const inviteToken = new URL(r.data.inviteUrl).searchParams.get('invite');
+    r = await new Session().call('POST', '/auth/register', { ...employee(i), inviteToken });
+    assert.equal(r.status, 200, JSON.stringify(r.data));
+  }
+  await Promise.all(Array.from({ length: EMPLOYEES }, (_, i) => new Session().login(employee(i))));
+  result({ employees: EMPLOYEES });
+}
+
+if (PHASE === 'seed') {
+  const { mkdir, writeFile } = await import('node:fs/promises');
+  const from = Number(process.env.SEED_FROM);
+  const count = Number(process.env.SEED_COUNT);
+  let bytes = 0;
+  for (let box = 0; box < MAILBOXES; box++) {
+    const dir = `/seed/${boxName(box)}`;
+    await Promise.all(['cur', 'new', 'tmp'].map((d) => mkdir(`${dir}/${d}`, { recursive: true })));
+    for (let index = from; index < from + count; index++) {
+      const l = letter(box, index);
+      const text = rfc822(l, box);
+      bytes += text.length;
+      const time = Math.floor(l.date.getTime() / 1000);
+      await writeFile(`${dir}/cur/${time}.M${index}P${box}.seed:2,${l.seen ? 'S' : ''}`, text);
+    }
+  }
+  result({ letters: MAILBOXES * count, perMailbox: count, averageBytes: Math.round(bytes / (MAILBOXES * count)) });
+}
+
+if (PHASE === 'bodies') {
+  const client = await panelDb();
+  const started = Date.now();
+  const { rows } = await client.query(
+    'SELECT id, message_id FROM messages WHERE message_id LIKE $1 AND body_text IS NULL', [`%@${SEED_ID_DOMAIN}%`]);
+  for (let i = 0; i < rows.length; i += 2000) {
+    const batch = rows.slice(i, i + 2000).map((row) => {
+      const [, box, index] = /seed-(\d+)-(\d+)@/.exec(row.message_id);
+      return [row.id, letter(Number(box), Number(index)).body];
+    });
+    await client.query(`UPDATE messages m SET body_text = v.body
+      FROM unnest($1::uuid[], $2::text[]) AS v(id, body) WHERE m.id = v.id`,
+    [batch.map((b) => b[0]), batch.map((b) => b[1])]);
+  }
+  await client.query('VACUUM ANALYZE messages');
+  result({ filled: rows.length, seconds: seconds(Date.now() - started), ...(await dbSize(client)) });
+  await client.end();
+}
+
+if (PHASE === 'search') {
+  const label = process.env.SEARCH_LABEL;
+  const untilRows = Number(process.env.SEARCH_UNTIL_ROWS || 0);
+  const client = await panelDb();
+  const employees = await Promise.all(Array.from({ length: EMPLOYEES }, (_, i) => new Session().login(employee(i))));
+  const [one] = await nodeAccounts(employees[0]);
+  // What an employee types, over all mailboxes and folders: a common word, a sender's surname, two
+  // words, an order number, a word no letter has (the whole table is read), and a word in one mailbox.
+  const QUERIES = [
+    { kind: 'word', q: 'накладная' },
+    { kind: 'surname', q: 'Воробьёв' },
+    { kind: 'two words', q: 'претензия возврат' },
+    { kind: 'number', q: '48213' },
+    { kind: 'no match', q: 'кракозябра' },
+    { kind: 'one mailbox', q: 'invoice', accountId: one.id },
+  ];
+  const latency = new Map(QUERIES.map((x) => [x.kind, []]));
+  const failures = {};
+  let stop = false;
+  const started = Date.now();
+  let syncedAt = null;
+  const stopper = (async () => {
+    if (untilRows) {
+      const end = Date.now() + 3600000;
+      while (Date.now() < end) {
+        const s = await seededRows(client);
+        if (s.rows >= untilRows && !syncedAt) syncedAt = Date.now();
+        // Snippets are part of the sync: search reads them. Give them up to 10 minutes more.
+        if (syncedAt && (s.pending === 0 || Date.now() - syncedAt > 600000)) break;
+        await sleep(5000);
+      }
+    } else {
+      await sleep(Number(process.env.SEARCH_SECONDS) * 1000);
+    }
+    stop = true;
+  })();
+  await Promise.all(employees.map(async (s, i) => {
+    for (let n = i; !stop; n++) {
+      const query = QUERIES[n % QUERIES.length];
+      const path = `/search?q=${encodeURIComponent(query.q)}&limit=50${query.accountId ? `&accountId=${query.accountId}` : ''}`;
+      const t0 = Date.now();
+      // A search still running after a minute counts as failed ('timeout'), not as a latency.
+      const r = await s.call('GET', path, null, { timeoutMs: 60000 })
+        .catch((err) => ({ status: err.name === 'TimeoutError' ? 'timeout' : 0 }));
+      if (r.status === 200) latency.get(query.kind).push(Date.now() - t0);
+      else failures[r.status] = (failures[r.status] || 0) + 1;
+      await sleep(2000);
+    }
+  }));
+  await stopper;
+  const seeded = await seededRows(client);
+  const ms = Object.fromEntries([...latency].map(([kind, list]) => [kind, list.length ? { n: list.length, ...percentiles(list) } : null]));
+  result({
+    label,
+    seconds: seconds(Date.now() - started),
+    ...(untilRows ? {
+      syncSeconds: syncedAt ? seconds(syncedAt - started) : null, rows: seeded.rows, of: untilRows, snippetsPending: seeded.pending,
+    } : {}),
+    searches: [...latency.values()].reduce((sum, list) => sum + list.length, 0),
+    failures,
+    ms,
+    ...(await dbSize(client)),
+  });
+  await client.end();
+  if (untilRows) assert.ok(seeded.rows >= untilRows, `the panel holds ${seeded.rows} of ${untilRows} seeded letters`);
 }

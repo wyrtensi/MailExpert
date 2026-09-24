@@ -8,6 +8,8 @@
 #   scripts/deploy/test/e2e-mailcow.sh --image ghcr.io/wyrtensi/mailexpert-backend:sha-<12>
 #   scripts/deploy/test/e2e-mailcow.sh --image ... --scenario load [--mailboxes 100] [--imap-process-limit 2048]
 #     [--node-tuning] [--kind gmail] [--panel-env NAME=VALUE ...]
+#   scripts/deploy/test/e2e-mailcow.sh --image ... --scenario search --mailboxes 500 --node-tuning \
+#     --levels 1000,5000,10000,30000,50000,100000
 #
 # --node-tuning applies the node settings docs/operations/mail-node.md recommends: the Dovecot
 # overrides from scripts/deploy/mail-node/dovecot-extra.conf.
@@ -19,6 +21,13 @@
 # (e2e-mailcow-load.mjs) creates many mailboxes and measures connecting, delivery to all of them,
 # reconnecting after a backend restart and ten parallel sessions, sampling the memory of every
 # container (mailcow and the panel) and the IMAP sessions and processes on the node every 5 seconds.
+# The search scenario grows the mail to each of --levels letters in all (spread evenly over the
+# mailboxes, imported straight into Dovecot) and, at each level, measures the panel's search by ten
+# employees while the panel syncs the new letters, at rest (every letter opened, so body text is
+# searched too), while one letter goes to every mailbox, and while all mailboxes reconnect after a
+# backend restart; with memory and CPU peaks and the database size for the level.
+# The panel runs with the production limits of deploy/compose.prod.yml (memory caps, Node heap,
+# PostgreSQL shared_buffers).
 #
 # Needs about 6 GB of memory for Docker and pulls a few GB of mailcow images on every run; it is
 # a manual check, not part of CI. From Git Bash on Windows run it with MSYS_NO_PATHCONV=1, so
@@ -32,12 +41,13 @@ TEST_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 # shellcheck source=../lib/common.sh
 . "$TEST_DIR/../lib/common.sh"
 
-IMAGE='' SCENARIO=functional MAILBOXES=100 IMAP_PROCESS_LIMIT='' NODE_TUNING=0 KIND=node PANEL_ENV=''
+IMAGE='' SCENARIO=functional MAILBOXES=100 IMAP_PROCESS_LIMIT='' NODE_TUNING=0 KIND=node PANEL_ENV='' LEVELS=''
 while [ $# -gt 0 ]; do
   case $1 in
     --image) IMAGE=$2 && shift 2 ;;
     --scenario) SCENARIO=$2 && shift 2 ;;
     --mailboxes) MAILBOXES=$2 && shift 2 ;;
+    --levels) LEVELS=$2 && shift 2 ;;
     --imap-process-limit) IMAP_PROCESS_LIMIT=$2 && shift 2 ;;
     --node-tuning) NODE_TUNING=1 && shift ;;
     --kind) KIND=$2 && shift 2 ;;
@@ -48,8 +58,18 @@ while [ $# -gt 0 ]; do
   esac
 done
 [ -n "$IMAGE" ] || die "--image <backend image> is required" 2
-case $SCENARIO in functional | load) ;; *) die "--scenario must be functional or load" 2 ;; esac
+case $SCENARIO in functional | load | search) ;; *) die "--scenario must be functional, load or search" 2 ;; esac
 [[ $MAILBOXES =~ ^[1-9][0-9]{0,3}$ ]] || die "--mailboxes must be a number from 1 to 9999" 2
+if [ "$SCENARIO" = search ]; then
+  [ "$KIND" = node ] || die "--scenario search runs on node mailboxes only" 2
+  [[ $LEVELS =~ ^[1-9][0-9]*(,[1-9][0-9]*)*$ ]] || die "--levels must be a comma-separated list of letter counts" 2
+  previous=0
+  for level in ${LEVELS//,/ }; do
+    [ $((level % MAILBOXES)) = 0 ] || die "--levels: $level letters do not split evenly over $MAILBOXES mailboxes" 2
+    [ "$level" -gt "$previous" ] || die "--levels must grow" 2
+    previous=$level
+  done
+fi
 [ -z "$IMAP_PROCESS_LIMIT" ] || [[ $IMAP_PROCESS_LIMIT =~ ^[1-9][0-9]{2,4}$ ]] || die "--imap-process-limit must be a number from 100 to 99999" 2
 case $KIND in node | gmail) ;; *) die "--kind must be node or gmail" 2 ;; esac
 
@@ -143,9 +163,12 @@ if docker image inspect "$IMAGE" >/dev/null 2>&1; then
 else
   inner "docker pull -q $IMAGE >/dev/null"
 fi
+# Memory caps and database settings as in deploy/compose.prod.yml.
 inner "docker network create panel >/dev/null \
-  && docker run -d --name pg --network panel -e POSTGRES_USER=mailexpert -e POSTGRES_PASSWORD=pw -e POSTGRES_DB=mailexpert postgres:16-alpine >/dev/null \
-  && docker run -d --name redis --network panel redis:7-alpine >/dev/null"
+  && docker run -d --name pg --network panel --memory 2g -e POSTGRES_USER=mailexpert -e POSTGRES_PASSWORD=pw -e POSTGRES_DB=mailexpert \
+    postgres:16-alpine postgres -c shared_buffers=1GB -c effective_cache_size=3GB -c random_page_cost=1.1 >/dev/null \
+  && docker run -d --name redis --network panel redis:7-alpine \
+    redis-server --save 60 1 --loglevel warning --maxmemory 256mb --maxmemory-policy noeviction >/dev/null"
 sleep 5
 # The panel reaches the node by name, like in production; here the name points at the host of
 # the inner daemon, where mailcow publishes its ports.
@@ -170,7 +193,8 @@ if [ "$KIND" = gmail ]; then
   PANEL_ARGS="$PANEL_ARGS --dns $DNS_IP"
   log "imap.gmail.com and smtp.gmail.com resolve to the node ($GMAIL_IP) through $DNS_IP"
 fi
-inner "docker run -d --name backend $PANEL_ARGS -e NODE_ENV=production -e PORT=3000 -e APP_URL=http://backend:3000 \
+inner "docker run -d --name backend $PANEL_ARGS --memory 1536m -e NODE_OPTIONS=--max-old-space-size=1024 \
+  -e NODE_ENV=production -e PORT=3000 -e APP_URL=http://backend:3000 \
   -e SESSION_SECRET=$(secret) -e ENCRYPTION_KEY=$(secret) -e DB_HOST=pg -e DB_PASSWORD=pw -e REDIS_URL=redis://redis:6379 \
   -e AUTH_MODE=local $PANEL_ENV $IMAGE >/dev/null"
 panel_ok() { inner "docker run --rm --network panel $IMAGE node -e \"fetch('http://backend:3000/api/health').then(r=>process.exit(r.ok?0:1),()=>process.exit(1))\"" >/dev/null 2>&1; }
@@ -217,19 +241,75 @@ phase() {
   log "load phase: $1"
   inner "docker run --rm $PANEL_ARGS -v /opt/load.mjs:/app/e2e-mailcow-load.mjs:ro -w /app \
     -e PANEL=http://backend:3000 -e MAIL_HOST=$MAIL_HOST -e API_KEY=$API_KEY -e MAILBOXES=$MAILBOXES \
-    -e DOMAIN=$DOMAIN -e LOAD_KIND=$KIND -e GMAIL_IP=$GMAIL_IP -e PHASE=$1 ${2:-} $IMAGE node e2e-mailcow-load.mjs" | grep '^RESULT '
+    -e DOMAIN=$DOMAIN -e LOAD_KIND=$KIND -e GMAIL_IP=$GMAIL_IP -e PGHOST=pg -e PGUSER=mailexpert -e PGPASSWORD=pw \
+    -e PGDATABASE=mailexpert -e PHASE=$1 ${2:-} $IMAGE node e2e-mailcow-load.mjs" | grep '^RESULT '
 }
+restart_backend() {
+  log "restarting the backend"
+  restarted_at=$(( $(date +%s) * 1000 ))
+  inner 'docker restart backend >/dev/null'
+  for _ in $(seq 30); do
+    if panel_ok; then break; fi
+    sleep 3
+  done
+}
+# Memory (MiB) and CPU (% of one core) peaks between two times, for one search level.
+level_peaks() {
+  awk -v label="$1" -v a="$2" -v b="$3" \
+    'function mib(v) { if (v ~ /GiB$/) return v * 1024; if (v ~ /MiB$/) return v + 0; if (v ~ /KiB$/) return v / 1024; return 0 }
+     $1 >= a && $1 <= b {
+       m = mib($3); cpu = $4; sub(/%/, "", cpu); name = $2; sub(/^mailcowdockerized-/, "", name); sub(/-1$/, "", name)
+       if (m > peak[name]) peak[name] = m; if (cpu + 0 > cpeak[name]) cpeak[name] = cpu + 0
+       group = $2 ~ /^mailcowdockerized-/ ? "mailcow" : (name ~ /^(backend|pg|redis)$/ ? "panel" : "")
+       if (group != "") { sum[$1, group] += m; sum[$1, "both"] += m; times[$1] = 1 } }
+     END {
+       split("mailcow panel both", gs, " ")
+       for (i = 1; i <= 3; i++) for (t in times) if (sum[t, gs[i]] > top[gs[i]]) top[gs[i]] = sum[t, gs[i]]
+       printf "LEVEL %s letters: memory peak mailcow %.0f MiB (dovecot %.0f), panel %.0f MiB (backend %.0f, pg %.0f), both %.0f MiB; CPU peak backend %.0f%%, pg %.0f%%, dovecot %.0f%%\n",
+         label, top["mailcow"], peak["dovecot-mailcow"], top["panel"], peak["backend"], peak["pg"], top["both"],
+         cpeak["backend"], cpeak["pg"], cpeak["dovecot-mailcow"] }' "$STATS"
+}
+
 phase setup
-phase delivery
-phase sessions
-log "restarting the backend"
-restarted_at=$(( $(date +%s) * 1000 ))
-inner 'docker restart backend >/dev/null'
-for _ in $(seq 30); do
-  if panel_ok; then break; fi
-  sleep 3
-done
-phase restart "-e RESTARTED_AT=$restarted_at"
+if [ "$SCENARIO" = search ]; then
+  phase users
+  DOVECOT=mailcowdockerized-dovecot-mailcow-1
+  have=0
+  for level in ${LEVELS//,/ }; do
+    per=$((level / MAILBOXES))
+    level_started=$(date +%s)
+    log "level $level letters: $((per - have)) new per mailbox, $per in all"
+    inner 'rm -rf /opt/seed && mkdir -m 777 /opt/seed'
+    phase seed "-v /opt/seed:/seed -e SEED_FROM=$have -e SEED_COUNT=$((per - have))"
+    inner "docker cp /opt/seed/. $DOVECOT:/tmp/seed && rm -rf /opt/seed"
+    # Dovecot takes the letters and the panel syncs them while the employees search.
+    phase search "-e SEARCH_LABEL=sync -e SEARCH_UNTIL_ROWS=$level" &
+    search_pid=$!
+    # doveadm logs every letter it copies; its output is shown only when an import fails.
+    inner "docker exec $DOVECOT sh -c 'chown -R vmail:vmail /tmp/seed \
+      && { ls /tmp/seed | xargs -P 8 -I{} doveadm import -u {}@$DOMAIN maildir:/tmp/seed/{} \"\" all >/tmp/import.log 2>&1 \
+           || { grep -v \": Info: \" /tmp/import.log | tail -20; exit 1; }; } && rm -rf /tmp/seed /tmp/import.log'"
+    wait "$search_pid"
+    have=$per
+    phase bodies
+    phase search "-e SEARCH_LABEL=rest -e SEARCH_SECONDS=60"
+    phase search "-e SEARCH_LABEL=delivery -e SEARCH_SECONDS=60" &
+    search_pid=$!
+    phase delivery
+    wait "$search_pid"
+    restart_backend
+    phase search "-e SEARCH_LABEL=restart -e SEARCH_SECONDS=120" &
+    search_pid=$!
+    phase restart "-e RESTARTED_AT=$restarted_at"
+    wait "$search_pid"
+    level_peaks "$level" "$level_started" "$(date +%s)"
+  done
+else
+  phase delivery
+  phase sessions
+  restart_backend
+  phase restart "-e RESTARTED_AT=$restarted_at"
+fi
 kill "$SAMPLER_PID" 2>/dev/null || true
 SAMPLER_PID=''
 # The busiest moments. Memory in MiB: the peak of each container, and the peak of the sum over

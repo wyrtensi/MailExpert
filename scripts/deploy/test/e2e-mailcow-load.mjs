@@ -32,6 +32,11 @@ const GMAIL_IMAP = 'imap.gmail.com';
 const GMAIL_SMTP = 'smtp.gmail.com';
 const BOX_PASSWORD = 'e2e-Gmail-like-password-1';
 const MAILBOXES = Number(process.env.MAILBOXES || 100);
+// GMAIL_MAILBOXES adds Gmail-like mailboxes (gbox000...) next to the node's; the letter generator
+// numbers them from GMAIL_BOX_BASE.
+const GMAIL_EXTRA = Number(process.env.GMAIL_MAILBOXES || 0);
+const ALL_MAILBOXES = MAILBOXES + GMAIL_EXTRA;
+const GMAIL_BOX_BASE = 1000;
 const DOMAIN = process.env.DOMAIN;
 const USER = { username: 'admin', password: 'e2e-admin-password-1' };
 const sleep = (ms) => new Promise((resolve) => { setTimeout(resolve, ms); });
@@ -69,9 +74,9 @@ function percentiles(values) {
   return { p50: at(50), p95: at(95), max: sorted[sorted.length - 1] };
 }
 
-// The mailboxes under test: the mail node's, or the Gmail-like ones.
+// The mailboxes under test: the mail node's, the Gmail-like ones, or both with GMAIL_MAILBOXES.
 const nodeAccounts = async (s) => (await s.call('GET', '/accounts')).data
-  .filter((a) => (GMAIL ? a.imap_host === GMAIL_IMAP : a.mail_node));
+  .filter((a) => (GMAIL ? a.imap_host === GMAIL_IMAP : a.mail_node || (GMAIL_EXTRA > 0 && a.imap_host === GMAIL_IMAP)));
 
 // A mailbox created straight in mailcow with a known password, for adding it as a Gmail account.
 async function mailcowMailbox(localPart, domain) {
@@ -107,7 +112,7 @@ async function waitConnected(s, since, timeoutMs) {
         done.set(a.id, Date.now() - since);
       }
     }
-    if (done.size >= MAILBOXES) break;
+    if (done.size >= ALL_MAILBOXES) break;
     await sleep(1000);
   }
   const errors = (await nodeAccounts(s)).filter((a) => a.sync_error).map((a) => `${a.email_address}: ${a.sync_error}`);
@@ -117,7 +122,7 @@ async function waitConnected(s, since, timeoutMs) {
 const result = (data) => console.log(`RESULT ${JSON.stringify({ phase: PHASE, ...data })}`);
 
 // Before anything logs in: the Gmail names must lead to the node, never to the real Gmail.
-if (GMAIL) {
+if (GMAIL || GMAIL_EXTRA) {
   const { resolve4 } = await import('node:dns/promises');
   for (const host of [GMAIL_IMAP, GMAIL_SMTP]) {
     const ips = await resolve4(host);
@@ -133,7 +138,7 @@ if (PHASE === 'setup') {
   assert.equal(r.status, 200);
   r = await s.call('PUT', '/mail-node/config', { mailHost: MAIL_HOST, apiKey: API_KEY, quotaMb: 5120 });
   assert.equal(r.status, 200, JSON.stringify(r.data));
-  r = await s.call('POST', '/mail-node/domains', { domain: DOMAIN, mailboxes: MAILBOXES + 10 });
+  r = await s.call('POST', '/mail-node/domains', { domain: DOMAIN, mailboxes: ALL_MAILBOXES + 10 });
   assert.equal(r.status, 200, JSON.stringify(r.data));
 
   const since = Date.now();
@@ -148,18 +153,25 @@ if (PHASE === 'setup') {
     assert.equal(r.status, 200, JSON.stringify(r.data));
     createMs.push(Date.now() - t0);
   }
+  for (let i = 0; i < GMAIL_EXTRA; i++) {
+    const localPart = `gbox${String(i).padStart(3, '0')}`;
+    await mailcowMailbox(localPart, DOMAIN);
+    r = await addGmailLikeAccount(s, `${localPart}@${DOMAIN}`);
+    assert.equal(r.status, 200, JSON.stringify(r.data));
+  }
   const created = Date.now() - since;
   const c = await waitConnected(s, since, 600000);
   result({
     kind: GMAIL ? 'gmail' : 'node',
     mailboxes: MAILBOXES,
+    ...(GMAIL_EXTRA ? { gmailMailboxes: GMAIL_EXTRA } : {}),
     createSeconds: seconds(created),
     createPerMailboxMs: percentiles(createMs),
     connected: c.connected,
     connectSeconds: c.times.length ? percentiles(c.times.map(seconds)) : null,
     errors: c.errors.slice(0, 5),
   });
-  assert.equal(c.connected, MAILBOXES, `only ${c.connected} of ${MAILBOXES} connected`);
+  assert.equal(c.connected, ALL_MAILBOXES, `only ${c.connected} of ${ALL_MAILBOXES} connected`);
 }
 
 if (PHASE === 'delivery') {
@@ -205,7 +217,7 @@ if (PHASE === 'restart') {
     reconnectSeconds: c.times.length ? percentiles(c.times.map(seconds)) : null,
     errors: c.errors.slice(0, 5),
   });
-  assert.equal(c.connected, MAILBOXES, `only ${c.connected} of ${MAILBOXES} reconnected`);
+  assert.equal(c.connected, ALL_MAILBOXES, `only ${c.connected} of ${ALL_MAILBOXES} reconnected`);
 }
 
 if (PHASE === 'sessions') {
@@ -329,7 +341,12 @@ function letter(box, index) {
   };
 }
 
-const boxName = (box) => `box${String(box).padStart(3, '0')}`;
+const boxName = (box) => (box >= GMAIL_BOX_BASE
+  ? `gbox${String(box - GMAIL_BOX_BASE).padStart(3, '0')}` : `box${String(box).padStart(3, '0')}`);
+const seededBoxes = () => [
+  ...Array.from({ length: MAILBOXES }, (_, i) => i),
+  ...Array.from({ length: GMAIL_EXTRA }, (_, i) => GMAIL_BOX_BASE + i),
+];
 const encodedWord = (text) => `=?UTF-8?B?${Buffer.from(text).toString('base64')}?=`;
 
 function rfc822(l, box) {
@@ -386,7 +403,7 @@ if (PHASE === 'seed') {
   const from = Number(process.env.SEED_FROM);
   const count = Number(process.env.SEED_COUNT);
   let bytes = 0;
-  for (let box = 0; box < MAILBOXES; box++) {
+  for (const box of seededBoxes()) {
     const dir = `/seed/${boxName(box)}`;
     await Promise.all(['cur', 'new', 'tmp'].map((d) => mkdir(`${dir}/${d}`, { recursive: true })));
     for (let index = from; index < from + count; index++) {
@@ -397,7 +414,7 @@ if (PHASE === 'seed') {
       await writeFile(`${dir}/cur/${time}.M${index}P${box}.seed:2,${l.seen ? 'S' : ''}`, text);
     }
   }
-  result({ letters: MAILBOXES * count, perMailbox: count, averageBytes: Math.round(bytes / (MAILBOXES * count)) });
+  result({ letters: ALL_MAILBOXES * count, perMailbox: count, averageBytes: Math.round(bytes / (ALL_MAILBOXES * count)) });
 }
 
 if (PHASE === 'bodies') {

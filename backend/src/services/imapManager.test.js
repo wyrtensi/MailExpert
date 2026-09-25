@@ -4517,6 +4517,35 @@ describe('setFlag routing over the persistent session', () => {
     expect(persistent.messageFlagsAdd).toHaveBeenCalledWith('43', ['\\Seen'], { uid: true, silent: true });
   });
 
+  it('uses the pool at once while a sync that outlived its caller still holds the INBOX lock', async () => {
+    // connectAccount's initial sync gives up after 40s but syncMessages keeps running, holding
+    // the persistent session's INBOX lock, after connectingAccounts has been cleared.
+    vi.useFakeTimers();
+    const persistent = fakePersistent({ mailbox: { path: 'INBOX', uidValidity: 7, exists: 1 } });
+    const { mgr, account } = arrange({ persistent });
+    let failSync;
+    query.mockImplementation(async (sql) => (String(sql).includes('uid_validity')
+      ? new Promise((_, rej) => { failSync = () => rej(new Error('db gone')); })
+      : { rows: [account] }));
+    vi.spyOn(console, 'warn').mockImplementation(() => {});
+    const sync = mgr.syncMessages(account, persistent, 'INBOX', 20, false, true).catch(() => {});
+    await vi.advanceTimersByTimeAsync(1);
+    expect(persistent.getMailboxLock).toHaveBeenCalledOnce(); // the sync holds INBOX
+
+    const done = vi.fn();
+    const click = mgr.setFlag(account, 42, 'INBOX', '\\Seen', true).then(done);
+    await vi.advanceTimersByTimeAsync(50);
+    expect(done).toHaveBeenCalled();                     // no wait on the sync's lock
+    await click;
+    expect(persistent.getMailboxLock).toHaveBeenCalledOnce();
+    expect(poolClients[0].messageFlagsAdd).toHaveBeenCalled();
+
+    failSync();                                          // the sync ends and lets go of INBOX
+    await sync;
+    await mgr.setFlag(account, 43, 'INBOX', '\\Seen', true);
+    expect(persistent.messageFlagsAdd).toHaveBeenCalledWith('43', ['\\Seen'], { uid: true, silent: true });
+  });
+
   it('uses a reconnected session at once even while the old one still has a STORE out', async () => {
     vi.useFakeTimers();
     const stuck = fakePersistent({ messageFlagsAdd: vi.fn(() => new Promise(() => {})) });

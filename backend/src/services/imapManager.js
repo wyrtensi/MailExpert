@@ -1339,6 +1339,9 @@ export const PERSISTENT_FLAG_LOCK_WAIT_MS = 4500;
 // certainly dead, and the sync tick closes such a session, but the wait itself must not depend on
 // that happening (a click on the same message would hang until it did).
 export const PERSISTENT_FLAG_LATE_STORE_WAIT_MS = 15000;
+// Clients whose mailbox lock syncMessages holds right now. Module-level because the lock
+// belongs to the client, not to a manager (and tests call syncMessages with a bare `this`).
+const syncLockedClients = new WeakSet();
 
 export function poolSizeFor(account) {
   return providerProfile(account).poolSize ?? POOL_SIZE;
@@ -3675,6 +3678,10 @@ export class ImapManager {
 
     try {
       const lock = await client.getMailboxLock(folder);
+      // setFlag skips a persistent session while a sync holds its lock. Marked here rather
+      // than by the callers, so it also covers a sync that outlived its caller's timeout
+      // (the initial sync in connectAccount keeps running detached after 40s).
+      syncLockedClients.add(client);
       try {
         const mailbox = client.mailbox;
         // A missing mailbox is unknown, never proof of an empty mailbox.
@@ -4254,6 +4261,7 @@ export class ImapManager {
         await stampLastSync(account.id);
         return { insertedCount, broadcastedNewMessages };
       } finally {
+        syncLockedClients.delete(client);
         lock.release();
       }
     } catch (err) {
@@ -6100,7 +6108,8 @@ export class ImapManager {
   //  - Not while this account syncs or connects. syncMessages holds this session's INBOX lock
   //    for the whole sync and applies inbox rules inside it, so a store from a rule would wait
   //    for a lock its own caller holds. The initial sync runs under connectingAccounts, before
-  //    syncingAccounts is ever set.
+  //    syncingAccounts is ever set. syncMessages also marks the client while it holds the
+  //    lock (syncLockedClients), which covers a sync still running after its caller gave up.
   //  - Bounded. A timeout falls through to the pool rather than hanging the click. The attempt
   //    keeps running detached; if its lock arrives after we gave up it releases at once and
   //    stores nothing, so the lock cannot leak and the store is not sent twice.
@@ -6124,6 +6133,7 @@ export class ImapManager {
     // usable === false: a dead transport, where a queued command hangs or fails late. The pool
     // path with its eviction and retry is the right place for that.
     if (!client || client.usable === false) return false;
+    if (syncLockedClients.has(client)) return false;
     if (this._persistentFlagStuck.get(account.id) === client) return false;
     let expired = false;
     let settled = false;

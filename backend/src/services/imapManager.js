@@ -6086,6 +6086,15 @@ export class ImapManager {
         /EPIPE/.test(detail)
       );
       if (isTransient) {
+        // No fresh-login retry while a backoff is armed (the account's own cooldown or the
+        // secondary one). The retry is a brand-new LOGIN, exactly the request the backoff exists
+        // to hold back; against a server already refusing us it only adds one more refusal per
+        // click. Rethrow the first failure instead.
+        if (this._secondaryConnectBlocked(account.id)) {
+          const wrapped = new Error(detail);
+          wrapped.imapError = true;
+          throw wrapped;
+        }
         try {
           return await doFetch(withFreshLogin);
         } catch (retryErr) {

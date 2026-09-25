@@ -2853,7 +2853,8 @@ describe('extractImapError', () => {
       return client;
     });
     const gmail = { id: 'body-fetch-missing', user_id: 'u1', imap_host: 'imap.gmail.com', imap_tls: true };
-    const body = await ImapManager.prototype.fetchMessageBody.call({}, gmail, 42, 'INBOX');
+    // No backoff armed: the fresh-login retry is allowed.
+    const body = await ImapManager.prototype.fetchMessageBody.call({ _secondaryConnectBlocked: () => null }, gmail, 42, 'INBOX');
     expect(body).toEqual({ html: null, text: null, attachments: [] });
     expect(clients).toHaveLength(2); // pooled attempt, then the fresh-login retry
     vi.restoreAllMocks();
@@ -4793,5 +4794,55 @@ describe('secondary-connection refusals escalate their own backoff', () => {
     await expect(mgr._withCountClient(acct, async () => {})).rejects.toThrow();
     mgr.clearConnectCooldown(acct.id);
     expect(mgr._secondaryCooldown.has(acct.id)).toBe(false);
+  });
+});
+
+describe('fetchMessageBody opens no fresh login while a backoff is armed', () => {
+  // Drives the real pool: the pooled attempt fails with ECONNRESET, which IS in the transient
+  // list, so the test reaches the retry decision rather than failing before it.
+  let created;
+  beforeEach(() => {
+    vi.clearAllMocks();
+    created = 0;
+    getConnectionPolicy.mockResolvedValue({ allowPrivateHosts: true });
+    resolveForConnection.mockResolvedValue({ host: '127.0.0.1', addresses: ['127.0.0.1'] });
+    ImapFlow.mockImplementation(function () {
+      created++;
+      const client = Object.assign(new EventEmitter(), {
+        usable: true,
+        connect: vi.fn().mockResolvedValue(),
+        logout: vi.fn().mockResolvedValue(),
+        getMailboxLock: vi.fn().mockRejectedValue(new Error('ECONNRESET')),
+      });
+      client.close = vi.fn(() => { client.usable = false; client.emit('close'); });
+      return client;
+    });
+    vi.spyOn(console, 'warn').mockImplementation(() => {});
+  });
+  afterEach(() => { vi.restoreAllMocks(); });
+
+  const account = id => ({ id, user_id: 'u1', imap_host: 'mail.example.com', imap_tls: true });
+
+  it('rethrows the first failure while the secondary backoff is armed', async () => {
+    const mgr = ladderManager();
+    const acct = account('body-retry-secondary');
+    mgr._secondaryCooldown.set(acct.id, { until: Date.now() + 60000, failures: 2 });
+    await expect(mgr.fetchMessageBody(acct, 9, 'INBOX')).rejects.toThrow('ECONNRESET');
+    expect(created).toBe(1); // the pooled attempt only, no fresh-login retry
+  });
+
+  it('rethrows the first failure while the live-sync cooldown is armed', async () => {
+    const mgr = ladderManager();
+    const acct = account('body-retry-primary');
+    mgr._connectCooldown.set(acct.id, { until: Date.now() + 60000, failures: 1 });
+    await expect(mgr.fetchMessageBody(acct, 9, 'INBOX')).rejects.toThrow('ECONNRESET');
+    expect(created).toBe(1);
+  });
+
+  it('still retries over a fresh login when nothing is armed', async () => {
+    const mgr = ladderManager();
+    const acct = account('body-retry-free');
+    await expect(mgr.fetchMessageBody(acct, 9, 'INBOX')).rejects.toThrow('ECONNRESET');
+    expect(created).toBe(2);
   });
 });

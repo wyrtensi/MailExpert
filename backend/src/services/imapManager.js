@@ -252,6 +252,11 @@ const ACCOUNT_ERROR_MIN_STREAK = 2;
 const CONNECT_COOLDOWN_BASE_MS = 30 * 1000;      // first refusal ≈ 30s
 const CONNECT_COOLDOWN_MAX_MS = 15 * 60 * 1000;  // capped at 15 min
 
+// Consecutive body-prefetch failures tolerated before the run is abandoned. Same threshold as
+// backfill's consecutive-error stop: two failures can be one bad message, three in a row means
+// the server or the connection is the problem.
+export const PREFETCH_MAX_CONSECUTIVE_ERRORS = 3;
+
 // True when an IMAP error looks like a connection-limit / throttle / temporary refusal —
 // the class of failure that should back off rather than retry hard. Deliberately broad on
 // the safe side: a false positive only means a ~30s backoff, never data loss.
@@ -2507,7 +2512,9 @@ export class ImapManager {
       // backfillAllFolders runs INBOX first, then all other known folders sequentially.
       if (shouldBackfill) {
         this.backfillAllFolders(account).catch(err =>
-          console.error(`Backfill error for ${logAccount(account)}:`, err.message)
+          // extractImapError, not err.message: an IMAP rejection arriving here would otherwise
+          // read 'Command failed'. It falls back to err.message, so other errors are unchanged.
+          console.error(`Backfill error for ${logAccount(account)}:`, extractImapError(err))
         );
       } else {
         logger.debug(`Backfill deferred on connect for ${logAccount(account)} — account already has cached mail`);
@@ -5761,6 +5768,7 @@ export class ImapManager {
     );
     if (!uncachedResult.rows.length) return;
 
+    let consecutiveErrors = 0;
     for (const msg of uncachedResult.rows) {
       const quietFor = Date.now() - (this.lastUserActivity.get(accountId) || 0);
       if (quietFor < QUIET_WINDOW_MS) {
@@ -5787,8 +5795,37 @@ export class ImapManager {
           );
         }
       } catch (err) {
-        console.warn(`Folder body prefetch failed for uid ${msg.uid}:`, err.message);
+        const detail = extractImapError(err);
+        console.warn(`Folder body prefetch failed for uid ${msg.uid}:`, detail);
+
+        // Stop the run instead of walking the rest of the list. Each iteration draws its own
+        // connection (a pooled session, or a fresh login on retry), so against a server that is
+        // refusing us, continuing turns one refusal into one more login per remaining message
+        // and takes the pool away from the user's own actions. This runs on every folder view,
+        // and on a shared mail node every extra login counts against the per-user+IP limit.
+        //
+        // Two guards:
+        //  - an explicit refusal stops the run at the first one: the server has already said it
+        //    is at its limit;
+        //  - three consecutive failures of any kind stop it too, for a server whose refusal is
+        //    not phrased as one. A success resets the count, so one bad message does not stop
+        //    the rest of the folder.
+        //
+        // Deliberately NOT armed onto the account's connect cooldown: that map gates
+        // connectAccount, the reconnect and the poll-only tick, so a refused best-effort prefetch
+        // would delay live sync. Bodies are fetched on demand when a message is opened, and the
+        // next folder view re-runs this for whatever is still uncached.
+        if (isConnectionRefusal(detail)) {
+          console.log(`Body prefetch stopping for ${logAccount(account)}: server is refusing connections`);
+          return;
+        }
+        if (++consecutiveErrors >= PREFETCH_MAX_CONSECUTIVE_ERRORS) {
+          console.log(`Body prefetch stopping for ${logAccount(account)} after ${consecutiveErrors} consecutive errors`);
+          return;
+        }
+        continue;
       }
+      consecutiveErrors = 0;
     }
   }
 

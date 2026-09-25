@@ -4625,3 +4625,59 @@ describe('setFlag routing over the persistent session', () => {
     expect(persistent.messageFlagsRemove).toHaveBeenCalledOnce();
   });
 });
+
+// ── Backoff ladders (upstream #474 round) ──────────────────────────────────────
+
+const ladderManager = () => {
+  const mgr = new ImapManager(null);
+  for (const key of ['_healthCheckTimer', '_snippetSchedulerTimer', '_stalenessCheckTimer', '_flagPushReconcilerTimer', '_folderStatusTimer', '_providerIdSchedulerTimer']) clearInterval(mgr[key]);
+  mgr.broadcast = vi.fn();
+  return mgr;
+};
+
+describe('prefetchFolderBodies stops instead of hammering a refusing server', () => {
+  // A generic host: the mail node's profile, where snippetIndex (and so folder prefetch) is on.
+  const acct = { id: 'prefetch-acct', user_id: 'u1', enabled: true, imap_host: 'mail.example.com', imap_port: 993, imap_tls: true };
+  const ids = ['m1', 'm2', 'm3', 'm4', 'm5', 'm6'];
+
+  beforeEach(() => {
+    vi.clearAllMocks();
+    query.mockReset();
+    query.mockImplementation(async (sql) => {
+      if (sql.startsWith('SELECT * FROM email_accounts')) return { rows: [acct] };
+      if (sql.includes('body_html IS NULL AND body_text IS NULL')) return { rows: ids.map((id, i) => ({ id, uid: i + 1, folder: 'INBOX' })) };
+      return { rows: [] };
+    });
+    vi.spyOn(console, 'warn').mockImplementation(() => {});
+    vi.spyOn(console, 'log').mockImplementation(() => {});
+  });
+  afterEach(() => { vi.restoreAllMocks(); });
+
+  it('stops at the first refusal and leaves the live-sync cooldown alone', async () => {
+    const mgr = ladderManager();
+    // Dovecot's per-user+IP limit, as fetchMessageBody rethrows it (message text only).
+    mgr.fetchMessageBody = vi.fn().mockRejectedValue(new Error('Maximum number of connections from user+IP exceeded (mail_max_userip_connections=20)'));
+    await mgr.prefetchFolderBodies(acct.id, ids);
+    expect(mgr.fetchMessageBody).toHaveBeenCalledTimes(1);
+    expect(mgr._connectCooldown.has(acct.id)).toBe(false);
+  });
+
+  it('stops after three consecutive failures of any kind', async () => {
+    const mgr = ladderManager();
+    mgr.fetchMessageBody = vi.fn().mockRejectedValue(new Error('Unexpected server response'));
+    await mgr.prefetchFolderBodies(acct.id, ids);
+    expect(mgr.fetchMessageBody).toHaveBeenCalledTimes(3);
+  });
+
+  it('resets the count on a success, so scattered bad messages do not stop the folder', async () => {
+    const mgr = ladderManager();
+    const bad = new Error('Unexpected server response');
+    mgr.fetchMessageBody = vi.fn()
+      .mockRejectedValueOnce(bad).mockRejectedValueOnce(bad)
+      .mockResolvedValueOnce({ html: null, text: 'ok', attachments: [] })
+      .mockRejectedValueOnce(bad).mockRejectedValueOnce(bad)
+      .mockResolvedValueOnce({ html: null, text: 'ok', attachments: [] });
+    await mgr.prefetchFolderBodies(acct.id, ids);
+    expect(mgr.fetchMessageBody).toHaveBeenCalledTimes(6);
+  });
+});

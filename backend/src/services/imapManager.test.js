@@ -6071,5 +6071,36 @@ describe('every background login waits out a rejected password', () => {
       expect(second.providerRefusing).toBeUndefined();
       expect(clients).toHaveLength(2 * perAttempt);
     });
+
+    describe('an OAuth mailbox while its account-wide auth ladder is armed', () => {
+      // Its own login was rejected after a forced refresh. fail2ban does not guard Gmail, so the
+      // pool holds back only background callers; a user's action still tries its login.
+      const armedOAuth = () => {
+        const acct = { ...account(), imap_host: 'imap.gmail.com', oauth_provider: 'google', oauth_access_token: 'enc' };
+        const mgr = ladderManager();
+        mgr._noteAuthFailure(acct);
+        return { acct, mgr };
+      };
+
+      it('lets a user action log in', async () => {
+        const { acct } = armedOAuth();
+        const err = await acquirePooledClient(acct).catch(e => e);
+        expect(err.providerRefusing).toBeUndefined();
+        expect(clients.length).toBeGreaterThan(0);
+      });
+
+      it('holds a background caller back', async () => {
+        const { acct } = armedOAuth();
+        await expect(acquirePooledClient(acct, { background: true })).rejects.toMatchObject({ providerRefusing: true });
+        expect(clients).toHaveLength(0);
+      });
+
+      it('holds a password mailbox back for a user action too', async () => {
+        const acct = account();
+        ladderManager()._noteAuthFailure(acct);
+        await expect(acquirePooledClient(acct)).rejects.toMatchObject({ providerRefusing: true });
+        expect(clients).toHaveLength(0);
+      });
+    });
   });
 });

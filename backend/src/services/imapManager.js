@@ -1532,7 +1532,13 @@ async function applyHelperAuthFailure(account, err, what) {
 // 503 mailbox_busy. A login would only be rejected again, one more strike toward fail2ban, whose
 // ban cuts the panel off every mailbox on the node. Refusal windows do not count here: work a user
 // is waiting on may still try a login while the server merely refuses extra connections.
-function loginHeldBack(account) {
+//
+// OAuth mailboxes (Gmail) are held back for background callers only. fail2ban does not guard
+// Gmail, and a single leftover AUTHENTICATIONFAILED there is routine, so a user's move, delete or
+// folder open must not answer "busy" for the whole window; their background work keeps the gates
+// it has (_poolLoginOpts, _secondaryLoginBlocked).
+function loginHeldBack(account, { background = false } = {}) {
+  if (isOAuthAccount(account) && !background) return false;
   return !!helperManager?._authLoginBlocked?.(account.id);
 }
 
@@ -1592,7 +1598,7 @@ function drainWaiters(pool) {
     pool.waiters.shift();
     clearTimeout(head.timer);
     // A waiter queued before a rejected password held logins back must not log in now either.
-    if (loginHeldBack(head.account)) { head.reject(providerRefusingError()); continue; }
+    if (loginHeldBack(head.account, { background: head.background })) { head.reject(providerRefusingError()); continue; }
     growPool(pool, head.account).then(head.resolve, head.reject);
   }
 }
@@ -1652,7 +1658,7 @@ export async function acquirePooledClient(account, { background = false, noNewLo
   }
   const pool = connectionPools.get(id);
 
-  if (noNewLogin || loginHeldBack(account)) {
+  if (noNewLogin || loginHeldBack(account, { background })) {
     const idle = pool.waiters.length === 0 && pool.clients.find(c => !pool.inUse.has(c));
     if (idle) {
       disarmPoolIdleClose(pool, idle);
@@ -3007,7 +3013,7 @@ export class ImapManager {
   // The window that holds logins back because the password was rejected, or null: the account-wide
   // auth ladder (armed by the account's own login) or the secondary one (armed by any other login
   // while the persistent connection is up). The gate the pool and withFreshLogin apply to every
-  // caller (loginHeldBack). Narrower than _secondaryLoginBlocked on purpose: work a user or a rule
+  // caller of a password mailbox, and to background callers of an OAuth one (loginHeldBack). Narrower than _secondaryLoginBlocked on purpose: work a user or a rule
   // is waiting on (a click, a move, a flag store, a rule forward) may still try a login while the
   // server merely refuses extra connections, but a login with a password the server just rejected
   // only adds a strike toward fail2ban, whose ban cuts off every mailbox on the node.

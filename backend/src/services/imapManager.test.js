@@ -6038,6 +6038,19 @@ describe('every background login waits out a rejected password', () => {
       expect(clients).toHaveLength(1);
     });
 
+    it('without a persistent session, a rejected pool login arms the account-wide ladder and paints the mailbox red', async () => {
+      // Nothing else would record it: reconnect, health check and status client wait the window out.
+      const acct = account();
+      const mgr = ladderManager();
+      query.mockImplementation(async () => ({ rows: [], rowCount: 1 }));
+      await expect(mgr.moveMessage(acct, 5, 'INBOX', 'Archive')).rejects.toBeTruthy();
+      expect(mgr._connectCooldown.get(acct.id).authArmed).toBe(true);
+      const writes = query.mock.calls.filter(([sql]) => sql.startsWith('UPDATE email_accounts SET sync_error = $1'));
+      expect(writes).toHaveLength(1);
+      expect(writes[0][1][0]).toMatch(/AUTHENTICATIONFAILED/);
+      expect(mgr.broadcast).toHaveBeenCalledWith(expect.objectContaining({ type: 'account_error', accountId: acct.id }));
+    });
+
     it('a rejected fresh login arms the ladder too', async () => {
       // PurelyMail fetches bodies over a brand-new login (preferFreshBodyFetch), not the pool.
       const acct = { ...account(), imap_host: 'imap.purelymail.com' };

@@ -3080,6 +3080,10 @@ export class ImapManager {
       await this._recordAccountError(account, extractImapError(err));
     } else {
       this._noteAuthFailure(account);
+      // Recorded here too: the reconnect, the health check and the status client all wait out the
+      // window this just armed, so nothing else would paint the mailbox red for its whole length,
+      // and every user action on it would answer "busy" from a mailbox that looks healthy.
+      await this._recordAccountError(account, extractImapError(err));
     }
   }
 

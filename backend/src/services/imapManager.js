@@ -7274,6 +7274,12 @@ export class ImapManager {
         const accountResult = await query('SELECT * FROM email_accounts WHERE id = $1', [row.account_id]);
         if (!accountResult.rows.length) continue;
         const account = accountResult.rows[0];
+        // A background job like any other: a disabled mailbox, or one whose backoffs hold background
+        // logins back, keeps its letter snoozed until a minute that lets it through. The row stays,
+        // so nothing is lost. Without this the wakeup logged in once a minute per due letter however
+        // often the password had been rejected: ten strikes toward fail2ban in ten minutes. A
+        // rejected login here arms the ladder in the pool (applyHelperAuthFailure).
+        if (!account.enabled || this._secondaryLoginBlocked(account.id)) continue;
 
         // Guard source UID before the IMAP move so reconcileDeletes cannot delete
         // the DB row if an EXPUNGE arrives from the Snoozed folder while the move

@@ -5695,6 +5695,82 @@ describe('every background login waits out a rejected password', () => {
     });
   });
 
+  describe('snooze wakeup', () => {
+    // A letter snoozed until 9:00 in a node mailbox whose password changed on mailcow: the wakeup
+    // ran every minute and logged in for it every time, windows or not.
+    const snoozeManager = (acct) => {
+      const mgr = liveManager(acct);
+      query.mockImplementation(async (sql) => {
+        if (sql.includes('SELECT sm.id AS snooze_id')) {
+          return { rows: [{ snooze_id: 's1', account_id: acct.id, message_id_header: '<s1@example.com>', original_folder: 'INBOX', snoozed_folder: 'Snoozed', uid: 5, is_read: true }] };
+        }
+        if (sql.startsWith('SELECT * FROM email_accounts')) return { rows: [acct] };
+        return { rows: [], rowCount: 1 };
+      });
+      return mgr;
+    };
+    const snoozeRowDeleted = () => query.mock.calls.some(([sql]) => sql.startsWith('DELETE FROM snoozed_messages WHERE id'));
+
+    const holds = {
+      'a rejected password': rejectedPassword,
+      // The pool's own gate covers rejected passwords only; a background job also waits out refusals.
+      'the secondary refusal backoff': (mgr, acct) => mgr._secondaryCooldown.set(acct.id, { until: Date.now() + 60000, failures: 1 }),
+    };
+    for (const [what, hold] of Object.entries(holds)) {
+      it(`does not log in while ${what} holds background logins back, and keeps the letter`, async () => {
+        const acct = account();
+        const mgr = snoozeManager(acct);
+        connectError = null; // whatever the server would answer, no login is tried
+        hold(mgr, acct);
+        await mgr._runSnoozeWakeup();
+        expect(clients).toHaveLength(0);
+        expect(snoozeRowDeleted()).toBe(false);
+      });
+    }
+
+    it('arms the ladder on its rejected login, so the next minute opens nothing', async () => {
+      const acct = account();
+      const mgr = snoozeManager(acct);
+      await mgr._runSnoozeWakeup();
+      expect(clients).toHaveLength(1);
+      await mgr._runSnoozeWakeup();
+      expect(clients).toHaveLength(1);
+      expect(snoozeRowDeleted()).toBe(false);
+    });
+
+    it('leaves a disabled mailbox alone', async () => {
+      const acct = { ...account(), enabled: false };
+      const mgr = snoozeManager(acct);
+      await mgr._runSnoozeWakeup();
+      expect(clients).toHaveLength(0);
+    });
+
+    it('wakes the letter once the password works again', async () => {
+      const acct = account();
+      const mgr = snoozeManager(acct);
+      await mgr._runSnoozeWakeup();
+      mgr.clearConnectCooldown(acct.id); // Reconnect or a settings save with the new password
+      connectError = null;
+      ImapFlow.mockImplementation(function () {
+        const client = Object.assign(new EventEmitter(), {
+          usable: true,
+          connect: vi.fn().mockResolvedValue(),
+          logout: vi.fn().mockResolvedValue(),
+          getMailboxLock: vi.fn().mockResolvedValue({ release: vi.fn() }),
+          messageMove: vi.fn().mockResolvedValue({ uidMap: new Map([[5, 50]]) }),
+          messageFlagsRemove: vi.fn().mockResolvedValue(true),
+        });
+        client.close = vi.fn(() => { client.usable = false; client.emit('close'); });
+        clients.push(client);
+        return client;
+      });
+      await mgr._runSnoozeWakeup();
+      expect(clients[1].messageMove).toHaveBeenCalledOnce();
+      expect(snoozeRowDeleted()).toBe(true);
+      evictPool(acct.id);
+    });
+  });
+
   describe('the pool arms the auth ladder and holds logins back', () => {
     // Every pooled or fresh login goes through growPool or withFreshLogin, so that is where a
     // rejected password is noted, and where a noted one stops the next login.

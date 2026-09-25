@@ -6094,6 +6094,37 @@ describe('every background login waits out a rejected password', () => {
       expect(clients).toHaveLength(1);
     });
 
+    it('a server refusal on a pool login does not hold the next user action back', async () => {
+      // Dovecot's per-user+IP limit: not a rejected password, so no auth window and no hold.
+      const acct = account();
+      const mgr = liveManager(acct);
+      connectError = loginLimitRefusal;
+      const first = await mgr.moveMessage(acct, 5, 'INBOX', 'Archive').catch(e => e);
+      expect(first.providerRefusing).toBeUndefined();
+      expect(mgr._authLoginBlocked(acct.id)).toBeNull();
+      const second = await mgr.moveMessage(acct, 5, 'INBOX', 'Archive').catch(e => e);
+      expect(second.providerRefusing).toBeUndefined();
+      expect(clients).toHaveLength(2);
+    });
+
+    it('the Gmail folder status client through the pool: one rejected login per short window', async () => {
+      // Gmail runs folder status on the pool (statusOnPool), as a background caller.
+      const acct = { ...account(), imap_host: 'imap.gmail.com', oauth_provider: 'google', oauth_access_token: 'enc' };
+      const mgr = liveManager(acct);
+      query.mockImplementation(async (sql) => ({ rows: sql.startsWith('SELECT * FROM email_accounts') ? [acct] : [], rowCount: 1 }));
+      await expect(mgr._withCountClient(acct, async () => {})).rejects.toThrow();
+      const perAttempt = clients.length; // the login and connectImapClient's retry after a forced refresh
+      expect(perAttempt).toBeGreaterThan(0);
+      expect(mgr._secondaryCooldown.get(acct.id).failures).toBe(1);
+      expect(mgr._secondaryAuthCooldown.has(acct.id)).toBe(false);
+      await expect(mgr._withCountClient(acct, async () => {})).rejects.toThrow('Provider connection cooldown active');
+      expect(clients).toHaveLength(perAttempt);
+      mgr._secondaryCooldown.get(acct.id).until = 0; // the short window ran out
+      await expect(mgr._withCountClient(acct, async () => {})).rejects.toThrow();
+      expect(clients).toHaveLength(2 * perAttempt);
+      expect(mgr._secondaryCooldown.get(acct.id).failures).toBe(2);
+    });
+
     it('without a persistent session, a rejected pool login arms the account-wide ladder and paints the mailbox red', async () => {
       // Nothing else would record it: reconnect, health check and status client wait the window out.
       const acct = account();

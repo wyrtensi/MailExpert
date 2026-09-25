@@ -1587,7 +1587,7 @@ export function disarmPoolIdleClose(pool, client) {
 // the next one would be a fresh login per waiter against a provider that just refused us.
 // A head waiter a backoff holds back (noNewLogin, loginHeldBack) never grows the pool: it waits
 // for a session to be released, and the grow goes to the first waiter behind it that may log in.
-// With no session open, the held head fails at once with providerRefusing.
+// With no session open or being opened, the held head fails at once with providerRefusing.
 function drainWaiters(pool) {
   while (pool.waiters.length > 0) {
     const free = pool.clients.find(c => !pool.inUse.has(c));
@@ -1606,7 +1606,8 @@ function drainWaiters(pool) {
     // left to wait for. This also covers a waiter that queued before the window opened.
     const headAuthHeld = loginHeldBack(head.account, { background: head.background });
     if (head.noNewLogin || headAuthHeld) {
-      if (pool.clients.length > 0) {
+      // A session being opened (for a waiter behind it) counts: it is released to the head later.
+      if (pool.clients.length + (pool.connecting || 0) > 0) {
         // The held head waits for a released session (freed sessions still go to the head, above).
         // A waiter behind it that may log in (a move while the server only refuses extra
         // connections, say) must not wait behind it for a slot it can fill now.

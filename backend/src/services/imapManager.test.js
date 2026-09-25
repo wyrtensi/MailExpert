@@ -6336,6 +6336,38 @@ describe('every background login waits out a rejected password', () => {
       evictPool(acct.id);
     });
 
+    it('a held-back waiter keeps waiting while a session for the waiter behind it is still being opened', async () => {
+      const acct = account();
+      const mgr = liveManager(acct);
+      connectError = null;
+      const busy = await acquirePooledClient(acct);
+      mgr._secondaryCooldown.set(acct.id, { until: Date.now() + 60000, failures: 1 }); // a refusal window
+      let finishConnect;
+      ImapFlow.mockImplementation(function () {
+        const client = Object.assign(new EventEmitter(), {
+          usable: true,
+          connect: vi.fn(() => new Promise(r => { finishConnect = r; })), // this login is slow
+          logout: vi.fn().mockResolvedValue(),
+        });
+        client.close = vi.fn(() => { client.usable = false; client.emit('close'); });
+        clients.push(client);
+        return client;
+      });
+      let clickErr = null;
+      const click = acquirePooledClient(acct, { noNewLogin: true }).catch(e => { clickErr = e; return e; });
+      const move = acquirePooledClient(acct); // grows the pool: its login is under way
+      await vi.waitFor(() => expect(finishConnect).toBeTypeOf('function'));
+      busy.close(); // the only open session goes away while that login runs
+      await new Promise(r => setImmediate(r));
+      expect(clickErr).toBeNull(); // not "busy" while a session is on its way
+      finishConnect();
+      const opened = await move;
+      releasePooledClient(acct, opened);
+      expect(await click).toBe(opened);
+      releasePooledClient(acct, opened);
+      evictPool(acct.id);
+    });
+
     it('a waiting user action fails typed when the last open session closes', async () => {
       const acct = account();
       const mgr = liveManager(acct);

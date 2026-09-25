@@ -5694,4 +5694,117 @@ describe('every background login waits out a rejected password', () => {
       expect(mgr._secondaryCooldown.get(acct.id).failures).toBe(1);
     });
   });
+
+  describe('the pool arms the auth ladder and holds logins back', () => {
+    // Every pooled or fresh login goes through growPool or withFreshLogin, so that is where a
+    // rejected password is noted, and where a noted one stops the next login.
+    const expireWindows = (mgr, acct) => {
+      for (const map of [mgr._connectCooldown, mgr._statusAuthCooldown, mgr._secondaryCooldown]) {
+        const cd = map.get(acct.id);
+        if (cd) cd.until = 0;
+      }
+    };
+
+    it('a background job arms the ladder on its rejected login, and the next job opens nothing', async () => {
+      const acct = account();
+      const mgr = liveManager(acct);
+      await mgr._syncFlagsForRange(acct);
+      expect(clients).toHaveLength(1);
+      expect(mgr._authLoginBlocked(acct.id)).toBeTruthy();
+      await mgr._syncFlagsForRange(acct);
+      await mgr.reconcileDeletes(acct).catch(() => {});
+      await mgr.syncFolderViaPool(acct, 'Todo').catch(() => {});
+      expect(clients).toHaveLength(1);
+    });
+
+    it('after the window runs out, one rejected login arms it again', async () => {
+      const acct = account();
+      const mgr = liveManager(acct);
+      await mgr._syncFlagsForRange(acct);
+      expireWindows(mgr, acct);
+      await mgr._syncFlagsForRange(acct);
+      expect(clients).toHaveLength(2);
+      expect(mgr._statusAuthCooldown.get(acct.id).failures).toBe(2);
+      await mgr._syncFlagsForRange(acct);
+      expect(clients).toHaveLength(2);
+    });
+
+    it('a rule move costs one rejected login and then fails typed, without reconciling', async () => {
+      const acct = account();
+      const mgr = liveManager(acct);
+      await expect(mgr.bulkMoveMessages(acct, [5], 'INBOX', 'Archive')).rejects.toMatchObject({ providerRefusing: true });
+      expect(clients).toHaveLength(1);
+      const statusWarnings = () => console.warn.mock.calls.filter(([msg]) => String(msg).includes('reconciliation skipped')).length;
+      const warned = statusWarnings();
+      await expect(mgr.bulkMoveMessages(acct, [5], 'INBOX', 'Archive')).rejects.toMatchObject({ providerRefusing: true });
+      expect(clients).toHaveLength(1);
+      // Held back at the STATUS step already: no move is attempted after it.
+      expect(statusWarnings()).toBe(warned);
+    });
+
+    it('a user action before anything was armed costs one login, and the next fails fast', async () => {
+      const acct = account();
+      const mgr = liveManager(acct);
+      await expect(mgr.fetchMessageBody(acct, 5, 'INBOX')).rejects.toBeTruthy();
+      expect(clients).toHaveLength(1);
+      await expect(mgr.fetchMessageBody(acct, 5, 'INBOX')).rejects.toMatchObject({ providerRefusing: true });
+      await expect(mgr.moveMessage(acct, 5, 'INBOX', 'Archive')).rejects.toMatchObject({ providerRefusing: true });
+      await expect(mgr.fetchAttachment(acct, 5, 'INBOX', '2')).rejects.toMatchObject({ providerRefusing: true });
+      expect(clients).toHaveLength(1);
+    });
+
+    it('a rejected fresh login arms the ladder too', async () => {
+      // PurelyMail fetches bodies over a brand-new login (preferFreshBodyFetch), not the pool.
+      const acct = { ...account(), imap_host: 'imap.purelymail.com' };
+      const mgr = liveManager(acct);
+      await expect(mgr.fetchMessageBody(acct, 5, 'INBOX', { allowLogin: true })).rejects.toBeTruthy();
+      expect(clients).toHaveLength(1);
+      expect(mgr._authLoginBlocked(acct.id)).toBeTruthy();
+    });
+
+    it('still serves a user action over a pooled session that is already open', async () => {
+      const acct = account();
+      const mgr = liveManager(acct);
+      connectError = null;
+      releasePooledClient(acct, await acquirePooledClient(acct));
+      clients[0].messageMove = vi.fn().mockResolvedValue({ uidMap: new Map([[5, 50]]) });
+      rejectedPassword(mgr, acct);
+      await mgr.moveMessage(acct, 5, 'INBOX', 'Archive');
+      expect(clients[0].messageMove).toHaveBeenCalledOnce();
+      expect(clients).toHaveLength(1);
+      evictPool(acct.id);
+    });
+
+    it('a waiter queued before the window opened does not log in when a slot frees', async () => {
+      const acct = account();
+      const mgr = liveManager(acct);
+      connectError = null;
+      const held = [];
+      for (let i = 0; i < poolSizeFor(acct); i++) held.push(await acquirePooledClient(acct));
+      const waiter = acquirePooledClient(acct).catch(e => e);
+      rejectedPassword(mgr, acct);
+      connectError = dovecotAuthFailure;
+      held[0].close(); // the server closed one pooled session: its slot goes to the waiter
+      expect(await waiter).toMatchObject({ providerRefusing: true });
+      expect(clients).toHaveLength(poolSizeFor(acct));
+      for (const c of held.slice(1)) releasePooledClient(acct, c);
+      evictPool(acct.id);
+    });
+
+    it('an OAuth mailbox keeps the short ladder, and its user actions are not held back', async () => {
+      // Gmail: fail2ban does not guard it, and a leftover rejection after a token refresh is routine.
+      const acct = { ...account(), imap_host: 'imap.gmail.com', oauth_provider: 'google', oauth_access_token: 'enc' };
+      const mgr = liveManager(acct);
+      const first = await mgr.moveMessage(acct, 5, 'INBOX', 'Archive').catch(e => e);
+      expect(first.providerRefusing).toBeUndefined();
+      const perAttempt = clients.length; // connectImapClient retried once after a forced refresh
+      expect(perAttempt).toBeGreaterThan(0);
+      expect(mgr._secondaryCooldown.get(acct.id).failures).toBe(1);
+      expect(mgr._statusAuthCooldown.has(acct.id)).toBe(false);
+      expect(mgr._connectCooldown.has(acct.id)).toBe(false);
+      const second = await mgr.moveMessage(acct, 5, 'INBOX', 'Archive').catch(e => e);
+      expect(second.providerRefusing).toBeUndefined();
+      expect(clients).toHaveLength(2 * perAttempt);
+    });
+  });
 });

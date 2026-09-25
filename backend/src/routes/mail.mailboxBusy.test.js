@@ -1,7 +1,8 @@
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 
-// A full IMAP pool fails an operation with poolExhausted (upstream #474). That is our own
-// connection budget, not a broken server, so the delete, move and bulk routes answer
+// A full IMAP pool fails an operation with poolExhausted (upstream #474), and a login held back
+// by a rejected password fails it with providerRefusing. Neither is a broken server and nothing
+// was sent, so the delete, move and bulk routes answer
 // 503 { code: 'mailbox_busy' }, which the client shows as "the mailbox is busy, try again".
 vi.mock('../services/db.js', () => ({ query: vi.fn() }));
 vi.mock('../middleware/auth.js', () => ({ requireAuth: (req, _res, next) => { req.session = { userId: 'u1' }; next(); } }));
@@ -44,7 +45,10 @@ const MSG = (id, folder, uid) => ({
   subject: 'Board minutes', from_email: 'sender@example.com', folder_mappings: null,
 });
 const rows = { [INBOX_ID]: MSG(INBOX_ID, 'INBOX', 11), [TRASH_ID]: MSG(TRASH_ID, 'Trash', 22), [SENT_ID]: MSG(SENT_ID, 'Sent', 33) };
-const busy = () => Object.assign(new Error('IMAP pool busy, please retry'), { poolExhausted: true });
+const poolBusy = () => Object.assign(new Error('IMAP pool busy, please retry'), { poolExhausted: true });
+// A rejected password holds the mailbox's logins back and no pooled session is open: the pool
+// fails at once with providerRefusing instead of logging in (imapManager's loginHeldBack).
+const loginHeld = () => Object.assign(new Error('Mail server is not accepting new connections for this account right now'), { providerRefusing: true });
 
 let server;
 let base;
@@ -83,7 +87,7 @@ const expectBusy = ({ status, body }) => {
   expect(body.code).toBe('mailbox_busy');
 };
 
-describe('a busy mailbox answers 503 mailbox_busy', () => {
+for (const [what, busy] of [['a full pool', poolBusy], ['a login held back', loginHeld]]) describe(`a busy mailbox answers 503 mailbox_busy: ${what}`, () => {
   it('on delete (move to Trash)', async () => {
     imapManager.moveMessage.mockRejectedValue(busy());
     expectBusy(await call('DELETE', `/messages/${INBOX_ID}`));

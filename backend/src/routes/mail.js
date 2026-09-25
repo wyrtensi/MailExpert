@@ -8,7 +8,7 @@ import { shouldBlockImages } from '../utils/imageBlocking.js';
 import { threadingDiagnostics } from '../services/threadingDiagnostics.js';
 import { requireAuth } from '../middleware/auth.js';
 import { imapManager } from '../index.js';
-import { isConnectionRefusal } from '../services/imapManager.js';
+import { isConnectionRefusal, isMailboxBusyError } from '../services/imapManager.js';
 import { sanitizeEmail, stripEmailHead, hasRemoteImages, blockRemoteImages, rewriteEbayImageserUrls, rewriteAnchorHrefs } from '../services/emailSanitizer.js';
 import { snippetFromBody, decodeMimeWords, parseRawHeaders, buildHeadersFromMessage } from '../services/messageParser.js';
 import { resolveTrashFolder, resolveAllTrashPaths, resolveAllDraftsPaths, resolveArchiveFolder, isAllMailFolder, resolveSpamFolder, resolveAllSpamPaths, getDeleteStrategy, adjustFolderCounts, fanOutReadToSiblings, fanOutStarToSiblings, fanOutBulkReadToSiblings } from '../utils/mailUtils.js';
@@ -459,8 +459,10 @@ router.get('/messages/:id/threading', async (req, res) => {
 
 // A full IMAP pool (imapManager's poolExhausted) is our own connection budget, not a broken
 // server: every pooled connection of the mailbox is busy and the request waited its turn out.
-// Worth retrying and nothing is lost, so answer 503 with a stable code the client turns into a
-// localized "the mailbox is busy, try again in a few seconds" instead of a generic failure.
+// A login held back (providerRefusing: a rejected password and no open pooled session) is the
+// same shape: nothing was sent. Both are isMailboxBusyError. Worth retrying and nothing is lost,
+// so answer 503 with a stable code the client turns into a localized "the mailbox is busy, try
+// again in a few seconds" instead of a generic failure.
 export const MAILBOX_BUSY_CODE = 'mailbox_busy';
 const MAILBOX_BUSY_ERROR = 'This mailbox is busy with other mail operations. Please try again in a few seconds.';
 function sendMailboxBusy(res) {
@@ -482,7 +484,7 @@ function bulkBusyTracker() {
       try {
         return await fn();
       } catch (err) {
-        if (!err?.poolExhausted) throw err;
+        if (!isMailboxBusyError(err)) throw err;
         busyAccounts.add(accountId);
         return null;
       }
@@ -635,7 +637,7 @@ router.get('/messages/:id/body', async (req, res) => {
     // Our own pool budget (poolExhausted), a backoff holding new logins back (providerRefusing),
     // or a server refusing one outright: none is a broken message, and each is worth retrying
     // shortly, so the same 503 busy answer the UI already explains instead of a raw 500.
-    if (err.poolExhausted || err.providerRefusing || isConnectionRefusal(msg)) return sendMailboxBusy(res);
+    if (isMailboxBusyError(err) || isConnectionRefusal(msg)) return sendMailboxBusy(res);
     res.status(500).json({ error: msg });
   }
 });
@@ -1506,7 +1508,7 @@ router.post('/messages/bulk-delete', async (req, res) => {
     res.json({ ok: true, deleted: allSucceeded, ...busy.flag() });
   } catch (err) {
     console.error('bulk-delete error:', err);
-    if (err.poolExhausted) return sendMailboxBusy(res);
+    if (isMailboxBusyError(err)) return sendMailboxBusy(res);
     res.status(500).json({ error: 'Failed to delete messages' });
   } finally {
     for (const g of moveGuards) imapManager._unguardMoveUid(g.accountId, g.folder, g.uid);
@@ -1731,7 +1733,7 @@ router.post('/messages/bulk-move', async (req, res) => {
     res.json({ ok: true, moved: movedIds, ...busy.flag() });
   } catch (err) {
     console.error('bulk-move error:', err);
-    if (err.poolExhausted) return sendMailboxBusy(res);
+    if (isMailboxBusyError(err)) return sendMailboxBusy(res);
     res.status(500).json({ error: 'Failed to move messages' });
   } finally {
     for (const g of moveGuards) imapManager._unguardMoveUid(g.accountId, g.folder, g.uid);
@@ -1906,7 +1908,7 @@ router.post('/messages/bulk-archive', async (req, res) => {
     res.json({ ok: true, archived: archivedIds.map(a => a.id), noArchiveFolder, ...busy.flag() });
   } catch (err) {
     console.error('bulk-archive error:', err);
-    if (err.poolExhausted) return sendMailboxBusy(res);
+    if (isMailboxBusyError(err)) return sendMailboxBusy(res);
     res.status(500).json({ error: 'Failed to archive messages' });
   } finally {
     for (const g of moveGuards) imapManager._unguardMoveUid(g.accountId, g.folder, g.uid);
@@ -2051,7 +2053,7 @@ router.post('/messages/:id/snooze', async (req, res) => {
     await imapManager.ensureFolder(account, snoozedFolder);
   } catch (err) {
     console.error(`Snooze ensureFolder failed for message ${id}:`, err.message);
-    if (err.poolExhausted) return sendMailboxBusy(res);
+    if (isMailboxBusyError(err)) return sendMailboxBusy(res);
     return res.status(500).json({ error: 'Failed to move message to Snoozed folder' });
   }
 
@@ -2066,7 +2068,7 @@ router.post('/messages/:id/snooze', async (req, res) => {
         // The message the user acted on must succeed; a failed sibling is logged
         // and skipped so the rest of the conversation still snoozes.
         if (tm.id === msg.id) {
-          if (err.poolExhausted) return sendMailboxBusy(res);
+          if (isMailboxBusyError(err)) return sendMailboxBusy(res);
           return res.status(500).json({ error: 'Failed to move message to Snoozed folder' });
         }
         continue;
@@ -2122,7 +2124,7 @@ router.delete('/messages/:id', async (req, res) => {
       await imapManager.permanentDeleteMessage(account, message.uid, message.folder);
     } catch (err) {
       console.error('IMAP permanent delete (draft) failed:', err.message);
-      if (err.poolExhausted) return sendMailboxBusy(res);
+      if (isMailboxBusyError(err)) return sendMailboxBusy(res);
       return res.status(500).json({ error: 'Failed to delete draft' });
     }
     await query('DELETE FROM messages WHERE id = $1', [id]);
@@ -2150,7 +2152,7 @@ router.delete('/messages/:id', async (req, res) => {
         newUid = await imapManager.moveMessage(account, message.uid, message.folder, trashPath);
       } catch (err) {
         console.error('IMAP move to trash failed:', err.message);
-        if (err.poolExhausted) return sendMailboxBusy(res);
+        if (isMailboxBusyError(err)) return sendMailboxBusy(res);
         return res.status(500).json({ error: 'Failed to delete message' });
       }
       if (newUid != null) {
@@ -2177,7 +2179,7 @@ router.delete('/messages/:id', async (req, res) => {
       await imapManager.permanentDeleteMessage(account, message.uid, message.folder);
     } catch (err) {
       console.error('IMAP permanent delete failed:', err.message);
-      if (err.poolExhausted) return sendMailboxBusy(res);
+      if (isMailboxBusyError(err)) return sendMailboxBusy(res);
       return res.status(500).json({ error: 'Failed to delete message' });
     }
     await query('DELETE FROM messages WHERE id = $1', [id]);
@@ -2241,7 +2243,7 @@ async function moveForSpamLabel(messageId, userId, destinationFolder, label) {
       newUid = await imapManager.moveMessage(account, message.uid, message.folder, destinationFolder);
     } catch (err) {
       console.error(`IMAP move for /${label} failed:`, err.message);
-      if (err.poolExhausted) return { ok: false, status: 503, error: MAILBOX_BUSY_ERROR, code: MAILBOX_BUSY_CODE };
+      if (isMailboxBusyError(err)) return { ok: false, status: 503, error: MAILBOX_BUSY_ERROR, code: MAILBOX_BUSY_CODE };
       return { ok: false, status: 502, error: `IMAP move failed: ${err.message}` };
     }
     if (newUid != null) {

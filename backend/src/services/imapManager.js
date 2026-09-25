@@ -1509,6 +1509,31 @@ async function applyHelperOAuthFailure(account, err) {
   }
 }
 
+// A pooled or fresh login had its credentials rejected: arm the account's auth ladder here, once,
+// for every caller of the pool. Before, only the callers that armed it themselves (the flag store,
+// body prefetch) did, so background jobs, rule moves and user actions retried a rejected password
+// after every window and on every click. _noteSecondaryAuthFailure picks the ladder (OAuth: the
+// short secondary one; a live persistent session: the status-only one; otherwise account-wide).
+// The caller still rethrows the original error.
+async function applyHelperAuthFailure(account, err, what) {
+  if (!isImapAuthFailure(err) || !oauthFailureManager) return;
+  try {
+    await oauthFailureManager._noteSecondaryAuthFailure(account, err, what);
+  } catch (noteErr) {
+    console.error(`Arming the auth backoff for ${logAccount(account)} failed: ${noteErr?.message || 'unknown error'}`);
+  }
+}
+
+// True while a rejected password holds this account's new logins back (_authLoginBlocked): then no
+// pool grow and no fresh login, for background and user work alike. An open session can still
+// serve the work; without one it fails at once with providerRefusing, which routes answer with
+// 503 mailbox_busy. A login would only be rejected again, one more strike toward fail2ban, whose
+// ban cuts the panel off every mailbox on the node. Refusal windows do not count here: work a user
+// is waiting on may still try a login while the server merely refuses extra connections.
+function loginHeldBack(account) {
+  return !!oauthFailureManager?._authLoginBlocked?.(account.id);
+}
+
 // A pooled login nobody used for this long is closed; the next action opens a new one. Without it
 // every mailbox that ever synced a folder or served a click keeps a second IMAP session open for
 // good, which on a self-hosted node doubles its sessions (Dovecot: one process, a few MB each).
@@ -1564,6 +1589,8 @@ function drainWaiters(pool) {
     if (pool.clients.length + (pool.connecting || 0) >= poolSizeFor(head.account)) break;
     pool.waiters.shift();
     clearTimeout(head.timer);
+    // A waiter queued before a rejected password held logins back must not log in now either.
+    if (loginHeldBack(head.account)) { head.reject(providerRefusingError()); continue; }
     growPool(pool, head.account).then(head.resolve, head.reject);
   }
 }
@@ -1586,6 +1613,7 @@ async function growPool(pool, account) {
   } catch (err) {
     pool.connecting--;
     await applyHelperOAuthFailure(account, err);
+    await applyHelperAuthFailure(account, err, 'Pooled');
     throw err;
   }
   pool.connecting--;
@@ -1613,6 +1641,8 @@ async function growPool(pool, account) {
 // only take a session that is already open and idle; anything that would log in or queue fails at
 // once with providerRefusing. The pool's grow is a login like any other, and a background job has
 // no business spending one against a server that is refusing us or rejecting the password.
+// Every caller gets the same treatment while a rejected password holds logins back
+// (loginHeldBack), whatever it passed.
 export async function acquirePooledClient(account, { background = false, noNewLogin = false } = {}) {
   const id = account.id;
   if (!connectionPools.has(id)) {
@@ -1620,7 +1650,7 @@ export async function acquirePooledClient(account, { background = false, noNewLo
   }
   const pool = connectionPools.get(id);
 
-  if (noNewLogin) {
+  if (noNewLogin || loginHeldBack(account)) {
     const idle = pool.waiters.length === 0 && pool.clients.find(c => !pool.inUse.has(c));
     if (idle) {
       disarmPoolIdleClose(pool, idle);
@@ -1743,6 +1773,13 @@ export function providerRefusingError(retryAfterMs) {
   return err;
 }
 
+// A pooled operation that got no session: the pool was full (poolExhausted) or a backoff held the
+// login back (providerRefusing). Nothing was sent, so there is nothing to reconcile, and the
+// routes answer both with 503 mailbox_busy, which the client shows as "the mailbox is busy".
+export function isMailboxBusyError(err) {
+  return !!(err?.poolExhausted || err?.providerRefusing);
+}
+
 // A fresh Error carrying the server's text (extractImapError's `detail`) for fetchMessageBody to
 // rethrow, flagged imapError. It keeps the fields isImapAuthFailure reads, so a background caller
 // (body prefetch) can still tell a rejected login from a refusal once the original is gone.
@@ -1764,6 +1801,7 @@ export function wrapImapError(err, detail) {
 // fresh. Not pooled itself — a body fetch is user-initiated and infrequent, so the
 // one-off login cost is acceptable for guaranteed correctness.
 async function withFreshLogin(account, fn) {
+  if (loginHeldBack(account)) throw providerRefusingError();
   let client;
   try {
     const fresh = await ensureFreshToken(account);
@@ -1771,6 +1809,7 @@ async function withFreshLogin(account, fn) {
     client = await connectImapClient(fresh, resolved, { policy }, 30000, 'IMAP fresh-login connect');
   } catch (err) {
     await applyHelperOAuthFailure(account, err);
+    await applyHelperAuthFailure(account, err, 'Fresh');
     throw err;
   }
   try {
@@ -6877,10 +6916,10 @@ export class ImapManager {
       });
       destUidNextBefore = status?.uidNext ?? null;
     } catch (statusErr) {
-      // A full pool means nothing was sent and nothing will be: fail the whole call as busy
+      // A full pool (or a login held back) means nothing was sent and nothing will be: fail the whole call as busy
       // (routes answer 503 mailbox_busy) instead of queueing twice more for the move and a
       // reconcile that would each wait out the same busy pool.
-      if (statusErr?.poolExhausted) throw statusErr;
+      if (isMailboxBusyError(statusErr)) throw statusErr;
       console.warn(`bulkMoveMessages STATUS ${toFolder} failed (${statusErr.message}) — reconciliation skipped`);
     }
 
@@ -6933,8 +6972,8 @@ export class ImapManager {
       return { uidMap: bySearch.uidMap, succeeded: bySearch.succeeded, failed: bySearch.failed };
 
     } catch (err) {
-      // No session was acquired, so no MOVE was sent: there is nothing to reconcile.
-      if (err?.poolExhausted) throw err;
+      // No session was acquired (isMailboxBusyError), so no MOVE was sent: there is nothing to reconcile.
+      if (isMailboxBusyError(err)) throw err;
       console.warn(`bulkMoveMessages ${fromFolder} → ${toFolder}: batch failed (${err.message}), verifying via UID SEARCH`);
       // A thrown move may have applied partway; reconcile by search to report what actually moved.
       // Not counted as stale_mutation_uid — this is a move failure, not a stale-identity meeting.
@@ -7052,8 +7091,8 @@ export class ImapManager {
       });
       return { succeeded: uids, failed: [] };
     } catch (err) {
-      // No session was acquired, so nothing was deleted: fail as busy rather than reconcile.
-      if (err?.poolExhausted) throw err;
+      // No session was acquired (isMailboxBusyError), so nothing was deleted: fail as busy rather than reconcile.
+      if (isMailboxBusyError(err)) throw err;
       console.warn(`bulkPermanentDelete ${folder}: batch failed (${err.message}), verifying via UID SEARCH`);
       try {
         const remaining = await withFreshClient(account, async (client) => {

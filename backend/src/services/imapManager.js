@@ -1715,6 +1715,18 @@ async function withFreshClient(account, fn, poolOpts = {}) {
   }
 }
 
+// A fresh Error carrying the server's text (extractImapError's `detail`) for fetchMessageBody to
+// rethrow, flagged imapError. It keeps the fields isImapAuthFailure reads, so a background caller
+// (body prefetch) can still tell a rejected login from a refusal once the original is gone.
+export function wrapImapError(err, detail) {
+  const wrapped = new Error(detail);
+  wrapped.imapError = true;
+  for (const key of ['authenticationFailed', 'serverResponseCode', 'responseStatus', 'code']) {
+    if (err?.[key] !== undefined) wrapped[key] = err[key];
+  }
+  return wrapped;
+}
+
 // Like withFreshClient, but bypasses the pool entirely: it opens a BRAND-NEW IMAP login,
 // runs fn(client), and tears it down. Used as the body-fetch retry path. When a pooled
 // connection returns nothing for a recently-arrived UID (the PurelyMail "frozen view"
@@ -1888,9 +1900,11 @@ export class ImapManager {
     // one re-reads the flags of a whole folder, so they get the same per-host bound of their own.
     this._integritySem = createKeyedSemaphore(host => backgroundConnectionLimit(host));
     this._connectCooldown = new Map(); // accountId -> { until: ms, failures: number } after connection refusals
-    // accountId -> { until, failures } after the folder status client's login was rejected while
-    // the persistent connection stayed up (see _withCountClient). Present = that login is known
-    // to be rejected; removed when it succeeds again or on clearConnectCooldown.
+    // accountId -> { until, failures } after a secondary login (folder status client, body
+    // prefetch, staleness probe, snippet indexer, backfill) was rejected while the persistent
+    // connection stayed up (see _noteSecondaryAuthFailure). Present = that login is known to be
+    // rejected; every secondary login path waits it out (_secondaryLoginBlocked). Removed when the
+    // status login succeeds again or on clearConnectCooldown.
     this._statusAuthCooldown = new Map();
     // accountId -> { until, failures } after a SECONDARY connection (the folder status client,
     // background body prefetch) was refused. Kept apart from _connectCooldown, which live sync
@@ -2853,6 +2867,39 @@ export class ImapManager {
     return null;
   }
 
+  // The status-only auth cooldown, when it is holding secondary logins shut, or null. Armed by
+  // _noteSecondaryAuthFailure while the persistent connection stays up: the password was rejected
+  // on a background login, so every other background login would be rejected too.
+  _secondaryAuthBlocked(accountId) {
+    const cd = this._statusAuthCooldown?.get(accountId);
+    return cd && Date.now() < cd.until ? cd : null;
+  }
+
+  // Everything that holds a background login back: the live-sync cooldown, the secondary refusal
+  // backoff, and a rejected secondary login. The gate for every secondary login path except the
+  // folder status client, which checks the two parts itself to report them apart.
+  _secondaryLoginBlocked(accountId) {
+    return this._secondaryConnectBlocked(accountId) || this._secondaryAuthBlocked(accountId);
+  }
+
+  // A secondary login (folder status, body prefetch, staleness probe, snippet indexer, backfill)
+  // had its credentials rejected. While the persistent connection is up, the status-only ladder
+  // (30 min doubling to 6 h) and a recorded error: the account-wide ladder would stop the sync tick
+  // of a mailbox whose own session still works (on Gmail one transient AUTHENTICATIONFAILED after a
+  // token refresh would do it), yet the rejected password is real and someone has to fix it.
+  // Without a persistent connection nothing vouches for the credentials, so the account-wide
+  // ladder, as connectAccount would arm. Either way every secondary login path honors the result
+  // (_secondaryLoginBlocked), which is what keeps a wrong password from being retried often enough
+  // to trip fail2ban on the mail node.
+  async _noteSecondaryAuthFailure(account, err, what) {
+    if (this.connections.has(account.id)) {
+      this._noteStatusAuthFailure(account, what);
+      await this._recordAccountError(account, extractImapError(err));
+    } else {
+      this._noteAuthFailure(account);
+    }
+  }
+
   // The folder status client's login was rejected while the account's persistent connection is
   // still up. The account-wide auth cooldown would stop the healthy sync tick and new-mail
   // handling, so this status-only cooldown takes the same ladder (authCooldownMs: 30 min doubling
@@ -2860,11 +2907,11 @@ export class ImapManager {
   // on its own backoff (capped at 10 min), about six failed logins an hour for as long as the
   // password stayed wrong: exactly what gets a server IP banned by fail2ban on mailcow-style
   // hosts. Returns the delay in ms.
-  _noteStatusAuthFailure(account) {
+  _noteStatusAuthFailure(account, what = 'Folder status') {
     const failures = (this._statusAuthCooldown.get(account.id)?.failures || 0) + 1;
     const ms = authCooldownMs(failures);
     this._statusAuthCooldown.set(account.id, { until: Date.now() + ms, failures });
-    console.warn(`Folder status login rejected for ${logAccount(account)} while its persistent connection is up — status checks paused for ${Math.round(ms / 60000)}m (attempt #${failures}); sync continues on the persistent connection`);
+    console.warn(`${what} login rejected for ${logAccount(account)} while its persistent connection is up — background logins paused for ${Math.round(ms / 60000)}m (attempt #${failures}); sync continues on the persistent connection`);
     return ms;
   }
 
@@ -3449,22 +3496,13 @@ export class ImapManager {
       return await fn(client);
     } catch (err) {
       if (await this._handleOAuthRefreshFailure(account, err)) throw err;
-      // Auth first, as on every other path: a rejected password takes the long ladder, not the
-      // 30-second refusal ladder. Except while the account's persistent connection is up (the
-      // same call as backfill): a rejected pool grow on Gmail's pooled status client, e.g. one
-      // transient AUTHENTICATIONFAILED right after a token refresh, would otherwise arm a
-      // cooldown that stops the sync tick and new-mail handling of a working account for 30
-      // minutes to 6 hours, without recording anything. The persistent connection's own
-      // reconnect path arms the ladder if the credentials really are gone.
-      if (isImapAuthFailure(err) && this.connections.has(account.id)) {
-        // Status-only ladder instead, and say so in the sidebar: the rejected login is real even
-        // though mail still arrives, and someone has to fix the password.
-        this._noteStatusAuthFailure(account);
-        await this._recordAccountError(account, extractImapError(err));
-      } else if (isImapAuthFailure(err)) {
-        // No persistent connection to vouch for the credentials: the account-wide auth ladder,
-        // as before.
-        this._noteAuthFailure(account);
+      // Auth first, as on every other path: a rejected password takes a long ladder, not the
+      // 30-second refusal ladder. Which one depends on whether the persistent connection is up
+      // (see _noteSecondaryAuthFailure): a rejected pool grow on Gmail's pooled status client,
+      // e.g. one transient AUTHENTICATIONFAILED right after a token refresh, must not stop the
+      // sync tick of a working account for 30 minutes to 6 hours.
+      if (isImapAuthFailure(err)) {
+        await this._noteSecondaryAuthFailure(account, err, 'Folder status');
       } else if (isConnectionRefusal(extractImapError(err))) {
         // A refused STATUS connection takes the secondary ladder, never the live-sync cooldown:
         // on the mail node this is Dovecot's per-user+IP limit hit by a background login, and
@@ -5795,33 +5833,8 @@ export class ImapManager {
   // By the time the user clicks the email (typically 2–10s later), the body is already
   // in the DB and the click returns instantly without a live IMAP round-trip.
   async prefetchNewMessageBodies(account, messages) {
-    for (const msg of messages) {
-      try {
-        // Skip if body already cached (concurrent click may have triggered this too)
-        const existing = await query(
-          'SELECT id FROM messages WHERE id = $1 AND (body_html IS NOT NULL OR body_text IS NOT NULL)',
-          [msg.id]
-        );
-        if (existing.rows.length) continue;
-
-        const { html, text, attachments } = await this.fetchMessageBody(
-          account, msg.uid, msg.folder || 'INBOX'
-        );
-        const safeHtml = html ? sanitizeEmail(html) : null;
-        if (safeHtml || text) {
-          const snip = snippetFromBody(text, safeHtml || html);
-          await query(
-            `UPDATE messages
-             SET body_html = $1, body_text = $2, attachments = $3,
-                 snippet = CASE WHEN $5 != '' THEN $5 ELSE snippet END
-             WHERE id = $4`,
-            [sanitizeStr(safeHtml), sanitizeStr(text), JSON.stringify(attachments || []), msg.id, sanitizeStr(snip)]
-          );
-        }
-      } catch (err) {
-        console.warn(`Body prefetch failed for uid ${msg.uid}:`, err.message);
-      }
-    }
+    if (!messages.length) return;
+    await this._prefetchBodyRun(account, messages.map(m => ({ ...m, folder: m.folder || 'INBOX' })), { waitForQuiet: false });
   }
 
   // Background body prefetch for messages currently visible in a folder.
@@ -5844,22 +5857,38 @@ export class ImapManager {
     );
     if (!uncachedResult.rows.length) return;
 
-    // Background work, so it honors the secondary backoff before opening anything. Without this
-    // every folder view would start a fresh run while the server is still refusing.
-    const blocked = this._secondaryConnectBlocked(accountId);
-    if (blocked) {
-      logger.debug(`Body prefetch skipped for ${logAccount(account)}: backing off ${Math.round((blocked.until - Date.now()) / 1000)}s`);
-      return;
-    }
+    await this._prefetchBodyRun(account, uncachedResult.rows, { waitForQuiet: true });
+  }
 
+  // One best-effort body-prefetch run over `rows` ({ id, uid, folder }). Shared by the folder-view
+  // prefetch and the new-mail prefetch after a sync, so both stop the same way. waitForQuiet pauses
+  // between messages while the user is clicking, so live fetches stay snappy.
+  //
+  // Each message draws its own connection (a pooled session, or a fresh login on retry), so against
+  // a server that is refusing us or rejecting the password, walking the rest of the list turns one
+  // failure into one more login per remaining message. The folder prefetch runs on every folder
+  // view; on the shared mail node every extra login counts against the per-user+IP limit, and every
+  // rejected one counts toward fail2ban, whose ban cuts off every mailbox on the node.
+  async _prefetchBodyRun(account, rows, { waitForQuiet }) {
     let consecutiveErrors = 0;
-    for (const msg of uncachedResult.rows) {
-      const quietFor = Date.now() - (this.lastUserActivity.get(accountId) || 0);
-      if (quietFor < QUIET_WINDOW_MS) {
-        await new Promise(r => setTimeout(r, QUIET_WINDOW_MS - quietFor));
+    for (const msg of rows) {
+      // Checked before every message, not only at entry: a backoff armed meanwhile (by the status
+      // client, or by this run's own previous failure) must stop a run already in progress. Covers
+      // the live-sync cooldown, the secondary refusal backoff and a rejected secondary login.
+      const blocked = this._secondaryLoginBlocked(account.id);
+      if (blocked) {
+        logger.debug(`Body prefetch skipped for ${logAccount(account)}: backing off ${Math.round((blocked.until - Date.now()) / 1000)}s`);
+        return;
+      }
+      if (waitForQuiet) {
+        const quietFor = Date.now() - (this.lastUserActivity.get(account.id) || 0);
+        if (quietFor < QUIET_WINDOW_MS) {
+          await new Promise(r => setTimeout(r, QUIET_WINDOW_MS - quietFor));
+        }
       }
 
       try {
+        // Skip if body already cached (a concurrent click may have fetched it).
         const existing = await query(
           'SELECT id FROM messages WHERE id = $1 AND (body_html IS NOT NULL OR body_text IS NOT NULL)',
           [msg.id]
@@ -5880,35 +5909,31 @@ export class ImapManager {
         }
       } catch (err) {
         const detail = extractImapError(err);
-        console.warn(`Folder body prefetch failed for uid ${msg.uid}:`, detail);
+        console.warn(`Body prefetch failed for uid ${msg.uid}:`, detail);
 
-        // Stop the run instead of walking the rest of the list. Each iteration draws its own
-        // connection (a pooled session, or a fresh login on retry), so against a server that is
-        // refusing us, continuing turns one refusal into one more login per remaining message
-        // and takes the pool away from the user's own actions. This runs on every folder view,
-        // and on a shared mail node every extra login counts against the per-user+IP limit.
-        //
-        // Two guards:
-        //  - an explicit refusal stops the run at the first one: the server has already said it
-        //    is at its limit;
-        //  - three consecutive failures of any kind stop it too, for a server whose refusal is
-        //    not phrased as one. A success resets the count, so one bad message does not stop
-        //    the rest of the folder.
-        //
-        // A refusal is armed on the SECONDARY backoff, never on the account's connect cooldown:
-        // that map gates connectAccount, the reconnect and the poll-only tick, so a refused
-        // best-effort prefetch would delay live sync. Arming the secondary one is what stops the
-        // next folder view from paying for the same refusal again. Bodies are fetched on demand
-        // when a message is opened, and a later folder view re-runs this for whatever is still
-        // uncached.
+        // Three guards, each stopping the run:
+        //  - a rejected login stops at the first one and goes on the same auth handling as the
+        //    folder status client (_noteSecondaryAuthFailure): the long status-only ladder while
+        //    the persistent connection is up, the account-wide one otherwise. Without it a wrong
+        //    password behind a live IDLE session cost three rejected logins per folder view.
+        //    fetchMessageBody keeps the fields isImapAuthFailure reads when it rewraps the error;
+        //  - an explicit refusal stops at the first one and arms the SECONDARY backoff, never the
+        //    account's connect cooldown, which gates live sync. Arming is what stops the next
+        //    folder view from paying for the same refusal again;
+        //  - three consecutive failures of any other kind stop it too, arming nothing: they are
+        //    usually about the messages (an expunged UID, a body that will not parse). A success
+        //    resets the count, so one bad message does not stop the rest of the folder.
+        // Prefetch is best-effort: bodies are fetched on demand when a message is opened.
+        if (isImapAuthFailure(err)) {
+          await this._noteSecondaryAuthFailure(account, err, 'Body prefetch');
+          console.log(`Body prefetch stopping for ${logAccount(account)}: login rejected`);
+          return;
+        }
         if (isConnectionRefusal(detail)) {
           this._noteSecondaryRefusal(account);
           console.log(`Body prefetch stopping for ${logAccount(account)}: server is refusing connections`);
           return;
         }
-        // Anything else arms nothing: it is usually about the messages rather than the
-        // connection (an expunged UID, a body that will not parse), and must not hold back the
-        // next folder view.
         if (++consecutiveErrors >= PREFETCH_MAX_CONSECUTIVE_ERRORS) {
           console.log(`Body prefetch stopping for ${logAccount(account)} after ${consecutiveErrors} consecutive errors`);
           return;
@@ -6103,9 +6128,7 @@ export class ImapManager {
         // to hold back; against a server already refusing us it only adds one more refusal per
         // click. Rethrow the first failure instead.
         if (this._secondaryConnectBlocked(account.id)) {
-          const wrapped = new Error(detail);
-          wrapped.imapError = true;
-          throw wrapped;
+          throw wrapImapError(firstErr, detail);
         }
         try {
           return await doFetch(withFreshLogin);
@@ -6118,14 +6141,10 @@ export class ImapManager {
             console.warn(`fetchMessageBody: uid=${uid} folder=${folder} account=${logAccount(account)} — no body after retry; message may be missing on server`);
             return { html: null, text: null, attachments: [] };
           }
-          const wrapped = new Error(retryDetail);
-          wrapped.imapError = true;
-          throw wrapped;
+          throw wrapImapError(retryErr, retryDetail);
         }
       }
-      const wrapped = new Error(detail);
-      wrapped.imapError = true;
-      throw wrapped;
+      throw wrapImapError(firstErr, detail);
     }
   }
 

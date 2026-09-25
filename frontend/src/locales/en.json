@@ -22,7 +22,8 @@
     "dismiss": "Dismiss",
     "loadMore": "Load more",
     "adminOnly": "Only an administrator can change this.",
-    "mailboxBusy": "The mailbox is busy, try again in a few seconds"
+    "mailboxBusy": "The mailbox is busy, try again in a few seconds",
+    "mailboxAuthRejected": "The mail server rejected this mailbox's password. Update it in the mailbox settings."
   },
   "login": {
     "google": {

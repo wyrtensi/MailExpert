@@ -56,6 +56,9 @@ const poolBusy = () => Object.assign(new Error('IMAP pool busy, please retry'), 
 // A rejected password holds the mailbox's logins back and no pooled session is open: the pool
 // fails at once with providerRefusing instead of logging in (imapManager's loginHeldBack).
 const loginHeld = () => Object.assign(new Error('Mail server is not accepting new connections for this account right now'), { providerRefusing: true });
+// The same hold when the reason is a rejected password (authRejected): retrying will not help, so
+// the answer says so with its own code.
+const authHeld = () => Object.assign(loginHeld(), { authRejected: true });
 
 let server;
 let base;
@@ -89,12 +92,16 @@ const call = async (method, path, body) => {
   });
   return { status: res.status, body: await res.json() };
 };
-const expectBusy = ({ status, body }) => {
-  expect(status).toBe(503);
-  expect(body.code).toBe('mailbox_busy');
-};
+for (const [what, busy, code] of [
+  ['a full pool', poolBusy, 'mailbox_busy'],
+  ['a login held back', loginHeld, 'mailbox_busy'],
+  ['a rejected password', authHeld, 'mailbox_auth_rejected'],
+]) describe(`a busy mailbox answers 503 ${code}: ${what}`, () => {
+  const expectBusy = ({ status, body }) => {
+    expect(status).toBe(503);
+    expect(body.code).toBe(code);
+  };
 
-for (const [what, busy] of [['a full pool', poolBusy], ['a login held back', loginHeld]]) describe(`a busy mailbox answers 503 mailbox_busy: ${what}`, () => {
   it('on delete (move to Trash)', async () => {
     imapManager.moveMessage.mockRejectedValue(busy());
     expectBusy(await call('DELETE', `/messages/${INBOX_ID}`));
@@ -130,6 +137,7 @@ for (const [what, busy] of [['a full pool', poolBusy], ['a login held back', log
     expect(res.status).toBe(200);
     expect(res.body.deleted).toEqual([INBOX_ID]);
     expect(res.body.busy).toBe(true);
+    expect(res.body.code).toBe(code);
     const relocate = query.mock.calls.find(([sql]) => /WITH deleted AS/.test(sql));
     expect(relocate[1][0]).toEqual([INBOX_ID]);
     const audit = query.mock.calls.filter(([sql]) => sql.includes('INSERT INTO mailbox_audit_log'));
@@ -146,6 +154,7 @@ for (const [what, busy] of [['a full pool', poolBusy], ['a login held back', log
     expect(moved.status).toBe(200);
     expect(moved.body.moved).toEqual([INBOX_ID]);
     expect(moved.body.busy).toBe(true);
+    expect(moved.body.code).toBe(code);
     const archived = await call('POST', '/messages/bulk-archive', { ids: [INBOX_ID, SENT_ID] });
     expect(archived.status).toBe(200);
     expect(archived.body.archived).toEqual([INBOX_ID]);
@@ -171,7 +180,7 @@ for (const [what, busy] of [['a full pool', poolBusy], ['a login held back', log
     imapManager.emptyFolder.mockRejectedValue(busy());
     const res = await call('POST', '/folders/empty', { accountId: ACCOUNT_ID, path: 'Trash' });
     expect(res.status).toBe(202);
-    await vi.waitFor(() => expect(imapManager.broadcast).toHaveBeenCalledWith(expect.objectContaining({ type: 'folder_emptied', ok: false, code: 'mailbox_busy' })));
+    await vi.waitFor(() => expect(imapManager.broadcast).toHaveBeenCalledWith(expect.objectContaining({ type: 'folder_emptied', ok: false, code })));
   });
 
   it('keeps other failures as they were', async () => {

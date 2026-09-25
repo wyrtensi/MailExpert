@@ -1598,11 +1598,12 @@ function drainWaiters(pool) {
     // While a backoff holds its logins back (noNewLogin, loginHeldBack), a waiter never grows the pool:
     // it keeps waiting for an open session to be released, and fails at once only when none is
     // left to wait for. This also covers a waiter that queued before the window opened.
-    if (head.noNewLogin || loginHeldBack(head.account, { background: head.background })) {
+    const headAuthHeld = loginHeldBack(head.account, { background: head.background });
+    if (head.noNewLogin || headAuthHeld) {
       if (pool.clients.length > 0) break;
       pool.waiters.shift();
       clearTimeout(head.timer);
-      head.reject(providerRefusingError());
+      head.reject(providerRefusingError({ authRejected: headAuthHeld }));
       continue;
     }
     pool.waiters.shift();
@@ -1671,7 +1672,8 @@ export async function acquirePooledClient(account, { background = false, noNewLo
     connectionPools.set(id, { clients: [], inUse: new Set(), waiters: [], connecting: 0, idleTimers: new Map() });
   }
   const pool = connectionPools.get(id);
-  const loginHeld = noNewLogin || loginHeldBack(account, { background });
+  const authHeld = loginHeldBack(account, { background });
+  const loginHeld = noNewLogin || authHeld;
 
   if (loginHeld && background) {
     const idle = pool.waiters.length === 0 && pool.clients.find(c => !pool.inUse.has(c));
@@ -1680,7 +1682,7 @@ export async function acquirePooledClient(account, { background = false, noNewLo
       pool.inUse.add(idle);
       return idle;
     }
-    throw providerRefusingError();
+    throw providerRefusingError({ authRejected: authHeld });
   }
 
   // Nobody queued: take an idle client, or grow the pool if it is under its size.
@@ -1788,10 +1790,12 @@ async function withFreshClient(account, fn, poolOpts = {}) {
 
 // The typed error for work held back by the account's backoffs. The wording deliberately matches
 // neither isConnectionRefusal nor an auth failure, so surfacing it can never re-arm the backoff it
-// reports.
-export function providerRefusingError() {
+// reports. authRejected: the hold is a rejected password (loginHeldBack), which retrying will not
+// fix; routes then answer mailbox_auth_rejected instead of mailbox_busy (utils/mailboxBusy.js).
+export function providerRefusingError({ authRejected = false } = {}) {
   const err = new Error('Mail server is not accepting new connections for this account right now');
   err.providerRefusing = true;
+  if (authRejected) err.authRejected = true;
   return err;
 }
 
@@ -1823,7 +1827,7 @@ export function wrapImapError(err, detail) {
 // fresh. Not pooled itself — a body fetch is user-initiated and infrequent, so the
 // one-off login cost is acceptable for guaranteed correctness.
 async function withFreshLogin(account, fn) {
-  if (loginHeldBack(account)) throw providerRefusingError();
+  if (loginHeldBack(account)) throw providerRefusingError({ authRejected: true });
   let client;
   try {
     const fresh = await ensureFreshToken(account);
@@ -6407,6 +6411,8 @@ export class ImapManager {
         if (noNewLogin || loginHeld()) {
           const held = wrapImapError(firstErr, detail);
           held.providerRefusing = true;
+          // A rejected password says so (routes answer mailbox_auth_rejected); see loginHeldBack.
+          if (loginHeldBack(account, { background })) held.authRejected = true;
           throw held;
         }
         try {

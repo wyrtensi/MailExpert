@@ -281,7 +281,16 @@ describe('archiveInChunks', () => {
     ));
     assert.deepEqual(result.archived, ['a']);
     assert.equal(result.busy, true);
+    assert.equal(result.busyCode, 'mailbox_busy');
     const clean = await threadedArchive.archiveInChunks(['a'], async (chunk) => ({ archived: chunk, noArchiveFolder: [] }));
     assert.equal(clean.busy, false);
+  });
+
+  it('keeps the rejected-password code of a chunk that got partly through', async () => {
+    const result = await threadedArchive.archiveInChunks(['a', 'b'], async () => (
+      { archived: ['a'], noArchiveFolder: [], busy: true, code: 'mailbox_auth_rejected' }
+    ));
+    assert.equal(result.busy, true);
+    assert.equal(result.busyCode, 'mailbox_auth_rejected');
   });
 });

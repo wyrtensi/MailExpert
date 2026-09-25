@@ -90,22 +90,24 @@ export async function archiveTargetGroupsForRows(
 }
 
 // `busy` is true when a chunk that got partly through said the mailbox was busy (a 200 with the
-// mailbox_busy code), so the caller can say why the rest did not go through.
+// mailbox_busy or mailbox_auth_rejected code), and busyCode is that code, so the caller can say
+// why the rest did not go through.
 export async function archiveInChunks(ids, archive, chunkSize = 500) {
   const archived = [];
   const noArchiveFolder = [];
   let busy = false;
+  let busyCode = null;
   for (let offset = 0; offset < ids.length; offset += chunkSize) {
     try {
       const result = await archive(ids.slice(offset, offset + chunkSize));
       archived.push(...(result?.archived || []));
       noArchiveFolder.push(...(result?.noArchiveFolder || []));
-      if (isMailboxBusy(result)) busy = true;
+      if (isMailboxBusy(result)) { busy = true; busyCode = result.code; }
     } catch (error) {
-      return { archived, noArchiveFolder, unconfirmed: ids.slice(offset), error, busy };
+      return { archived, noArchiveFolder, unconfirmed: ids.slice(offset), error, busy, busyCode };
     }
   }
-  return { archived, noArchiveFolder, unconfirmed: [], error: null, busy };
+  return { archived, noArchiveFolder, unconfirmed: [], error: null, busy, busyCode };
 }
 
 export function unreadCountsByAccount(messages) {

@@ -6027,6 +6027,59 @@ describe('every background login waits out a rejected password', () => {
       expect(statusWarnings()).toBe(warned);
     });
 
+    describe('a held-back error says whether a rejected password is the reason', () => {
+      // Routes answer mailbox_auth_rejected for those (retrying will not help) and mailbox_busy
+      // for everything else.
+      it('a user action with no open session', async () => {
+        const acct = account();
+        rejectedPassword(liveManager(acct), acct);
+        await expect(acquirePooledClient(acct)).rejects.toMatchObject({ providerRefusing: true, authRejected: true });
+      });
+
+      it('a background caller', async () => {
+        const acct = account();
+        rejectedPassword(liveManager(acct), acct);
+        await expect(acquirePooledClient(acct, { background: true })).rejects.toMatchObject({ providerRefusing: true, authRejected: true });
+      });
+
+      it('a fresh login (a rule forward on PurelyMail)', async () => {
+        const acct = { ...account(), imap_host: 'imap.purelymail.com' };
+        const mgr = liveManager(acct);
+        rejectedPassword(mgr, acct);
+        await expect(mgr.fetchMessageBody(acct, 5, 'INBOX', { allowLogin: true })).rejects.toMatchObject({ providerRefusing: true, authRejected: true });
+      });
+
+      it('a message click whose fresh-login retry the window holds back', async () => {
+        const acct = account();
+        const mgr = liveManager(acct);
+        connectError = null;
+        ImapFlow.mockImplementation(function () {
+          const client = Object.assign(new EventEmitter(), {
+            usable: true,
+            connect: vi.fn().mockResolvedValue(),
+            logout: vi.fn().mockResolvedValue(),
+            getMailboxLock: vi.fn(() => Promise.reject(new Error('ECONNRESET'))),
+          });
+          client.close = vi.fn(() => { client.usable = false; client.emit('close'); });
+          clients.push(client);
+          return client;
+        });
+        releasePooledClient(acct, await acquirePooledClient(acct)); // one idle session
+        rejectedPassword(mgr, acct);
+        await expect(mgr.fetchMessageBody(acct, 5, 'INBOX')).rejects.toMatchObject({ message: 'ECONNRESET', providerRefusing: true, authRejected: true });
+        evictPool(acct.id);
+      });
+
+      it('not a hold by the secondary refusal backoff', async () => {
+        const acct = account();
+        const mgr = liveManager(acct);
+        mgr._secondaryCooldown.set(acct.id, { until: Date.now() + 60000, failures: 1 });
+        const err = await mgr.fetchMessageBody(acct, 5, 'INBOX').catch(e => e);
+        expect(err.providerRefusing).toBe(true);
+        expect(err.authRejected).toBeUndefined();
+      });
+    });
+
     it('a user action before anything was armed costs one login, and the next fails fast', async () => {
       const acct = account();
       const mgr = liveManager(acct);

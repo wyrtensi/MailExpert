@@ -6042,6 +6042,15 @@ export class ImapManager {
   // Auto-retries once on transient connection errors (stale pool connection, NAT
   // timeout, half-open TCP, etc.) so a single click is enough in all common cases.
   async fetchMessageBody(account, uid, folder) {
+    // While a backoff holds new logins back (live-sync cooldown, secondary refusal backoff, a
+    // rejected secondary login), a body click can only succeed over a session that is already
+    // open. The first attempt then goes through the pool with noNewLogin: an idle pooled session
+    // serves it, and with none the pool fails at once with providerRefusing, which the route
+    // answers with its 503 busy response instead of paying a doomed login now and another on
+    // the retry. Taking the idle session inside the pool, rather than checking for one here
+    // first, leaves no window for another caller to take it and make this one log in. A
+    // revoked OAuth grant is left to the token refresh, which fails with its stable error.
+    const { noNewLogin } = this._poolLoginOpts(account.id);
     // Inner fetch — called up to twice. `acquire` selects how the connection is obtained:
     // the first attempt uses the pool (withFreshClient); the retry uses a genuinely fresh
     // login (withFreshLogin) so a frozen/half-open pooled connection can't hang or return
@@ -6191,15 +6200,16 @@ export class ImapManager {
     // fetch until its command timeout. Other providers keep pool-first for TLS reuse.
     // The pooled attempt is bounded well inside the route's 40s budget (BODY_FETCH_POOL_TIMEOUT_MS),
     // so a stalled fetch frees its pool slot instead of holding it for minutes.
-    const pooledBodyFetch = (acct, fn) => withFreshClient(acct, fn, { timeoutMs: BODY_FETCH_POOL_TIMEOUT_MS });
-    const firstAcquire = providerProfile(account).preferFreshBodyFetch ? withFreshLogin : pooledBodyFetch;
+    const pooledBodyFetch = (acct, fn) => withFreshClient(acct, fn, { timeoutMs: BODY_FETCH_POOL_TIMEOUT_MS, noNewLogin });
+    // preferFreshBodyFetch providers log in fresh on the first attempt, which a backoff forbids.
+    const firstAcquire = providerProfile(account).preferFreshBodyFetch && !noNewLogin ? withFreshLogin : pooledBodyFetch;
     try {
       return await doFetch(firstAcquire);
     } catch (firstErr) {
       // A full pool is our own connection budget, not a broken connection: never answer it with
       // a fresh login (that is the overflow the queue exists to stop), and keep the flag so the
       // route can say "busy, try again" instead of a generic error.
-      if (firstErr?.poolExhausted) throw firstErr;
+      if (firstErr?.poolExhausted || firstErr?.providerRefusing) throw firstErr;
       const detail = extractImapError(firstErr);
       // Retry once on any transient connection-level error (dead pool connection,
       // half-open TCP, NAT expiry, socket reset, or an empty UID FETCH
@@ -6217,12 +6227,15 @@ export class ImapManager {
         /EPIPE/.test(detail)
       );
       if (isTransient) {
-        // No fresh-login retry while a backoff is armed (the account's own cooldown or the
-        // secondary one). The retry is a brand-new LOGIN, exactly the request the backoff exists
+        // No fresh-login retry while a backoff is armed (the account's own cooldown, the
+        // secondary one or a rejected secondary login). The retry is a brand-new LOGIN, exactly the request the backoff exists
         // to hold back; against a server already refusing us it only adds one more refusal per
-        // click. Rethrow the first failure instead.
-        if (this._secondaryConnectBlocked(account.id)) {
-          throw wrapImapError(firstErr, detail);
+        // click. Rethrow the first failure instead, typed so the route answers 503 rather than a
+        // raw 500. Re-read here: a backoff armed while the first attempt ran counts too.
+        if (noNewLogin || this._poolLoginOpts(account.id).noNewLogin) {
+          const held = wrapImapError(firstErr, detail);
+          held.providerRefusing = true;
+          throw held;
         }
         try {
           return await doFetch(withFreshLogin);

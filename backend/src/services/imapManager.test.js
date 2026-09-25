@@ -17,7 +17,7 @@ vi.mock('../utils/redact.js', () => ({ redactEmail: vi.fn() }));
 vi.mock('./hostValidation.js', () => ({ resolveForConnection: vi.fn(), createPinnedLookup: vi.fn() }));
 vi.mock('./connectionPolicy.js', () => ({ getConnectionPolicy: vi.fn() }));
 
-import { ImapManager, MIN_SYNC_INTERVAL_MS, AUTO_IDLE_DELAY_MS, countMissingInboxCopies, fetchBackfillBatch, providerProfile, makeClientCfg, relocateExemptGuard, insertCopiedSibling, deleteMessageCopyRow, emitSectionsChanged, ensureMailbox, createKeyedSemaphore, isConnectionRefusal, extractImapError, isImapAuthFailure, AUTH_FAILURE_COOLDOWN_MS, AUTH_FAILURE_COOLDOWN_MAX_MS, authCooldownMs, connectCooldownMs, effectiveSyncIntervalMs, folderSyncDue, planModseqSync, connectStaggerFor, walkStructure, planBodyParts, extractBodyFromMsg, bodyFallbackApplies, poolSizeFor, rerootThreadChildren, parsePersistentCap, resolvePersistentCap, persistentEligible, shouldRetryIPv4, classifyMoveBySearch, PERSISTENT_FLAG_STORE_TIMEOUT_MS, PERSISTENT_FLAG_LATE_STORE_WAIT_MS, PERSISTENT_FLAG_LOCK_WAIT_MS, wrapImapError } from './imapManager.js';
+import { ImapManager, MIN_SYNC_INTERVAL_MS, AUTO_IDLE_DELAY_MS, countMissingInboxCopies, fetchBackfillBatch, providerProfile, makeClientCfg, relocateExemptGuard, insertCopiedSibling, deleteMessageCopyRow, emitSectionsChanged, ensureMailbox, createKeyedSemaphore, isConnectionRefusal, extractImapError, isImapAuthFailure, AUTH_FAILURE_COOLDOWN_MS, AUTH_FAILURE_COOLDOWN_MAX_MS, authCooldownMs, connectCooldownMs, effectiveSyncIntervalMs, folderSyncDue, planModseqSync, connectStaggerFor, walkStructure, planBodyParts, extractBodyFromMsg, bodyFallbackApplies, poolSizeFor, rerootThreadChildren, parsePersistentCap, resolvePersistentCap, persistentEligible, shouldRetryIPv4, classifyMoveBySearch, PERSISTENT_FLAG_STORE_TIMEOUT_MS, PERSISTENT_FLAG_LATE_STORE_WAIT_MS, PERSISTENT_FLAG_LOCK_WAIT_MS, wrapImapError, acquirePooledClient, releasePooledClient, evictPool } from './imapManager.js';
 import { pluginRegistry } from '../plugins/registry.js';
 import { EventEmitter } from 'node:events';
 import { ImapFlow } from 'imapflow';
@@ -33,6 +33,9 @@ import { GMAIL_KEY_PREFIX } from './threading/threadId.js';
 const account = (imap_host, oauth_provider = null) => ({ imap_host, oauth_provider });
 
 const resolved = { host: '127.0.0.1', servername: null };
+
+// A `this` for calling fetchMessageBody off the prototype with no backoff armed.
+const NO_BACKOFF = { _poolLoginOpts: () => ({ noNewLogin: false }) };
 
 // The account backoffs a hand-built manager needs to run a background login path for real: the
 // real gates over empty maps, and spies for the two ways a background login arms them.
@@ -2868,7 +2871,7 @@ describe('extractImapError', () => {
     });
     const gmail = { id: 'body-fetch-missing', user_id: 'u1', imap_host: 'imap.gmail.com', imap_tls: true };
     // No backoff armed: the fresh-login retry is allowed.
-    const body = await ImapManager.prototype.fetchMessageBody.call({ _secondaryConnectBlocked: () => null }, gmail, 42, 'INBOX');
+    const body = await ImapManager.prototype.fetchMessageBody.call(NO_BACKOFF, gmail, 42, 'INBOX');
     expect(body).toEqual({ html: null, text: null, attachments: [] });
     expect(clients).toHaveLength(2); // pooled attempt, then the fresh-login retry
     vi.restoreAllMocks();
@@ -2898,7 +2901,7 @@ describe('extractImapError', () => {
     });
     const account = { id: 'pool-burst', user_id: 'u1', imap_host: 'imap.example.com', imap_tls: true };
     const bodies = await Promise.all(Array.from({ length: 5 }, () =>
-      ImapManager.prototype.fetchMessageBody.call({}, account, 9, 'INBOX')));
+      ImapManager.prototype.fetchMessageBody.call(NO_BACKOFF, account, 9, 'INBOX')));
     expect(bodies).toHaveLength(5);
     expect(created).toBe(poolSizeFor(account));
   });
@@ -2925,7 +2928,7 @@ describe('extractImapError', () => {
       });
     });
     const gmail = { id: 'body-fetch-ics', user_id: 'u1', imap_host: 'imap.gmail.com', imap_tls: true };
-    const body = await ImapManager.prototype.fetchMessageBody.call({}, gmail, 7, 'INBOX');
+    const body = await ImapManager.prototype.fetchMessageBody.call(NO_BACKOFF, gmail, 7, 'INBOX');
     expect(requested).toContain('1');
     expect(body.html).toMatch(/<s>Standup<\/s>/);
     expect(body.html).toContain('2026-09-15 08:00 (UTC)');
@@ -4967,12 +4970,14 @@ describe('secondary-connection refusals escalate their own backoff', () => {
 });
 
 describe('fetchMessageBody opens no fresh login while a backoff is armed', () => {
-  // Drives the real pool: the pooled attempt fails with ECONNRESET, which IS in the transient
-  // list, so the test reaches the retry decision rather than failing before it.
+  // Drives the real pool. The pooled attempt fails with ECONNRESET, which IS in the transient
+  // list, so the tests reach the retry decision rather than failing before it.
   let created;
+  let lockError;
   beforeEach(() => {
     vi.clearAllMocks();
     created = 0;
+    lockError = new Error('ECONNRESET');
     getConnectionPolicy.mockResolvedValue({ allowPrivateHosts: true });
     resolveForConnection.mockResolvedValue({ host: '127.0.0.1', addresses: ['127.0.0.1'] });
     ImapFlow.mockImplementation(function () {
@@ -4981,7 +4986,7 @@ describe('fetchMessageBody opens no fresh login while a backoff is armed', () =>
         usable: true,
         connect: vi.fn().mockResolvedValue(),
         logout: vi.fn().mockResolvedValue(),
-        getMailboxLock: vi.fn().mockRejectedValue(new Error('ECONNRESET')),
+        getMailboxLock: vi.fn(() => Promise.reject(lockError)),
       });
       client.close = vi.fn(() => { client.usable = false; client.emit('close'); });
       return client;
@@ -4991,27 +4996,67 @@ describe('fetchMessageBody opens no fresh login while a backoff is armed', () =>
   afterEach(() => { vi.restoreAllMocks(); });
 
   const account = id => ({ id, user_id: 'u1', imap_host: 'mail.example.com', imap_tls: true });
+  // One pooled session already open and idle, as after an earlier click.
+  const primeIdleSession = async (acct) => { releasePooledClient(acct, await acquirePooledClient(acct)); };
+  const arms = {
+    'the secondary backoff': (mgr, id) => mgr._secondaryCooldown.set(id, { until: Date.now() + 60000, failures: 2 }),
+    'the live-sync cooldown': (mgr, id) => mgr._connectCooldown.set(id, { until: Date.now() + 60000, failures: 1 }),
+    'a rejected secondary login': (mgr, id) => mgr._statusAuthCooldown.set(id, { until: Date.now() + AUTH_FAILURE_COOLDOWN_MS, failures: 1 }),
+  };
 
-  it('rethrows the first failure while the secondary backoff is armed', async () => {
+  for (const [what, arm] of Object.entries(arms)) {
+    it(`fails fast, typed and without a login, while ${what} is armed and no session is open`, async () => {
+      const mgr = ladderManager();
+      const acct = account(`body-gate-${what}`);
+      arm(mgr, acct.id);
+      await expect(mgr.fetchMessageBody(acct, 9, 'INBOX')).rejects.toMatchObject({ providerRefusing: true });
+      expect(created).toBe(0);
+    });
+  }
+
+  it('uses an idle pooled session while a backoff is armed, and rethrows typed instead of retrying', async () => {
     const mgr = ladderManager();
-    const acct = account('body-retry-secondary');
-    mgr._secondaryCooldown.set(acct.id, { until: Date.now() + 60000, failures: 2 });
-    await expect(mgr.fetchMessageBody(acct, 9, 'INBOX')).rejects.toThrow('ECONNRESET');
-    expect(created).toBe(1); // the pooled attempt only, no fresh-login retry
+    const acct = account('body-gate-idle');
+    await primeIdleSession(acct);
+    expect(created).toBe(1);
+    arms['the secondary backoff'](mgr, acct.id);
+    await expect(mgr.fetchMessageBody(acct, 9, 'INBOX')).rejects.toMatchObject({ message: 'ECONNRESET', providerRefusing: true });
+    expect(created).toBe(1); // the idle session only: no pool grow, no fresh-login retry
+    evictPool(acct.id);
   });
 
-  it('rethrows the first failure while the live-sync cooldown is armed', async () => {
+  it('does not open a fresh first login for a preferFreshBodyFetch provider while a backoff is armed', async () => {
     const mgr = ladderManager();
-    const acct = account('body-retry-primary');
-    mgr._connectCooldown.set(acct.id, { until: Date.now() + 60000, failures: 1 });
-    await expect(mgr.fetchMessageBody(acct, 9, 'INBOX')).rejects.toThrow('ECONNRESET');
+    const acct = { ...account('body-gate-purelymail'), imap_host: 'imap.purelymail.com' };
+    arms['the live-sync cooldown'](mgr, acct.id);
+    await expect(mgr.fetchMessageBody(acct, 9, 'INBOX')).rejects.toMatchObject({ providerRefusing: true });
+    expect(created).toBe(0);
+  });
+
+  it('does not retry when a backoff is armed while the first attempt runs', async () => {
+    const mgr = ladderManager();
+    const acct = account('body-gate-meanwhile');
+    lockError = null;
+    ImapFlow.mockImplementation(function () {
+      created++;
+      const client = Object.assign(new EventEmitter(), { usable: true, connect: vi.fn().mockResolvedValue(), logout: vi.fn().mockResolvedValue() });
+      client.getMailboxLock = vi.fn(async () => {
+        arms['the secondary backoff'](mgr, acct.id); // the status client was refused meanwhile
+        throw new Error('ECONNRESET');
+      });
+      client.close = vi.fn(() => { client.usable = false; client.emit('close'); });
+      return client;
+    });
+    await expect(mgr.fetchMessageBody(acct, 9, 'INBOX')).rejects.toMatchObject({ providerRefusing: true });
     expect(created).toBe(1);
   });
 
   it('still retries over a fresh login when nothing is armed', async () => {
     const mgr = ladderManager();
     const acct = account('body-retry-free');
-    await expect(mgr.fetchMessageBody(acct, 9, 'INBOX')).rejects.toThrow('ECONNRESET');
+    const err = await mgr.fetchMessageBody(acct, 9, 'INBOX').catch(e => e);
+    expect(err.message).toBe('ECONNRESET');
+    expect(err.providerRefusing).toBeUndefined();
     expect(created).toBe(2);
   });
 });

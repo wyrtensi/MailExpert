@@ -56,6 +56,21 @@ describe('GET /messages/:id/body when the account is busy', () => {
     expect(body.code).toBe('mailbox_busy');
   });
 
+  it('answers the same 503 busy while a backoff holds new logins back', async () => {
+    imapManager.fetchMessageBody.mockRejectedValue(Object.assign(new Error('ECONNRESET'), { providerRefusing: true }));
+    const res = await fetch(`${ctx.base}/api/mail/messages/${MESSAGE_ID}/body`);
+    const body = await res.json();
+    expect(res.status).toBe(503);
+    expect(body.code).toBe('mailbox_busy');
+  });
+
+  it('answers 503 busy when the server refuses the connection outright', async () => {
+    imapManager.fetchMessageBody.mockRejectedValue(new Error('Maximum number of connections from user+IP exceeded (mail_max_userip_connections=20)'));
+    const res = await fetch(`${ctx.base}/api/mail/messages/${MESSAGE_ID}/body`);
+    expect(res.status).toBe(503);
+    expect((await res.json()).code).toBe('mailbox_busy');
+  });
+
   it('still answers 500 for any other failure', async () => {
     imapManager.fetchMessageBody.mockRejectedValue(new Error('Mailbox does not exist'));
     const res = await fetch(`${ctx.base}/api/mail/messages/${MESSAGE_ID}/body`);

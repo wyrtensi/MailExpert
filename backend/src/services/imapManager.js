@@ -1675,11 +1675,16 @@ async function growPool(pool, account) {
 // fails at once only when no session is open at all.
 //
 // A rejected password (loginHeldBack) holds every caller back the same way, whatever it passed:
-// a background caller (a rule, the block list, a snooze wakeup, the flag-push reconciler, body
-// prefetch) fails at once, a user action may queue for an open session. Background work must not
-// wait: rules run inside the sync tick, whose 55 s bound closes the live IDLE session when a few
-// held-back stores and moves each wait out the queue.
-export async function acquirePooledClient(account, { background = false, noNewLogin = false } = {}) {
+// a background caller (a snooze wakeup, the flag-push reconciler, body prefetch) fails at once,
+// a user action may queue for an open session.
+//
+// failFastWhenHeld: true (inbox rules, the block list, a rule forward) keeps the normal
+// interactive wait while nothing holds the account back, and fails at once like a background
+// caller when something does. Rules run inside the sync tick, whose 55 s bound closes the live
+// IDLE session when a few held-back stores and moves each wait out the queue; but a healthy
+// mailbox's rule move must not lose the interactive queue and its 15 s wait, since a rule that
+// gives up is not retried.
+export async function acquirePooledClient(account, { background = false, noNewLogin = false, failFastWhenHeld = false } = {}) {
   const id = account.id;
   if (!connectionPools.has(id)) {
     connectionPools.set(id, { clients: [], inUse: new Set(), waiters: [], connecting: 0, idleTimers: new Map() });
@@ -1688,7 +1693,7 @@ export async function acquirePooledClient(account, { background = false, noNewLo
   const authHeld = loginHeldBack(account, { background });
   const loginHeld = noNewLogin || authHeld;
 
-  if (loginHeld && background) {
+  if (loginHeld && (background || failFastWhenHeld)) {
     const idle = pool.waiters.length === 0 && pool.clients.find(c => !pool.inUse.has(c));
     if (idle) {
       disarmPoolIdleClose(pool, idle);
@@ -6220,7 +6225,7 @@ export class ImapManager {
   // Uses a fresh connection to avoid lock contention with sync connection.
   // Auto-retries once on transient connection errors (stale pool connection, NAT
   // timeout, half-open TCP, etc.) so a single click is enough in all common cases.
-  async fetchMessageBody(account, uid, folder, { allowLogin = false, background = false } = {}) {
+  async fetchMessageBody(account, uid, folder, { allowLogin = false, background = false, failFastWhenHeld = false } = {}) {
     // While a backoff holds new logins back (live-sync cooldown, secondary refusal backoff, a
     // rejected secondary login), a body click can only succeed over a session that is already
     // open. The first attempt then goes through the pool with noNewLogin: an idle pooled session
@@ -6386,9 +6391,9 @@ export class ImapManager {
     // fetch until its command timeout. Other providers keep pool-first for TLS reuse.
     // The pooled attempt is bounded well inside the route's 40s budget (BODY_FETCH_POOL_TIMEOUT_MS),
     // so a stalled fetch frees its pool slot instead of holding it for minutes.
-    // background (body prefetch, a rule forward): nobody is waiting, so a held-back fetch fails
-    // at once rather than queueing for a busy session (see acquirePooledClient).
-    const pooledBodyFetch = (acct, fn) => withFreshClient(acct, fn, { timeoutMs: BODY_FETCH_POOL_TIMEOUT_MS, noNewLogin, background });
+    // background (body prefetch) and failFastWhenHeld (a rule forward): a held-back fetch fails at
+    // once rather than queueing for a busy session (see acquirePooledClient).
+    const pooledBodyFetch = (acct, fn) => withFreshClient(acct, fn, { timeoutMs: BODY_FETCH_POOL_TIMEOUT_MS, noNewLogin, background, failFastWhenHeld });
     // preferFreshBodyFetch providers log in fresh on the first attempt, which a backoff forbids.
     const firstAcquire = providerProfile(account).preferFreshBodyFetch && !noNewLogin ? withFreshLogin : pooledBodyFetch;
     try {
@@ -6508,8 +6513,8 @@ export class ImapManager {
   // Fetch multiple attachment parts in a single IMAP round trip.
   // parts: array of { part, encoding } (metadata from messages.attachments).
   // Returns Map<partNum, Buffer> — missing or empty parts are omitted.
-  // background: work nobody is waiting on (a rule forward), see acquirePooledClient.
-  async fetchMultipleAttachments(account, uid, folder, parts, { background = false } = {}) {
+  // failFastWhenHeld: a rule forward, see acquirePooledClient.
+  async fetchMultipleAttachments(account, uid, folder, parts, { background = false, failFastWhenHeld = false } = {}) {
     return withFreshClient(account, async (client) => {
       const lock = await client.getMailboxLock(folder);
       try {
@@ -6544,7 +6549,7 @@ export class ImapManager {
       } finally {
         lock.release();
       }
-    }, { background });
+    }, { background, failFastWhenHeld });
   }
 
   // Attempt 0 of setFlag: store the flag on the account's persistent IDLE session, the way
@@ -6658,11 +6663,12 @@ export class ImapManager {
   // background: a store nobody is waiting on (a rule, the flag-push reconciler, a snooze
   // wakeup). Held back by a backoff, it fails at once instead of queueing for a busy pooled
   // session (see acquirePooledClient); its caller queues it for the flag-push reconciler.
-  async setFlag(account, uid, folder, flag, value, { background = false } = {}) {
+  // failFastWhenHeld: an inbox rule's store, see acquirePooledClient.
+  async setFlag(account, uid, folder, flag, value, { background = false, failFastWhenHeld = false } = {}) {
     const key = `${account.id}\n${folder}\n${uid}`;
     const prev = this._flagStoreChains.get(key) || Promise.resolve();
     const flight = { attempt: null, sent: false };
-    const run = prev.then(() => this._setFlagInner(account, uid, folder, flag, value, flight, { background }));
+    const run = prev.then(() => this._setFlagInner(account, uid, folder, flag, value, flight, { background, failFastWhenHeld }));
     // Never rejects, so the next store on this message runs whatever this one did. The wait for
     // an abandoned persistent STORE is bounded (PERSISTENT_FLAG_LATE_STORE_WAIT_MS), so a
     // STORE that never settles cannot hold this message's next store indefinitely.
@@ -6676,7 +6682,7 @@ export class ImapManager {
     return run;
   }
 
-  async _setFlagInner(account, uid, folder, flag, value, flight, { background = false } = {}) {
+  async _setFlagInner(account, uid, folder, flag, value, flight, { background = false, failFastWhenHeld = false } = {}) {
     console.log(`setFlag: uid=${uid} folder=${folder} flag=${flag} value=${value}`);
     if (await this._setFlagOverPersistent(account, uid, folder, flag, value, flight)) return;
     // Up to 2 attempts. ImapFlow returns false when the server did NOT apply the flag —
@@ -6707,7 +6713,7 @@ export class ImapManager {
           } finally {
             lock.release();
           }
-        }, { background });
+        }, { background, failFastWhenHeld });
         return; // applied
       } catch (err) {
         lastErr = err;
@@ -6975,8 +6981,9 @@ export class ImapManager {
   // destination UIDNEXT so the DB can store the correct new UIDs.
   // On command failure, verifies via UID SEARCH and confirms destination arrival
   // before trusting the source-absence result.
-  // background: a move nobody is waiting on (a rule, the block list), see acquirePooledClient.
-  async bulkMoveMessages(account, uids, fromFolder, toFolder, { background = false } = {}) {
+  // background / failFastWhenHeld (a rule, the block list): see acquirePooledClient.
+  async bulkMoveMessages(account, uids, fromFolder, toFolder, { background = false, failFastWhenHeld = false } = {}) {
+    const poolOpts = { background, failFastWhenHeld };
     if (!uids.length) return { uidMap: new Map(), succeeded: [], failed: [] };
     let destUidNextBefore = null;
 
@@ -6986,7 +6993,7 @@ export class ImapManager {
     try {
       const status = await withFreshClient(account, async (client) => {
         return await client.status(toFolder, { uidNext: true });
-      }, { background });
+      }, poolOpts);
       destUidNextBefore = status?.uidNext ?? null;
     } catch (statusErr) {
       // A full pool (or a login held back) means nothing was sent and nothing will be: fail the whole call as busy
@@ -7006,7 +7013,7 @@ export class ImapManager {
         } finally {
           lock.release();
         }
-      }, { background });
+      }, poolOpts);
 
       if (serverUidMap) {
         // #407 fix: report only what the server actually moved. A requested UID the server did
@@ -7028,7 +7035,7 @@ export class ImapManager {
       // case — so reconcile by UID SEARCH rather than blindly claiming success, which would delete
       // local rows for messages that never moved and lose the destination UIDs of the ones that
       // did. `stale_mutation_uid` records the inferred stale count.
-      const bySearch = await this._reconcileMoveBySearch(account, uids, fromFolder, toFolder, destUidNextBefore, { background });
+      const bySearch = await this._reconcileMoveBySearch(account, uids, fromFolder, toFolder, destUidNextBefore, poolOpts);
       if (bySearch.staleCount) {
         recordSyncSignal('stale_mutation_uid', { accountId: account.id, magnitude: bySearch.staleCount });
         // The batch is reported all-failed, so the caller leaves local rows untouched. The
@@ -7050,7 +7057,7 @@ export class ImapManager {
       console.warn(`bulkMoveMessages ${fromFolder} → ${toFolder}: batch failed (${err.message}), verifying via UID SEARCH`);
       // A thrown move may have applied partway; reconcile by search to report what actually moved.
       // Not counted as stale_mutation_uid — this is a move failure, not a stale-identity meeting.
-      const bySearch = await this._reconcileMoveBySearch(account, uids, fromFolder, toFolder, destUidNextBefore, { background });
+      const bySearch = await this._reconcileMoveBySearch(account, uids, fromFolder, toFolder, destUidNextBefore, poolOpts);
       return { uidMap: bySearch.uidMap, succeeded: bySearch.succeeded, failed: bySearch.failed };
     }
   }
@@ -7062,14 +7069,14 @@ export class ImapManager {
   // classifyMoveBySearch; this method just does the two IMAP searches and the sorted-order mapping.
   // Returns { uidMap, succeeded, failed, staleCount } (staleCount is the inferred stale-UID count,
   // or null when it could not be determined).
-  async _reconcileMoveBySearch(account, uids, fromFolder, toFolder, destUidNextBefore, { background = false } = {}) {
+  async _reconcileMoveBySearch(account, uids, fromFolder, toFolder, destUidNextBefore, poolOpts = {}) {
     let remaining;
     try {
       remaining = await withFreshClient(account, async (client) => {
         const lock = await client.getMailboxLock(fromFolder);
         try { return await client.search({ uid: uids.join(',') }, { uid: true }); }
         finally { lock.release(); }
-      }, { background });
+      }, poolOpts);
     } catch (searchErr) {
       console.error(`bulkMoveMessages: source UID SEARCH failed (${searchErr.message}) — leaving all ${uids.length} for next sync`);
       return { uidMap: new Map(), succeeded: [], failed: uids, staleCount: null };
@@ -7083,7 +7090,7 @@ export class ImapManager {
           const lock = await client.getMailboxLock(toFolder);
           try { return await client.search({ uid: `${destUidNextBefore}:*` }, { uid: true }); }
           finally { lock.release(); }
-        }, { background });
+        }, poolOpts);
         destArrived = destNew.length;
       } catch (destErr) {
         console.warn(`bulkMoveMessages: destination verification failed (${destErr.message}) — trusting source-absence`);

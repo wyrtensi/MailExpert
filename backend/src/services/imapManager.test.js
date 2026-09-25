@@ -17,7 +17,7 @@ vi.mock('../utils/redact.js', () => ({ redactEmail: vi.fn() }));
 vi.mock('./hostValidation.js', () => ({ resolveForConnection: vi.fn(), createPinnedLookup: vi.fn() }));
 vi.mock('./connectionPolicy.js', () => ({ getConnectionPolicy: vi.fn() }));
 
-import { ImapManager, MIN_SYNC_INTERVAL_MS, AUTO_IDLE_DELAY_MS, countMissingInboxCopies, fetchBackfillBatch, providerProfile, makeClientCfg, relocateExemptGuard, insertCopiedSibling, deleteMessageCopyRow, emitSectionsChanged, ensureMailbox, createKeyedSemaphore, isConnectionRefusal, extractImapError, isImapAuthFailure, AUTH_FAILURE_COOLDOWN_MS, AUTH_FAILURE_COOLDOWN_MAX_MS, authCooldownMs, connectCooldownMs, effectiveSyncIntervalMs, folderSyncDue, planModseqSync, connectStaggerFor, walkStructure, planBodyParts, extractBodyFromMsg, bodyFallbackApplies, poolSizeFor, rerootThreadChildren, parsePersistentCap, resolvePersistentCap, persistentEligible, shouldRetryIPv4, classifyMoveBySearch, PERSISTENT_FLAG_STORE_TIMEOUT_MS, PERSISTENT_FLAG_LATE_STORE_WAIT_MS, PERSISTENT_FLAG_LOCK_WAIT_MS, wrapImapError, acquirePooledClient, releasePooledClient, evictPool, ACQUIRE_TIMEOUT_MS, PREFETCH_MAX_CONSECUTIVE_ERRORS, PREFETCH_STOP_PAUSE_MS } from './imapManager.js';
+import { ImapManager, MIN_SYNC_INTERVAL_MS, AUTO_IDLE_DELAY_MS, countMissingInboxCopies, fetchBackfillBatch, providerProfile, makeClientCfg, relocateExemptGuard, insertCopiedSibling, deleteMessageCopyRow, emitSectionsChanged, ensureMailbox, createKeyedSemaphore, isConnectionRefusal, extractImapError, isImapAuthFailure, AUTH_FAILURE_COOLDOWN_MS, AUTH_FAILURE_COOLDOWN_MAX_MS, authCooldownMs, connectCooldownMs, effectiveSyncIntervalMs, folderSyncDue, planModseqSync, connectStaggerFor, walkStructure, planBodyParts, extractBodyFromMsg, bodyFallbackApplies, poolSizeFor, rerootThreadChildren, parsePersistentCap, resolvePersistentCap, persistentEligible, shouldRetryIPv4, classifyMoveBySearch, PERSISTENT_FLAG_STORE_TIMEOUT_MS, PERSISTENT_FLAG_LATE_STORE_WAIT_MS, PERSISTENT_FLAG_LOCK_WAIT_MS, wrapImapError, acquirePooledClient, releasePooledClient, evictPool, ACQUIRE_TIMEOUT_MS, BACKGROUND_ACQUIRE_TIMEOUT_MS, PREFETCH_MAX_CONSECUTIVE_ERRORS, PREFETCH_STOP_PAUSE_MS } from './imapManager.js';
 import { pluginRegistry } from '../plugins/registry.js';
 import { EventEmitter } from 'node:events';
 import { ImapFlow } from 'imapflow';
@@ -6197,8 +6197,8 @@ describe('every background login waits out a rejected password', () => {
       evictPool(acct.id);
     });
 
-    describe('background work held back does not wait for a busy session', () => {
-      // Rules, the block list, a rule forward and snooze run inside the sync tick, bounded at 55 s;
+    describe('rule work held back does not wait for a busy session', () => {
+      // Rules, the block list and a rule forward run inside the sync tick, bounded at 55 s;
       // a tick that overruns closes the live IDLE session. Two letters whose rule moves and marks
       // read each waited out the pool queue (15 s a move, 31 s a store) were enough.
       const settlesAtOnce = (p) => Promise.race([p.then(() => 'settled', () => 'settled'), new Promise(r => setTimeout(() => r('waited'), 200))]);
@@ -6213,7 +6213,7 @@ describe('every background login waits out a rejected password', () => {
 
       it('a rule move fails at once, typed, without a login', async () => {
         const { acct, mgr, busy } = await busyAndHeld();
-        const move = mgr.bulkMoveMessages(acct, [5], 'INBOX', 'Archive', { background: true });
+        const move = mgr.bulkMoveMessages(acct, [5], 'INBOX', 'Archive', { failFastWhenHeld: true });
         expect(await settlesAtOnce(move)).toBe('settled');
         await expect(move).rejects.toMatchObject({ providerRefusing: true });
         expect(clients).toHaveLength(1);
@@ -6223,7 +6223,7 @@ describe('every background login waits out a rejected password', () => {
 
       it('a rule flag store fails at once, typed, without a login', async () => {
         const { acct, mgr, busy } = await busyAndHeld();
-        const store = mgr.setFlag(acct, 7, 'Sent', '\\Seen', true, { background: true });
+        const store = mgr.setFlag(acct, 7, 'Sent', '\\Seen', true, { failFastWhenHeld: true });
         expect(await settlesAtOnce(store)).toBe('settled');
         await expect(store).rejects.toMatchObject({ providerRefusing: true });
         expect(clients).toHaveLength(1);
@@ -6233,11 +6233,47 @@ describe('every background login waits out a rejected password', () => {
 
       it('a rule forward fails at once, typed, without a login', async () => {
         const { acct, mgr, busy } = await busyAndHeld();
-        const fetch = mgr.fetchMessageBody(acct, 5, 'INBOX', { allowLogin: true, background: true });
+        const fetch = mgr.fetchMessageBody(acct, 5, 'INBOX', { allowLogin: true, failFastWhenHeld: true });
         expect(await settlesAtOnce(fetch)).toBe('settled');
         await expect(fetch).rejects.toMatchObject({ providerRefusing: true });
         expect(clients).toHaveLength(1);
         releasePooledClient(acct, busy);
+        evictPool(acct.id);
+      });
+
+      it('on a healthy mailbox a rule move waits for a busy pool as a user action does, past the 10 s background wait', async () => {
+        // Nothing holds the account back: the rule keeps the interactive queue and its 15 s wait.
+        // A rule move that gives up is skipped for good, so it must not lose that wait.
+        const acct = account();
+        const mgr = liveManager(acct);
+        connectError = null;
+        ImapFlow.mockImplementation(function () {
+          const client = Object.assign(new EventEmitter(), {
+            usable: true,
+            connect: vi.fn().mockResolvedValue(),
+            logout: vi.fn().mockResolvedValue(),
+            getMailboxLock: vi.fn().mockResolvedValue({ release: vi.fn() }),
+            status: vi.fn().mockResolvedValue({ uidNext: 51 }),
+            messageMove: vi.fn().mockResolvedValue({ uidMap: new Map([[5, 50]]) }),
+          });
+          client.close = vi.fn(() => { client.usable = false; client.emit('close'); });
+          clients.push(client);
+          return client;
+        });
+        const held = [];
+        for (let i = 0; i < poolSizeFor(acct); i++) held.push(await acquirePooledClient(acct)); // all busy
+        vi.useFakeTimers();
+        let settled = false;
+        let move;
+        try {
+          move = mgr.bulkMoveMessages(acct, [5], 'INBOX', 'Archive', { failFastWhenHeld: true }).finally(() => { settled = true; });
+          await vi.advanceTimersByTimeAsync(BACKGROUND_ACQUIRE_TIMEOUT_MS + 1000);
+          expect(settled).toBe(false); // still queued, where a background caller would have given up
+        } finally { vi.useRealTimers(); }
+        releasePooledClient(acct, held[0]);
+        expect(await move).toMatchObject({ succeeded: [5], failed: [] });
+        expect(clients).toHaveLength(poolSizeFor(acct)); // no login: it used the released session
+        for (const c of held) releasePooledClient(acct, c);
         evictPool(acct.id);
       });
     });

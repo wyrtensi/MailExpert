@@ -154,13 +154,13 @@ async function loadForwardContent({ row, account, imapManager }) {
   if (!text && !html) {
     // allowLogin: a forward runs once per new message and has no retry, so a refusal backoff
     // must not make it fail without even one login attempt (see fetchMessageBody).
-    // background: it runs inside the sync tick, so a held-back fetch must fail at once rather
-    // than queue for a busy pooled session.
+    // failFastWhenHeld: it runs inside the sync tick, so a fetch the login gate holds back must
+    // fail at once rather than queue for a busy pooled session; otherwise it waits as usual.
     const fetched = await imapManager.fetchMessageBody(
       account,
       row.uid,
       row.folder,
-      { allowLogin: true, background: true }
+      { allowLogin: true, failFastWhenHeld: true }
     );
     text = fetched.text;
     html = fetched.html;
@@ -204,7 +204,7 @@ async function loadForwardContent({ row, account, imapManager }) {
       row.uid,
       row.folder,
       storedParts,
-      { background: true }
+      { failFastWhenHeld: true }
     );
     fetchedAttachments = storedParts.map(attachment => {
       const content = buffers.get(attachment.part);

@@ -410,11 +410,12 @@ export async function applyBlockList(messages, account, imapManager) {
   return remaining;
 }
 
-// Rules run inside the sync tick, as background work: an IMAP call held back by a backoff fails
-// at once instead of queueing for a busy pooled session (imapManager's acquirePooledClient). The
-// tick is bounded at 55 s and closes the live IDLE session when it runs out, so a few rule
-// actions each waiting out the pool queue would take the mailbox offline.
-const RULE_IMAP = { background: true };
+// Rules run inside the sync tick. An IMAP call the login gate holds back fails at once instead of
+// queueing for a busy pooled session (imapManager's acquirePooledClient): the tick is bounded at
+// 55 s and closes the live IDLE session when it runs out, so a few rule actions each waiting out
+// the pool queue would take the mailbox offline. On a healthy mailbox they keep the normal
+// interactive wait: a rule move that gives up is not retried.
+const RULE_IMAP = { failFastWhenHeld: true };
 
 // A rule action the pool did not run: held back (providerRefusing: a backoff holds new logins
 // back and no pooled session was free, so no login was tried; with a rejected password a login

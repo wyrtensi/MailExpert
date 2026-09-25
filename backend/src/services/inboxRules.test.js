@@ -113,7 +113,7 @@ describe('applyInboxRules — forwarding', () => {
         'INBOX',
         '\\Seen',
         true,
-        { background: true }
+        { failFastWhenHeld: true }
       );
       expect(consoleError).toHaveBeenCalledWith(
         'inboxRules: forward action failed; destination actions suppressed'
@@ -513,7 +513,7 @@ describe('applyInboxRules — destination action deduplication', () => {
     await applyInboxRules([mkMsg()], account, mockImap);
 
     expect(mockImap.bulkMoveMessages).toHaveBeenCalledOnce();
-    expect(mockImap.bulkMoveMessages).toHaveBeenCalledWith(account, [100], 'INBOX', 'INBOX/Work', { background: true });
+    expect(mockImap.bulkMoveMessages).toHaveBeenCalledWith(account, [100], 'INBOX', 'INBOX/Work', { failFastWhenHeld: true });
   });
 
   it('executes only the first destination action when a legacy rule has move + delete', async () => {
@@ -529,7 +529,7 @@ describe('applyInboxRules — destination action deduplication', () => {
     await applyInboxRules([mkMsg()], account, mockImap);
 
     expect(mockImap.bulkMoveMessages).toHaveBeenCalledOnce();
-    expect(mockImap.bulkMoveMessages).toHaveBeenCalledWith(account, [100], 'INBOX', 'INBOX/Archive', { background: true });
+    expect(mockImap.bulkMoveMessages).toHaveBeenCalledWith(account, [100], 'INBOX', 'INBOX/Archive', { failFastWhenHeld: true });
   });
 
   it('skips subsequent destination actions even when the first one fails', async () => {
@@ -564,7 +564,7 @@ describe('applyInboxRules — destination action deduplication', () => {
     await applyInboxRules([mkMsg()], account, mockImap);
 
     expect(mockImap.bulkMoveMessages).toHaveBeenCalledOnce();
-    expect(mockImap.setFlag).toHaveBeenCalledWith(account, 100, 'INBOX', '\\Seen', true, { background: true });
+    expect(mockImap.setFlag).toHaveBeenCalledWith(account, 100, 'INBOX', '\\Seen', true, { failFastWhenHeld: true });
   });
 });
 
@@ -588,7 +588,7 @@ describe('applyInboxRules — already-relocated message skips subsequent rules',
     // message removed from remaining; second move never fired
     expect(result.remaining).toHaveLength(0);
     expect(mockImap.bulkMoveMessages).toHaveBeenCalledOnce();
-    expect(mockImap.bulkMoveMessages).toHaveBeenCalledWith(account, [100], 'INBOX', 'INBOX/Work', { background: true });
+    expect(mockImap.bulkMoveMessages).toHaveBeenCalledWith(account, [100], 'INBOX', 'INBOX/Work', { failFastWhenHeld: true });
   });
 
   it('applies a subsequent mark_read rule even after an earlier rule moved the message', async () => {
@@ -616,7 +616,7 @@ describe('applyInboxRules — already-relocated message skips subsequent rules',
     // mark_read DB update fired: third query call (after rules fetch + move update)
     expect(query).toHaveBeenCalledTimes(3);
     // setFlag targeted the NEW uid (200) in the destination folder (INBOX/Work)
-    expect(mockImap.setFlag).toHaveBeenCalledWith(account, 200, 'INBOX/Work', '\\Seen', true, { background: true });
+    expect(mockImap.setFlag).toHaveBeenCalledWith(account, 200, 'INBOX/Work', '\\Seen', true, { failFastWhenHeld: true });
   });
 
   it('does not double-decrement unread count when mark_read fires before move (reversed priority)', async () => {

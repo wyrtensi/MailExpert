@@ -2940,6 +2940,8 @@ export class ImapManager {
       const fresh = await ensureFreshToken(account);
       const { resolved, policy } = await raceTimeout(resolveAccountHost(fresh), 15000, 'Poll-only host resolve');
       client = await connectImapClient(fresh, resolved, { enableIdle: false, policy }, 30000, 'Poll-only connect');
+      // A poll-only mailbox has no persistent login: this one proves a restored node password.
+      this._nodePasswordRestored.delete(account.id);
 
       if (folderSyncDue(this.folderSyncIntervalMs, this.lastFolderSyncAt.get(account.id))) {
         this.lastFolderSyncAt.set(account.id, Date.now());
@@ -3108,11 +3110,12 @@ export class ImapManager {
   _noteNodePasswordRejected(account) {
     if (!account?.mail_node || isOAuthAccount(account)) return;
     const id = account.id;
-    if (this._nodePasswordRestoring.has(id)) return;
+    // Checked first, so a rejection of the restore's own reconnect is logged, not skipped silently.
     if (this._nodePasswordRestored.has(id)) {
       console.warn(`The password restored on the mail node for ${logAccount(account)} is rejected too; not restoring it again until a login succeeds or the mailbox is reconnected`);
       return;
     }
+    if (this._nodePasswordRestoring.has(id)) return;
     this._nodePasswordRestoring.add(id);
     // Next turn, so the caller records the rejection first and the outcome below is what stays.
     setImmediate(() => {

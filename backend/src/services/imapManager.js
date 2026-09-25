@@ -1585,6 +1585,9 @@ export function disarmPoolIdleClose(pool, client) {
 // jumped the queue. One grow at a time per freed slot: pool.connecting counts it, so the pool
 // never exceeds its size. A grow that fails rejects only its own waiter and wakes nobody: waking
 // the next one would be a fresh login per waiter against a provider that just refused us.
+// A head waiter a backoff holds back (noNewLogin, loginHeldBack) never grows the pool: it waits
+// for a session to be released, and the grow goes to the first waiter behind it that may log in.
+// With no session open, the held head fails at once with providerRefusing.
 function drainWaiters(pool) {
   while (pool.waiters.length > 0) {
     const free = pool.clients.find(c => !pool.inUse.has(c));

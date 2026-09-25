@@ -17,7 +17,7 @@ vi.mock('../utils/redact.js', () => ({ redactEmail: vi.fn() }));
 vi.mock('./hostValidation.js', () => ({ resolveForConnection: vi.fn(), createPinnedLookup: vi.fn() }));
 vi.mock('./connectionPolicy.js', () => ({ getConnectionPolicy: vi.fn() }));
 
-import { ImapManager, MIN_SYNC_INTERVAL_MS, AUTO_IDLE_DELAY_MS, countMissingInboxCopies, fetchBackfillBatch, providerProfile, makeClientCfg, relocateExemptGuard, insertCopiedSibling, deleteMessageCopyRow, emitSectionsChanged, ensureMailbox, createKeyedSemaphore, isConnectionRefusal, extractImapError, isImapAuthFailure, AUTH_FAILURE_COOLDOWN_MS, AUTH_FAILURE_COOLDOWN_MAX_MS, authCooldownMs, connectCooldownMs, effectiveSyncIntervalMs, folderSyncDue, planModseqSync, connectStaggerFor, walkStructure, planBodyParts, extractBodyFromMsg, bodyFallbackApplies, poolSizeFor, rerootThreadChildren, parsePersistentCap, resolvePersistentCap, persistentEligible, shouldRetryIPv4, classifyMoveBySearch, PERSISTENT_FLAG_STORE_TIMEOUT_MS, PERSISTENT_FLAG_LATE_STORE_WAIT_MS, PERSISTENT_FLAG_LOCK_WAIT_MS, wrapImapError, acquirePooledClient, releasePooledClient, evictPool, PREFETCH_MAX_CONSECUTIVE_ERRORS, PREFETCH_STOP_PAUSE_MS } from './imapManager.js';
+import { ImapManager, MIN_SYNC_INTERVAL_MS, AUTO_IDLE_DELAY_MS, countMissingInboxCopies, fetchBackfillBatch, providerProfile, makeClientCfg, relocateExemptGuard, insertCopiedSibling, deleteMessageCopyRow, emitSectionsChanged, ensureMailbox, createKeyedSemaphore, isConnectionRefusal, extractImapError, isImapAuthFailure, AUTH_FAILURE_COOLDOWN_MS, AUTH_FAILURE_COOLDOWN_MAX_MS, authCooldownMs, connectCooldownMs, effectiveSyncIntervalMs, folderSyncDue, planModseqSync, connectStaggerFor, walkStructure, planBodyParts, extractBodyFromMsg, bodyFallbackApplies, poolSizeFor, rerootThreadChildren, parsePersistentCap, resolvePersistentCap, persistentEligible, shouldRetryIPv4, classifyMoveBySearch, PERSISTENT_FLAG_STORE_TIMEOUT_MS, PERSISTENT_FLAG_LATE_STORE_WAIT_MS, PERSISTENT_FLAG_LOCK_WAIT_MS, wrapImapError, acquirePooledClient, releasePooledClient, evictPool, ACQUIRE_TIMEOUT_MS, PREFETCH_MAX_CONSECUTIVE_ERRORS, PREFETCH_STOP_PAUSE_MS } from './imapManager.js';
 import { pluginRegistry } from '../plugins/registry.js';
 import { EventEmitter } from 'node:events';
 import { ImapFlow } from 'imapflow';
@@ -5081,6 +5081,19 @@ describe('fetchMessageBody opens no fresh login while a backoff is armed', () =>
     evictPool(acct.id);
   });
 
+  it('waits for a busy open session while a backoff is armed, instead of failing at once', async () => {
+    const mgr = ladderManager();
+    const acct = account('body-gate-busy');
+    const busy = await acquirePooledClient(acct); // another click holds the only session
+    arms['the secondary backoff'](mgr, acct.id);
+    const click = mgr.fetchMessageBody(acct, 9, 'INBOX').catch(e => e);
+    releasePooledClient(acct, busy);
+    // It got the session (the fetch on it failed with ECONNRESET), and opened no login.
+    expect(await click).toMatchObject({ message: 'ECONNRESET', providerRefusing: true });
+    expect(created).toBe(1);
+    evictPool(acct.id);
+  });
+
   it('does not open a fresh first login for a preferFreshBodyFetch provider while a backoff is armed', async () => {
     const mgr = ladderManager();
     const acct = { ...account('body-gate-purelymail'), imap_host: 'imap.purelymail.com' };
@@ -6040,19 +6053,84 @@ describe('every background login waits out a rejected password', () => {
       evictPool(acct.id);
     });
 
-    it('a waiter queued before the window opened does not log in when a slot frees', async () => {
+    it('a waiter queued before the window opened does not log in when a slot frees, and gets the next released session', async () => {
       const acct = account();
       const mgr = liveManager(acct);
       connectError = null;
       const held = [];
       for (let i = 0; i < poolSizeFor(acct); i++) held.push(await acquirePooledClient(acct));
-      const waiter = acquirePooledClient(acct).catch(e => e);
+      let settled = null;
+      const waiter = acquirePooledClient(acct).then(c => { settled = c; return c; }, e => { settled = e; return e; });
       rejectedPassword(mgr, acct);
       connectError = dovecotAuthFailure;
-      held[0].close(); // the server closed one pooled session: its slot goes to the waiter
-      expect(await waiter).toMatchObject({ providerRefusing: true });
+      held[0].close(); // the server closed one pooled session: its slot is not grown into
+      await Promise.resolve();
+      expect(settled).toBeNull();
       expect(clients).toHaveLength(poolSizeFor(acct));
-      for (const c of held.slice(1)) releasePooledClient(acct, c);
+      releasePooledClient(acct, held[1]);
+      expect(await waiter).toBe(held[1]);
+      expect(clients).toHaveLength(poolSizeFor(acct));
+      for (const c of [held[1], ...held.slice(2)]) releasePooledClient(acct, c);
+      evictPool(acct.id);
+    });
+
+    it('a background job does not queue behind a busy session while logins are held back', async () => {
+      const acct = account();
+      const mgr = liveManager(acct);
+      connectError = null;
+      mgr.syncMessages = vi.fn().mockResolvedValue({});
+      query.mockImplementation(async (sql) => ({ rows: sql.includes('lower(name) ~') ? [{ path: 'Junk' }] : [], rowCount: 1 }));
+      const busy = await acquirePooledClient(acct);
+      mgr._secondaryCooldown.set(acct.id, { until: Date.now() + 60000, failures: 1 });
+      const poll = mgr._syncSpamFolder(acct);
+      await new Promise(r => setImmediate(r));
+      releasePooledClient(acct, busy);
+      await poll;
+      expect(mgr.syncMessages).not.toHaveBeenCalled();
+      evictPool(acct.id);
+    });
+
+    it('a user action waits for a busy open session while the password is rejected, without a login', async () => {
+      const acct = account();
+      const mgr = liveManager(acct);
+      connectError = null;
+      const busy = await acquirePooledClient(acct); // another employee's action holds it
+      rejectedPassword(mgr, acct);
+      const waiting = acquirePooledClient(acct);
+      releasePooledClient(acct, busy);
+      expect(await waiting).toBe(busy);
+      expect(clients).toHaveLength(1);
+      releasePooledClient(acct, busy);
+      evictPool(acct.id);
+    });
+
+    it('a waiting user action fails typed when the last open session closes', async () => {
+      const acct = account();
+      const mgr = liveManager(acct);
+      connectError = null;
+      const busy = await acquirePooledClient(acct);
+      rejectedPassword(mgr, acct);
+      const waiting = acquirePooledClient(acct).catch(e => e);
+      busy.close();
+      expect(await waiting).toMatchObject({ providerRefusing: true });
+      expect(clients).toHaveLength(1);
+      evictPool(acct.id);
+    });
+
+    it('a user action that waits out the queue gets the usual busy answer', async () => {
+      const acct = account();
+      const mgr = liveManager(acct);
+      connectError = null;
+      const busy = await acquirePooledClient(acct);
+      rejectedPassword(mgr, acct);
+      vi.useFakeTimers();
+      try {
+        const waiting = acquirePooledClient(acct).catch(e => e);
+        vi.advanceTimersByTime(ACQUIRE_TIMEOUT_MS);
+        expect(await waiting).toMatchObject({ poolExhausted: true });
+      } finally { vi.useRealTimers(); }
+      expect(clients).toHaveLength(1);
+      releasePooledClient(acct, busy);
       evictPool(acct.id);
     });
 
@@ -6093,6 +6171,25 @@ describe('every background login waits out a rejected password', () => {
         const { acct } = armedOAuth();
         await expect(acquirePooledClient(acct, { background: true })).rejects.toMatchObject({ providerRefusing: true });
         expect(clients).toHaveLength(0);
+      });
+
+      it('a queued background caller does not grow the pool when a slot frees', async () => {
+        const { acct } = armedOAuth();
+        connectError = null;
+        const a = await acquirePooledClient(acct);
+        const b = await acquirePooledClient(acct);
+        const opened = clients.length;
+        connectError = dovecotAuthFailure;
+        let settled = false;
+        const waiting = acquirePooledClient(acct, { background: true }).finally(() => { settled = true; }).catch(e => e);
+        a.close(); // a slot frees while b stays open and busy
+        await new Promise(r => setImmediate(r));
+        expect(settled).toBe(false);
+        expect(clients).toHaveLength(opened);
+        releasePooledClient(acct, b);
+        expect(await waiting).toBe(b);
+        releasePooledClient(acct, b);
+        evictPool(acct.id);
       });
 
       it('holds a password mailbox back for a user action too', async () => {

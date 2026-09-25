@@ -1595,10 +1595,18 @@ function drainWaiters(pool) {
     }
     const head = pool.waiters[0];
     if (pool.clients.length + (pool.connecting || 0) >= poolSizeFor(head.account)) break;
+    // While a backoff holds its logins back (noNewLogin, loginHeldBack), a waiter never grows the pool:
+    // it keeps waiting for an open session to be released, and fails at once only when none is
+    // left to wait for. This also covers a waiter that queued before the window opened.
+    if (head.noNewLogin || loginHeldBack(head.account, { background: head.background })) {
+      if (pool.clients.length > 0) break;
+      pool.waiters.shift();
+      clearTimeout(head.timer);
+      head.reject(providerRefusingError());
+      continue;
+    }
     pool.waiters.shift();
     clearTimeout(head.timer);
-    // A waiter queued before a rejected password held logins back must not log in now either.
-    if (loginHeldBack(head.account, { background: head.background })) { head.reject(providerRefusingError()); continue; }
     growPool(pool, head.account).then(head.resolve, head.reject);
   }
 }
@@ -1645,20 +1653,23 @@ async function growPool(pool, account) {
 // the operation fails with poolExhausted. background: true (work nobody is waiting on) queues
 // behind interactive waiters and gives up after BACKGROUND_ACQUIRE_TIMEOUT_MS.
 //
-// noNewLogin: true (a background caller while the account's backoffs hold new logins back) may
-// only take a session that is already open and idle; anything that would log in or queue fails at
-// once with providerRefusing. The pool's grow is a login like any other, and a background job has
-// no business spending one against a server that is refusing us or rejecting the password.
-// Every caller gets the same treatment while a rejected password holds logins back
-// (loginHeldBack), whatever it passed.
+// noNewLogin: true (the account's backoffs hold new logins back) never grows the pool: the grow
+// is a login like any other, and nobody should spend one against a server that is refusing us or
+// rejecting the password. A background caller may then only take a session that is already open
+// and idle; anything else fails at once with providerRefusing. An interactive caller may also
+// queue for an open session that is busy, as usual (a timeout is the usual poolExhausted), and
+// fails at once only when no session is open at all.
+//
+// A rejected password (loginHeldBack) holds every caller back the same way, whatever it passed.
 export async function acquirePooledClient(account, { background = false, noNewLogin = false } = {}) {
   const id = account.id;
   if (!connectionPools.has(id)) {
     connectionPools.set(id, { clients: [], inUse: new Set(), waiters: [], connecting: 0, idleTimers: new Map() });
   }
   const pool = connectionPools.get(id);
+  const loginHeld = noNewLogin || loginHeldBack(account, { background });
 
-  if (noNewLogin || loginHeldBack(account, { background })) {
+  if (noNewLogin && background) {
     const idle = pool.waiters.length === 0 && pool.clients.find(c => !pool.inUse.has(c));
     if (idle) {
       disarmPoolIdleClose(pool, idle);
@@ -1676,7 +1687,7 @@ export async function acquirePooledClient(account, { background = false, noNewLo
       pool.inUse.add(idle);
       return idle;
     }
-    if (pool.clients.length + (pool.connecting || 0) < poolSizeFor(account)) {
+    if (!loginHeld && pool.clients.length + (pool.connecting || 0) < poolSizeFor(account)) {
       return growPool(pool, account);
     }
   }
@@ -1693,7 +1704,7 @@ export async function acquirePooledClient(account, { background = false, noNewLo
   // variable, offlineimap blocks on a bounded semaphore; RFC 2683 3.1.1 asks clients not to
   // open extra connections to the same mailbox.
   return new Promise((resolve, reject) => {
-    const entry = { resolve, reject, timer: null, account, background };
+    const entry = { resolve, reject, timer: null, account, background, noNewLogin };
     entry.timer = setTimeout(() => {
       pool.waiters = pool.waiters.filter(w => w !== entry);
       recordImapEvent(account.imap_host, 'pool_busy');
@@ -6033,7 +6044,7 @@ export class ImapManager {
       try {
         await withFreshClient(account, async (client) => {
           await this.syncMessages(account, client, spamPath, 50, false, true);
-        }, this._poolLoginOpts(account.id));
+        }, { background: true, ...this._poolLoginOpts(account.id) }); // nobody is waiting on it
         this.broadcast({ type: 'folders_synced', accountId: account.id });
       } finally {
         this._bgConnSem.release(host);
@@ -6188,7 +6199,8 @@ export class ImapManager {
     // While a backoff holds new logins back (live-sync cooldown, secondary refusal backoff, a
     // rejected secondary login), a body click can only succeed over a session that is already
     // open. The first attempt then goes through the pool with noNewLogin: an idle pooled session
-    // serves it, and with none the pool fails at once with providerRefusing, which the route
+    // serves it, a busy one is waited for in the usual queue, and with none open the pool fails
+    // at once with providerRefusing, which the route
     // answers with its 503 busy response instead of paying a doomed login now and another on
     // the retry. Taking the idle session inside the pool, rather than checking for one here
     // first, leaves no window for another caller to take it and make this one log in. A

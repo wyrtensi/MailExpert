@@ -1253,20 +1253,25 @@ export function selectAccountFolders(s, accountId) {
   return s.folders[accountId] || NO_FOLDERS;
 }
 
-// __dl_ deep-link stash written by GTD sidebar selection. Returns null when nothing is selected
-// or the selected row has no message_id. Lets the GTD sidebar and message list highlight every
-// copy of the open message by identity (not just the exact DB row that was clicked). A plain selector, not
-// a state field, so it stays in sync with the list automatically; returns a primitive so a
-// useStore(selectSelectedMessageMid) subscription only re-renders when the value changes.
-export function selectSelectedMessageMid(s) {
-  return findSelectedMessage(s)?.message_id ?? null;
+// The selected message's RFC message_id and account, read with parseSelectedIdentity. Lets the
+// GTD sidebar and message list highlight every copy of the open message by identity (not just
+// the exact DB row that was clicked, e.g. the __dl_ deep-link stash a GTD sidebar selection
+// writes), scoped to its account so that two accounts' copies of one email (separate rows since
+// #476) do not highlight together. Null when nothing is selected.
+//
+// A plain selector, not a state field, so it stays in sync with the list automatically. It runs
+// on every store update in every subscribed component, so it scans the pools ONCE and returns
+// both values as one primitive string: the subscription re-renders only when either changes.
+export function selectSelectedMessageIdentity(s) {
+  const msg = findSelectedMessage(s);
+  return msg ? JSON.stringify([msg.message_id ?? null, msg.account_id ?? null]) : null;
 }
 
-// The selected message's account, the companion to selectSelectedMessageMid. isSelectedRow needs
-// both to scope an identity match to one account, so that two accounts' copies of one email
-// (separate rows since #476) do not highlight together. Also a primitive, for the same reason.
-export function selectSelectedMessageAccountId(s) {
-  return findSelectedMessage(s)?.account_id ?? null;
+// { mid, accountId } from a selectSelectedMessageIdentity value; both null for no selection.
+export function parseSelectedIdentity(identity) {
+  if (!identity) return { mid: null, accountId: null };
+  const [mid, accountId] = JSON.parse(identity);
+  return { mid, accountId };
 }
 
 function findSelectedMessage(s) {

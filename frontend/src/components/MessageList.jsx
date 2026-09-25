@@ -1,7 +1,7 @@
 import { useEffect, useLayoutEffect, useRef, useCallback, useState, useMemo } from 'react';
 import { pickReplyAlias } from '../utils/replyAlias.js';
 import { useTranslation } from 'react-i18next';
-import { useStore, selectSelectedMessageMid, selectSelectedMessageAccountId } from '../store/index.js';
+import { useStore, selectSelectedMessageIdentity, parseSelectedIdentity } from '../store/index.js';
 import { api } from '../utils/api.js';
 import { mailboxBusyOr, isMailboxBusy, MAILBOX_BUSY_CODE } from '../utils/mailboxBusy.js';
 import { priorityFromHeaders } from '../utils/draftPriority.js';
@@ -143,10 +143,11 @@ export default function MessageList() {
   // GTD's UI surfaces (pills, rail, per-row "done") gate on the GTD plugin being activated for the
   // user, on top of each account's gtd_enabled — deactivating hides them entirely.
   const gtdPluginActive = enabledPlugins.includes('gtd');
-  // RFC message_id of the open message, so a row highlights when it is a different DB copy
-  // of the selected message (multi-folder model) — e.g. the inbox copy of a GTD sidebar click.
-  const selectedMid = useStore(selectSelectedMessageMid);
-  const selectedAcct = useStore(selectSelectedMessageAccountId);
+  // RFC message_id and account of the open message, so a row highlights when it is a different
+  // DB copy of the selected message in the same account (multi-folder model) — e.g. the inbox
+  // copy of a GTD sidebar click.
+  const { mid: selectedMid, accountId: selectedAcct } =
+    parseSelectedIdentity(useStore(selectSelectedMessageIdentity));
 
   const isMobile = useMobile();
   const isUnified = selectedAccountId === null;

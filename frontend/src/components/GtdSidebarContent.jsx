@@ -1,7 +1,7 @@
 import { useState } from 'react';
 import { createPortal } from 'react-dom';
 import { useTranslation } from 'react-i18next';
-import { useStore, selectSelectedMessageMid, selectSelectedMessageAccountId } from '../store/index.js';
+import { useStore, selectSelectedMessageIdentity, parseSelectedIdentity } from '../store/index.js';
 import {
   GTD_COLORS, GTD_CHIP_BG,
   buildGtdDisplaySections, isSelectedRow,
@@ -23,8 +23,8 @@ export default function GtdSidebarContent({ onCollapse, toggleHint }) {
   const gtdCollapsedSections = useStore(s => s.gtdCollapsedSections);
   const toggleGtdSection = useStore(s => s.toggleGtdSection);
   const selectedMessageId = useStore(s => s.selectedMessageId);
-  const selectedMid = useStore(selectSelectedMessageMid);
-  const selectedAcct = useStore(selectSelectedMessageAccountId);
+  const { mid: selectedMid, accountId: selectedAcct } =
+    parseSelectedIdentity(useStore(selectSelectedMessageIdentity));
 
   // Every triage primitive (hover cluster + right-click menu), the auto-read timer, and the
   // context-menu state now live in the shared hook — the GTD tab browse list mounts its own

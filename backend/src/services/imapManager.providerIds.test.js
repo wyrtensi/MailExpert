@@ -265,6 +265,28 @@ describe('startProviderIdBackfill connection handling', () => {
     expect(mgr._connectCooldown.has(gmail.id)).toBe(false);
     expect(mgr._secondaryAuthCooldown.has(gmail.id)).toBe(true);
   });
+
+  // Row 11 of the login-path walk in imapManager.test.js ('every login path under a rejected
+  // password'), which cannot mock the runner module.
+  it('costs at most one rejected login per auth window', async () => {
+    const mgr = newManager();
+    mgr.connections.set(gmail.id, { close: vi.fn() });
+    connectError = Object.assign(new Error('Command failed'), {
+      authenticationFailed: true, responseStatus: 'NO', serverResponseCode: 'AUTHENTICATIONFAILED',
+    });
+    runProviderIdBackfill.mockImplementation(async ({ getClient }) => { await getClient(); });
+    await mgr.startProviderIdBackfill(gmail);
+    expect(imapClients).toHaveLength(1);
+    expect(mgr._authLoginBlocked(gmail.id)).toBeTruthy();
+    mgr.providerIdBackoff.clear(); // only the auth window holds it back now
+    await mgr.startProviderIdBackfill(gmail);
+    expect(imapClients).toHaveLength(1);
+    mgr._secondaryAuthCooldown.get(gmail.id).until = 0; // the window ran out
+    mgr.providerIdBackoff.clear();
+    await mgr.startProviderIdBackfill(gmail);
+    expect(imapClients).toHaveLength(2);
+    expect(mgr._authLoginBlocked(gmail.id)).toBeTruthy();
+  });
 });
 
 describe('startProviderIdBackfill shouldContinue', () => {

@@ -5815,6 +5815,104 @@ describe('every background login waits out a rejected password', () => {
     });
   });
 
+  describe('every login path under a rejected password', () => {
+    // The login-path table of the final review of #98, walked end to end: every path that can open
+    // a new IMAP login, run twice per window against Dovecot rejecting the password. Each costs at
+    // most one rejected login per window and none while the window is open.
+    // Not walked here: row 2 (the pool pre-warm runs only after connectAccount's login was
+    // accepted; row 1 counts every login connectAccount opens), row 4 (_syncInboxWithFreshLogin
+    // runs only for a freshInboxSync profile, and no shipped profile sets it), row 11 (provider id
+    // backfill: imapManager.providerIds.test.js, 'costs at most one rejected login per auth window').
+    const snoozeRow = (acct) => ({ snooze_id: 's1', account_id: acct.id, message_id_header: '<s1@example.com>', original_folder: 'INBOX', snoozed_folder: 'Snoozed', uid: 5, is_read: true });
+    const walkQuery = (acct) => async (sql) => {
+      if (sql.startsWith('SELECT * FROM email_accounts')) return { rows: [acct], rowCount: 1 };
+      if (sql.startsWith('SELECT count(*)')) return { rows: [{ count: '5' }] };
+      if (sql.includes('is_bulk IS NULL')) return { rows: [{ id: 'x1', uid: 1, folder: 'INBOX' }, { id: 'x2', uid: 2, folder: 'Sent' }] };
+      if (sql.includes('body_html IS NULL AND body_text IS NULL')) return { rows: [{ id: 'p1', uid: 1, folder: 'INBOX' }, { id: 'p2', uid: 2, folder: 'INBOX' }] };
+      if (sql.startsWith('SELECT uid, folder FROM messages')) return { rows: [{ uid: 7, folder: 'Sent' }] };
+      if (sql.includes('SELECT sm.id AS snooze_id')) return { rows: [snoozeRow(acct)] };
+      if (sql.includes('SELECT DISTINCT m.folder')) return { rows: [{ folder: 'INBOX' }] };
+      if (sql.includes('lower(name) ~')) return { rows: [{ path: 'Junk' }] };
+      return { rows: [], rowCount: 1 };
+    };
+    const live = (acct) => liveManager(acct);
+    const idle = () => ladderManager(); // no persistent connection
+    const paths = [
+      // [row, path, make(acct) -> mgr, run(mgr, acct)]
+      ['1', 'connectAccount', idle, (mgr, a) => mgr.connectAccount(a)],
+      ['3', 'sync tick reconnect', idle, (mgr, a) => mgr._syncTick(a)],
+      ['5', 'poll-only tick', idle, (mgr, a) => mgr._pollOnlyTick(a)],
+      ['6', 'staleness probe', (a) => {
+        const interval = vi.spyOn(globalThis, 'setInterval');
+        const mgr = live(a);
+        mgr._walkProbe = interval.mock.calls.find(([, ms]) => ms === 180000)[0];
+        query.mockImplementation(async sql => ({ rows: sql.includes('MAX(uid)') ? [{ maxuid: 100 }] : [a], rowCount: 1 }));
+        return mgr;
+      }, (mgr) => mgr._walkProbe()],
+      ['7', 'folder status client', live, (mgr, a) => mgr._withCountClient(a, async () => {})],
+      ['8', 'backfill', live, (mgr, a) => mgr.backfillMessages(a, 'Sent')],
+      ['9', 'bulk flag refresh', live, (mgr, a) => mgr.refreshBulkFlags(a)],
+      ['10', 'snippet indexer', live, (mgr, a) => mgr.startSnippetIndexer(a)],
+      ['12', 'body prefetch', live, (mgr, a) => mgr.prefetchFolderBodies(a.id, ['p1', 'p2'])],
+      ['13', 'flag store on the pool', live, (mgr, a) => mgr.setFlag(a, 7, 'Sent', '\\Seen', true)],
+      ['14', 'flag-push reconciler', live, (mgr, a) => { mgr._enqueueFlagPush(a.id, 'm-1', '\\Seen', true); return mgr._reconcileFlagPushes(); }],
+      ['15', 'IDLE flag sync', live, (mgr, a) => mgr._syncFlagsForRange(a)],
+      ['16', 'IDLE expunge reconcile', live, (mgr, a) => mgr.reconcileDeletes(a)],
+      ['17', 'spam poll', live, (mgr, a) => mgr._syncSpamFolder(a)],
+      ['18', 'GTD folder sync', live, (mgr, a) => mgr.syncFolderViaPool(a, 'Todo')],
+      ['19', 'rule move', live, (mgr, a) => mgr.bulkMoveMessages(a, [5], 'INBOX', 'Archive')],
+      ['20', 'rule forward', live, (mgr, a) => mgr.fetchMessageBody(a, 5, 'INBOX', { allowLogin: true })],
+      ['21', 'snooze wakeup', live, (mgr) => mgr._runSnoozeWakeup()],
+      ['22', 'message click', live, (mgr, a) => mgr.fetchMessageBody(a, 5, 'INBOX')],
+      ['23', 'headers', live, (mgr, a) => mgr.fetchHeaders(a, 5, 'INBOX')],
+      ['23', 'attachment', live, (mgr, a) => mgr.fetchAttachment(a, 5, 'INBOX', '2')],
+      ['23', 'move', live, (mgr, a) => mgr.moveMessage(a, 5, 'INBOX', 'Archive')],
+      ['23', 'delete from Trash', live, (mgr, a) => mgr.permanentDeleteMessage(a, 5, 'Trash')],
+      ['23', 'bulk permanent delete', live, (mgr, a) => mgr.bulkPermanentDelete(a, [5], 'Trash')],
+      ['23', 'empty folder', live, (mgr, a) => mgr.emptyFolder(a, 'Trash')],
+      ['23', 'mark all read', live, (mgr, a) => mgr.markAllReadImap(a, 'INBOX')],
+      ['23', 'create folder', live, (mgr, a) => mgr.ensureFolder(a, 'Projects')],
+      ['23', 'rename folder', live, (mgr, a) => mgr.renameFolder(a, 'Projects', 'Archive2')],
+      ['23', 'delete folder', live, (mgr, a) => mgr.deleteFolder(a, 'Projects')],
+      ['23', 'append (draft, Sent copy)', live, (mgr, a) => mgr.appendToFolder(a, 'Drafts', 'raw')],
+      ['23', 'find the Sent copy', live, (mgr, a) => mgr.findUidByMessageId(a, 'Sent', '<m@example.com>')],
+      ['23', 'label copy', live, (mgr, a) => mgr.copyMessage(a.id, 5, 'INBOX', 'Label')],
+      ['23', 'open a folder', live, (mgr, a) => mgr.syncFolderOnDemand(a, 'Archive')],
+    ];
+    const expire = (mgr, acct) => {
+      for (const map of [mgr._connectCooldown, mgr._secondaryAuthCooldown, mgr._secondaryCooldown]) {
+        const cd = map.get(acct.id);
+        if (cd) cd.until = 0;
+      }
+      mgr._prefetchPausedUntil.clear(); // a 60 s pause, long gone once a 30 min window has run out
+    };
+
+    for (const [row, what, make, run] of paths) {
+      it(`row ${row}, ${what}: one rejected login per window, none while it is open`, async () => {
+        const acct = account();
+        query.mockImplementation(walkQuery(acct));
+        const mgr = make(acct);
+        const attempt = () => Promise.resolve().then(() => run(mgr, acct)).catch(() => {});
+
+        await attempt();
+        expect(clients).toHaveLength(1);
+        expect(mgr._authLoginBlocked(acct.id)).toBeTruthy();
+        await attempt();
+        expect(clients).toHaveLength(1);
+
+        expire(mgr, acct);
+        await attempt();
+        expect(clients).toHaveLength(2);
+        expect(mgr._authLoginBlocked(acct.id)).toBeTruthy();
+        await attempt();
+        expect(clients).toHaveLength(2);
+
+        await mgr.disconnectAccount(acct.id);
+        evictPool(acct.id);
+      });
+    }
+  });
+
   describe('a persistent login the server accepts lifts the window', () => {
     // The password was fixed on the server and nobody pressed Reconnect: the persistent session
     // logs in again with the same credentials. That proves the password, so background logins and

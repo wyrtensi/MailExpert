@@ -8,12 +8,14 @@
 //   a moment. Worth retrying in a few seconds.
 // - mailbox_auth_rejected: the server rejected the mailbox's password on a recent login
 //   (providerRefusing with authRejected), so no login is tried for 30 minutes to 6 hours.
-//   Retrying does nothing until the password is updated in the mailbox settings.
+//   Retrying does nothing; someone has to check the mailbox. The text does not say to change the
+//   password in the mailbox settings: a mail-node mailbox cannot change it there
+//   (mail_node_connection_locked), and it may be the mailbox that was deactivated.
 export const MAILBOX_BUSY_CODE = 'mailbox_busy';
 export const MAILBOX_AUTH_REJECTED_CODE = 'mailbox_auth_rejected';
 
 const MAILBOX_BUSY_ERROR = 'This mailbox is busy with other mail operations. Please try again in a few seconds.';
-const MAILBOX_AUTH_REJECTED_ERROR = "The mail server rejected this mailbox's password. Update it in the mailbox settings.";
+const MAILBOX_AUTH_REJECTED_ERROR = 'The mail server does not accept the sign-in to this mailbox. Ask an administrator to check the mailbox.';
 
 // { error, code } for a busy answer; `err` is the error that got no session (or an object with
 // authRejected, for a bulk route that tracks it across groups).

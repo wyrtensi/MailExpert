@@ -23,7 +23,7 @@
     "loadMore": "Load more",
     "adminOnly": "Only an administrator can change this.",
     "mailboxBusy": "The mailbox is busy, try again in a few seconds",
-    "mailboxAuthRejected": "The mail server rejected this mailbox's password. Update it in the mailbox settings."
+    "mailboxAuthRejected": "The mail server does not accept the sign-in to this mailbox. Ask an administrator to check the mailbox."
   },
   "login": {
     "google": {

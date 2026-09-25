@@ -5,8 +5,9 @@
 // in its body, so a partial-failure toast can say why the rest did not.
 //
 // 'mailbox_auth_rejected' is the same answer when the reason is that the mail server rejected the
-// mailbox's password: no login is tried for a while, and retrying does nothing until the password
-// is updated in the mailbox settings, so the reader is told that instead.
+// mailbox's password: no login is tried for a while and retrying does nothing, so the reader is
+// told to have the mailbox checked. Not "change the password in the settings": a mail-node
+// mailbox cannot change it there.
 export const MAILBOX_BUSY_CODE = 'mailbox_busy';
 export const MAILBOX_AUTH_REJECTED_CODE = 'mailbox_auth_rejected';
 

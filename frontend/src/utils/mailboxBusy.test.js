@@ -27,7 +27,7 @@ describe('mailbox busy errors', () => {
     assert.equal(locale('en').common.mailboxBusy, 'The mailbox is busy, try again in a few seconds');
   });
 
-  it('tells a rejected password apart: retrying will not help, the password must be updated', () => {
+  it('tells a rejected password apart: retrying will not help, the mailbox must be checked', () => {
     const t = key => `t:${key}`;
     const rejected = Object.assign(new Error('x'), { code: MAILBOX_AUTH_REJECTED_CODE });
     assert.equal(MAILBOX_AUTH_REJECTED_CODE, 'mailbox_auth_rejected');
@@ -37,7 +37,8 @@ describe('mailbox busy errors', () => {
     assert.equal(mailboxBusyText({ code: 'mailbox_busy' }, t), 't:common.mailboxBusy');
     // A partial-success bulk response body carries it too.
     assert.equal(mailboxBusyOr({ ok: true, moved: ['a'], busy: true, code: 'mailbox_auth_rejected' }, t, 'fallback'), 't:common.mailboxAuthRejected');
-    assert.equal(locale('en').common.mailboxAuthRejected, "The mail server rejected this mailbox's password. Update it in the mailbox settings.");
-    assert.equal(locale('ru').common.mailboxAuthRejected, 'Почтовый сервер отклонил пароль этого ящика. Обновите его в настройках ящика.');
+    // Neutral about where to fix it: a mail-node mailbox cannot change its password in its settings.
+    assert.equal(locale('en').common.mailboxAuthRejected, 'The mail server does not accept the sign-in to this mailbox. Ask an administrator to check the mailbox.');
+    assert.equal(locale('ru').common.mailboxAuthRejected, 'Почтовый сервер не принимает вход в этот ящик. Попросите администратора проверить ящик.');
   });
 });

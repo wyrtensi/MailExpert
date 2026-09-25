@@ -70,6 +70,8 @@ describe('GET /messages/:id/body when the account is busy', () => {
     const body = await res.json();
     expect(res.status).toBe(503);
     expect(body.code).toBe('mailbox_auth_rejected');
+    // Neutral about where to fix it: a mail-node mailbox cannot change its password in its settings.
+    expect(body.error).toBe('The mail server does not accept the sign-in to this mailbox. Ask an administrator to check the mailbox.');
   });
 
   it('answers 503 busy when the server refuses the connection outright', async () => {

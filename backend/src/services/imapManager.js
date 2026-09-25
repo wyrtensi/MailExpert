@@ -1327,6 +1327,21 @@ export const POOLED_OPERATION_TIMEOUT_MS = 120000;
 export const BODY_FETCH_POOL_TIMEOUT_MS = 30000;
 // Whole-account or whole-folder background passes.
 export const LONG_POOLED_OPERATION_TIMEOUT_MS = 5 * 60 * 1000;
+// How long setFlag waits for the persistent IDLE session (its INBOX lock, then the STORE)
+// before the pool takes the flag over. Short: a click must not hang behind a busy session.
+export const PERSISTENT_FLAG_STORE_TIMEOUT_MS = 5000;
+// acquireTimeout for that store's INBOX lock, inside the deadline above. ImapFlow then splices
+// a waiter that was not granted in time out of its lock queue and rejects it; without it every
+// timed-out attempt would leave a waiter queued on the session until the lock came free.
+export const PERSISTENT_FLAG_LOCK_WAIT_MS = 4500;
+// How long the next store on a message waits for a persistent STORE the previous call gave up
+// on. Past this it goes ahead: a STORE still unanswered this long is on a session that is almost
+// certainly dead, and the sync tick closes such a session, but the wait itself must not depend on
+// that happening (a click on the same message would hang until it did).
+export const PERSISTENT_FLAG_LATE_STORE_WAIT_MS = 15000;
+// Clients whose mailbox lock syncMessages holds right now. Module-level because the lock
+// belongs to the client, not to a manager (and tests call syncMessages with a bare `this`).
+const syncLockedClients = new WeakSet();
 
 export function poolSizeFor(account) {
   return providerProfile(account).poolSize ?? POOL_SIZE;
@@ -1887,6 +1902,8 @@ export class ImapManager {
     this.syncStartedAt = new Map();   // accountId -> ms when the current sync tick began (hung-sync detection)
     this.syncThrottleSkips = new Map(); // accountId -> remaining ticks to skip when throttled
     this.connectingAccounts = new Set(); // prevent concurrent connectAccount calls for same account
+    this._flagStoreChains = new Map(); // `${accountId}\n${folder}\n${uid}` -> tail promise; orders setFlag per message
+    this._persistentFlagStuck = new Map(); // accountId -> persistent client holding a flag attempt setFlag gave up on
     this._startupQueued = new Set(); // accountId — waiting for its turn in connectAllEnabled's queue
     this.syncIntervalMs = DEFAULT_SYNC_INTERVAL_SEC * 1000; // install-wide message sync cadence, see applySyncSettings
     this.folderSyncIntervalMs = DEFAULT_FOLDER_SYNC_INTERVAL_MS; // install-wide folder-structure cadence, 0 = never
@@ -3661,6 +3678,10 @@ export class ImapManager {
 
     try {
       const lock = await client.getMailboxLock(folder);
+      // setFlag skips a persistent session while a sync holds its lock. Marked here rather
+      // than by the callers, so it also covers a sync that outlived its caller's timeout
+      // (the initial sync in connectAccount keeps running detached after 40s).
+      syncLockedClients.add(client);
       try {
         const mailbox = client.mailbox;
         // A missing mailbox is unknown, never proof of an empty mailbox.
@@ -4240,6 +4261,7 @@ export class ImapManager {
         await stampLastSync(account.id);
         return { insertedCount, broadcastedNewMessages };
       } finally {
+        syncLockedClients.delete(client);
         lock.release();
       }
     } catch (err) {
@@ -6070,8 +6092,134 @@ export class ImapManager {
     });
   }
 
+  // Attempt 0 of setFlag: store the flag on the account's persistent IDLE session, the way
+  // Thunderbird does (DONE, STORE on the session already selected on the folder, IDLE again).
+  // A mark-read or star then costs no login at all, where the pool costs a pooled session or a
+  // fresh login. ImapFlow breaks IDLE before any command (run() awaits preCheck, which sends
+  // DONE) and re-arms auto-IDLE when the command ends and the lock is released, so the session
+  // is back in IDLE AUTO_IDLE_DELAY_MS after the last store. A burst of stores within that
+  // delay shares one DONE and one IDLE, which also keeps a hibernated Dovecot session on the
+  // mail node from being woken more than once per burst. Returns true when the flag was
+  // applied, false when the caller must use the pool.
+  //
+  // Deliberately narrow:
+  //  - INBOX only. The push session has INBOX selected; selecting another folder on it would
+  //    silence INBOX EXISTS events for that window.
+  //  - Not while this account syncs or connects. syncMessages holds this session's INBOX lock
+  //    for the whole sync and applies inbox rules inside it, so a store from a rule would wait
+  //    for a lock its own caller holds. The initial sync runs under connectingAccounts, before
+  //    syncingAccounts is ever set. syncMessages also marks the client while it holds the
+  //    lock (syncLockedClients), which covers a sync still running after its caller gave up.
+  //  - Bounded. A timeout falls through to the pool rather than hanging the click. The attempt
+  //    keeps running detached; if its lock arrives after we gave up it releases at once and
+  //    stores nothing, so the lock cannot leak and the store is not sent twice.
+  //  - .SILENT. Without it the server answers with an untagged FETCH (FLAGS) that ImapFlow emits
+  //    as a 'flags' event, and _attachIdleListeners answers that with a range flag sync on the
+  //    pool: our own mark-read would buy a pooled session after all.
+  //  - A failure here never tears the persistent client down. A failed STORE is not evidence
+  //    the session is dead; the sync tick and the health check own that decision.
+  //  - Skipped while an attempt we gave up on is still pending on this session. A half-open
+  //    socket keeps `usable` true: DONE goes out, the STORE is never answered, and the attempt
+  //    holds the INBOX lock. Without the skip every INBOX click on the account would queue
+  //    behind it, wait out the deadline, and only then use the pool. The skip ends when the
+  //    attempt settles, which a close() of the client guarantees (it rejects every request).
+  //
+  // flight.attempt is the attempt and flight.sent says whether its STORE went out, so setFlag
+  // can hold the next store on this message until a STORE we stopped waiting for has settled.
+  async _setFlagOverPersistent(account, uid, folder, flag, value, flight = {}) {
+    if (folder !== 'INBOX') return false;
+    if (this.syncingAccounts.has(account.id) || this.connectingAccounts.has(account.id)) return false;
+    const client = this.connections.get(account.id);
+    // usable === false: a dead transport, where a queued command hangs or fails late. The pool
+    // path with its eviction and retry is the right place for that.
+    if (!client || client.usable === false) return false;
+    if (syncLockedClients.has(client)) return false;
+    if (this._persistentFlagStuck.get(account.id) === client) return false;
+    let expired = false;
+    let settled = false;
+    let markedStuck = false;
+    const attempt = (async () => {
+      try {
+        const lock = await client.getMailboxLock('INBOX', { acquireTimeout: PERSISTENT_FLAG_LOCK_WAIT_MS });
+        // Still needed with acquireTimeout: a lock granted in the gap between the two timers.
+        if (expired) { lock.release(); throw new Error('persistent flag store timed out'); }
+        try {
+          const opts = { uid: true, silent: true };
+          const store = value
+            ? client.messageFlagsAdd(String(uid), [flag], opts)
+            : client.messageFlagsRemove(String(uid), [flag], opts);
+          flight.sent = true;
+          const applied = await store;
+          if (applied === false) throw new Error(`server did not apply ${flag}=${value} for uid=${uid} on the persistent session`);
+        } finally {
+          lock.release();
+        }
+      } finally {
+        // Synchronous, before the attempt settles, so whoever awaits it (the chain) already
+        // finds the session open to flag stores again.
+        settled = true;
+        if (markedStuck && this._persistentFlagStuck.get(account.id) === client) this._persistentFlagStuck.delete(account.id);
+      }
+    })();
+    flight.attempt = attempt;
+    attempt.catch(() => {}); // detached after a timeout; never an unhandled rejection
+    try {
+      await raceTimeout(attempt, PERSISTENT_FLAG_STORE_TIMEOUT_MS, 'Persistent flag store');
+      logger.debug(`setFlag success (persistent): uid=${uid} ${flag}=${value}`);
+      return true;
+    } catch (err) {
+      // Mark the detached attempt dead BEFORE falling through: a lock granted late must
+      // release and exit, not store a flag the pool path is about to store again.
+      expired = true;
+      if (!settled) {
+        // Timed out with the attempt still out: send the account's INBOX flags to the pool
+        // until it settles (see above). Keyed to this client, so a reconnect is used at once.
+        markedStuck = true;
+        this._persistentFlagStuck.set(account.id, client);
+      }
+      logger.debug(`setFlag persistent attempt failed, using pool: ${extractImapError(err)}`);
+      return false;
+    }
+  }
+
+  // Flag stores on one message reach the server in the order setFlag was called. Without that,
+  // transport reordering between two calls can invert the flag: call A's persistent STORE gets
+  // its lock just before the deadline and lingers on the wire while A's pool fallback stores
+  // too, then call B stores the opposite value and A's late STORE lands last, re-reading a
+  // message the user just unread with a quick toggle. Routing some stores over the persistent
+  // session and others over the pool makes that reordering likely.
+  //
+  // This preserves call order only, not freshness: a caller that decides on a stale value and
+  // calls last still wins (for example _reconcileFlagPushes replaying an op after the route's
+  // newer store has started but before it resolved the op). That race predates this chain.
+  //
+  // A store on a message waits for the previous store on the same message, including a
+  // persistent STORE the previous call sent and then stopped waiting for (up to
+  // PERSISTENT_FLAG_LATE_STORE_WAIT_MS). Upstream serializes per account instead; per message
+  // is enough, since stores on different messages commute, and it keeps bulk read's
+  // concurrency and keeps one slow store (a pool fallback can take minutes) from holding up
+  // every other mark-read in a mailbox the whole team works in.
   async setFlag(account, uid, folder, flag, value) {
+    const key = `${account.id}\n${folder}\n${uid}`;
+    const prev = this._flagStoreChains.get(key) || Promise.resolve();
+    const flight = { attempt: null, sent: false };
+    const run = prev.then(() => this._setFlagInner(account, uid, folder, flag, value, flight));
+    // Never rejects, so the next store on this message runs whatever this one did. The wait for
+    // an abandoned persistent STORE is bounded (PERSISTENT_FLAG_LATE_STORE_WAIT_MS), so a
+    // STORE that never settles cannot hold this message's next store indefinitely.
+    const tail = run.catch(() => {})
+      .then(() => flight.sent && raceTimeout(flight.attempt, PERSISTENT_FLAG_LATE_STORE_WAIT_MS, 'Late persistent flag store'))
+      .catch(() => {});
+    this._flagStoreChains.set(key, tail);
+    tail.then(() => {
+      if (this._flagStoreChains.get(key) === tail) this._flagStoreChains.delete(key);
+    });
+    return run;
+  }
+
+  async _setFlagInner(account, uid, folder, flag, value, flight) {
     console.log(`setFlag: uid=${uid} folder=${folder} flag=${flag} value=${value}`);
+    if (await this._setFlagOverPersistent(account, uid, folder, flag, value, flight)) return;
     // Up to 2 attempts. ImapFlow returns false when the server did NOT apply the flag —
     // typically a stale/half-open pooled connection whose SELECT view is missing the UID.
     // Throwing on false makes withFreshClient evict that client from the pool, so the

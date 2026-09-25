@@ -5799,6 +5799,50 @@ describe('every background login waits out a rejected password', () => {
     });
   });
 
+  describe('a persistent login the server accepts lifts the window', () => {
+    // The password was fixed on the server and nobody pressed Reconnect: the persistent session
+    // logs in again with the same credentials. That proves the password, so background logins and
+    // uncached clicks must not stay held back (and the mailbox red) until the window runs out.
+    const acceptingManager = (acct) => {
+      const mgr = ladderManager();
+      connectError = null;
+      query.mockImplementation(async (sql) => ({ rows: sql.startsWith('SELECT * FROM email_accounts') ? [acct] : [], rowCount: 1 }));
+      mgr.syncFolders = vi.fn().mockResolvedValue();
+      mgr.syncMessages = vi.fn().mockResolvedValue({});
+      mgr._shouldAutoBackfillOnConnect = vi.fn().mockResolvedValue(false);
+      mgr.startProviderIdBackfill = vi.fn().mockResolvedValue();
+      mgr._resumeThreadRecompute = vi.fn().mockResolvedValue();
+      mgr._startSyncInterval = vi.fn();
+      mgr._startPluginSyncTimers = vi.fn().mockResolvedValue();
+      mgr.folderStatusMonitor = { refresh: vi.fn().mockResolvedValue() };
+      return mgr;
+    };
+    const errorCleared = () => query.mock.calls.some(([sql]) => sql.startsWith('UPDATE email_accounts SET sync_error = NULL'));
+
+    it('on connectAccount', async () => {
+      const acct = account();
+      const mgr = acceptingManager(acct);
+      rejectedPassword(mgr, acct);
+      expect(await mgr.connectAccount(acct)).toBe(true);
+      expect(mgr._statusAuthCooldown.has(acct.id)).toBe(false);
+      expect(mgr._authLoginBlocked(acct.id)).toBeNull();
+      expect(errorCleared()).toBe(true);
+      await mgr.disconnectAccount(acct.id);
+      evictPool(acct.id);
+    });
+
+    it('on the sync tick reconnect', async () => {
+      const acct = account();
+      const mgr = acceptingManager(acct);
+      rejectedPassword(mgr, acct);
+      await mgr._syncTick(acct);
+      expect(mgr.connections.has(acct.id)).toBe(true);
+      expect(mgr._statusAuthCooldown.has(acct.id)).toBe(false);
+      expect(errorCleared()).toBe(true);
+      await mgr.disconnectAccount(acct.id);
+    });
+  });
+
   describe('the pool arms the auth ladder and holds logins back', () => {
     // Every pooled or fresh login goes through growPool or withFreshLogin, so that is where a
     // rejected password is noted, and where a noted one stops the next login.

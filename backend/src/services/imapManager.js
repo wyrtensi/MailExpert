@@ -2566,6 +2566,12 @@ export class ImapManager {
       client = await connectImapClient(account, resolved,
         { enableIdle: providerProfile(account).usesIdle !== false, policy, idleKeepaliveMs: providerProfile(account).idleKeepaliveMs },
         30000, 'IMAP connect');
+      // The server just accepted these credentials, so a background login rejected earlier no
+      // longer says the password is wrong: lift that window. Otherwise a password fixed on the
+      // server kept every background login and uncached click held back, and the mailbox red,
+      // until the window ran out or someone pressed Reconnect. The account error itself clears
+      // on the sync below, as ever.
+      this._statusAuthCooldown.delete(account.id);
 
       // Remove from active connections the moment the server closes the socket.
       // Without this, a cleanly-closed connection lingers in this.connections and
@@ -3225,6 +3231,7 @@ export class ImapManager {
           pendingClient = await connectImapClient(setup.freshAccount, setup.resolved,
             { enableIdle: providerProfile(setup.freshAccount).usesIdle !== false, policy: setup.policy, idleKeepaliveMs: providerProfile(setup.freshAccount).idleKeepaliveMs },
             30000, 'Reconnect');
+          this._statusAuthCooldown.delete(account.id); // credentials accepted: see connectAccount
           const reconnected = { client: pendingClient, account: setup.freshAccount };
           activeClient = reconnected.client;
           syncAccount = reconnected.account;

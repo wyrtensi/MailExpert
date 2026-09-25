@@ -112,7 +112,8 @@ describe('applyInboxRules — forwarding', () => {
         100,
         'INBOX',
         '\\Seen',
-        true
+        true,
+        { background: true }
       );
       expect(consoleError).toHaveBeenCalledWith(
         'inboxRules: forward action failed; destination actions suppressed'
@@ -512,7 +513,7 @@ describe('applyInboxRules — destination action deduplication', () => {
     await applyInboxRules([mkMsg()], account, mockImap);
 
     expect(mockImap.bulkMoveMessages).toHaveBeenCalledOnce();
-    expect(mockImap.bulkMoveMessages).toHaveBeenCalledWith(account, [100], 'INBOX', 'INBOX/Work');
+    expect(mockImap.bulkMoveMessages).toHaveBeenCalledWith(account, [100], 'INBOX', 'INBOX/Work', { background: true });
   });
 
   it('executes only the first destination action when a legacy rule has move + delete', async () => {
@@ -528,7 +529,7 @@ describe('applyInboxRules — destination action deduplication', () => {
     await applyInboxRules([mkMsg()], account, mockImap);
 
     expect(mockImap.bulkMoveMessages).toHaveBeenCalledOnce();
-    expect(mockImap.bulkMoveMessages).toHaveBeenCalledWith(account, [100], 'INBOX', 'INBOX/Archive');
+    expect(mockImap.bulkMoveMessages).toHaveBeenCalledWith(account, [100], 'INBOX', 'INBOX/Archive', { background: true });
   });
 
   it('skips subsequent destination actions even when the first one fails', async () => {
@@ -563,7 +564,7 @@ describe('applyInboxRules — destination action deduplication', () => {
     await applyInboxRules([mkMsg()], account, mockImap);
 
     expect(mockImap.bulkMoveMessages).toHaveBeenCalledOnce();
-    expect(mockImap.setFlag).toHaveBeenCalledWith(account, 100, 'INBOX', '\\Seen', true);
+    expect(mockImap.setFlag).toHaveBeenCalledWith(account, 100, 'INBOX', '\\Seen', true, { background: true });
   });
 });
 
@@ -587,7 +588,7 @@ describe('applyInboxRules — already-relocated message skips subsequent rules',
     // message removed from remaining; second move never fired
     expect(result.remaining).toHaveLength(0);
     expect(mockImap.bulkMoveMessages).toHaveBeenCalledOnce();
-    expect(mockImap.bulkMoveMessages).toHaveBeenCalledWith(account, [100], 'INBOX', 'INBOX/Work');
+    expect(mockImap.bulkMoveMessages).toHaveBeenCalledWith(account, [100], 'INBOX', 'INBOX/Work', { background: true });
   });
 
   it('applies a subsequent mark_read rule even after an earlier rule moved the message', async () => {
@@ -615,7 +616,7 @@ describe('applyInboxRules — already-relocated message skips subsequent rules',
     // mark_read DB update fired: third query call (after rules fetch + move update)
     expect(query).toHaveBeenCalledTimes(3);
     // setFlag targeted the NEW uid (200) in the destination folder (INBOX/Work)
-    expect(mockImap.setFlag).toHaveBeenCalledWith(account, 200, 'INBOX/Work', '\\Seen', true);
+    expect(mockImap.setFlag).toHaveBeenCalledWith(account, 200, 'INBOX/Work', '\\Seen', true, { background: true });
   });
 
   it('does not double-decrement unread count when mark_read fires before move (reversed priority)', async () => {
@@ -867,6 +868,35 @@ describe('destination actions while the mailbox password is rejected', () => {
       expect(query.mock.calls.some(([sql]) => /^UPDATE messages SET folder|^DELETE FROM messages/.test(sql))).toBe(false);
       expect(warn).toHaveBeenCalledWith(expect.stringMatching(new RegExp(`^inboxRules: ${what} skipped for msg msg-1 \\(rule rule-1\\).*stays in INBOX`)));
     } finally { warn.mockRestore(); }
+  });
+
+  it.each([
+    ['held back', heldBack],
+    ['the pool stayed busy', () => Object.assign(new Error('IMAP pool busy, please retry'), { poolExhausted: true })],
+  ])('logs a rule move the pool did not run (%s) as skipped, not as an error', async (_what, makeErr) => {
+    query.mockResolvedValueOnce({ rows: [mkRule([{ type: 'move', value: 'INBOX/Processed' }])] }).mockResolvedValue({ rows: [] });
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    const error = vi.spyOn(console, 'error').mockImplementation(() => {});
+    try {
+      const imap = { ...mockImap, bulkMoveMessages: vi.fn().mockRejectedValue(makeErr()) };
+      const result = await applyInboxRules([mkMsg()], account, imap);
+      expect(result.remaining).toHaveLength(1);
+      expect(warn).toHaveBeenCalledWith(expect.stringMatching(/^inboxRules: move skipped for msg msg-1 \(rule rule-1\).*stays in INBOX/));
+      expect(error).not.toHaveBeenCalled();
+    } finally { warn.mockRestore(); error.mockRestore(); }
+  });
+
+  it('defers a held-back rule mark_read to the flag-push queue with a warning, not an error', async () => {
+    query.mockResolvedValueOnce({ rows: [mkRule([{ type: 'mark_read', value: '' }])] }).mockResolvedValue({ rows: [] });
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    const error = vi.spyOn(console, 'error').mockImplementation(() => {});
+    try {
+      const imap = { ...mockImap, setFlag: vi.fn().mockRejectedValue(heldBack()), _enqueueFlagPush: vi.fn() };
+      await applyInboxRules([mkMsg()], account, imap);
+      await vi.waitFor(() => expect(imap._enqueueFlagPush).toHaveBeenCalledWith(account.id, 'msg-1', '\\Seen', true));
+      expect(warn).toHaveBeenCalledWith(expect.stringMatching(/^inboxRules: mark_read skipped for msg msg-1 \(rule rule-1\).*deferred to the flag-push queue/));
+      expect(error).not.toHaveBeenCalled();
+    } finally { warn.mockRestore(); error.mockRestore(); }
   });
 
   it('still moves when nothing holds logins back', async () => {

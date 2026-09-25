@@ -4724,6 +4724,7 @@ describe('prefetchFolderBodies stops instead of hammering a refusing server', ()
     mgr.fetchMessageBody = vi.fn().mockRejectedValue(new Error('Maximum number of connections from user+IP exceeded (mail_max_userip_connections=20)'));
     await mgr.prefetchFolderBodies(acct.id, ids);
     expect(mgr.fetchMessageBody).toHaveBeenCalledTimes(1);
+    expect(mgr.fetchMessageBody).toHaveBeenCalledWith(acct, 1, 'INBOX', { background: true });
     expect(mgr._connectCooldown.has(acct.id)).toBe(false);
   });
 
@@ -5621,7 +5622,7 @@ describe('every background login waits out a rejected password', () => {
       // Once the password works again (Reconnect, settings save), the queued store goes out.
       mgr.clearConnectCooldown(acct.id);
       await mgr._reconcileFlagPushes();
-      expect(setFlag).toHaveBeenCalledWith(acct, 7, 'Sent', '\\Seen', true);
+      expect(setFlag).toHaveBeenCalledWith(acct, 7, 'Sent', '\\Seen', true, { background: true });
       expect(mgr._pendingFlagPush.has(acct.id)).toBe(false);
     });
 
@@ -5637,7 +5638,7 @@ describe('every background login waits out a rejected password', () => {
       mgr._enqueueFlagPush(acct.id, 'm-1', '\\Seen', true);
       const setFlag = vi.spyOn(mgr, 'setFlag').mockResolvedValue();
       await mgr._reconcileFlagPushes();
-      expect(setFlag).toHaveBeenCalledWith(acct, 7, 'Sent', '\\Seen', true);
+      expect(setFlag).toHaveBeenCalledWith(acct, 7, 'Sent', '\\Seen', true, { background: true });
       expect(mgr._pendingFlagPush.has(acct.id)).toBe(false);
     });
 
@@ -5824,9 +5825,14 @@ describe('every background login waits out a rejected password', () => {
         clients.push(client);
         return client;
       });
+      const move = vi.spyOn(mgr, 'moveMessageGetNewUid');
+      const store = vi.spyOn(mgr, 'setFlag');
       await mgr._runSnoozeWakeup();
       expect(clients[1].messageMove).toHaveBeenCalledOnce();
       expect(snoozeRowDeleted()).toBe(true);
+      // Background work: held back later, it must fail at once rather than queue.
+      expect(move).toHaveBeenCalledWith(acct, 5, 'Snoozed', 'INBOX', { background: true });
+      expect(store).toHaveBeenCalledWith(acct, 50, 'INBOX', '\\Seen', false, { background: true });
       evictPool(acct.id);
     });
   });
@@ -6091,6 +6097,70 @@ describe('every background login waits out a rejected password', () => {
       evictPool(acct.id);
     });
 
+    describe('background work held back does not wait for a busy session', () => {
+      // Rules, the block list, a rule forward and snooze run inside the sync tick, bounded at 55 s;
+      // a tick that overruns closes the live IDLE session. Two letters whose rule moves and marks
+      // read each waited out the pool queue (15 s a move, 31 s a store) were enough.
+      const settlesAtOnce = (p) => Promise.race([p.then(() => 'settled', () => 'settled'), new Promise(r => setTimeout(() => r('waited'), 200))]);
+      const busyAndHeld = async () => {
+        const acct = account();
+        const mgr = liveManager(acct);
+        connectError = null;
+        const busy = await acquirePooledClient(acct); // an employee's action holds the only session
+        rejectedPassword(mgr, acct);
+        return { acct, mgr, busy };
+      };
+
+      it('a rule move fails at once, typed, without a login', async () => {
+        const { acct, mgr, busy } = await busyAndHeld();
+        const move = mgr.bulkMoveMessages(acct, [5], 'INBOX', 'Archive', { background: true });
+        expect(await settlesAtOnce(move)).toBe('settled');
+        await expect(move).rejects.toMatchObject({ providerRefusing: true });
+        expect(clients).toHaveLength(1);
+        releasePooledClient(acct, busy);
+        evictPool(acct.id);
+      });
+
+      it('a rule flag store fails at once, typed, without a login', async () => {
+        const { acct, mgr, busy } = await busyAndHeld();
+        const store = mgr.setFlag(acct, 7, 'Sent', '\\Seen', true, { background: true });
+        expect(await settlesAtOnce(store)).toBe('settled');
+        await expect(store).rejects.toMatchObject({ providerRefusing: true });
+        expect(clients).toHaveLength(1);
+        releasePooledClient(acct, busy);
+        evictPool(acct.id);
+      });
+
+      it('a rule forward fails at once, typed, without a login', async () => {
+        const { acct, mgr, busy } = await busyAndHeld();
+        const fetch = mgr.fetchMessageBody(acct, 5, 'INBOX', { allowLogin: true, background: true });
+        expect(await settlesAtOnce(fetch)).toBe('settled');
+        await expect(fetch).rejects.toMatchObject({ providerRefusing: true });
+        expect(clients).toHaveLength(1);
+        releasePooledClient(acct, busy);
+        evictPool(acct.id);
+      });
+    });
+
+    it('a user flag store that waited out the queue does not wait a second time', async () => {
+      const acct = account();
+      const mgr = liveManager(acct);
+      connectError = null;
+      const busy = await acquirePooledClient(acct);
+      rejectedPassword(mgr, acct);
+      vi.useFakeTimers();
+      try {
+        let settled = false;
+        const store = mgr.setFlag(acct, 7, 'Sent', '\\Seen', true).finally(() => { settled = true; }).catch(e => e);
+        await vi.advanceTimersByTimeAsync(ACQUIRE_TIMEOUT_MS + 1000);
+        expect(settled).toBe(true);
+        expect(await store).toMatchObject({ poolExhausted: true });
+      } finally { vi.useRealTimers(); }
+      expect(clients).toHaveLength(1);
+      releasePooledClient(acct, busy);
+      evictPool(acct.id);
+    });
+
     it('a user action waits for a busy open session while the password is rejected, without a login', async () => {
       const acct = account();
       const mgr = liveManager(acct);
@@ -6174,22 +6244,36 @@ describe('every background login waits out a rejected password', () => {
         expect(clients).toHaveLength(0);
       });
 
-      it('a queued background caller does not grow the pool when a slot frees', async () => {
-        const { acct } = armedOAuth();
+      it('a background caller queued before the ladder armed does not grow the pool when a slot frees', async () => {
+        const acct = { ...account(), imap_host: 'imap.gmail.com', oauth_provider: 'google', oauth_access_token: 'enc' };
+        const mgr = ladderManager();
         connectError = null;
-        const a = await acquirePooledClient(acct);
-        const b = await acquirePooledClient(acct);
+        const held = [];
+        for (let i = 0; i < poolSizeFor(acct); i++) held.push(await acquirePooledClient(acct)); // all busy
         const opened = clients.length;
         connectError = dovecotAuthFailure;
         let settled = false;
         const waiting = acquirePooledClient(acct, { background: true }).finally(() => { settled = true; }).catch(e => e);
-        a.close(); // a slot frees while b stays open and busy
+        mgr._noteAuthFailure(acct); // the account's own login is rejected while it waits
+        held[0].close(); // a slot frees while the other sessions stay open and busy
         await new Promise(r => setImmediate(r));
         expect(settled).toBe(false);
         expect(clients).toHaveLength(opened);
-        releasePooledClient(acct, b);
-        expect(await waiting).toBe(b);
-        releasePooledClient(acct, b);
+        const last = held[held.length - 1];
+        releasePooledClient(acct, last);
+        expect(await waiting).toBe(last);
+        for (const c of held.slice(1)) releasePooledClient(acct, c);
+        evictPool(acct.id);
+      });
+
+      it('a background caller fails at once while held back, even with an open busy session', async () => {
+        const { acct } = armedOAuth();
+        connectError = null;
+        const busy = await acquirePooledClient(acct); // a user action on OAuth is not held back
+        const opened = clients.length;
+        await expect(acquirePooledClient(acct, { background: true })).rejects.toMatchObject({ providerRefusing: true });
+        expect(clients).toHaveLength(opened);
+        releasePooledClient(acct, busy);
         evictPool(acct.id);
       });
 

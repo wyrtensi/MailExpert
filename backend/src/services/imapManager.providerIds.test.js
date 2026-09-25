@@ -263,7 +263,7 @@ describe('startProviderIdBackfill connection handling', () => {
     await mgr.startProviderIdBackfill(gmail);
 
     expect(mgr._connectCooldown.has(gmail.id)).toBe(false);
-    expect(mgr._statusAuthCooldown.has(gmail.id)).toBe(true);
+    expect(mgr._secondaryAuthCooldown.has(gmail.id)).toBe(true);
   });
 });
 

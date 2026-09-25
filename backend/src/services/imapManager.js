@@ -2424,12 +2424,31 @@ export class ImapManager {
     }
   }
 
+  // Re-assert a queued op's value on its row with a fresh marker, and return that marker as text
+  // (null when the write failed or the row is gone). Text, not a Date: Postgres keeps
+  // microseconds and a JS Date would drop them, so the conditional clear below would never match.
+  async _reassertFlagPush(op) {
+    const [valueCol, markerCol] = op.flag === '\\Seen' ? ['is_read', 'read_changed_at'] : ['is_starred', 'star_changed_at'];
+    // Both columns are fixed internal literals (not user input), safe to interpolate.
+    const res = await query(
+      `UPDATE messages SET ${valueCol} = $1, ${markerCol} = NOW() WHERE id = $2 RETURNING ${markerCol}::text AS marker`,
+      [op.value, op.messageId]
+    ).catch(() => null);
+    return res?.rows?.[0]?.marker ?? null;
+  }
+
   // Clear the marker for a message+flag once the server has confirmed (or we give up), so a
-  // subsequent flag-sync pull resumes reflecting the server for that message.
-  async _clearFlagMarker(messageId, flag) {
+  // subsequent flag-sync pull resumes reflecting the server for that message. With `marker` (the
+  // one _reassertFlagPush wrote) only while the row still carries it: a route that marked a newer
+  // change since then keeps its marker, so a pull cannot revert that change before its own push.
+  async _clearFlagMarker(messageId, flag, marker = null) {
     const col = flag === '\\Seen' ? 'read_changed_at' : 'star_changed_at';
     // col is a fixed internal literal (not user input) — safe to interpolate.
-    await query(`UPDATE messages SET ${col} = NULL WHERE id = $1`, [messageId]).catch(() => {});
+    if (marker) {
+      await query(`UPDATE messages SET ${col} = NULL WHERE id = $1 AND ${col} = $2::timestamptz`, [messageId, marker]).catch(() => {});
+    } else {
+      await query(`UPDATE messages SET ${col} = NULL WHERE id = $1`, [messageId]).catch(() => {});
+    }
   }
 
   async _reconcileFlagPushes() {
@@ -2477,27 +2496,25 @@ export class ImapManager {
         // key and leaves this one unmarked): don't re-assert/re-push a now-stale value over the
         // newer one. The queue holds the newer op, which a later pass pushes.
         if (op.resolved || ops.get(key) !== op) continue;
-        if (op.flag === '\\Seen') {
-          await query('UPDATE messages SET is_read = $1, read_changed_at = NOW() WHERE id = $2', [op.value, op.messageId]).catch(() => {});
-        } else {
-          await query('UPDATE messages SET is_starred = $1, star_changed_at = NOW() WHERE id = $2', [op.value, op.messageId]).catch(() => {});
-        }
+        const marker = await this._reassertFlagPush(op);
         try {
           await this.setFlag(account, msg.uid, msg.folder, op.flag, op.value, { background: true });
           // Only while this op is still the queued one. If a newer value was pushed elsewhere
           // (resolved: the key is gone) or queued (a new op under the key) while our setFlag
           // was in flight, its marker and its op stay: clearing the marker would let a pull
           // revert the newer change, and deleting the key would drop the newer op. Checked
-          // again after the clear's await, for an op queued during it.
+          // again after the clear's await, for an op queued during it. The clear itself only
+          // takes the marker this pass wrote, for a route that marked a newer change and has
+          // not queued it yet.
           if (ops.get(key) === op) {
-            await this._clearFlagMarker(op.messageId, op.flag); // confirmed on server
+            await this._clearFlagMarker(op.messageId, op.flag, marker); // confirmed on server
             if (ops.get(key) === op) ops.delete(key);
           }
         } catch (err) {
           op.attempts += 1;
           if (op.attempts >= FLAG_PUSH_MAX_ATTEMPTS && ops.get(key) === op) {
             console.warn(`Flag-push giving up after ${op.attempts} attempts (${op.flag} msg=${op.messageId}): ${extractImapError(err)}`);
-            await this._clearFlagMarker(op.messageId, op.flag); // honest revert to server truth
+            await this._clearFlagMarker(op.messageId, op.flag, marker); // honest revert to server truth
             if (ops.get(key) === op) ops.delete(key);
           }
           // else keep queued; marker + value re-asserted above so nothing is lost before retry

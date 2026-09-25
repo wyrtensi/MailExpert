@@ -5887,6 +5887,26 @@ describe('every background login waits out a rejected password', () => {
       expect(queuedValue(mgr, acct)).toBe(false);
     });
 
+    it('clears only the marker its own re-assert wrote', async () => {
+      const acct = account();
+      const mgr = liveManager(acct);
+      mgr._enqueueFlagPush(acct.id, 'm-1', '\\Seen', true);
+      const sqls = [];
+      query.mockImplementation(async (sql, params) => {
+        sqls.push([sql, params]);
+        if (sql.startsWith('SELECT * FROM email_accounts')) return { rows: [acct] };
+        if (sql.startsWith('SELECT uid, folder FROM messages')) return { rows: [{ uid: 7, folder: 'Sent' }] };
+        if (sql.includes('RETURNING read_changed_at::text')) return { rows: [{ marker: '2026-09-26 10:00:00.123456+00' }] };
+        return { rows: [], rowCount: 1 };
+      });
+      vi.spyOn(mgr, 'setFlag').mockResolvedValue();
+
+      await mgr._reconcileFlagPushes();
+
+      expect(clears(sqls)).toEqual([[expect.stringContaining('AND read_changed_at = $2::timestamptz'), ['m-1', '2026-09-26 10:00:00.123456+00']]]);
+      expect(mgr._pendingFlagPush.has(acct.id)).toBe(false);
+    });
+
     it('queued while the give-up clears its marker: the op stays', async () => {
       const acct = account();
       const mgr = liveManager(acct);

@@ -4662,6 +4662,31 @@ describe('prefetchFolderBodies stops instead of hammering a refusing server', ()
     expect(mgr._connectCooldown.has(acct.id)).toBe(false);
   });
 
+  it('arms the secondary backoff on a refusal, and the next folder view opens nothing', async () => {
+    const mgr = ladderManager();
+    mgr.fetchMessageBody = vi.fn().mockRejectedValue(new Error('Maximum number of connections from user+IP exceeded (mail_max_userip_connections=20)'));
+    await mgr.prefetchFolderBodies(acct.id, ids);
+    expect(mgr._secondaryCooldown.get(acct.id).failures).toBe(1);
+    await mgr.prefetchFolderBodies(acct.id, ids);
+    expect(mgr.fetchMessageBody).toHaveBeenCalledTimes(1);
+  });
+
+  it('arms nothing for failures that are about the messages', async () => {
+    const mgr = ladderManager();
+    mgr.fetchMessageBody = vi.fn().mockRejectedValue(new Error('Unexpected server response'));
+    await mgr.prefetchFolderBodies(acct.id, ids);
+    expect(mgr._secondaryCooldown.has(acct.id)).toBe(false);
+    expect(mgr._connectCooldown.has(acct.id)).toBe(false);
+  });
+
+  it('skips the run while the live-sync cooldown is armed', async () => {
+    const mgr = ladderManager();
+    mgr.fetchMessageBody = vi.fn();
+    mgr._connectCooldown.set(acct.id, { until: Date.now() + 30000, failures: 1 });
+    await mgr.prefetchFolderBodies(acct.id, ids);
+    expect(mgr.fetchMessageBody).not.toHaveBeenCalled();
+  });
+
   it('stops after three consecutive failures of any kind', async () => {
     const mgr = ladderManager();
     mgr.fetchMessageBody = vi.fn().mockRejectedValue(new Error('Unexpected server response'));
@@ -4679,5 +4704,94 @@ describe('prefetchFolderBodies stops instead of hammering a refusing server', ()
       .mockResolvedValueOnce({ html: null, text: 'ok', attachments: [] });
     await mgr.prefetchFolderBodies(acct.id, ids);
     expect(mgr.fetchMessageBody).toHaveBeenCalledTimes(6);
+  });
+});
+
+describe('secondary-connection refusals escalate their own backoff', () => {
+  // The folder status client on a generic host (the mail node): a fresh login per cycle.
+  const acct = { id: 'secondary-acct', user_id: 'u1', enabled: true, protocol: 'imap', imap_host: 'mail.example.com', imap_port: 993, imap_tls: true, auth_user: 'u', auth_pass: 'enc' };
+  let connectError;
+
+  beforeEach(() => {
+    vi.clearAllMocks();
+    connectError = loginLimitRefusal;
+    ImapFlow.mockImplementation(function () {
+      return Object.assign(new EventEmitter(), {
+        connect: vi.fn(() => (connectError ? Promise.reject(connectError()) : Promise.resolve())),
+        close: vi.fn(),
+        logout: vi.fn(() => Promise.resolve()),
+      });
+    });
+    getConnectionPolicy.mockResolvedValue({ allowPrivateHosts: true, allowInsecureTls: true });
+    resolveForConnection.mockResolvedValue({ host: '127.0.0.1', addresses: ['127.0.0.1'], servername: null });
+    query.mockReset();
+    query.mockImplementation(async (sql) => ({ rows: sql.startsWith('SELECT * FROM email_accounts') ? [acct] : [], rowCount: 1 }));
+    vi.spyOn(console, 'error').mockImplementation(() => {});
+    vi.spyOn(console, 'warn').mockImplementation(() => {});
+    vi.spyOn(console, 'log').mockImplementation(() => {});
+  });
+  afterEach(() => { vi.restoreAllMocks(); });
+
+  it('climbs past the first rung even though successful syncs keep clearing the live-sync cooldown', async () => {
+    // The reported loop: status login refused, a sync succeeds and clears the account's
+    // cooldown, the next refusal is refusal #1 again, forever at 30s.
+    const mgr = ladderManager();
+    await expect(mgr._withCountClient(acct, async () => {})).rejects.toThrow();
+    expect(mgr._connectCooldown.has(acct.id)).toBe(false);
+    expect(mgr._secondaryCooldown.get(acct.id).failures).toBe(1);
+
+    mgr._connectCooldown.delete(acct.id); // what a successful sync tick does
+    mgr._secondaryCooldown.get(acct.id).until = 0; // the first wait has run out
+    const before = Date.now();
+    await expect(mgr._withCountClient(acct, async () => {})).rejects.toThrow();
+    const cd = mgr._secondaryCooldown.get(acct.id);
+    expect(cd.failures).toBe(2);
+    expect(cd.until - before).toBeGreaterThanOrEqual(connectCooldownMs(2));
+    // Live sync was never held back by a background connection.
+    expect(mgr._connectCooldown.has(acct.id)).toBe(false);
+    expect(mgr._bgConnSem.activeCount('mail.example.com')).toBe(0);
+  });
+
+  it('opens no login while the secondary backoff is armed, and does not escalate on its own gate', async () => {
+    const mgr = ladderManager();
+    await expect(mgr._withCountClient(acct, async () => {})).rejects.toThrow();
+    ImapFlow.mockClear();
+    await expect(mgr._withCountClient(acct, async () => {})).rejects.toThrow('Provider connection cooldown active');
+    expect(ImapFlow).not.toHaveBeenCalled();
+    expect(mgr._secondaryCooldown.get(acct.id).failures).toBe(1);
+  });
+
+  it('clears on a login the server accepted, even when the work after it fails', async () => {
+    const mgr = ladderManager();
+    await expect(mgr._withCountClient(acct, async () => {})).rejects.toThrow();
+    mgr._secondaryCooldown.get(acct.id).until = 0;
+    connectError = null;
+    await expect(mgr._withCountClient(acct, async () => { throw new Error('Folder integrity sync timed out'); })).rejects.toThrow('timed out');
+    expect(mgr._secondaryCooldown.has(acct.id)).toBe(false);
+  });
+
+  it('clears on a successful pooled status call (Gmail)', async () => {
+    const gmailAcct = { ...acct, id: 'secondary-gmail', imap_host: 'imap.gmail.com' };
+    query.mockImplementation(async (sql) => ({ rows: sql.startsWith('SELECT * FROM email_accounts') ? [gmailAcct] : [], rowCount: 1 }));
+    connectError = null;
+    const mgr = ladderManager();
+    mgr._secondaryCooldown.set(gmailAcct.id, { until: 0, failures: 3 });
+    await mgr._withCountClient(gmailAcct, async () => {});
+    expect(mgr._secondaryCooldown.has(gmailAcct.id)).toBe(false);
+  });
+
+  it('keeps a rejected password off the secondary ladder when no persistent connection vouches for it', async () => {
+    connectError = gmailXoauthFailure;
+    const mgr = ladderManager();
+    await expect(mgr._withCountClient(acct, async () => {})).rejects.toThrow();
+    expect(mgr._connectCooldown.get(acct.id).authFailures).toBe(1);
+    expect(mgr._secondaryCooldown.has(acct.id)).toBe(false);
+  });
+
+  it('is lifted by an explicit reconnect or settings save', async () => {
+    const mgr = ladderManager();
+    await expect(mgr._withCountClient(acct, async () => {})).rejects.toThrow();
+    mgr.clearConnectCooldown(acct.id);
+    expect(mgr._secondaryCooldown.has(acct.id)).toBe(false);
   });
 });

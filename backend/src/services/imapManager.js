@@ -1891,6 +1891,14 @@ export class ImapManager {
     // the persistent connection stayed up (see _withCountClient). Present = that login is known
     // to be rejected; removed when it succeeds again or on clearConnectCooldown.
     this._statusAuthCooldown = new Map();
+    // accountId -> { until, failures } after a SECONDARY connection (the folder status client,
+    // background body prefetch) was refused. Kept apart from _connectCooldown, which live sync
+    // owns: with one shared counter, a refused status login armed 30s and the next successful
+    // sync tick cleared it as "healthy again", so the next refusal was once more refusal #1 and
+    // the ladder never left its bottom rung. It also paused the account's INBOX sync for that
+    // window because of a background connection. A successful sync says nothing about whether
+    // extra connections are welcome, so only a secondary login that succeeds clears this.
+    this._secondaryCooldown = new Map();
     // accountId -> the value last persisted to email_accounts.sync_error: a string (error is
     // showing), null (known clear), or absent (unknown — e.g. just after a restart, where the
     // DB may still hold a stale error, so the next call writes through unconditionally).
@@ -2196,7 +2204,9 @@ export class ImapManager {
             else reconnect();
           } catch (err) {
             recordWarning('staleness_error', accountId);
-            console.warn(`Staleness check error for ${accountId}:`, err.message);
+            // extractImapError, not err.message: the probe runs IMAP commands, so a rejection
+            // reads 'Command failed' until the server's own text is pulled out.
+            console.warn(`Staleness check error for ${accountId}:`, extractImapError(err));
             if (probedAccount) await this._handleOAuthRefreshFailure(probedAccount, err);
           }
         }
@@ -2794,6 +2804,41 @@ export class ImapManager {
   clearConnectCooldown(accountId) {
     this._connectCooldown.delete(accountId);
     this._statusAuthCooldown?.delete(accountId);
+    // The secondary backoff too: otherwise folder counts and prefetch stay frozen for up to the
+    // 15-minute cap after the user asked for a retry, and the button looks like a no-op.
+    this._secondaryCooldown?.delete(accountId);
+  }
+
+  // Arm/extend the backoff for SECONDARY connections (folder status client, body prefetch).
+  // Same short ladder as _noteConnectionRefusal (connectCooldownMs), a different map: only a
+  // secondary login that succeeds clears it, so a server that keeps refusing extra connections
+  // climbs 30s, 60s, 120s, ... instead of sitting at the base delay forever. Live sync keeps its
+  // own cooldown, so a refused background connection never delays the account's mail flow.
+  // Returns the delay in ms.
+  _noteSecondaryRefusal(account) {
+    const failures = (this._secondaryCooldown.get(account.id)?.failures || 0) + 1;
+    const ms = connectCooldownMs(failures);
+    this._secondaryCooldown.set(account.id, { until: Date.now() + ms, failures });
+    recordImapEvent(account.imap_host, 'secondary_refusal_cooldown');
+    console.warn(`Secondary connection refused for ${logAccount(account)} — backing off ${Math.round(ms / 1000)}s (refusal #${failures})`);
+    return ms;
+  }
+
+  // A secondary login got through: the server is accepting extra connections again.
+  _clearSecondaryCooldown(accountId) {
+    this._secondaryCooldown.delete(accountId);
+  }
+
+  // The backoff currently holding this account's secondary connections shut, or null. Honors the
+  // live-sync cooldown too: while the server refuses the account's own connection (or rejected
+  // its credentials), opening a background one on top of it helps nobody.
+  _secondaryConnectBlocked(accountId) {
+    const now = Date.now();
+    for (const map of [this._connectCooldown, this._secondaryCooldown]) {
+      const cd = map.get(accountId);
+      if (cd && now < cd.until) return cd;
+    }
+    return null;
   }
 
   // The folder status client's login was rejected while the account's persistent connection is
@@ -3360,8 +3405,10 @@ export class ImapManager {
     if (!pooled) await this._bgConnSem.acquire(host, { timeoutMs: 30000 });
     let client;
     try {
-      const cooldown = this._connectCooldown.get(account.id);
-      if (cooldown && Date.now() < cooldown.until) throw new Error('Provider connection cooldown active');
+      // The live-sync cooldown and the secondary backoff both hold this client back. The gate's
+      // wording must not match isConnectionRefusal, or the catch below would re-arm on it.
+      const cooldown = this._secondaryConnectBlocked(account.id);
+      if (cooldown) throw new Error('Provider connection cooldown active');
       const statusCooldown = this._statusAuthCooldown?.get(account.id);
       if (statusCooldown && Date.now() < statusCooldown.until) throw new Error('Folder status login cooldown active');
       const { rows: [current] } = await query('SELECT * FROM email_accounts WHERE id=$1 AND enabled', [account.id]);
@@ -3373,12 +3420,19 @@ export class ImapManager {
         // never handed on: withFreshClient evicts a session whose callback threw, and
         // releasePooledClient closes it (close(), not LOGOUT, which would queue behind it).
         const pooledResult = await withFreshClient(current, fn, { background: true });
+        // The pool hides whether this took a new login, so the secondary backoff clears on the
+        // whole call succeeding, the same point _noteStatusLoginOk uses.
+        this._clearSecondaryCooldown(account.id);
         await this._noteStatusLoginOk(account);
         return pooledResult;
       }
       const fresh = await ensureFreshToken(current);
       const { resolved, policy } = await raceTimeout(resolveAccountHost(fresh), 15000, 'Count host resolve');
       client = await connectImapClient(fresh, resolved, { policy }, 25000, 'Folder status connect');
+      // Cleared on the login, not after fn: the server accepting the LOGIN is the whole signal
+      // this backoff tracks. Work failing afterwards (an integrity pass, a folder that will not
+      // open) says nothing about whether extra connections are welcome.
+      this._clearSecondaryCooldown(account.id);
       await this._noteStatusLoginOk(account);
       return await fn(client);
     } catch (err) {
@@ -3395,8 +3449,16 @@ export class ImapManager {
         // though mail still arrives, and someone has to fix the password.
         this._noteStatusAuthFailure(account);
         await this._recordAccountError(account, extractImapError(err));
-      } else {
-        this._noteLoginFailure(account, err);
+      } else if (isImapAuthFailure(err)) {
+        // No persistent connection to vouch for the credentials: the account-wide auth ladder,
+        // as before.
+        this._noteAuthFailure(account);
+      } else if (isConnectionRefusal(extractImapError(err))) {
+        // A refused STATUS connection takes the secondary ladder, never the live-sync cooldown:
+        // on the mail node this is Dovecot's per-user+IP limit hit by a background login, and
+        // arming the account's cooldown for it paused INBOX sync of a working mailbox, then was
+        // wiped by the next successful tick, so the refusals never escalated.
+        this._noteSecondaryRefusal(account);
       }
       throw err;
     } finally {
@@ -3436,7 +3498,9 @@ export class ImapManager {
       })
       .catch(err => {
         this._noteIntegrityRetry(key);
-        console.warn(`Folder integrity sync failed for account ${account.id}: ${err.message}`);
+        // extractImapError, not err.message: this path runs IMAP commands, so a rejection reads
+        // 'Command failed' until the server's own text is pulled out.
+        console.warn(`Folder integrity sync failed for account ${account.id}: ${extractImapError(err)}`);
       })
       .finally(() => {
         this._statusSyncRunning.delete(key);
@@ -5768,6 +5832,14 @@ export class ImapManager {
     );
     if (!uncachedResult.rows.length) return;
 
+    // Background work, so it honors the secondary backoff before opening anything. Without this
+    // every folder view would start a fresh run while the server is still refusing.
+    const blocked = this._secondaryConnectBlocked(accountId);
+    if (blocked) {
+      logger.debug(`Body prefetch skipped for ${logAccount(account)}: backing off ${Math.round((blocked.until - Date.now()) / 1000)}s`);
+      return;
+    }
+
     let consecutiveErrors = 0;
     for (const msg of uncachedResult.rows) {
       const quietFor = Date.now() - (this.lastUserActivity.get(accountId) || 0);
@@ -5811,14 +5883,20 @@ export class ImapManager {
         //    not phrased as one. A success resets the count, so one bad message does not stop
         //    the rest of the folder.
         //
-        // Deliberately NOT armed onto the account's connect cooldown: that map gates
-        // connectAccount, the reconnect and the poll-only tick, so a refused best-effort prefetch
-        // would delay live sync. Bodies are fetched on demand when a message is opened, and the
-        // next folder view re-runs this for whatever is still uncached.
+        // A refusal is armed on the SECONDARY backoff, never on the account's connect cooldown:
+        // that map gates connectAccount, the reconnect and the poll-only tick, so a refused
+        // best-effort prefetch would delay live sync. Arming the secondary one is what stops the
+        // next folder view from paying for the same refusal again. Bodies are fetched on demand
+        // when a message is opened, and a later folder view re-runs this for whatever is still
+        // uncached.
         if (isConnectionRefusal(detail)) {
+          this._noteSecondaryRefusal(account);
           console.log(`Body prefetch stopping for ${logAccount(account)}: server is refusing connections`);
           return;
         }
+        // Anything else arms nothing: it is usually about the messages rather than the
+        // connection (an expunged UID, a body that will not parse), and must not hold back the
+        // next folder view.
         if (++consecutiveErrors >= PREFETCH_MAX_CONSECUTIVE_ERRORS) {
           console.log(`Body prefetch stopping for ${logAccount(account)} after ${consecutiveErrors} consecutive errors`);
           return;

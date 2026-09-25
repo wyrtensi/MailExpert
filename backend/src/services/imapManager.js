@@ -6102,7 +6102,7 @@ export class ImapManager {
   // Uses a fresh connection to avoid lock contention with sync connection.
   // Auto-retries once on transient connection errors (stale pool connection, NAT
   // timeout, half-open TCP, etc.) so a single click is enough in all common cases.
-  async fetchMessageBody(account, uid, folder) {
+  async fetchMessageBody(account, uid, folder, { allowLogin = false } = {}) {
     // While a backoff holds new logins back (live-sync cooldown, secondary refusal backoff, a
     // rejected secondary login), a body click can only succeed over a session that is already
     // open. The first attempt then goes through the pool with noNewLogin: an idle pooled session
@@ -6111,7 +6111,13 @@ export class ImapManager {
     // the retry. Taking the idle session inside the pool, rather than checking for one here
     // first, leaves no window for another caller to take it and make this one log in. A
     // revoked OAuth grant is left to the token refresh, which fails with its stable error.
-    const { noNewLogin } = this._poolLoginOpts(account.id);
+    //
+    // allowLogin (a rule forward, which nobody can retry by clicking again): only a rejected
+    // password holds the login back. While the server merely refuses extra connections, one
+    // login attempt beats losing the forward; a login with a rejected password is only another
+    // strike toward fail2ban.
+    const loginHeld = () => (allowLogin ? !!this._authLoginBlocked(account.id) : this._poolLoginOpts(account.id).noNewLogin);
+    const noNewLogin = loginHeld();
     // Inner fetch — called up to twice. `acquire` selects how the connection is obtained:
     // the first attempt uses the pool (withFreshClient); the retry uses a genuinely fresh
     // login (withFreshLogin) so a frozen/half-open pooled connection can't hang or return
@@ -6293,7 +6299,7 @@ export class ImapManager {
         // to hold back; against a server already refusing us it only adds one more refusal per
         // click. Rethrow the first failure instead, typed so the route answers 503 rather than a
         // raw 500. Re-read here: a backoff armed while the first attempt ran counts too.
-        if (noNewLogin || this._poolLoginOpts(account.id).noNewLogin) {
+        if (noNewLogin || loginHeld()) {
           const held = wrapImapError(firstErr, detail);
           held.providerRefusing = true;
           throw held;

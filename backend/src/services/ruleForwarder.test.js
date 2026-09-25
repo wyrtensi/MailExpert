@@ -340,7 +340,8 @@ describe('forwardRuleMessage', () => {
       expect(imapManager.fetchMessageBody).toHaveBeenCalledWith(
         account,
         messageRow.uid,
-        messageRow.folder
+        messageRow.folder,
+        { allowLogin: true }
       );
       expect(imapManager.fetchMultipleAttachments).toHaveBeenCalledWith(
         account,

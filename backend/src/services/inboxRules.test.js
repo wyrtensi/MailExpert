@@ -890,3 +890,27 @@ describe('destination actions while the mailbox password is rejected', () => {
     } finally { warn.mockRestore(); }
   });
 });
+
+describe('a rule forward held back by a rejected password', () => {
+  it('is logged plainly as skipped and not retried, without the error text', async () => {
+    query.mockResolvedValueOnce({ rows: [mkRule([{ type: 'forward', value: 'recipient@example.com' }])] }).mockResolvedValue({ rows: [] });
+    forwardRuleMessage.mockRejectedValue(Object.assign(new Error('Mail server is not accepting new connections for this account right now'), { providerRefusing: true }));
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    const error = vi.spyOn(console, 'error').mockImplementation(() => {});
+    try {
+      await applyInboxRules([mkMsg()], account, mockImap);
+      expect(warn).toHaveBeenCalledWith(expect.stringMatching(/^inboxRules: forward skipped for msg msg-1 \(rule rule-1\).*not retried/));
+    } finally { warn.mockRestore(); error.mockRestore(); }
+  });
+
+  it('says nothing of the kind for an ordinary forward failure', async () => {
+    query.mockResolvedValueOnce({ rows: [mkRule([{ type: 'forward', value: 'recipient@example.com' }])] }).mockResolvedValue({ rows: [] });
+    forwardRuleMessage.mockRejectedValue(new Error('Forward delivery failed'));
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    const error = vi.spyOn(console, 'error').mockImplementation(() => {});
+    try {
+      await applyInboxRules([mkMsg()], account, mockImap);
+      expect(warn).not.toHaveBeenCalled();
+    } finally { warn.mockRestore(); error.mockRestore(); }
+  });
+});

@@ -5104,6 +5104,25 @@ describe('fetchMessageBody opens no fresh login while a backoff is armed', () =>
     expect(created).toBe(1);
   });
 
+  it('lets a rule forward (allowLogin) log in while the server only refuses extra connections', async () => {
+    // A forward runs once per new message and nobody can retry it by clicking again.
+    const mgr = ladderManager();
+    const acct = account('body-forward-refusal');
+    arms['the secondary backoff'](mgr, acct.id);
+    const err = await mgr.fetchMessageBody(acct, 9, 'INBOX', { allowLogin: true }).catch(e => e);
+    expect(err.message).toBe('ECONNRESET');
+    expect(err.providerRefusing).toBeUndefined();
+    expect(created).toBe(2); // the pool grow, then the fresh-login retry
+  });
+
+  it('still opens no login for a rule forward while the password is rejected', async () => {
+    const mgr = ladderManager();
+    const acct = account('body-forward-auth');
+    arms['a rejected secondary login'](mgr, acct.id);
+    await expect(mgr.fetchMessageBody(acct, 9, 'INBOX', { allowLogin: true })).rejects.toMatchObject({ providerRefusing: true });
+    expect(created).toBe(0);
+  });
+
   it('still retries over a fresh login when nothing is armed', async () => {
     const mgr = ladderManager();
     const acct = account('body-retry-free');

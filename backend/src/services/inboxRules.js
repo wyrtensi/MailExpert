@@ -275,9 +275,14 @@ export async function applyInboxRules(messages, account, imapManager) {
             rule.id,
             resolverCache
           );
-        } catch {
+        } catch (err) {
           destinationBlockedIds.add(msg.id);
           console.error('inboxRules: forward action failed; destination actions suppressed');
+          // Held back by a rejected password (no login is opened, see fetchMessageBody's
+          // allowLogin): say so plainly. A forward runs once per new message, so it is not retried.
+          if (err?.providerRefusing) {
+            console.warn(`inboxRules: forward skipped for msg ${msg.id} (rule ${rule.id}): the server rejected this mailbox's password on a recent login, so the message body could not be loaded; the forward is not retried and the letter stays in ${msg.folder}`);
+          }
         }
       }
 

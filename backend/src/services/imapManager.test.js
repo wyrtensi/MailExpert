@@ -5588,7 +5588,7 @@ describe('every background login waits out a rejected password', () => {
       const acct = account();
       const mgr = liveManager(acct);
       withStore();
-      await expect(mgr.setFlag(acct, 7, 'Sent', '\Seen', true)).rejects.toBeTruthy();
+      await expect(mgr.setFlag(acct, 7, 'Sent', '\\Seen', true)).rejects.toBeTruthy();
       expect(clients).toHaveLength(1);
       expect(mgr._authLoginBlocked(acct.id)).toBeTruthy();
     });
@@ -5602,7 +5602,7 @@ describe('every background login waits out a rejected password', () => {
         if (sql.startsWith('SELECT uid, folder FROM messages')) return { rows: [{ uid: 7, folder: 'Sent' }] };
         return { rows: [], rowCount: 1 };
       });
-      for (let i = 1; i <= 5; i++) mgr._enqueueFlagPush(acct.id, `m-${i}`, '\Seen', true);
+      for (let i = 1; i <= 5; i++) mgr._enqueueFlagPush(acct.id, `m-${i}`, '\\Seen', true);
       await mgr._reconcileFlagPushes();
       expect(clients).toHaveLength(1);
       await mgr._reconcileFlagPushes();

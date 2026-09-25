@@ -4,6 +4,7 @@ import { useTranslation } from 'react-i18next';
 import DOMPurify from 'dompurify';
 import { useStore } from '../store/index.js';
 import { api } from '../utils/api.js';
+import { isMailboxBusy, mailboxBusyText } from '../utils/mailboxBusy.js';
 import { useMobile } from '../hooks/useMobile.js';
 import { useUiScale, descale } from '../hooks/useUiScale.js';
 import { QUOTE_HEADER_ATTR, identityName, quoteHeaderHtml, quoteHeaderPlain, senderLanguage, switchQuoteText } from '../utils/quoteHeader.js';
@@ -963,6 +964,9 @@ export default function ComposeModal() {
       }
     } catch (err) {
       console.error('Save draft failed:', err.message);
+      // A save the user asked for says when the mailbox is busy or its password was rejected;
+      // autosave stays quiet and retries on its next interval.
+      if (!silent && isMailboxBusy(err)) addNotification({ title: mailboxBusyText(err, t) });
     } finally {
       setSavingDraft(false);
     }

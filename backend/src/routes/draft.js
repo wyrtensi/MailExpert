@@ -8,6 +8,8 @@ import { embedInlineDataImages } from '../utils/inlineImages.js';
 import { wrapSignatureHtml } from '../utils/signatureWrapper.js';
 import { htmlToText } from '../utils/htmlToText.js';
 import { imapManager } from '../index.js';
+import { isMailboxBusyError } from '../services/imapManager.js';
+import { sendMailboxBusy } from '../utils/mailboxBusy.js';
 import { resolveAllDraftsPaths } from '../utils/mailUtils.js';
 
 const router = Router();
@@ -215,6 +217,9 @@ router.post('/draft', async (req, res) => {
     res.json({ uid, folder: draftsFolder });
   } catch (err) {
     console.error('Save draft failed:', err.message);
+    // No pooled session for the APPEND (full pool, or a login held back): nothing was stored, and
+    // the client says why (busy, or a rejected password) instead of showing the raw error.
+    if (isMailboxBusyError(err)) return sendMailboxBusy(res, err);
     res.status(err.status || 500).json({ error: err.message || 'Failed to save draft' });
   }
 });

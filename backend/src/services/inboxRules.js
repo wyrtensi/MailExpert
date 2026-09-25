@@ -227,7 +227,9 @@ export async function applyInboxRules(messages, account, imapManager) {
         // star: intentionally NOT muted — a star-only rule should still alert.
         if (action.type === 'mark_read') mutedIds.add(msg.id);
       } catch (err) {
-        console.error(`inboxRules: action ${action.type} failed for msg ${msg.id}:`, err.message);
+        if (!logHeldBack(err, action.type, msg, ruleId)) {
+          console.error(`inboxRules: action ${action.type} failed for msg ${msg.id}:`, err.message);
+        }
       }
     };
 
@@ -368,12 +370,10 @@ export async function applyBlockList(messages, account, imapManager) {
     }
     try {
       const strategy = getDeleteStrategy(msg.folder, trashFolder, allTrashPaths);
-      if (strategy.action === 'move' && destinationHeldBack(imapManager, account, 'block list move', msg, null)) {
-        remaining.push(msg);
-      } else if (strategy.action === 'move') {
+      if (strategy.action === 'move') {
         imapManager._guardMoveUid(account.id, msg.folder, msg.uid);
         try {
-          const result = await imapManager.bulkMoveMessages(account, [msg.uid], msg.folder, strategy.destination);
+          const result = await imapManager.bulkMoveMessages(account, [msg.uid], msg.folder, strategy.destination, RULE_IMAP);
           if (!result.failed?.length) {
             const newUid = result.uidMap?.get(Number(msg.uid));
             if (newUid) {
@@ -393,7 +393,7 @@ export async function applyBlockList(messages, account, imapManager) {
           imapManager._unguardMoveUid(account.id, msg.folder, msg.uid);
         }
       } else if (strategy.action === 'expunge') {
-        await imapManager.setFlag(account, msg.uid, msg.folder, '\\Deleted', true);
+        await imapManager.setFlag(account, msg.uid, msg.folder, '\\Deleted', true, RULE_IMAP);
         await query('UPDATE messages SET is_deleted = true WHERE id = $1', [msg.id]);
         const wasUnread = !(msg.isRead ?? msg.is_read);
         adjustFolderCounts(account.id, msg.folder, -1, wasUnread ? -1 : 0);
@@ -401,21 +401,33 @@ export async function applyBlockList(messages, account, imapManager) {
         remaining.push(msg);
       }
     } catch (err) {
-      console.error(`blockList: failed to move msg ${msg.id}:`, err.message);
+      if (!logHeldBack(err, 'block list move', msg, null)) {
+        console.error(`blockList: failed to move msg ${msg.id}:`, err.message);
+      }
       remaining.push(msg);
     }
   }
   return remaining;
 }
 
-// True while the server is known to reject this mailbox's password (the account-wide or the
-// status-only auth ladder in imapManager). A move through the pool would then open a login bound to
-// be rejected, one more strike toward fail2ban on the mail node, whose ban cuts off every mailbox.
-// Rules run once per new message and a move has no retry path, so the letter stays where it is and
-// the skip is logged (ids only: rule actions must not leak message content into the log).
-function destinationHeldBack(imapManager, account, what, msg, ruleId) {
-  if (!imapManager._authLoginBlocked?.(account.id)) return false;
-  console.warn(`inboxRules: ${what} skipped for msg ${msg.id}${ruleId ? ` (rule ${ruleId})` : ''}: the server rejected this mailbox's password on a recent login, so no new login is opened; the letter stays in ${msg.folder} and the action is not retried`);
+// Rules run inside the sync tick. An IMAP call the login gate holds back fails at once instead of
+// queueing for a busy pooled session (imapManager's acquirePooledClient): the tick is bounded at
+// 55 s and closes the live IDLE session when it runs out, so a few rule actions each waiting out
+// the pool queue would take the mailbox offline. On a healthy mailbox they keep the normal
+// interactive wait: a rule move that gives up is not retried.
+const RULE_IMAP = { failFastWhenHeld: true };
+
+// A rule action the pool did not run: held back (providerRefusing: a backoff holds new logins
+// back and no pooled session was free, so no login was tried; with a rejected password a login
+// would only be one more strike toward fail2ban on the mail node, whose ban cuts off every
+// mailbox) or the pool stayed busy (poolExhausted). Not an error: logged as a warning with ids
+// only (rule actions must not leak message content into the log). A move has no retry path, so
+// the letter stays where it is; a flag store is deferred to the flag-push queue. Returns false
+// for any other error.
+function logHeldBack(err, what, msg, ruleId, outcome = `the letter stays in ${msg.folder} and the action is not retried`) {
+  if (!err?.providerRefusing && !err?.poolExhausted) return false;
+  const why = err.providerRefusing ? 'no new login is opened while a backoff holds this mailbox back' : 'the mailbox had no free IMAP session';
+  console.warn(`inboxRules: ${what} skipped for msg ${msg.id}${ruleId ? ` (rule ${ruleId})` : ''}: ${why}; ${outcome}`);
   return true;
 }
 
@@ -440,8 +452,10 @@ async function applyAction(action, msg, account, imapManager, ruleId, resolverCa
         'UPDATE messages SET is_read = true, read_changed_at = NOW() WHERE id = $1',
         [msg.id]
       );
-      imapManager.setFlag(account, msg.uid, msg.folder, '\\Seen', true).catch(err => {
-        console.error('inboxRules: setFlag \\Seen failed:', err.message);
+      imapManager.setFlag(account, msg.uid, msg.folder, '\\Seen', true, RULE_IMAP).catch(err => {
+        if (!logHeldBack(err, 'mark_read', msg, ruleId, 'deferred to the flag-push queue')) {
+          console.error('inboxRules: setFlag \\Seen failed:', err.message);
+        }
         // Durable retry so a later flag-sync pull can't silently revert the rule's effect.
         imapManager._enqueueFlagPush(account.id, msg.id, '\\Seen', true);
       });
@@ -462,8 +476,10 @@ async function applyAction(action, msg, account, imapManager, ruleId, resolverCa
         'UPDATE messages SET is_starred = true, star_changed_at = NOW() WHERE id = $1',
         [msg.id]
       );
-      imapManager.setFlag(account, msg.uid, msg.folder, '\\Flagged', true).catch(err => {
-        console.error('inboxRules: setFlag \\Flagged failed:', err.message);
+      imapManager.setFlag(account, msg.uid, msg.folder, '\\Flagged', true, RULE_IMAP).catch(err => {
+        if (!logHeldBack(err, 'star', msg, ruleId, 'deferred to the flag-push queue')) {
+          console.error('inboxRules: setFlag \\Flagged failed:', err.message);
+        }
         // Durable retry so a later flag-sync pull can't silently revert the rule's effect.
         imapManager._enqueueFlagPush(account.id, msg.id, '\\Flagged', true);
       });
@@ -473,7 +489,6 @@ async function applyAction(action, msg, account, imapManager, ruleId, resolverCa
     case 'move': {
       const destFolder = action.value;
       if (!destFolder) return false;
-      if (destinationHeldBack(imapManager, account, 'move', msg, ruleId)) return false;
       // Save source coordinates before the move so the finally block can unguard the
       // correct slot even after we update msg.folder/uid for subsequent rules.
       const srcFolder = msg.folder;
@@ -486,7 +501,7 @@ async function applyAction(action, msg, account, imapManager, ruleId, resolverCa
         // the error propagates to the caller so the DB is never updated. This prevents
         // a DB/IMAP split where the DB shows the message in destFolder but IMAP still
         // has it in INBOX, which caused the next sync to bounce the message back.
-        const moveResult = await imapManager.bulkMoveMessages(account, [srcUid], srcFolder, destFolder);
+        const moveResult = await imapManager.bulkMoveMessages(account, [srcUid], srcFolder, destFolder, RULE_IMAP);
         if (moveResult.failed?.length) throw new Error(`IMAP move to ${destFolder} failed for uid ${srcUid}`);
         // Update UID alongside folder. The IMAP MOVE assigns the message a new UID in
         // the destination folder. Without this, reconcileDeletes fires ~1.5 s later
@@ -533,12 +548,11 @@ async function applyAction(action, msg, account, imapManager, ruleId, resolverCa
       }
       const archiveFolder = resolverCache.archiveFolder;
       if (!archiveFolder) return false;
-      if (destinationHeldBack(imapManager, account, 'archive', msg, ruleId)) return false;
       const srcFolder = msg.folder;
       const srcUid = msg.uid;
       imapManager._guardMoveUid(account.id, srcFolder, srcUid);
       try {
-        const archiveResult = await imapManager.bulkMoveMessages(account, [srcUid], srcFolder, archiveFolder);
+        const archiveResult = await imapManager.bulkMoveMessages(account, [srcUid], srcFolder, archiveFolder, RULE_IMAP);
         if (archiveResult.failed?.length) throw new Error(`IMAP archive failed for uid ${srcUid}`);
         const newArchiveUid = archiveResult.uidMap?.get(Number(srcUid));
         const wasUnread = !(msg.isRead ?? msg.is_read);
@@ -576,10 +590,9 @@ async function applyAction(action, msg, account, imapManager, ruleId, resolverCa
       const strategy = getDeleteStrategy(msg.folder, trashFolder, allTrashPaths);
       if (strategy.action === 'no_trash') return false;
       if (strategy.action === 'move') {
-        if (destinationHeldBack(imapManager, account, 'delete', msg, ruleId)) return false;
         imapManager._guardMoveUid(account.id, msg.folder, msg.uid);
         try {
-          const deleteResult = await imapManager.bulkMoveMessages(account, [msg.uid], msg.folder, strategy.destination);
+          const deleteResult = await imapManager.bulkMoveMessages(account, [msg.uid], msg.folder, strategy.destination, RULE_IMAP);
           if (deleteResult.failed?.length) throw new Error(`IMAP delete-move failed for uid ${msg.uid}`);
           const newDeleteUid = deleteResult.uidMap?.get(Number(msg.uid));
           if (newDeleteUid) {
@@ -596,7 +609,7 @@ async function applyAction(action, msg, account, imapManager, ruleId, resolverCa
           imapManager._unguardMoveUid(account.id, msg.folder, msg.uid);
         }
       } else if (strategy.action === 'expunge') {
-        await imapManager.setFlag(account, msg.uid, msg.folder, '\\Deleted', true);
+        await imapManager.setFlag(account, msg.uid, msg.folder, '\\Deleted', true, RULE_IMAP);
         await query('UPDATE messages SET is_deleted = true WHERE id = $1', [msg.id]);
         const wasUnread = !(msg.isRead ?? msg.is_read);
         adjustFolderCounts(account.id, msg.folder, -1, wasUnread ? -1 : 0);

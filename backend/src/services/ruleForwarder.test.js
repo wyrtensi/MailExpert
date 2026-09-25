@@ -293,7 +293,8 @@ describe('forwardRuleMessage', () => {
       account,
       messageRow.uid,
       messageRow.folder,
-      storedAttachments
+      storedAttachments,
+      { failFastWhenHeld: true }
     );
     expect(transport.sendMail).toHaveBeenCalledWith(expect.objectContaining({
       attachments: [
@@ -341,13 +342,14 @@ describe('forwardRuleMessage', () => {
         account,
         messageRow.uid,
         messageRow.folder,
-        { allowLogin: true }
+        { allowLogin: true, failFastWhenHeld: true }
       );
       expect(imapManager.fetchMultipleAttachments).toHaveBeenCalledWith(
         account,
         messageRow.uid,
         messageRow.folder,
-        [storedAttachments[0]]
+        [storedAttachments[0]],
+        { failFastWhenHeld: true }
       );
       const mail = transport.sendMail.mock.calls[0][0];
       expect(mail.html).not.toContain('<script');
@@ -413,7 +415,8 @@ describe('forwardRuleMessage', () => {
       account,
       messageRow.uid,
       messageRow.folder,
-      [fetchedAttachment]
+      [fetchedAttachment],
+      { failFastWhenHeld: true }
     );
     expect(transport.sendMail).toHaveBeenCalledWith(expect.objectContaining({
       attachments: [{

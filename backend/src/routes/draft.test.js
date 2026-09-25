@@ -88,6 +88,32 @@ describe('POST /api/mail/draft — local row persistence', () => {
     expect(await res.json()).toEqual({ uid: 5, folder: 'Drafts' });
   });
 
+  it.each([
+    ['a full pool', { poolExhausted: true }, 'mailbox_busy'],
+    ['a login held back', { providerRefusing: true }, 'mailbox_busy'],
+    ['a rejected password', { providerRefusing: true, authRejected: true }, 'mailbox_auth_rejected'],
+  ])('answers 503 with a stable code when the append gets no session (%s)', async (_what, flags, code) => {
+    imapManager.appendToFolder.mockRejectedValueOnce(Object.assign(new Error('Mail server is not accepting new connections for this account right now'), flags));
+    const res = await fetch(`${base}/api/mail/draft`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ accountId: ACCOUNT_ID, to: ['a@b.com'], subject: 'x', body: 'y' }),
+    });
+    expect(res.status).toBe(503);
+    expect((await res.json()).code).toBe(code);
+  });
+
+  it('keeps other append failures as they were', async () => {
+    imapManager.appendToFolder.mockRejectedValueOnce(new Error('Mailbox does not exist'));
+    const res = await fetch(`${base}/api/mail/draft`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ accountId: ACCOUNT_ID, to: ['a@b.com'], subject: 'x', body: 'y' }),
+    });
+    expect(res.status).toBe(500);
+    expect((await res.json()).code).toBeUndefined();
+  });
+
   it('does not persist a row when the append returns no uid (no reliable key)', async () => {
     imapManager.appendToFolder.mockResolvedValueOnce({ uid: null, folder: 'Drafts' });
     const res = await fetch(`${base}/api/mail/draft`, {

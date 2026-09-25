@@ -53,7 +53,7 @@ import TodoistTaskModal from './TodoistTaskModal.jsx';
 import SenderAvatarImage from './SenderAvatarImage.jsx';
 import ContextMenu from './ContextMenu.jsx';
 import { formatDateTime, localeTag } from '../utils/formatDate.js';
-import { mailboxBusyOr, isMailboxBusy, MAILBOX_BUSY_CODE } from '../utils/mailboxBusy.js';
+import { mailboxBusyOr, mailboxBusyText, isMailboxBusy } from '../utils/mailboxBusy.js';
 
 function parseAddressField(raw) {
   try {
@@ -569,7 +569,7 @@ export default function MessagePane({ windowMessageId = null, onWindowClose = nu
       .catch(err => {
         if (cancelled) return;
         // The code, not translated text: translated at render, so the effect need not depend on t.
-        setBodyError(isMailboxBusy(err) ? MAILBOX_BUSY_CODE : err.message);
+        setBodyError(isMailboxBusy(err) ? err.code : err.message);
       })
       .finally(() => {
         if (!cancelled) setLoadingBody(false);
@@ -1427,6 +1427,7 @@ ${bodyContent}
       URL.revokeObjectURL(url);
     } catch (err) {
       console.error('Download error:', err);
+      if (isMailboxBusy(err)) addNotification({ title: mailboxBusyText(err, t) });
     } finally {
       setDownloadingPart(null);
     }
@@ -2817,7 +2818,7 @@ ${bodyContent}
                 {t('message.loadingError')}
               </div>
               <div style={{ fontSize: 13, color: 'var(--text-secondary)', lineHeight: 1.5 }}>
-                {bodyError === MAILBOX_BUSY_CODE ? t('common.mailboxBusy') : bodyError}
+                {mailboxBusyOr({ code: bodyError }, t, bodyError)}
               </div>
             </div>
             <button

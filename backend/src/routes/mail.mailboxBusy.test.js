@@ -1,7 +1,8 @@
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 
-// A full IMAP pool fails an operation with poolExhausted (upstream #474). That is our own
-// connection budget, not a broken server, so the delete, move and bulk routes answer
+// A full IMAP pool fails an operation with poolExhausted (upstream #474), and a login held back
+// by a rejected password fails it with providerRefusing. Neither is a broken server and nothing
+// was sent, so the delete, move and bulk routes answer
 // 503 { code: 'mailbox_busy' }, which the client shows as "the mailbox is busy, try again".
 vi.mock('../services/db.js', () => ({ query: vi.fn() }));
 vi.mock('../middleware/auth.js', () => ({ requireAuth: (req, _res, next) => { req.session = { userId: 'u1' }; next(); } }));
@@ -12,6 +13,12 @@ vi.mock('../index.js', () => ({
     permanentDeleteMessage: vi.fn(),
     bulkMoveMessages: vi.fn(),
     bulkPermanentDelete: vi.fn(),
+    fetchAttachment: vi.fn(),
+    fetchMultipleAttachments: vi.fn(),
+    ensureFolder: vi.fn(),
+    deleteFolder: vi.fn(),
+    renameFolder: vi.fn(),
+    emptyFolder: vi.fn(),
     syncFolderOnDemand: vi.fn(async () => {}),
     _guardMoveUid: vi.fn(),
     _unguardMoveUid: vi.fn(),
@@ -42,9 +49,20 @@ const SENT_ID = 'e5e5e5e5-5555-4555-8555-e5e5e5e5e5e5';
 const MSG = (id, folder, uid) => ({
   id, account_id: ACCOUNT_ID, uid, folder, is_read: true, message_id: `<${uid}@example.com>`,
   subject: 'Board minutes', from_email: 'sender@example.com', folder_mappings: null,
+  attachments: [{ part: '2', filename: 'minutes.pdf', size: 10, type: 'application/pdf' }],
 });
 const rows = { [INBOX_ID]: MSG(INBOX_ID, 'INBOX', 11), [TRASH_ID]: MSG(TRASH_ID, 'Trash', 22), [SENT_ID]: MSG(SENT_ID, 'Sent', 33) };
-const busy = () => Object.assign(new Error('IMAP pool busy, please retry'), { poolExhausted: true });
+// A letter in a second mailbox, for bulk requests that span two.
+const OTHER_ACCOUNT_ID = 'd4d4d4d4-4444-4444-8444-d4d4d4d4d4d4';
+const OTHER_ID = 'f6f6f6f6-6666-4666-8666-f6f6f6f6f6f6';
+rows[OTHER_ID] = { ...MSG(OTHER_ID, 'Projects', 44), account_id: OTHER_ACCOUNT_ID };
+const poolBusy = () => Object.assign(new Error('IMAP pool busy, please retry'), { poolExhausted: true });
+// A rejected password holds the mailbox's logins back and no pooled session is open: the pool
+// fails at once with providerRefusing instead of logging in (imapManager's loginHeldBack).
+const loginHeld = () => Object.assign(new Error('Mail server is not accepting new connections for this account right now'), { providerRefusing: true });
+// The same hold when the reason is a rejected password (authRejected): retrying will not help, so
+// the answer says so with its own code.
+const authHeld = () => Object.assign(loginHeld(), { authRejected: true });
 
 let server;
 let base;
@@ -78,12 +96,16 @@ const call = async (method, path, body) => {
   });
   return { status: res.status, body: await res.json() };
 };
-const expectBusy = ({ status, body }) => {
-  expect(status).toBe(503);
-  expect(body.code).toBe('mailbox_busy');
-};
+for (const [what, busy, code] of [
+  ['a full pool', poolBusy, 'mailbox_busy'],
+  ['a login held back', loginHeld, 'mailbox_busy'],
+  ['a rejected password', authHeld, 'mailbox_auth_rejected'],
+]) describe(`a busy mailbox answers 503 ${code}: ${what}`, () => {
+  const expectBusy = ({ status, body }) => {
+    expect(status).toBe(503);
+    expect(body.code).toBe(code);
+  };
 
-describe('a busy mailbox answers 503 mailbox_busy', () => {
   it('on delete (move to Trash)', async () => {
     imapManager.moveMessage.mockRejectedValue(busy());
     expectBusy(await call('DELETE', `/messages/${INBOX_ID}`));
@@ -119,6 +141,7 @@ describe('a busy mailbox answers 503 mailbox_busy', () => {
     expect(res.status).toBe(200);
     expect(res.body.deleted).toEqual([INBOX_ID]);
     expect(res.body.busy).toBe(true);
+    expect(res.body.code).toBe(code);
     const relocate = query.mock.calls.find(([sql]) => /WITH deleted AS/.test(sql));
     expect(relocate[1][0]).toEqual([INBOX_ID]);
     const audit = query.mock.calls.filter(([sql]) => sql.includes('INSERT INTO mailbox_audit_log'));
@@ -135,9 +158,33 @@ describe('a busy mailbox answers 503 mailbox_busy', () => {
     expect(moved.status).toBe(200);
     expect(moved.body.moved).toEqual([INBOX_ID]);
     expect(moved.body.busy).toBe(true);
+    expect(moved.body.code).toBe(code);
     const archived = await call('POST', '/messages/bulk-archive', { ids: [INBOX_ID, SENT_ID] });
     expect(archived.status).toBe(200);
     expect(archived.body.archived).toEqual([INBOX_ID]);
+  });
+
+  it('on an attachment download and the ZIP of all attachments', async () => {
+    imapManager.fetchAttachment.mockRejectedValue(busy());
+    imapManager.fetchMultipleAttachments.mockRejectedValue(busy());
+    expectBusy(await call('GET', `/messages/${INBOX_ID}/attachments/2`));
+    expectBusy(await call('GET', `/messages/${INBOX_ID}/attachments.zip`));
+  });
+
+  it('on creating, renaming and deleting a folder', async () => {
+    imapManager.ensureFolder.mockRejectedValue(busy());
+    imapManager.renameFolder.mockRejectedValue(busy());
+    imapManager.deleteFolder.mockRejectedValue(busy());
+    expectBusy(await call('POST', '/folders', { accountId: ACCOUNT_ID, name: 'Projects' }));
+    expectBusy(await call('POST', '/folders/rename', { accountId: ACCOUNT_ID, oldPath: 'Projects', newName: 'Clients' }));
+    expectBusy(await call('POST', '/folders/delete', { accountId: ACCOUNT_ID, path: 'Projects' }));
+  });
+
+  it('on emptying a folder, over the folder_emptied event (the request already answered 202)', async () => {
+    imapManager.emptyFolder.mockRejectedValue(busy());
+    const res = await call('POST', '/folders/empty', { accountId: ACCOUNT_ID, path: 'Trash' });
+    expect(res.status).toBe(202);
+    await vi.waitFor(() => expect(imapManager.broadcast).toHaveBeenCalledWith(expect.objectContaining({ type: 'folder_emptied', ok: false, code })));
   });
 
   it('keeps other failures as they were', async () => {
@@ -145,5 +192,41 @@ describe('a busy mailbox answers 503 mailbox_busy', () => {
     const res = await call('DELETE', `/messages/${INBOX_ID}`);
     expect(res.status).toBe(500);
     expect(res.body.code).toBeUndefined();
+    imapManager.emptyFolder.mockRejectedValue(new Error('Mailbox does not exist'));
+    await call('POST', '/folders/empty', { accountId: ACCOUNT_ID, path: 'Junk' });
+    await vi.waitFor(() => expect(imapManager.broadcast).toHaveBeenCalledWith(expect.objectContaining({ type: 'folder_emptied', ok: false })));
+    const emptied = imapManager.broadcast.mock.calls.find(([e]) => e.type === 'folder_emptied')[0];
+    expect(emptied.code).toBeUndefined();
+  });
+});
+
+describe('a bulk request over two mailboxes names the reason both share', () => {
+  // One code speaks for the whole request: mailbox_auth_rejected only when every busy mailbox had
+  // its password rejected. Mixed with a mailbox that is merely busy, the answer is mailbox_busy.
+  const failBySource = (bySource) => imapManager.bulkMoveMessages.mockImplementation(async (_account, uids, src) => {
+    if (bySource[src]) throw bySource[src]();
+    return { uidMap: new Map(uids.map(u => [Number(u), Number(u) + 900])), succeeded: uids, failed: [] };
+  });
+
+  it('says busy when one mailbox is busy and the other rejects the password', async () => {
+    failBySource({ INBOX: poolBusy, Projects: authHeld });
+    const res = await call('POST', '/messages/bulk-move', { ids: [INBOX_ID, OTHER_ID], folder: 'Archive' });
+    expect(res.status).toBe(503);
+    expect(res.body.code).toBe('mailbox_busy');
+  });
+
+  it('says the password was rejected when that holds back every busy mailbox', async () => {
+    failBySource({ INBOX: authHeld, Projects: authHeld });
+    const res = await call('POST', '/messages/bulk-move', { ids: [INBOX_ID, OTHER_ID], folder: 'Archive' });
+    expect(res.status).toBe(503);
+    expect(res.body.code).toBe('mailbox_auth_rejected');
+  });
+
+  it('keeps the rejected-password code on a partial success where only that mailbox failed', async () => {
+    failBySource({ Projects: authHeld });
+    const res = await call('POST', '/messages/bulk-move', { ids: [INBOX_ID, OTHER_ID], folder: 'Archive' });
+    expect(res.status).toBe(200);
+    expect(res.body.moved).toEqual([INBOX_ID]);
+    expect(res.body.code).toBe('mailbox_auth_rejected');
   });
 });

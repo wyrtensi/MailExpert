@@ -3,12 +3,12 @@ import { pickReplyAlias } from '../utils/replyAlias.js';
 import { useTranslation } from 'react-i18next';
 import { useStore, selectSelectedMessageIdentity, parseSelectedIdentity } from '../store/index.js';
 import { api } from '../utils/api.js';
-import { mailboxBusyOr, isMailboxBusy, MAILBOX_BUSY_CODE } from '../utils/mailboxBusy.js';
+import { mailboxBusyOr, mailboxBusyText, isMailboxBusy, MAILBOX_BUSY_CODE } from '../utils/mailboxBusy.js';
 import { priorityFromHeaders } from '../utils/draftPriority.js';
 
 // What made an archive fall short: the request's error, or a busy mailbox reported by a chunk
 // that got partly through.
-const archiveFailure = (result) => result.error || (result.busy ? { code: MAILBOX_BUSY_CODE } : null);
+const archiveFailure = (result) => result.error || (result.busy ? { code: result.busyCode || MAILBOX_BUSY_CODE } : null);
 import { LAYOUTS } from '../layouts.js';
 import { senderColor } from '../themes.js';
 import { useMobile } from '../hooks/useMobile.js';
@@ -1518,8 +1518,8 @@ export default function MessageList() {
           if (delta > 0) incrementUnread(msg.account_id, delta);
         });
         // A chunk that failed or got partly through because the mailbox was busy says so.
-        const busy = results.find(r => isMailboxBusy(r.status === 'rejected' ? r.reason : r.value));
-        addNotification({ type: 'error', title: t('messageList.bulkDeleted.failTitle'), body: busy ? t('common.mailboxBusy') : t('messageList.bulkDeleted.failBody', { count: failedIds.length }) });
+        const busy = results.map(r => (r.status === 'rejected' ? r.reason : r.value)).find(isMailboxBusy);
+        addNotification({ type: 'error', title: t('messageList.bulkDeleted.failTitle'), body: busy ? mailboxBusyText(busy, t) : t('messageList.bulkDeleted.failBody', { count: failedIds.length }) });
       }
       if (useStore.getState().searchQuery.trim()) {
         setSearchReloadToken(token => token + 1);

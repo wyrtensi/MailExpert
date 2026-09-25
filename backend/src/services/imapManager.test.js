@@ -17,7 +17,7 @@ vi.mock('../utils/redact.js', () => ({ redactEmail: vi.fn() }));
 vi.mock('./hostValidation.js', () => ({ resolveForConnection: vi.fn(), createPinnedLookup: vi.fn() }));
 vi.mock('./connectionPolicy.js', () => ({ getConnectionPolicy: vi.fn() }));
 
-import { ImapManager, MIN_SYNC_INTERVAL_MS, AUTO_IDLE_DELAY_MS, countMissingInboxCopies, fetchBackfillBatch, providerProfile, makeClientCfg, relocateExemptGuard, insertCopiedSibling, deleteMessageCopyRow, emitSectionsChanged, ensureMailbox, createKeyedSemaphore, isConnectionRefusal, extractImapError, isImapAuthFailure, AUTH_FAILURE_COOLDOWN_MS, AUTH_FAILURE_COOLDOWN_MAX_MS, authCooldownMs, connectCooldownMs, effectiveSyncIntervalMs, folderSyncDue, planModseqSync, connectStaggerFor, walkStructure, planBodyParts, extractBodyFromMsg, bodyFallbackApplies, poolSizeFor, rerootThreadChildren, parsePersistentCap, resolvePersistentCap, persistentEligible, shouldRetryIPv4, classifyMoveBySearch, PERSISTENT_FLAG_STORE_TIMEOUT_MS, PERSISTENT_FLAG_LATE_STORE_WAIT_MS, PERSISTENT_FLAG_LOCK_WAIT_MS, wrapImapError, acquirePooledClient, releasePooledClient, evictPool, PREFETCH_MAX_CONSECUTIVE_ERRORS, PREFETCH_STOP_PAUSE_MS } from './imapManager.js';
+import { ImapManager, MIN_SYNC_INTERVAL_MS, AUTO_IDLE_DELAY_MS, countMissingInboxCopies, fetchBackfillBatch, providerProfile, makeClientCfg, relocateExemptGuard, insertCopiedSibling, deleteMessageCopyRow, emitSectionsChanged, ensureMailbox, createKeyedSemaphore, isConnectionRefusal, extractImapError, isImapAuthFailure, AUTH_FAILURE_COOLDOWN_MS, AUTH_FAILURE_COOLDOWN_MAX_MS, authCooldownMs, connectCooldownMs, effectiveSyncIntervalMs, folderSyncDue, planModseqSync, connectStaggerFor, walkStructure, planBodyParts, extractBodyFromMsg, bodyFallbackApplies, poolSizeFor, rerootThreadChildren, parsePersistentCap, resolvePersistentCap, persistentEligible, shouldRetryIPv4, classifyMoveBySearch, PERSISTENT_FLAG_STORE_TIMEOUT_MS, PERSISTENT_FLAG_LATE_STORE_WAIT_MS, PERSISTENT_FLAG_LOCK_WAIT_MS, wrapImapError, acquirePooledClient, releasePooledClient, evictPool, ACQUIRE_TIMEOUT_MS, BACKGROUND_ACQUIRE_TIMEOUT_MS, PREFETCH_MAX_CONSECUTIVE_ERRORS, PREFETCH_STOP_PAUSE_MS } from './imapManager.js';
 import { pluginRegistry } from '../plugins/registry.js';
 import { EventEmitter } from 'node:events';
 import { ImapFlow } from 'imapflow';
@@ -39,11 +39,14 @@ const NO_BACKOFF = { _poolLoginOpts: () => ({ noNewLogin: false }) };
 
 // The account backoffs a hand-built manager needs to run a background login path for real: the
 // real gates over empty maps, and spies for the two ways a background login arms them.
+// Only for paths with their own connectImapClient: the pool and withFreshLogin arm and consult the
+// most recently constructed ImapManager (helperManager), never this object, so a pool-driven test
+// on it would see another test's ladder state. Use ladderManager() for those.
 const backoffState = () => ({
   connections: new Map(),
   _connectCooldown: new Map(),
   _secondaryCooldown: new Map(),
-  _statusAuthCooldown: new Map(),
+  _secondaryAuthCooldown: new Map(),
   _secondaryConnectBlocked: ImapManager.prototype._secondaryConnectBlocked,
   _secondaryAuthBlocked: ImapManager.prototype._secondaryAuthBlocked,
   _secondaryLoginBlocked: ImapManager.prototype._secondaryLoginBlocked,
@@ -2985,6 +2988,9 @@ describe('isImapAuthFailure', () => {
     ['login-stage connection limit', loginLimitRefusal()],
     ['Gmail simultaneous-connection alert', imapErr({ response: '1 NO [ALERT] Too many simultaneous connections. (Failure)', responseText: 'Too many simultaneous connections. (Failure)', serverResponseCode: 'ALERT', authenticationFailed: true })],
     ['UNAVAILABLE at login', imapErr({ responseText: 'Service temporarily unavailable', serverResponseCode: 'UNAVAILABLE', authenticationFailed: true })],
+    // Dovecot's auth backend failing (its database down): it could not check the password.
+    ['Dovecot temporary auth failure with UNAVAILABLE', imapErr({ response: '1 NO [UNAVAILABLE] Temporary authentication failure.', responseText: 'Temporary authentication failure.', serverResponseCode: 'UNAVAILABLE', authenticationFailed: true })],
+    ['Dovecot temporary auth failure without a code', imapErr({ response: '1 NO Temporary authentication failure.', responseStatus: 'NO', responseText: 'Temporary authentication failure.', authenticationFailed: true })],
     ['Microsoft throttling', imapErr({ responseText: 'Request is throttled. Suggested Backoff Time: 92415 milliseconds', responseStatus: 'BAD', code: 'ETHROTTLE' })],
     ['connection dropped mid-SASL', imapErr({ message: 'Connection not available', code: 'NoConnection', authenticationFailed: true })],
     ['socket closed after connect', imapErr({ message: 'Unexpected close', code: 'ClosedAfterConnectText' })],
@@ -3223,7 +3229,7 @@ describe('connect paths back off on IMAP authentication failure', () => {
     query.mockImplementation(async (sql) => ({ rows: sql.startsWith('SELECT * FROM email_accounts') ? [acct] : [], rowCount: 1 }));
     const before = Date.now();
     await expect(mgr._withCountClient(acct, async () => {})).rejects.toThrow();
-    const cd = mgr._statusAuthCooldown.get(acct.id);
+    const cd = mgr._secondaryAuthCooldown.get(acct.id);
     expect(cd.until).toBeGreaterThanOrEqual(before + AUTH_FAILURE_COOLDOWN_MS);
     expect(syncErrorWrites()).toHaveLength(1);
     expect(syncErrorWrites()[0][1][0]).toMatch(/AUTHENTICATIONFAILED/);
@@ -3241,33 +3247,33 @@ describe('connect paths back off on IMAP authentication failure', () => {
     cd.until = 0;
     const again = Date.now();
     await expect(mgr._withCountClient(acct, async () => {})).rejects.toThrow();
-    expect(mgr._statusAuthCooldown.get(acct.id).until).toBeGreaterThanOrEqual(again + 2 * AUTH_FAILURE_COOLDOWN_MS);
+    expect(mgr._secondaryAuthCooldown.get(acct.id).until).toBeGreaterThanOrEqual(again + 2 * AUTH_FAILURE_COOLDOWN_MS);
     // The account-wide ladder, which would stop the sync tick, is still untouched.
     expect(mgr._connectCooldown.has(acct.id)).toBe(false);
   });
 
-  it('lifts the status-only cooldown and the error once the status login works again', async () => {
+  it('lifts the secondary auth window and the error once the status login works again', async () => {
     const mgr = newManager();
     mgr.connections.set(acct.id, Object.assign(new EventEmitter(), { close: vi.fn() }));
     query.mockImplementation(async (sql) => ({ rows: sql.startsWith('SELECT * FROM email_accounts') ? [acct] : [], rowCount: 1 }));
     await expect(mgr._withCountClient(acct, async () => {})).rejects.toThrow();
-    mgr._statusAuthCooldown.get(acct.id).until = 0;
+    mgr._secondaryAuthCooldown.get(acct.id).until = 0;
     connectError = null;
     ImapFlow.mockImplementation(function () {
       return Object.assign(new EventEmitter(), { connect: vi.fn().mockResolvedValue(), close: vi.fn(), logout: vi.fn() });
     });
     await mgr._withCountClient(acct, async () => {});
-    expect(mgr._statusAuthCooldown.has(acct.id)).toBe(false);
+    expect(mgr._secondaryAuthCooldown.has(acct.id)).toBe(false);
     expect(query.mock.calls.some(([sql]) => sql.startsWith('UPDATE email_accounts SET sync_error = NULL'))).toBe(true);
   });
 
-  it('lets an explicit reconnect or settings save lift the status-only cooldown too', async () => {
+  it('lets an explicit reconnect or settings save lift the secondary auth window too', async () => {
     const mgr = newManager();
     mgr.connections.set(acct.id, Object.assign(new EventEmitter(), { close: vi.fn() }));
     query.mockImplementation(async (sql) => ({ rows: sql.startsWith('SELECT * FROM email_accounts') ? [acct] : [], rowCount: 1 }));
     await expect(mgr._withCountClient(acct, async () => {})).rejects.toThrow();
     mgr.clearConnectCooldown(acct.id);
-    expect(mgr._statusAuthCooldown.has(acct.id)).toBe(false);
+    expect(mgr._secondaryAuthCooldown.has(acct.id)).toBe(false);
   });
 
   it('arms the same cooldown and surfaces the error when a poll-only tick hits an auth failure', async () => {
@@ -3540,7 +3546,7 @@ describe('backfill stops on a provider refusal (#433)', () => {
     ImapFlow.mockImplementation(function () { throw new Error('no login expected'); });
     for (const arm of [
       m => m._secondaryCooldown.set(acct.id, { until: Date.now() + 30000, failures: 1 }),
-      m => m._statusAuthCooldown.set(acct.id, { until: Date.now() + AUTH_FAILURE_COOLDOWN_MS, failures: 1 }),
+      m => m._secondaryAuthCooldown.set(acct.id, { until: Date.now() + AUTH_FAILURE_COOLDOWN_MS, failures: 1 }),
     ]) {
       const mgr = backfillManager();
       arm(mgr);
@@ -4721,6 +4727,7 @@ describe('prefetchFolderBodies stops instead of hammering a refusing server', ()
     mgr.fetchMessageBody = vi.fn().mockRejectedValue(new Error('Maximum number of connections from user+IP exceeded (mail_max_userip_connections=20)'));
     await mgr.prefetchFolderBodies(acct.id, ids);
     expect(mgr.fetchMessageBody).toHaveBeenCalledTimes(1);
+    expect(mgr.fetchMessageBody).toHaveBeenCalledWith(acct, 1, 'INBOX', { background: true });
     expect(mgr._connectCooldown.has(acct.id)).toBe(false);
   });
 
@@ -4820,8 +4827,8 @@ describe('body prefetch and a rejected password', () => {
     const before = Date.now();
     await mgr.prefetchFolderBodies(acct.id, ids);
     expect(logins).toBe(1);
-    // The status-only ladder, not the account-wide one: the IDLE session keeps syncing.
-    expect(mgr._statusAuthCooldown.get(acct.id).until).toBeGreaterThanOrEqual(before + AUTH_FAILURE_COOLDOWN_MS);
+    // The secondary auth ladder, not the account-wide one: the IDLE session keeps syncing.
+    expect(mgr._secondaryAuthCooldown.get(acct.id).until).toBeGreaterThanOrEqual(before + AUTH_FAILURE_COOLDOWN_MS);
     expect(mgr._connectCooldown.has(acct.id)).toBe(false);
     expect(syncErrorWrites()).toHaveLength(1);
     // The next folder view opens nothing.
@@ -4832,7 +4839,7 @@ describe('body prefetch and a rejected password', () => {
   it('opens nothing while a rejected status login holds background logins back', async () => {
     const mgr = liveManager();
     mgr.fetchMessageBody = vi.fn();
-    mgr._statusAuthCooldown.set(acct.id, { until: Date.now() + AUTH_FAILURE_COOLDOWN_MS, failures: 1 });
+    mgr._secondaryAuthCooldown.set(acct.id, { until: Date.now() + AUTH_FAILURE_COOLDOWN_MS, failures: 1 });
     await mgr.prefetchFolderBodies(acct.id, ids);
     await mgr.prefetchNewMessageBodies(acct, [{ id: 'n1', uid: 9, folder: 'INBOX' }]);
     expect(mgr.fetchMessageBody).not.toHaveBeenCalled();
@@ -5054,7 +5061,7 @@ describe('fetchMessageBody opens no fresh login while a backoff is armed', () =>
   const arms = {
     'the secondary backoff': (mgr, id) => mgr._secondaryCooldown.set(id, { until: Date.now() + 60000, failures: 2 }),
     'the live-sync cooldown': (mgr, id) => mgr._connectCooldown.set(id, { until: Date.now() + 60000, failures: 1 }),
-    'a rejected secondary login': (mgr, id) => mgr._statusAuthCooldown.set(id, { until: Date.now() + AUTH_FAILURE_COOLDOWN_MS, failures: 1 }),
+    'a rejected secondary login': (mgr, id) => mgr._secondaryAuthCooldown.set(id, { until: Date.now() + AUTH_FAILURE_COOLDOWN_MS, failures: 1 }),
   };
 
   for (const [what, arm] of Object.entries(arms)) {
@@ -5075,6 +5082,19 @@ describe('fetchMessageBody opens no fresh login while a backoff is armed', () =>
     arms['the secondary backoff'](mgr, acct.id);
     await expect(mgr.fetchMessageBody(acct, 9, 'INBOX')).rejects.toMatchObject({ message: 'ECONNRESET', providerRefusing: true });
     expect(created).toBe(1); // the idle session only: no pool grow, no fresh-login retry
+    evictPool(acct.id);
+  });
+
+  it('waits for a busy open session while a backoff is armed, instead of failing at once', async () => {
+    const mgr = ladderManager();
+    const acct = account('body-gate-busy');
+    const busy = await acquirePooledClient(acct); // another click holds the only session
+    arms['the secondary backoff'](mgr, acct.id);
+    const click = mgr.fetchMessageBody(acct, 9, 'INBOX').catch(e => e);
+    releasePooledClient(acct, busy);
+    // It got the session (the fetch on it failed with ECONNRESET), and opened no login.
+    expect(await click).toMatchObject({ message: 'ECONNRESET', providerRefusing: true });
+    expect(created).toBe(1);
     evictPool(acct.id);
   });
 
@@ -5121,6 +5141,24 @@ describe('fetchMessageBody opens no fresh login while a backoff is armed', () =>
     arms['a rejected secondary login'](mgr, acct.id);
     await expect(mgr.fetchMessageBody(acct, 9, 'INBOX', { allowLogin: true })).rejects.toMatchObject({ providerRefusing: true });
     expect(created).toBe(0);
+  });
+
+  it('opens no fresh login for a rule forward on a fresh-login provider while the password is rejected', async () => {
+    const mgr = ladderManager();
+    const acct = { ...account('body-forward-auth-fresh'), imap_host: 'imap.purelymail.com' };
+    arms['a rejected secondary login'](mgr, acct.id);
+    await expect(mgr.fetchMessageBody(acct, 9, 'INBOX', { allowLogin: true })).rejects.toMatchObject({ providerRefusing: true });
+    expect(created).toBe(0);
+  });
+
+  it('a rule forward uses an idle session while the password is rejected, and its retry fails typed', async () => {
+    const mgr = ladderManager();
+    const acct = account('body-forward-auth-idle');
+    await primeIdleSession(acct);
+    arms['a rejected secondary login'](mgr, acct.id);
+    await expect(mgr.fetchMessageBody(acct, 9, 'INBOX', { allowLogin: true })).rejects.toMatchObject({ providerRefusing: true });
+    expect(created).toBe(1); // the idle session only: the fresh-login retry is held back
+    evictPool(acct.id);
   });
 
   it('still retries over a fresh login when nothing is armed', async () => {
@@ -5329,7 +5367,7 @@ describe('the live-sync ladder is cleared by a successful sync, not by a login',
 describe('every background login waits out a rejected password', () => {
   // Same setup as the prefetch case: the password changed on mailcow, the IDLE session survives,
   // and every new login is rejected. Each background path must stop at one rejected login and
-  // then open nothing while the status-only auth cooldown runs.
+  // then open nothing while the secondary auth window runs.
   let n = 0;
   const account = () => ({ id: `bg-auth-${++n}`, user_id: 'u1', enabled: true, protocol: 'imap', imap_host: 'mail.example.com', imap_port: 993, imap_tls: true, auth_user: 'u', auth_pass: 'enc' });
   const dovecotAuthFailure = () => imapErr({
@@ -5373,7 +5411,7 @@ describe('every background login waits out a rejected password', () => {
     mgr.connections.set(acct.id, Object.assign(new EventEmitter(), { close: vi.fn() }));
     return mgr;
   };
-  const rejectedPassword = (mgr, acct) => mgr._statusAuthCooldown.set(acct.id, { until: Date.now() + AUTH_FAILURE_COOLDOWN_MS, failures: 1 });
+  const rejectedPassword = (mgr, acct) => mgr._secondaryAuthCooldown.set(acct.id, { until: Date.now() + AUTH_FAILURE_COOLDOWN_MS, failures: 1 });
 
   describe('staleness probe', () => {
     const probeCycleOf = (acct) => {
@@ -5392,12 +5430,12 @@ describe('every background login waits out a rejected password', () => {
       expect(clients).toHaveLength(0);
     });
 
-    it('puts a rejected probe login on the status-only ladder, not the account-wide one', async () => {
+    it('puts a rejected probe login on the secondary auth ladder, not the account-wide one', async () => {
       const acct = account();
       const { mgr, cycle } = probeCycleOf(acct);
       await cycle();
       expect(clients).toHaveLength(1);
-      expect(mgr._statusAuthCooldown.has(acct.id)).toBe(true);
+      expect(mgr._secondaryAuthCooldown.has(acct.id)).toBe(true);
       expect(mgr._connectCooldown.has(acct.id)).toBe(false);
       await cycle();
       expect(clients).toHaveLength(1);
@@ -5437,7 +5475,7 @@ describe('every background login waits out a rejected password', () => {
       const mgr = indexerManager(acct);
       await mgr.startSnippetIndexer(acct);
       expect(clients).toHaveLength(1);
-      expect(mgr._statusAuthCooldown.has(acct.id)).toBe(true);
+      expect(mgr._secondaryAuthCooldown.has(acct.id)).toBe(true);
       expect(mgr.snippetBackoff.has('mail.example.com')).toBe(false);
       expect(mgr._bgConnSem.activeCount('mail.example.com')).toBe(0);
 
@@ -5465,7 +5503,7 @@ describe('every background login waits out a rejected password', () => {
     });
     await mgr.refreshBulkFlags(acct);
     expect(clients).toHaveLength(1);
-    expect(mgr._statusAuthCooldown.has(acct.id)).toBe(true);
+    expect(mgr._secondaryAuthCooldown.has(acct.id)).toBe(true);
     expect(mgr._bgConnSem.activeCount('mail.example.com')).toBe(0);
   });
 
@@ -5484,10 +5522,20 @@ describe('every background login waits out a rejected password', () => {
       const cd = mgr._secondaryCooldown.get(acct.id);
       expect(cd.failures).toBe(1);
       expect(cd.until - before).toBeLessThan(AUTH_FAILURE_COOLDOWN_MS);
-      expect(mgr._statusAuthCooldown.has(acct.id)).toBe(false);
+      expect(mgr._secondaryAuthCooldown.has(acct.id)).toBe(false);
       expect(mgr._connectCooldown.has(acct.id)).toBe(false);
       // Transient: not painted red.
       expect(query.mock.calls.some(([sql]) => sql.startsWith('UPDATE email_accounts SET sync_error = $1'))).toBe(false);
+    });
+
+    it('a rejected flag store is not tried a second time', async () => {
+      // Its short ladder holds no user login back, so only setFlag's own stop prevents a second
+      // rejected login for the same store.
+      const acct = oauthAccount();
+      const mgr = liveManager(acct);
+      await expect(mgr.setFlag(acct, 7, 'Sent', '\\Seen', true)).rejects.toBeTruthy();
+      expect(ensureFreshOAuthAccount.mock.calls.filter(([, opts]) => opts?.force)).toHaveLength(1);
+      expect(clients).toHaveLength(2); // the login and connectImapClient's one retry after a forced refresh
     });
 
     it('does the same when no persistent connection is up', async () => {
@@ -5577,7 +5625,23 @@ describe('every background login waits out a rejected password', () => {
       // Once the password works again (Reconnect, settings save), the queued store goes out.
       mgr.clearConnectCooldown(acct.id);
       await mgr._reconcileFlagPushes();
-      expect(setFlag).toHaveBeenCalledWith(acct, 7, 'Sent', '\\Seen', true);
+      expect(setFlag).toHaveBeenCalledWith(acct, 7, 'Sent', '\\Seen', true, { background: true });
+      expect(mgr._pendingFlagPush.has(acct.id)).toBe(false);
+    });
+
+    it('the flag-push reconciler drains a poll-only account, which has no persistent connection', async () => {
+      const acct = account();
+      const mgr = ladderManager();
+      mgr._pollOnlyAccounts.add(acct.id);
+      query.mockImplementation(async (sql) => {
+        if (sql.startsWith('SELECT * FROM email_accounts')) return { rows: [acct] };
+        if (sql.startsWith('SELECT uid, folder FROM messages')) return { rows: [{ uid: 7, folder: 'Sent' }] };
+        return { rows: [], rowCount: 1 };
+      });
+      mgr._enqueueFlagPush(acct.id, 'm-1', '\\Seen', true);
+      const setFlag = vi.spyOn(mgr, 'setFlag').mockResolvedValue();
+      await mgr._reconcileFlagPushes();
+      expect(setFlag).toHaveBeenCalledWith(acct, 7, 'Sent', '\\Seen', true, { background: true });
       expect(mgr._pendingFlagPush.has(acct.id)).toBe(false);
     });
 
@@ -5648,6 +5712,770 @@ describe('every background login waits out a rejected password', () => {
       await mgr.syncFolderViaPool(acct, 'Todo');
       expect(clients).toHaveLength(1);
       mgr.disconnectAccount(acct.id);
+    });
+  });
+
+  describe('a ladder climbs one step per window', () => {
+    // Logins that started before the window was armed are rejected after it: they must not push
+    // the ladder further. Three concurrent stores used to land it on its third step (2 h).
+    it('three concurrent rejected flag stores arm the secondary auth ladder once', async () => {
+      const acct = account();
+      const mgr = liveManager(acct);
+      const before = Date.now();
+      const stores = [7, 8, 9].map(uid => mgr.setFlag(acct, uid, 'Sent', '\\Seen', true).catch(e => e));
+      await Promise.all(stores);
+      const cd = mgr._secondaryAuthCooldown.get(acct.id);
+      expect(cd.failures).toBe(1);
+      expect(cd.until - before).toBeLessThan(2 * AUTH_FAILURE_COOLDOWN_MS);
+    });
+
+    it('the account-wide auth ladder counts one step per open window', () => {
+      const acct = account();
+      const mgr = ladderManager();
+      mgr._noteAuthFailure(acct);
+      mgr._noteAuthFailure(acct);
+      expect(mgr._connectCooldown.get(acct.id).authFailures).toBe(1);
+      mgr._connectCooldown.get(acct.id).until = 0; // the window ran out
+      mgr._noteAuthFailure(acct);
+      expect(mgr._connectCooldown.get(acct.id).authFailures).toBe(2);
+    });
+
+    it('a rejected password still promotes an open refusal window to the auth ladder', () => {
+      const acct = account();
+      const mgr = ladderManager();
+      mgr._noteConnectionRefusal(acct);
+      mgr._noteAuthFailure(acct);
+      const cd = mgr._connectCooldown.get(acct.id);
+      expect(cd.authArmed).toBe(true);
+      expect(cd.authFailures).toBe(1);
+    });
+
+    it('the secondary refusal ladder counts one step per open window', () => {
+      const acct = account();
+      const mgr = ladderManager();
+      mgr._noteSecondaryRefusal(acct);
+      mgr._noteSecondaryRefusal(acct);
+      expect(mgr._secondaryCooldown.get(acct.id).failures).toBe(1);
+    });
+  });
+
+  describe('snooze wakeup', () => {
+    // A letter snoozed until 9:00 in a node mailbox whose password changed on mailcow: the wakeup
+    // ran every minute and logged in for it every time, windows or not.
+    const snoozeManager = (acct) => {
+      const mgr = liveManager(acct);
+      query.mockImplementation(async (sql) => {
+        if (sql.includes('SELECT sm.id AS snooze_id')) {
+          return { rows: [{ snooze_id: 's1', account_id: acct.id, message_id_header: '<s1@example.com>', original_folder: 'INBOX', snoozed_folder: 'Snoozed', uid: 5, is_read: true }] };
+        }
+        if (sql.startsWith('SELECT * FROM email_accounts')) return { rows: [acct] };
+        return { rows: [], rowCount: 1 };
+      });
+      return mgr;
+    };
+    const snoozeRowDeleted = () => query.mock.calls.some(([sql]) => sql.startsWith('DELETE FROM snoozed_messages WHERE id'));
+
+    const holds = {
+      'a rejected password': rejectedPassword,
+      // The pool's own gate covers rejected passwords only; a background job also waits out refusals.
+      'the secondary refusal backoff': (mgr, acct) => mgr._secondaryCooldown.set(acct.id, { until: Date.now() + 60000, failures: 1 }),
+    };
+    for (const [what, hold] of Object.entries(holds)) {
+      it(`does not log in while ${what} holds background logins back, and keeps the letter`, async () => {
+        const acct = account();
+        const mgr = snoozeManager(acct);
+        connectError = null; // whatever the server would answer, no login is tried
+        hold(mgr, acct);
+        await mgr._runSnoozeWakeup();
+        expect(clients).toHaveLength(0);
+        expect(snoozeRowDeleted()).toBe(false);
+      });
+    }
+
+    it('arms the ladder on its rejected login, so the next minute opens nothing', async () => {
+      const acct = account();
+      const mgr = snoozeManager(acct);
+      await mgr._runSnoozeWakeup();
+      expect(clients).toHaveLength(1);
+      await mgr._runSnoozeWakeup();
+      expect(clients).toHaveLength(1);
+      expect(snoozeRowDeleted()).toBe(false);
+    });
+
+    it('leaves a disabled mailbox alone', async () => {
+      const acct = { ...account(), enabled: false };
+      const mgr = snoozeManager(acct);
+      await mgr._runSnoozeWakeup();
+      expect(clients).toHaveLength(0);
+    });
+
+    it('wakes the letter once the password works again', async () => {
+      const acct = account();
+      const mgr = snoozeManager(acct);
+      await mgr._runSnoozeWakeup();
+      mgr.clearConnectCooldown(acct.id); // Reconnect or a settings save with the new password
+      connectError = null;
+      ImapFlow.mockImplementation(function () {
+        const client = Object.assign(new EventEmitter(), {
+          usable: true,
+          connect: vi.fn().mockResolvedValue(),
+          logout: vi.fn().mockResolvedValue(),
+          getMailboxLock: vi.fn().mockResolvedValue({ release: vi.fn() }),
+          messageMove: vi.fn().mockResolvedValue({ uidMap: new Map([[5, 50]]) }),
+          messageFlagsRemove: vi.fn().mockResolvedValue(true),
+        });
+        client.close = vi.fn(() => { client.usable = false; client.emit('close'); });
+        clients.push(client);
+        return client;
+      });
+      const move = vi.spyOn(mgr, 'moveMessageGetNewUid');
+      const store = vi.spyOn(mgr, 'setFlag');
+      await mgr._runSnoozeWakeup();
+      expect(clients[1].messageMove).toHaveBeenCalledOnce();
+      expect(snoozeRowDeleted()).toBe(true);
+      // Background work: held back later, it must fail at once rather than queue.
+      expect(move).toHaveBeenCalledWith(acct, 5, 'Snoozed', 'INBOX', { background: true });
+      expect(store).toHaveBeenCalledWith(acct, 50, 'INBOX', '\\Seen', false, { background: true });
+      evictPool(acct.id);
+    });
+  });
+
+  describe('every login path under a rejected password', () => {
+    // The login-path table of the final review of #98, walked end to end: every path that can open
+    // a new IMAP login, run twice per window against Dovecot rejecting the password. Each costs at
+    // most one rejected login per window and none while the window is open.
+    // Not walked here: row 2 (the pool pre-warm runs only after connectAccount's login was
+    // accepted; row 1 counts every login connectAccount opens), row 4 (_syncInboxWithFreshLogin
+    // runs only for a freshInboxSync profile, and no shipped profile sets it), row 11 (provider id
+    // backfill: imapManager.providerIds.test.js, 'costs at most one rejected login per auth window').
+    const snoozeRow = (acct) => ({ snooze_id: 's1', account_id: acct.id, message_id_header: '<s1@example.com>', original_folder: 'INBOX', snoozed_folder: 'Snoozed', uid: 5, is_read: true });
+    const walkQuery = (acct) => async (sql) => {
+      if (sql.startsWith('SELECT * FROM email_accounts')) return { rows: [acct], rowCount: 1 };
+      if (sql.startsWith('SELECT count(*)')) return { rows: [{ count: '5' }] };
+      if (sql.includes('is_bulk IS NULL')) return { rows: [{ id: 'x1', uid: 1, folder: 'INBOX' }, { id: 'x2', uid: 2, folder: 'Sent' }] };
+      if (sql.includes('body_html IS NULL AND body_text IS NULL')) return { rows: [{ id: 'p1', uid: 1, folder: 'INBOX' }, { id: 'p2', uid: 2, folder: 'INBOX' }] };
+      if (sql.startsWith('SELECT uid, folder FROM messages')) return { rows: [{ uid: 7, folder: 'Sent' }] };
+      if (sql.includes('SELECT sm.id AS snooze_id')) return { rows: [snoozeRow(acct)] };
+      if (sql.includes('SELECT DISTINCT m.folder')) return { rows: [{ folder: 'INBOX' }] };
+      if (sql.includes('lower(name) ~')) return { rows: [{ path: 'Junk' }] };
+      return { rows: [], rowCount: 1 };
+    };
+    const live = (acct) => liveManager(acct);
+    const idle = () => ladderManager(); // no persistent connection
+    const paths = [
+      // [row, path, make(acct) -> mgr, run(mgr, acct)]
+      ['1', 'connectAccount', idle, (mgr, a) => mgr.connectAccount(a)],
+      ['3', 'sync tick reconnect', idle, (mgr, a) => mgr._syncTick(a)],
+      ['5', 'poll-only tick', idle, (mgr, a) => mgr._pollOnlyTick(a)],
+      ['6', 'staleness probe', (a) => {
+        const interval = vi.spyOn(globalThis, 'setInterval');
+        const mgr = live(a);
+        mgr._walkProbe = interval.mock.calls.find(([, ms]) => ms === 180000)[0];
+        query.mockImplementation(async sql => ({ rows: sql.includes('MAX(uid)') ? [{ maxuid: 100 }] : [a], rowCount: 1 }));
+        return mgr;
+      }, (mgr) => mgr._walkProbe()],
+      ['7', 'folder status client', live, (mgr, a) => mgr._withCountClient(a, async () => {})],
+      ['8', 'backfill', live, (mgr, a) => mgr.backfillMessages(a, 'Sent')],
+      ['9', 'bulk flag refresh', live, (mgr, a) => mgr.refreshBulkFlags(a)],
+      ['10', 'snippet indexer', live, (mgr, a) => mgr.startSnippetIndexer(a)],
+      ['12', 'body prefetch', live, (mgr, a) => mgr.prefetchFolderBodies(a.id, ['p1', 'p2'])],
+      ['13', 'flag store on the pool', live, (mgr, a) => mgr.setFlag(a, 7, 'Sent', '\\Seen', true)],
+      ['14', 'flag-push reconciler', live, (mgr, a) => { mgr._enqueueFlagPush(a.id, 'm-1', '\\Seen', true); return mgr._reconcileFlagPushes(); }],
+      ['15', 'IDLE flag sync', live, (mgr, a) => mgr._syncFlagsForRange(a)],
+      ['16', 'IDLE expunge reconcile', live, (mgr, a) => mgr.reconcileDeletes(a)],
+      ['17', 'spam poll', live, (mgr, a) => mgr._syncSpamFolder(a)],
+      ['18', 'GTD folder sync', live, (mgr, a) => mgr.syncFolderViaPool(a, 'Todo')],
+      ['19', 'rule move', live, (mgr, a) => mgr.bulkMoveMessages(a, [5], 'INBOX', 'Archive')],
+      ['20', 'rule forward', live, (mgr, a) => mgr.fetchMessageBody(a, 5, 'INBOX', { allowLogin: true })],
+      ['21', 'snooze wakeup', live, (mgr) => mgr._runSnoozeWakeup()],
+      ['22', 'message click', live, (mgr, a) => mgr.fetchMessageBody(a, 5, 'INBOX')],
+      ['23', 'headers', live, (mgr, a) => mgr.fetchHeaders(a, 5, 'INBOX')],
+      ['23', 'attachment', live, (mgr, a) => mgr.fetchAttachment(a, 5, 'INBOX', '2')],
+      ['23', 'attachments as ZIP', live, (mgr, a) => mgr.fetchMultipleAttachments(a, 5, 'INBOX', [{ part: '2' }])],
+      ['23', 'move', live, (mgr, a) => mgr.moveMessage(a, 5, 'INBOX', 'Archive')],
+      ['23', 'delete from Trash', live, (mgr, a) => mgr.permanentDeleteMessage(a, 5, 'Trash')],
+      ['23', 'bulk permanent delete', live, (mgr, a) => mgr.bulkPermanentDelete(a, [5], 'Trash')],
+      ['23', 'empty folder', live, (mgr, a) => mgr.emptyFolder(a, 'Trash')],
+      ['23', 'mark all read', live, (mgr, a) => mgr.markAllReadImap(a, 'INBOX')],
+      ['23', 'create folder', live, (mgr, a) => mgr.ensureFolder(a, 'Projects')],
+      ['23', 'rename folder', live, (mgr, a) => mgr.renameFolder(a, 'Projects', 'Archive2')],
+      ['23', 'delete folder', live, (mgr, a) => mgr.deleteFolder(a, 'Projects')],
+      ['23', 'append (draft, Sent copy)', live, (mgr, a) => mgr.appendToFolder(a, 'Drafts', 'raw')],
+      ['23', 'find the Sent copy', live, (mgr, a) => mgr.findUidByMessageId(a, 'Sent', '<m@example.com>')],
+      ['23', 'label copy', live, (mgr, a) => mgr.copyMessage(a.id, 5, 'INBOX', 'Label')],
+      ['23', 'open a folder', live, (mgr, a) => mgr.syncFolderOnDemand(a, 'Archive')],
+    ];
+    const expire = (mgr, acct) => {
+      for (const map of [mgr._connectCooldown, mgr._secondaryAuthCooldown, mgr._secondaryCooldown]) {
+        const cd = map.get(acct.id);
+        if (cd) cd.until = 0;
+      }
+      mgr._prefetchPausedUntil.clear(); // a 60 s pause, long gone once a 30 min window has run out
+    };
+
+    for (const [row, what, make, run] of paths) {
+      it(`row ${row}, ${what}: one rejected login per window, none while it is open`, async () => {
+        const acct = account();
+        query.mockImplementation(walkQuery(acct));
+        const mgr = make(acct);
+        const attempt = () => Promise.resolve().then(() => run(mgr, acct)).catch(() => {});
+
+        await attempt();
+        expect(clients).toHaveLength(1);
+        expect(mgr._authLoginBlocked(acct.id)).toBeTruthy();
+        await attempt();
+        expect(clients).toHaveLength(1);
+
+        expire(mgr, acct);
+        await attempt();
+        expect(clients).toHaveLength(2);
+        expect(mgr._authLoginBlocked(acct.id)).toBeTruthy();
+        await attempt();
+        expect(clients).toHaveLength(2);
+
+        await mgr.disconnectAccount(acct.id);
+        evictPool(acct.id);
+      });
+    }
+  });
+
+  describe('a persistent login the server accepts lifts the window', () => {
+    // The password was fixed on the server and nobody pressed Reconnect: the persistent session
+    // logs in again with the same credentials. That proves the password, so background logins and
+    // uncached clicks must not stay held back (and the mailbox red) until the window runs out.
+    const acceptingManager = (acct) => {
+      const mgr = ladderManager();
+      connectError = null;
+      query.mockImplementation(async (sql) => ({ rows: sql.startsWith('SELECT * FROM email_accounts') ? [acct] : [], rowCount: 1 }));
+      mgr.syncFolders = vi.fn().mockResolvedValue();
+      mgr.syncMessages = vi.fn().mockResolvedValue({});
+      mgr._shouldAutoBackfillOnConnect = vi.fn().mockResolvedValue(false);
+      mgr.startProviderIdBackfill = vi.fn().mockResolvedValue();
+      mgr._resumeThreadRecompute = vi.fn().mockResolvedValue();
+      mgr._startSyncInterval = vi.fn();
+      mgr._startPluginSyncTimers = vi.fn().mockResolvedValue();
+      mgr.folderStatusMonitor = { refresh: vi.fn().mockResolvedValue() };
+      return mgr;
+    };
+    const errorCleared = () => query.mock.calls.some(([sql]) => sql.startsWith('UPDATE email_accounts SET sync_error = NULL'));
+
+    it('on connectAccount', async () => {
+      const acct = account();
+      const mgr = acceptingManager(acct);
+      rejectedPassword(mgr, acct);
+      expect(await mgr.connectAccount(acct)).toBe(true);
+      expect(mgr._secondaryAuthCooldown.has(acct.id)).toBe(false);
+      expect(mgr._authLoginBlocked(acct.id)).toBeNull();
+      expect(errorCleared()).toBe(true);
+      await mgr.disconnectAccount(acct.id);
+      evictPool(acct.id);
+    });
+
+    it('on the sync tick reconnect', async () => {
+      const acct = account();
+      const mgr = acceptingManager(acct);
+      rejectedPassword(mgr, acct);
+      await mgr._syncTick(acct);
+      expect(mgr.connections.has(acct.id)).toBe(true);
+      expect(mgr._secondaryAuthCooldown.has(acct.id)).toBe(false);
+      expect(errorCleared()).toBe(true);
+      await mgr.disconnectAccount(acct.id);
+    });
+  });
+
+  describe('the pool arms the auth ladder and holds logins back', () => {
+    // Every pooled or fresh login goes through growPool or withFreshLogin, so that is where a
+    // rejected password is noted, and where a noted one stops the next login.
+    const expireWindows = (mgr, acct) => {
+      for (const map of [mgr._connectCooldown, mgr._secondaryAuthCooldown, mgr._secondaryCooldown]) {
+        const cd = map.get(acct.id);
+        if (cd) cd.until = 0;
+      }
+    };
+
+    it('a background job arms the ladder on its rejected login, and the next job opens nothing', async () => {
+      const acct = account();
+      const mgr = liveManager(acct);
+      await mgr._syncFlagsForRange(acct);
+      expect(clients).toHaveLength(1);
+      expect(mgr._authLoginBlocked(acct.id)).toBeTruthy();
+      await mgr._syncFlagsForRange(acct);
+      await mgr.reconcileDeletes(acct).catch(() => {});
+      await mgr.syncFolderViaPool(acct, 'Todo').catch(() => {});
+      expect(clients).toHaveLength(1);
+    });
+
+    it('after the window runs out, one rejected login arms it again', async () => {
+      const acct = account();
+      const mgr = liveManager(acct);
+      await mgr._syncFlagsForRange(acct);
+      expireWindows(mgr, acct);
+      await mgr._syncFlagsForRange(acct);
+      expect(clients).toHaveLength(2);
+      expect(mgr._secondaryAuthCooldown.get(acct.id).failures).toBe(2);
+      await mgr._syncFlagsForRange(acct);
+      expect(clients).toHaveLength(2);
+    });
+
+    it('a rule move costs one rejected login and then fails typed, without reconciling', async () => {
+      const acct = account();
+      const mgr = liveManager(acct);
+      await expect(mgr.bulkMoveMessages(acct, [5], 'INBOX', 'Archive')).rejects.toMatchObject({ providerRefusing: true });
+      expect(clients).toHaveLength(1);
+      const statusWarnings = () => console.warn.mock.calls.filter(([msg]) => String(msg).includes('reconciliation skipped')).length;
+      const warned = statusWarnings();
+      await expect(mgr.bulkMoveMessages(acct, [5], 'INBOX', 'Archive')).rejects.toMatchObject({ providerRefusing: true });
+      expect(clients).toHaveLength(1);
+      // Held back at the STATUS step already: no move is attempted after it.
+      expect(statusWarnings()).toBe(warned);
+    });
+
+    describe('a held-back error says whether a rejected password is the reason', () => {
+      // Routes answer mailbox_auth_rejected for those (retrying will not help) and mailbox_busy
+      // for everything else.
+      it('a user action with no open session', async () => {
+        const acct = account();
+        rejectedPassword(liveManager(acct), acct);
+        await expect(acquirePooledClient(acct)).rejects.toMatchObject({ providerRefusing: true, authRejected: true });
+      });
+
+      it('a background caller', async () => {
+        const acct = account();
+        rejectedPassword(liveManager(acct), acct);
+        await expect(acquirePooledClient(acct, { background: true })).rejects.toMatchObject({ providerRefusing: true, authRejected: true });
+      });
+
+      it('a fresh login (a rule forward on PurelyMail)', async () => {
+        const acct = { ...account(), imap_host: 'imap.purelymail.com' };
+        const mgr = liveManager(acct);
+        rejectedPassword(mgr, acct);
+        await expect(mgr.fetchMessageBody(acct, 5, 'INBOX', { allowLogin: true })).rejects.toMatchObject({ providerRefusing: true, authRejected: true });
+      });
+
+      it('a message click whose fresh-login retry the window holds back', async () => {
+        const acct = account();
+        const mgr = liveManager(acct);
+        connectError = null;
+        ImapFlow.mockImplementation(function () {
+          const client = Object.assign(new EventEmitter(), {
+            usable: true,
+            connect: vi.fn().mockResolvedValue(),
+            logout: vi.fn().mockResolvedValue(),
+            getMailboxLock: vi.fn(() => Promise.reject(new Error('ECONNRESET'))),
+          });
+          client.close = vi.fn(() => { client.usable = false; client.emit('close'); });
+          clients.push(client);
+          return client;
+        });
+        releasePooledClient(acct, await acquirePooledClient(acct)); // one idle session
+        rejectedPassword(mgr, acct);
+        await expect(mgr.fetchMessageBody(acct, 5, 'INBOX')).rejects.toMatchObject({ message: 'ECONNRESET', providerRefusing: true, authRejected: true });
+        evictPool(acct.id);
+      });
+
+      it('not a hold by the secondary refusal backoff', async () => {
+        const acct = account();
+        const mgr = liveManager(acct);
+        mgr._secondaryCooldown.set(acct.id, { until: Date.now() + 60000, failures: 1 });
+        const err = await mgr.fetchMessageBody(acct, 5, 'INBOX').catch(e => e);
+        expect(err.providerRefusing).toBe(true);
+        expect(err.authRejected).toBeUndefined();
+      });
+    });
+
+    it('a user action before anything was armed costs one login, and the next fails fast', async () => {
+      const acct = account();
+      const mgr = liveManager(acct);
+      await expect(mgr.fetchMessageBody(acct, 5, 'INBOX')).rejects.toBeTruthy();
+      expect(clients).toHaveLength(1);
+      await expect(mgr.fetchMessageBody(acct, 5, 'INBOX')).rejects.toMatchObject({ providerRefusing: true });
+      await expect(mgr.moveMessage(acct, 5, 'INBOX', 'Archive')).rejects.toMatchObject({ providerRefusing: true });
+      await expect(mgr.fetchAttachment(acct, 5, 'INBOX', '2')).rejects.toMatchObject({ providerRefusing: true });
+      expect(clients).toHaveLength(1);
+    });
+
+    it('a server refusal on a pool login does not hold the next user action back', async () => {
+      // Dovecot's per-user+IP limit: not a rejected password, so no auth window and no hold.
+      const acct = account();
+      const mgr = liveManager(acct);
+      connectError = loginLimitRefusal;
+      const first = await mgr.moveMessage(acct, 5, 'INBOX', 'Archive').catch(e => e);
+      expect(first.providerRefusing).toBeUndefined();
+      expect(mgr._authLoginBlocked(acct.id)).toBeNull();
+      const second = await mgr.moveMessage(acct, 5, 'INBOX', 'Archive').catch(e => e);
+      expect(second.providerRefusing).toBeUndefined();
+      expect(clients).toHaveLength(2);
+    });
+
+    it('the Gmail folder status client through the pool: one rejected login per short window', async () => {
+      // Gmail runs folder status on the pool (statusOnPool), as a background caller.
+      const acct = { ...account(), imap_host: 'imap.gmail.com', oauth_provider: 'google', oauth_access_token: 'enc' };
+      const mgr = liveManager(acct);
+      query.mockImplementation(async (sql) => ({ rows: sql.startsWith('SELECT * FROM email_accounts') ? [acct] : [], rowCount: 1 }));
+      await expect(mgr._withCountClient(acct, async () => {})).rejects.toThrow();
+      const perAttempt = clients.length; // the login and connectImapClient's retry after a forced refresh
+      expect(perAttempt).toBeGreaterThan(0);
+      expect(mgr._secondaryCooldown.get(acct.id).failures).toBe(1);
+      expect(mgr._secondaryAuthCooldown.has(acct.id)).toBe(false);
+      await expect(mgr._withCountClient(acct, async () => {})).rejects.toThrow('Provider connection cooldown active');
+      expect(clients).toHaveLength(perAttempt);
+      mgr._secondaryCooldown.get(acct.id).until = 0; // the short window ran out
+      await expect(mgr._withCountClient(acct, async () => {})).rejects.toThrow();
+      expect(clients).toHaveLength(2 * perAttempt);
+      expect(mgr._secondaryCooldown.get(acct.id).failures).toBe(2);
+    });
+
+    it('without a persistent session, a rejected pool login arms the account-wide ladder and paints the mailbox red', async () => {
+      // Nothing else would record it: reconnect, health check and status client wait the window out.
+      const acct = account();
+      const mgr = ladderManager();
+      query.mockImplementation(async () => ({ rows: [], rowCount: 1 }));
+      await expect(mgr.moveMessage(acct, 5, 'INBOX', 'Archive')).rejects.toBeTruthy();
+      expect(mgr._connectCooldown.get(acct.id).authArmed).toBe(true);
+      const writes = query.mock.calls.filter(([sql]) => sql.startsWith('UPDATE email_accounts SET sync_error = $1'));
+      expect(writes).toHaveLength(1);
+      expect(writes[0][1][0]).toMatch(/AUTHENTICATIONFAILED/);
+      expect(mgr.broadcast).toHaveBeenCalledWith(expect.objectContaining({ type: 'account_error', accountId: acct.id }));
+    });
+
+    it('a rejected fresh login arms the ladder too', async () => {
+      // PurelyMail fetches bodies over a brand-new login (preferFreshBodyFetch), not the pool.
+      const acct = { ...account(), imap_host: 'imap.purelymail.com' };
+      const mgr = liveManager(acct);
+      await expect(mgr.fetchMessageBody(acct, 5, 'INBOX', { allowLogin: true })).rejects.toBeTruthy();
+      expect(clients).toHaveLength(1);
+      expect(mgr._authLoginBlocked(acct.id)).toBeTruthy();
+    });
+
+    it('still serves a user action over a pooled session that is already open', async () => {
+      const acct = account();
+      const mgr = liveManager(acct);
+      connectError = null;
+      releasePooledClient(acct, await acquirePooledClient(acct));
+      clients[0].messageMove = vi.fn().mockResolvedValue({ uidMap: new Map([[5, 50]]) });
+      rejectedPassword(mgr, acct);
+      await mgr.moveMessage(acct, 5, 'INBOX', 'Archive');
+      expect(clients[0].messageMove).toHaveBeenCalledOnce();
+      expect(clients).toHaveLength(1);
+      evictPool(acct.id);
+    });
+
+    it('a waiter queued before the window opened does not log in when a slot frees, and gets the next released session', async () => {
+      const acct = account();
+      const mgr = liveManager(acct);
+      connectError = null;
+      const held = [];
+      for (let i = 0; i < poolSizeFor(acct); i++) held.push(await acquirePooledClient(acct));
+      let settled = null;
+      const waiter = acquirePooledClient(acct).then(c => { settled = c; return c; }, e => { settled = e; return e; });
+      rejectedPassword(mgr, acct);
+      connectError = dovecotAuthFailure;
+      held[0].close(); // the server closed one pooled session: its slot is not grown into
+      await Promise.resolve();
+      expect(settled).toBeNull();
+      expect(clients).toHaveLength(poolSizeFor(acct));
+      releasePooledClient(acct, held[1]);
+      expect(await waiter).toBe(held[1]);
+      expect(clients).toHaveLength(poolSizeFor(acct));
+      for (const c of [held[1], ...held.slice(2)]) releasePooledClient(acct, c);
+      evictPool(acct.id);
+    });
+
+    it('a background job does not queue behind a busy session while logins are held back', async () => {
+      const acct = account();
+      const mgr = liveManager(acct);
+      connectError = null;
+      mgr.syncMessages = vi.fn().mockResolvedValue({});
+      query.mockImplementation(async (sql) => ({ rows: sql.includes('lower(name) ~') ? [{ path: 'Junk' }] : [], rowCount: 1 }));
+      const busy = await acquirePooledClient(acct);
+      mgr._secondaryCooldown.set(acct.id, { until: Date.now() + 60000, failures: 1 });
+      const poll = mgr._syncSpamFolder(acct);
+      await new Promise(r => setImmediate(r));
+      releasePooledClient(acct, busy);
+      await poll;
+      expect(mgr.syncMessages).not.toHaveBeenCalled();
+      evictPool(acct.id);
+    });
+
+    describe('rule work held back does not wait for a busy session', () => {
+      // Rules, the block list and a rule forward run inside the sync tick, bounded at 55 s;
+      // a tick that overruns closes the live IDLE session. Two letters whose rule moves and marks
+      // read each waited out the pool queue (15 s a move, 31 s a store) were enough.
+      const settlesAtOnce = (p) => Promise.race([p.then(() => 'settled', () => 'settled'), new Promise(r => setTimeout(() => r('waited'), 200))]);
+      const busyAndHeld = async () => {
+        const acct = account();
+        const mgr = liveManager(acct);
+        connectError = null;
+        const busy = await acquirePooledClient(acct); // an employee's action holds the only session
+        rejectedPassword(mgr, acct);
+        return { acct, mgr, busy };
+      };
+
+      it('a rule move fails at once, typed, without a login', async () => {
+        const { acct, mgr, busy } = await busyAndHeld();
+        const move = mgr.bulkMoveMessages(acct, [5], 'INBOX', 'Archive', { failFastWhenHeld: true });
+        expect(await settlesAtOnce(move)).toBe('settled');
+        await expect(move).rejects.toMatchObject({ providerRefusing: true });
+        expect(clients).toHaveLength(1);
+        releasePooledClient(acct, busy);
+        evictPool(acct.id);
+      });
+
+      it('a rule flag store fails at once, typed, without a login', async () => {
+        const { acct, mgr, busy } = await busyAndHeld();
+        const store = mgr.setFlag(acct, 7, 'Sent', '\\Seen', true, { failFastWhenHeld: true });
+        expect(await settlesAtOnce(store)).toBe('settled');
+        await expect(store).rejects.toMatchObject({ providerRefusing: true });
+        expect(clients).toHaveLength(1);
+        releasePooledClient(acct, busy);
+        evictPool(acct.id);
+      });
+
+      it('a rule forward fails at once, typed, without a login', async () => {
+        const { acct, mgr, busy } = await busyAndHeld();
+        const fetch = mgr.fetchMessageBody(acct, 5, 'INBOX', { allowLogin: true, failFastWhenHeld: true });
+        expect(await settlesAtOnce(fetch)).toBe('settled');
+        await expect(fetch).rejects.toMatchObject({ providerRefusing: true });
+        expect(clients).toHaveLength(1);
+        releasePooledClient(acct, busy);
+        evictPool(acct.id);
+      });
+
+      it('on a healthy mailbox a rule move waits for a busy pool as a user action does, past the 10 s background wait', async () => {
+        // Nothing holds the account back: the rule keeps the interactive queue and its 15 s wait.
+        // A rule move that gives up is skipped for good, so it must not lose that wait.
+        const acct = account();
+        const mgr = liveManager(acct);
+        connectError = null;
+        ImapFlow.mockImplementation(function () {
+          const client = Object.assign(new EventEmitter(), {
+            usable: true,
+            connect: vi.fn().mockResolvedValue(),
+            logout: vi.fn().mockResolvedValue(),
+            getMailboxLock: vi.fn().mockResolvedValue({ release: vi.fn() }),
+            status: vi.fn().mockResolvedValue({ uidNext: 51 }),
+            messageMove: vi.fn().mockResolvedValue({ uidMap: new Map([[5, 50]]) }),
+          });
+          client.close = vi.fn(() => { client.usable = false; client.emit('close'); });
+          clients.push(client);
+          return client;
+        });
+        const held = [];
+        for (let i = 0; i < poolSizeFor(acct); i++) held.push(await acquirePooledClient(acct)); // all busy
+        vi.useFakeTimers();
+        let settled = false;
+        let move;
+        try {
+          move = mgr.bulkMoveMessages(acct, [5], 'INBOX', 'Archive', { failFastWhenHeld: true }).finally(() => { settled = true; });
+          await vi.advanceTimersByTimeAsync(BACKGROUND_ACQUIRE_TIMEOUT_MS + 1000);
+          expect(settled).toBe(false); // still queued, where a background caller would have given up
+        } finally { vi.useRealTimers(); }
+        releasePooledClient(acct, held[0]);
+        expect(await move).toMatchObject({ succeeded: [5], failed: [] });
+        expect(clients).toHaveLength(poolSizeFor(acct)); // no login: it used the released session
+        for (const c of held) releasePooledClient(acct, c);
+        evictPool(acct.id);
+      });
+    });
+
+    it('a user flag store that waited out the queue does not wait a second time', async () => {
+      const acct = account();
+      const mgr = liveManager(acct);
+      connectError = null;
+      const busy = await acquirePooledClient(acct);
+      rejectedPassword(mgr, acct);
+      vi.useFakeTimers();
+      try {
+        let settled = false;
+        const store = mgr.setFlag(acct, 7, 'Sent', '\\Seen', true).finally(() => { settled = true; }).catch(e => e);
+        await vi.advanceTimersByTimeAsync(ACQUIRE_TIMEOUT_MS + 1000);
+        expect(settled).toBe(true);
+        expect(await store).toMatchObject({ poolExhausted: true });
+      } finally { vi.useRealTimers(); }
+      expect(clients).toHaveLength(1);
+      releasePooledClient(acct, busy);
+      evictPool(acct.id);
+    });
+
+    it('a user action waits for a busy open session while the password is rejected, without a login', async () => {
+      const acct = account();
+      const mgr = liveManager(acct);
+      connectError = null;
+      const busy = await acquirePooledClient(acct); // another employee's action holds it
+      rejectedPassword(mgr, acct);
+      const waiting = acquirePooledClient(acct);
+      releasePooledClient(acct, busy);
+      expect(await waiting).toBe(busy);
+      expect(clients).toHaveLength(1);
+      releasePooledClient(acct, busy);
+      evictPool(acct.id);
+    });
+
+    it('a waiter that may log in does not wait behind a held-back one for a free slot', async () => {
+      // A refusal window (not a rejected password): a message click waits for a busy session with
+      // noNewLogin, while a move behind it may log in, and the pool has room.
+      const acct = account();
+      const mgr = liveManager(acct);
+      connectError = null;
+      const busy = await acquirePooledClient(acct);
+      mgr._secondaryCooldown.set(acct.id, { until: Date.now() + 60000, failures: 1 });
+      const click = acquirePooledClient(acct, { noNewLogin: true });
+      let secondSettled = false;
+      const secondClick = acquirePooledClient(acct, { noNewLogin: true }).finally(() => { secondSettled = true; });
+      const move = await acquirePooledClient(acct);
+      expect(move).not.toBe(busy);
+      expect(clients).toHaveLength(2); // one login, for the move only
+      await new Promise(r => setImmediate(r));
+      expect(secondSettled).toBe(false); // the other held-back click did not log in either
+      releasePooledClient(acct, busy);
+      expect(await click).toBe(busy); // the released session still goes to the head
+      releasePooledClient(acct, move);
+      expect(await secondClick).toBe(move);
+      releasePooledClient(acct, busy);
+      releasePooledClient(acct, move);
+      evictPool(acct.id);
+    });
+
+    it('a held-back waiter keeps waiting while a session for the waiter behind it is still being opened', async () => {
+      const acct = account();
+      const mgr = liveManager(acct);
+      connectError = null;
+      const busy = await acquirePooledClient(acct);
+      mgr._secondaryCooldown.set(acct.id, { until: Date.now() + 60000, failures: 1 }); // a refusal window
+      let finishConnect;
+      ImapFlow.mockImplementation(function () {
+        const client = Object.assign(new EventEmitter(), {
+          usable: true,
+          connect: vi.fn(() => new Promise(r => { finishConnect = r; })), // this login is slow
+          logout: vi.fn().mockResolvedValue(),
+        });
+        client.close = vi.fn(() => { client.usable = false; client.emit('close'); });
+        clients.push(client);
+        return client;
+      });
+      let clickErr = null;
+      const click = acquirePooledClient(acct, { noNewLogin: true }).catch(e => { clickErr = e; return e; });
+      const move = acquirePooledClient(acct); // grows the pool: its login is under way
+      await vi.waitFor(() => expect(finishConnect).toBeTypeOf('function'));
+      busy.close(); // the only open session goes away while that login runs
+      await new Promise(r => setImmediate(r));
+      expect(clickErr).toBeNull(); // not "busy" while a session is on its way
+      finishConnect();
+      const opened = await move;
+      releasePooledClient(acct, opened);
+      expect(await click).toBe(opened);
+      releasePooledClient(acct, opened);
+      evictPool(acct.id);
+    });
+
+    it('a waiting user action fails typed when the last open session closes', async () => {
+      const acct = account();
+      const mgr = liveManager(acct);
+      connectError = null;
+      const busy = await acquirePooledClient(acct);
+      rejectedPassword(mgr, acct);
+      const waiting = acquirePooledClient(acct).catch(e => e);
+      busy.close();
+      expect(await waiting).toMatchObject({ providerRefusing: true });
+      expect(clients).toHaveLength(1);
+      evictPool(acct.id);
+    });
+
+    it('a user action that waits out the queue gets the usual busy answer', async () => {
+      const acct = account();
+      const mgr = liveManager(acct);
+      connectError = null;
+      const busy = await acquirePooledClient(acct);
+      rejectedPassword(mgr, acct);
+      vi.useFakeTimers();
+      try {
+        const waiting = acquirePooledClient(acct).catch(e => e);
+        vi.advanceTimersByTime(ACQUIRE_TIMEOUT_MS);
+        expect(await waiting).toMatchObject({ poolExhausted: true });
+      } finally { vi.useRealTimers(); }
+      expect(clients).toHaveLength(1);
+      releasePooledClient(acct, busy);
+      evictPool(acct.id);
+    });
+
+    it('an OAuth mailbox keeps the short ladder, and its user actions are not held back', async () => {
+      // Gmail: fail2ban does not guard it, and a leftover rejection after a token refresh is routine.
+      const acct = { ...account(), imap_host: 'imap.gmail.com', oauth_provider: 'google', oauth_access_token: 'enc' };
+      const mgr = liveManager(acct);
+      const first = await mgr.moveMessage(acct, 5, 'INBOX', 'Archive').catch(e => e);
+      expect(first.providerRefusing).toBeUndefined();
+      const perAttempt = clients.length; // connectImapClient retried once after a forced refresh
+      expect(perAttempt).toBeGreaterThan(0);
+      expect(mgr._secondaryCooldown.get(acct.id).failures).toBe(1);
+      expect(mgr._secondaryAuthCooldown.has(acct.id)).toBe(false);
+      expect(mgr._connectCooldown.has(acct.id)).toBe(false);
+      const second = await mgr.moveMessage(acct, 5, 'INBOX', 'Archive').catch(e => e);
+      expect(second.providerRefusing).toBeUndefined();
+      expect(clients).toHaveLength(2 * perAttempt);
+    });
+
+    describe('an OAuth mailbox while its account-wide auth ladder is armed', () => {
+      // Its own login was rejected after a forced refresh. fail2ban does not guard Gmail, so the
+      // pool holds back only background callers; a user's action still tries its login.
+      const armedOAuth = () => {
+        const acct = { ...account(), imap_host: 'imap.gmail.com', oauth_provider: 'google', oauth_access_token: 'enc' };
+        const mgr = ladderManager();
+        mgr._noteAuthFailure(acct);
+        return { acct, mgr };
+      };
+
+      it('lets a user action log in', async () => {
+        const { acct } = armedOAuth();
+        const err = await acquirePooledClient(acct).catch(e => e);
+        expect(err.providerRefusing).toBeUndefined();
+        expect(clients.length).toBeGreaterThan(0);
+      });
+
+      it('holds a background caller back', async () => {
+        const { acct } = armedOAuth();
+        await expect(acquirePooledClient(acct, { background: true })).rejects.toMatchObject({ providerRefusing: true });
+        expect(clients).toHaveLength(0);
+      });
+
+      it('a background caller queued before the ladder armed does not grow the pool when a slot frees', async () => {
+        const acct = { ...account(), imap_host: 'imap.gmail.com', oauth_provider: 'google', oauth_access_token: 'enc' };
+        const mgr = ladderManager();
+        connectError = null;
+        const held = [];
+        for (let i = 0; i < poolSizeFor(acct); i++) held.push(await acquirePooledClient(acct)); // all busy
+        const opened = clients.length;
+        connectError = dovecotAuthFailure;
+        let settled = false;
+        const waiting = acquirePooledClient(acct, { background: true }).finally(() => { settled = true; }).catch(e => e);
+        mgr._noteAuthFailure(acct); // the account's own login is rejected while it waits
+        held[0].close(); // a slot frees while the other sessions stay open and busy
+        await new Promise(r => setImmediate(r));
+        expect(settled).toBe(false);
+        expect(clients).toHaveLength(opened);
+        const last = held[held.length - 1];
+        releasePooledClient(acct, last);
+        expect(await waiting).toBe(last);
+        for (const c of held.slice(1)) releasePooledClient(acct, c);
+        evictPool(acct.id);
+      });
+
+      it('a background caller fails at once while held back, even with an open busy session', async () => {
+        const { acct } = armedOAuth();
+        connectError = null;
+        const busy = await acquirePooledClient(acct); // a user action on OAuth is not held back
+        const opened = clients.length;
+        await expect(acquirePooledClient(acct, { background: true })).rejects.toMatchObject({ providerRefusing: true });
+        expect(clients).toHaveLength(opened);
+        releasePooledClient(acct, busy);
+        evictPool(acct.id);
+      });
+
+      it('holds a password mailbox back for a user action too', async () => {
+        const acct = account();
+        ladderManager()._noteAuthFailure(acct);
+        await expect(acquirePooledClient(acct)).rejects.toMatchObject({ providerRefusing: true });
+        expect(clients).toHaveLength(0);
+      });
     });
   });
 });

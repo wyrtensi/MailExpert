@@ -64,6 +64,16 @@ describe('GET /messages/:id/body when the account is busy', () => {
     expect(body.code).toBe('mailbox_busy');
   });
 
+  it('says the password was rejected when that is what holds the login back', async () => {
+    imapManager.fetchMessageBody.mockRejectedValue(Object.assign(new Error('ECONNRESET'), { providerRefusing: true, authRejected: true }));
+    const res = await fetch(`${ctx.base}/api/mail/messages/${MESSAGE_ID}/body`);
+    const body = await res.json();
+    expect(res.status).toBe(503);
+    expect(body.code).toBe('mailbox_auth_rejected');
+    // Neutral about where to fix it: a mail-node mailbox cannot change its password in its settings.
+    expect(body.error).toBe('The mail server does not accept the sign-in to this mailbox. Ask an administrator to check the mailbox.');
+  });
+
   it('answers 503 busy when the server refuses the connection outright', async () => {
     imapManager.fetchMessageBody.mockRejectedValue(new Error('Maximum number of connections from user+IP exceeded (mail_max_userip_connections=20)'));
     const res = await fetch(`${ctx.base}/api/mail/messages/${MESSAGE_ID}/body`);

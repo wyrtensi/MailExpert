@@ -205,7 +205,11 @@ export function createDirectApi({
       const res = await fetchImpl(`/api/mail/messages/${messageId}/attachments/${encodeURIComponent(part)}`, {
         credentials: 'include',
       });
-      if (!res.ok) throw new Error('Download failed');
+      if (!res.ok) {
+        // Keep the server's stable code (mailbox_busy) so the caller can say the mailbox is busy.
+        const body = await res.json().catch(() => ({}));
+        throw Object.assign(new Error('Download failed'), body.code ? { code: body.code } : {});
+      }
       return res.blob();
     },
 

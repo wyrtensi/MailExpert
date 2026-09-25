@@ -6,6 +6,7 @@ import { filterAccounts } from '../utils/accountFilter.js';
 import { HEALTH_LABEL_KEYS, computeAccountHealth, reconnectMenuAction, reconnectUrlFor } from '../utils/accountHealth.js';
 import { openOAuthWindow } from '../utils/oauthWindow.js';
 import { api } from '../utils/api.js';
+import { mailboxBusyOr } from '../utils/mailboxBusy.js';
 import { resolveThreadMessages } from '../utils/threadActions.js';
 import {
   activateOnKey,
@@ -623,7 +624,7 @@ export default function Sidebar() {
       }
       setRenamingFolder(null);
     } catch (err) {
-      addNotification({ title: t('sidebar.renameFailed'), body: err.message });
+      addNotification({ title: t('sidebar.renameFailed'), body: mailboxBusyOr(err, t, err.message) });
     } finally {
       setFolderOpLoading(false);
     }
@@ -647,7 +648,7 @@ export default function Sidebar() {
             setSelectedAccount(accountId, 'INBOX');
           }
         } catch (err) {
-          addNotification({ title: t('sidebar.deleteFailed'), body: err.message });
+          addNotification({ title: t('sidebar.deleteFailed'), body: mailboxBusyOr(err, t, err.message) });
         }
       },
     });
@@ -670,7 +671,7 @@ export default function Sidebar() {
           await api.emptyFolder(accountId, folderPath);
           addNotification({ title: t('sidebar.emptying', { name }) });
         } catch (err) {
-          addNotification({ title: t('sidebar.emptyFailed'), body: err.message });
+          addNotification({ title: t('sidebar.emptyFailed'), body: mailboxBusyOr(err, t, err.message) });
         }
       },
     });
@@ -700,7 +701,7 @@ export default function Sidebar() {
       setCreatingFolder(null);
       setCreateName('');
     } catch (err) {
-      addNotification({ title: t('sidebar.createFailed'), body: err.message });
+      addNotification({ title: t('sidebar.createFailed'), body: mailboxBusyOr(err, t, err.message) });
     }
   };
 

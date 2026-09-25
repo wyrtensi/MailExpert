@@ -1,5 +1,5 @@
 import { threadCacheKey } from './threadKey.js';
-import { isMailboxBusy } from './mailboxBusy.js';
+import { isMailboxBusy, MAILBOX_BUSY_CODE } from './mailboxBusy.js';
 
 export function findVisibleArchiveMessage(messages, selectedMessageId, threadMessages = {}) {
   if (!selectedMessageId || !Array.isArray(messages)) return null;
@@ -90,22 +90,28 @@ export async function archiveTargetGroupsForRows(
 }
 
 // `busy` is true when a chunk that got partly through said the mailbox was busy (a 200 with the
-// mailbox_busy code), so the caller can say why the rest did not go through.
+// mailbox_busy or mailbox_auth_rejected code), and busyCode is that code, so the caller can say
+// why the rest did not go through. mailbox_auth_rejected only when every busy chunk said so: a
+// chunk that was merely busy makes it mailbox_busy, as the server does across mailboxes.
 export async function archiveInChunks(ids, archive, chunkSize = 500) {
   const archived = [];
   const noArchiveFolder = [];
   let busy = false;
+  let busyCode = null;
   for (let offset = 0; offset < ids.length; offset += chunkSize) {
     try {
       const result = await archive(ids.slice(offset, offset + chunkSize));
       archived.push(...(result?.archived || []));
       noArchiveFolder.push(...(result?.noArchiveFolder || []));
-      if (isMailboxBusy(result)) busy = true;
+      if (isMailboxBusy(result)) {
+        busyCode = !busy || busyCode === result.code ? result.code : MAILBOX_BUSY_CODE;
+        busy = true;
+      }
     } catch (error) {
-      return { archived, noArchiveFolder, unconfirmed: ids.slice(offset), error, busy };
+      return { archived, noArchiveFolder, unconfirmed: ids.slice(offset), error, busy, busyCode };
     }
   }
-  return { archived, noArchiveFolder, unconfirmed: [], error: null, busy };
+  return { archived, noArchiveFolder, unconfirmed: [], error: null, busy, busyCode };
 }
 
 export function unreadCountsByAccount(messages) {

@@ -5071,3 +5071,171 @@ describe('the live-sync ladder is cleared by a successful sync, not by a login',
     expect(mgr._connectCooldown.get(acct.id).failures).toBe(3);
   });
 });
+
+describe('every background login waits out a rejected password', () => {
+  // Same setup as the prefetch case: the password changed on mailcow, the IDLE session survives,
+  // and every new login is rejected. Each background path must stop at one rejected login and
+  // then open nothing while the status-only auth cooldown runs.
+  let n = 0;
+  const account = () => ({ id: `bg-auth-${++n}`, user_id: 'u1', enabled: true, protocol: 'imap', imap_host: 'mail.example.com', imap_port: 993, imap_tls: true, auth_user: 'u', auth_pass: 'enc' });
+  const dovecotAuthFailure = () => imapErr({
+    response: '1 NO [AUTHENTICATIONFAILED] Authentication failed.',
+    responseStatus: 'NO',
+    responseText: 'Authentication failed.',
+    serverResponseCode: 'AUTHENTICATIONFAILED',
+    authenticationFailed: true,
+  });
+  let connectError;
+  let clients;
+
+  beforeEach(() => {
+    vi.clearAllMocks();
+    clients = [];
+    connectError = dovecotAuthFailure;
+    ImapFlow.mockImplementation(function () {
+      const client = Object.assign(new EventEmitter(), {
+        usable: true,
+        connect: vi.fn(() => (connectError ? Promise.reject(connectError()) : Promise.resolve())),
+        logout: vi.fn().mockResolvedValue(),
+        getMailboxLock: vi.fn().mockResolvedValue({ release: vi.fn() }),
+        search: vi.fn().mockResolvedValue([]),
+        fetch: vi.fn(async function* () {}),
+      });
+      client.close = vi.fn(() => { client.usable = false; client.emit('close'); });
+      clients.push(client);
+      return client;
+    });
+    getConnectionPolicy.mockResolvedValue({ allowPrivateHosts: true, allowInsecureTls: true });
+    resolveForConnection.mockResolvedValue({ host: '127.0.0.1', addresses: ['127.0.0.1'], servername: null });
+    query.mockReset();
+    vi.spyOn(console, 'error').mockImplementation(() => {});
+    vi.spyOn(console, 'warn').mockImplementation(() => {});
+    vi.spyOn(console, 'log').mockImplementation(() => {});
+  });
+  afterEach(() => { vi.restoreAllMocks(); });
+
+  const liveManager = (acct) => {
+    const mgr = ladderManager();
+    mgr.connections.set(acct.id, Object.assign(new EventEmitter(), { close: vi.fn() }));
+    return mgr;
+  };
+  const rejectedPassword = (mgr, acct) => mgr._statusAuthCooldown.set(acct.id, { until: Date.now() + AUTH_FAILURE_COOLDOWN_MS, failures: 1 });
+
+  describe('staleness probe', () => {
+    const probeCycleOf = (acct) => {
+      const interval = vi.spyOn(globalThis, 'setInterval');
+      const mgr = liveManager(acct);
+      const cycle = interval.mock.calls.find(([, ms]) => ms === 180000)[0];
+      query.mockImplementation(async sql => ({ rows: sql.includes('MAX(uid)') ? [{ maxuid: 100 }] : [acct], rowCount: 1 }));
+      return { mgr, cycle };
+    };
+
+    it('does not log in while a rejected password holds background logins back', async () => {
+      const acct = account();
+      const { mgr, cycle } = probeCycleOf(acct);
+      rejectedPassword(mgr, acct);
+      await cycle();
+      expect(clients).toHaveLength(0);
+    });
+
+    it('puts a rejected probe login on the status-only ladder, not the account-wide one', async () => {
+      const acct = account();
+      const { mgr, cycle } = probeCycleOf(acct);
+      await cycle();
+      expect(clients).toHaveLength(1);
+      expect(mgr._statusAuthCooldown.has(acct.id)).toBe(true);
+      expect(mgr._connectCooldown.has(acct.id)).toBe(false);
+      await cycle();
+      expect(clients).toHaveLength(1);
+    });
+
+    it('puts a refused probe login on the secondary backoff', async () => {
+      const acct = account();
+      connectError = loginLimitRefusal;
+      const { mgr, cycle } = probeCycleOf(acct);
+      await cycle();
+      expect(mgr._secondaryCooldown.get(acct.id).failures).toBe(1);
+      expect(mgr._connectCooldown.has(acct.id)).toBe(false);
+    });
+  });
+
+  describe('snippet indexer', () => {
+    const indexerManager = (acct) => {
+      const mgr = liveManager(acct);
+      query.mockImplementation(async (sql) => {
+        if (sql.startsWith('SELECT count(*)')) return { rows: [{ count: '5' }] };
+        if (sql.startsWith('SELECT * FROM email_accounts')) return { rows: [acct] };
+        return { rows: [], rowCount: 1 };
+      });
+      return mgr;
+    };
+
+    it('does not log in while a rejected password holds background logins back', async () => {
+      const acct = account();
+      const mgr = indexerManager(acct);
+      rejectedPassword(mgr, acct);
+      await mgr.startSnippetIndexer(acct);
+      expect(clients).toHaveLength(0);
+    });
+
+    it('puts a rejected login on the account, not on the host shared with every other mailbox', async () => {
+      const acct = account();
+      const mgr = indexerManager(acct);
+      await mgr.startSnippetIndexer(acct);
+      expect(clients).toHaveLength(1);
+      expect(mgr._statusAuthCooldown.has(acct.id)).toBe(true);
+      expect(mgr.snippetBackoff.has('mail.example.com')).toBe(false);
+      expect(mgr._bgConnSem.activeCount('mail.example.com')).toBe(0);
+    });
+  });
+
+  it('bulk flag refresh stops at the first rejected folder login', async () => {
+    const acct = account();
+    const mgr = liveManager(acct);
+    query.mockImplementation(async (sql) => {
+      if (sql.includes('is_bulk IS NULL')) return { rows: [{ id: 'x1', uid: 1, folder: 'INBOX' }, { id: 'x2', uid: 2, folder: 'Sent' }, { id: 'x3', uid: 3, folder: 'Archive' }] };
+      if (sql.startsWith('SELECT * FROM email_accounts')) return { rows: [acct] };
+      return { rows: [], rowCount: 1 };
+    });
+    await mgr.refreshBulkFlags(acct);
+    expect(clients).toHaveLength(1);
+    expect(mgr._statusAuthCooldown.has(acct.id)).toBe(true);
+    expect(mgr._bgConnSem.activeCount('mail.example.com')).toBe(0);
+  });
+
+  describe('background work on the pool', () => {
+    it('does not grow the pool while a rejected password holds background logins back', async () => {
+      const acct = account();
+      const mgr = liveManager(acct);
+      mgr.syncMessages = vi.fn().mockResolvedValue({});
+      rejectedPassword(mgr, acct);
+      await expect(mgr.syncFolderViaPool(acct, 'Todo')).rejects.toMatchObject({ providerRefusing: true });
+      expect(clients).toHaveLength(0);
+      expect(mgr.syncMessages).not.toHaveBeenCalled();
+    });
+
+    it('still uses a session that is already open and idle', async () => {
+      const acct = account();
+      const mgr = liveManager(acct);
+      mgr.syncMessages = vi.fn().mockResolvedValue({});
+      connectError = null;
+      await mgr.syncFolderViaPool(acct, 'Todo'); // opens one pooled session and returns it
+      expect(clients).toHaveLength(1);
+      rejectedPassword(mgr, acct);
+      await mgr.syncFolderViaPool(acct, 'Todo');
+      expect(clients).toHaveLength(1);
+      expect(mgr.syncMessages).toHaveBeenCalledTimes(2);
+      mgr.disconnectAccount(acct.id);
+    });
+
+    it('grows the pool as before when nothing is armed', async () => {
+      const acct = account();
+      const mgr = liveManager(acct);
+      mgr.syncMessages = vi.fn().mockResolvedValue({});
+      connectError = null;
+      await mgr.syncFolderViaPool(acct, 'Todo');
+      expect(clients).toHaveLength(1);
+      mgr.disconnectAccount(acct.id);
+    });
+  });
+});

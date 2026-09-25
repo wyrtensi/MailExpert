@@ -1605,12 +1605,27 @@ async function growPool(pool, account) {
 // A full pool never opens another connection: the caller queues, and past the acquire timeout
 // the operation fails with poolExhausted. background: true (work nobody is waiting on) queues
 // behind interactive waiters and gives up after BACKGROUND_ACQUIRE_TIMEOUT_MS.
-export async function acquirePooledClient(account, { background = false } = {}) {
+//
+// noNewLogin: true (a background caller while the account's backoffs hold new logins back) may
+// only take a session that is already open and idle; anything that would log in or queue fails at
+// once with providerRefusing. The pool's grow is a login like any other, and a background job has
+// no business spending one against a server that is refusing us or rejecting the password.
+export async function acquirePooledClient(account, { background = false, noNewLogin = false } = {}) {
   const id = account.id;
   if (!connectionPools.has(id)) {
     connectionPools.set(id, { clients: [], inUse: new Set(), waiters: [], connecting: 0, idleTimers: new Map() });
   }
   const pool = connectionPools.get(id);
+
+  if (noNewLogin) {
+    const idle = pool.waiters.length === 0 && pool.clients.find(c => !pool.inUse.has(c));
+    if (idle) {
+      disarmPoolIdleClose(pool, idle);
+      pool.inUse.add(idle);
+      return idle;
+    }
+    throw providerRefusingError();
+  }
 
   // Nobody queued: take an idle client, or grow the pool if it is under its size.
   if (pool.waiters.length === 0) {
@@ -1713,6 +1728,16 @@ async function withFreshClient(account, fn, poolOpts = {}) {
   } finally {
     releasePooledClient(account, client);
   }
+}
+
+// The typed error for work held back by the account's backoffs. The wording deliberately matches
+// neither isConnectionRefusal nor an auth failure, so surfacing it can never re-arm the backoff it
+// reports.
+export function providerRefusingError(retryAfterMs) {
+  const err = new Error('Mail server is not accepting new connections for this account right now');
+  err.providerRefusing = true;
+  if (Number.isFinite(retryAfterMs)) err.retryAfterMs = Math.max(0, retryAfterMs);
+  return err;
 }
 
 // A fresh Error carrying the server's text (extractImapError's `detail`) for fetchMessageBody to
@@ -2118,6 +2143,10 @@ export class ImapManager {
             );
             const maxUid = w.maxuid ? Number(w.maxuid) : 0;
             if (!maxUid) continue; // nothing synced yet — backfill owns initial population
+            // The probe is one more login. While the server refuses extra connections or has
+            // rejected the password on one, it would only add another refusal (or another
+            // rejected login toward fail2ban) and could not recover anything anyway.
+            if (this._secondaryLoginBlocked(accountId)) continue;
 
             let missed = 0;
             let probe = null;
@@ -2221,8 +2250,15 @@ export class ImapManager {
             recordWarning('staleness_error', accountId);
             // extractImapError, not err.message: the probe runs IMAP commands, so a rejection
             // reads 'Command failed' until the server's own text is pulled out.
-            console.warn(`Staleness check error for ${accountId}:`, extractImapError(err));
-            if (probedAccount) await this._handleOAuthRefreshFailure(probedAccount, err);
+            const detail = extractImapError(err);
+            console.warn(`Staleness check error for ${accountId}:`, detail);
+            // A secondary login like the status client's, handled the same way: a rejected
+            // password on the status-only (or account-wide) auth ladder, a refusal on the
+            // secondary backoff. Without this the probe retried a rejected password every cycle.
+            if (probedAccount && !(await this._handleOAuthRefreshFailure(probedAccount, err))) {
+              if (isImapAuthFailure(err)) await this._noteSecondaryAuthFailure(probedAccount, err, 'Staleness probe');
+              else if (isConnectionRefusal(detail)) this._noteSecondaryRefusal(probedAccount);
+            }
           }
         }
       } finally {
@@ -2882,6 +2918,16 @@ export class ImapManager {
     return this._secondaryConnectBlocked(accountId) || this._secondaryAuthBlocked(accountId);
   }
 
+  // Pool options for background work on the pool (flag sync, reconcile, spam poll, GTD folder
+  // sync): while a backoff holds background logins back, the job may still use a session that is
+  // already open but must not grow the pool, which would be one more login.
+  // A revoked OAuth grant is left to the token refresh, which fails with its stable
+  // oauth_reconnect_required error without reaching the server.
+  _poolLoginOpts(accountId) {
+    const blocked = this._secondaryLoginBlocked(accountId);
+    return { noNewLogin: !!blocked && !blocked.oauthReconnectRequired };
+  }
+
   // A secondary login (folder status, body prefetch, staleness probe, snippet indexer, backfill)
   // had its credentials rejected. While the persistent connection is up, the status-only ladder
   // (30 min doubling to 6 h) and a recorded error: the account-wide ladder would stop the sync tick
@@ -3336,7 +3382,7 @@ export class ImapManager {
         } finally {
           lock.release();
         }
-      }, { background: true }); // nobody is waiting on it: queue behind the reader's clicks
+      }, { background: true, ...this._poolLoginOpts(account.id) }); // nobody is waiting on it: queue behind the reader's clicks
     } catch (err) {
       console.warn(`Flag range sync error for ${logAccount(account)}:`, err.message);
     }
@@ -3422,7 +3468,7 @@ export class ImapManager {
     // Background (the GTD tick): queues behind clicks, and a whole-folder sync gets the long bound.
     return withFreshClient(account, (client) =>
       this.syncMessages(account, client, folder, 100, false, true),
-    { background: true, timeoutMs: LONG_POOLED_OPERATION_TIMEOUT_MS });
+    { background: true, timeoutMs: LONG_POOLED_OPERATION_TIMEOUT_MS, ...this._poolLoginOpts(account.id) });
   }
 
   // Applies the install-wide sync cadence. Running message-sync and poll-only timers are re-armed
@@ -4967,6 +5013,12 @@ export class ImapManager {
 
     const host = (account.imap_host || '').toLowerCase();
     for (const [folder, msgs] of byFolder) {
+      // One login per folder, so honor the account's backoffs before each: otherwise a refused
+      // or rejected login was repeated once for every remaining folder.
+      if (this._secondaryLoginBlocked(account.id)) {
+        logger.debug(`Bulk flag refresh for ${logAccount(account)} stopped: backing off`);
+        return;
+      }
       let client = null;
       // A background connection like backfill and the snippet indexer, which start alongside it.
       await this._bgConnSem.acquire(host);
@@ -5011,7 +5063,12 @@ export class ImapManager {
           await this._noteOAuthReconnectRequired(account);
           return;
         }
-        console.warn(`Bulk flag refresh error for ${logAccount(account)}/${folder}: ${err.message}`);
+        const detail = extractImapError(err);
+        console.warn(`Bulk flag refresh error for ${logAccount(account)}/${folder}: ${detail}`);
+        // Arm the backoff the next folder's login would otherwise walk into; the check at the
+        // top of the loop then ends the run.
+        if (isImapAuthFailure(err)) await this._noteSecondaryAuthFailure(account, err, 'Bulk flag refresh');
+        else if (isConnectionRefusal(detail)) this._noteSecondaryRefusal(account);
       } finally {
         // close(), not logout(): the host slot below is released only after this.
         if (client) { try { client.close(); } catch { /* ignore */ } }
@@ -5132,6 +5189,8 @@ export class ImapManager {
     const host = (account.imap_host || '').toLowerCase();
     const backoff = this.snippetBackoff.get(host);
     if (backoff && Date.now() < backoff.until) return;
+    // And the account's own backoffs: its logins are background logins like any other.
+    if (this._secondaryLoginBlocked(account.id)) return;
     this.snippetIndexerRunning.add(account.id);
 
     // Rate limit: conservative batches so this doesn't affect normal usage.
@@ -5148,6 +5207,7 @@ export class ImapManager {
     let failed = false;
     let refused = false; // provider refused a connection (at its per-host limit) — back off hard
     let slotHeld = false; // holding a per-host background-connection slot
+    let loginRejected = false; // this account's password was rejected: says nothing about the host
     try {
       // Check if there's anything to index before opening a connection
       const countResult = await query(
@@ -5196,8 +5256,9 @@ export class ImapManager {
           // Reconnect periodically to keep the connection fresh
           if (batchCount > 0 && batchCount % 20 === 0) {
             await openClient().catch(err => {
-              // A revoked grant ends the run (outer catch); other reconnect failures surface as batch errors.
-              if (classifyOAuthRefreshError(err) === 'reconnect') throw err;
+              // A revoked grant or a rejected password ends the run (outer catch); other reconnect
+              // failures surface as batch errors.
+              if (classifyOAuthRefreshError(err) === 'reconnect' || isImapAuthFailure(err)) throw err;
               console.error(`Snippet indexer reconnect failed: ${err.message}`);
             });
           }
@@ -5296,8 +5357,16 @@ export class ImapManager {
         await this._noteOAuthReconnectRequired(account);
         return;
       }
+      // Same for a rejected password: it belongs to this account, not the host. It goes on the
+      // secondary auth handling, which every background login of the account then waits out.
+      if (isImapAuthFailure(err)) {
+        console.error(`Snippet indexer login rejected for ${logAccount(account)}:`, extractImapError(err));
+        loginRejected = true;
+        await this._noteSecondaryAuthFailure(account, err, 'Snippet indexer');
+        return;
+      }
       failed = true;
-      console.error(`Snippet indexer error ${logAccount(account)}:`, err.message);
+      console.error(`Snippet indexer error ${logAccount(account)}:`, extractImapError(err));
     } finally {
       // close(), not logout(): the per-host slot below is released only after this, so a hung
       // logout would stop background work for every account on the host.
@@ -5312,7 +5381,9 @@ export class ImapManager {
       // its limit even if some batches got through — in the refusal case, continuing to reopen
       // connections on the 10-minute cadence keeps competing with the live sync during exactly
       // the window when new mail must not be missed.
-      if (refused || (failed && batchCount === 0)) {
+      if (loginRejected) {
+        // Neither a host failure nor a host success: leave the host's backoff as it is.
+      } else if (refused || (failed && batchCount === 0)) {
         const failures = (this.snippetBackoff.get(host)?.failures || 0) + 1;
         const delay = Math.min(SNIPPET_BACKOFF_BASE_MS * 2 ** (failures - 1), SNIPPET_BACKOFF_MAX_MS);
         this.snippetBackoff.set(host, { failures, until: Date.now() + delay });
@@ -5332,8 +5403,7 @@ export class ImapManager {
     if (this.providerIdBackfillClean.has(account.id) || this.providerIdBackfillRunning.has(account.id)) return;
     // backfillAllFolders starts this job from its finally; running both would split the host budget.
     if (this.backfillAllRunning.has(account.id)) return;
-    const cooldown = this._connectCooldown.get(account.id);
-    if (cooldown && Date.now() < cooldown.until) return;
+    if (this._secondaryLoginBlocked(account.id)) return;
     const backoff = this.providerIdBackoff.get(account.id);
     if (backoff && Date.now() < backoff.until) return;
 
@@ -5371,8 +5441,7 @@ export class ImapManager {
           if (!row || !row.enabled || row.oauth_reconnect_required) return false;
           // A manual reindex started during the run; backfillAllFolders starts this job again when it ends.
           if (this.backfillAllRunning.has(account.id)) return false;
-          const cd = this._connectCooldown.get(account.id);
-          return !(cd && Date.now() < cd.until);
+          return !this._secondaryLoginBlocked(account.id);
         },
         onProgress: (progress) => {
           this.providerIdProgress.set(account.id, progress);
@@ -5407,7 +5476,12 @@ export class ImapManager {
       this._noteProviderIdBackfillFailure(account);
       if (await this._handleOAuthRefreshFailure(account, err)) return;
       const detail = extractImapError(err);
-      this._noteLoginFailure(account, err, detail);
+      // A background login like the status client's: a rejected password on the secondary auth
+      // handling, a refusal on the secondary backoff. It used to arm the account-wide ladders,
+      // so one rejected Gmail id-backfill login (a transient AUTHENTICATIONFAILED after a token
+      // refresh) stopped the sync tick of a working mailbox for 30 minutes or more.
+      if (isImapAuthFailure(err)) await this._noteSecondaryAuthFailure(account, err, 'Provider id backfill');
+      else if (isConnectionRefusal(detail)) this._noteSecondaryRefusal(account);
       console.warn(`Provider id backfill failed for ${logAccount(account)}: ${detail}`);
       await recordProviderIdBackfillError(query, account.id, detail).catch(() => {});
     } finally {
@@ -5816,7 +5890,7 @@ export class ImapManager {
       try {
         await withFreshClient(account, async (client) => {
           await this.syncMessages(account, client, spamPath, 50, false, true);
-        });
+        }, this._poolLoginOpts(account.id));
         this.broadcast({ type: 'folders_synced', accountId: account.id });
       } finally {
         this._bgConnSem.release(host);
@@ -7228,7 +7302,7 @@ export class ImapManager {
         }
         // Background, behind the reader's clicks; one SEARCH per folder of the account can take
         // longer than the default pooled-operation bound.
-      }, { background: true, timeoutMs: LONG_POOLED_OPERATION_TIMEOUT_MS });
+      }, { background: true, timeoutMs: LONG_POOLED_OPERATION_TIMEOUT_MS, ...this._poolLoginOpts(account.id) });
     } catch (err) {
       console.warn(`Reconcile connection error for ${logAccount(account)}: ${extractImapError(err)}`);
       return;

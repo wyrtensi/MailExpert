@@ -4747,24 +4747,26 @@ describe('setFlag routing over the persistent session', () => {
     expect(ImapFlow).not.toHaveBeenCalled();
   });
 
+  // The single store is on the MIDDLE letter of the set: a chain joined on the first or the
+  // last letter only would pass with a single store on that end.
   it('a single store on a letter waits for a bulk store that holds it, other letters do not', async () => {
     const order = [];
     let finishBulk;
     const persistent = fakePersistent({
-      messageFlagsAdd: vi.fn(() => new Promise(res => { finishBulk = () => { order.push('42,43'); res(true); }; })),
+      messageFlagsAdd: vi.fn(() => new Promise(res => { finishBulk = () => { order.push('42,43,44'); res(true); }; })),
       messageFlagsRemove: vi.fn(async (uid) => { order.push(uid); return true; }),
     });
     const { mgr, account } = arrange({ persistent });
 
-    const bulk = mgr.setFlags(account, 'INBOX', [42, 43], '\\Seen', true);
+    const bulk = mgr.setFlags(account, 'INBOX', [42, 43, 44], '\\Seen', true);
     const single = mgr.setFlag(account, 43, 'INBOX', '\\Seen', false);
-    const other = mgr.setFlag(account, 44, 'INBOX', '\\Seen', false);
+    const other = mgr.setFlag(account, 45, 'INBOX', '\\Seen', false);
     await new Promise(r => setTimeout(r, 50));
-    expect(persistent.getMailboxLock).toHaveBeenCalledTimes(2); // the bulk and 44 reached the lock
+    expect(persistent.getMailboxLock).toHaveBeenCalledTimes(2); // the bulk and 45 reached the lock
     expect(persistent.messageFlagsRemove).not.toHaveBeenCalled(); // 43 waits on its chain
     finishBulk();
     await bulk; await single; await other;
-    expect(order).toEqual(['42,43', '44', '43']);        // the newest value on 43 lands last
+    expect(order).toEqual(['42,43,44', '45', '43']);     // the newest value on 43 lands last
     await new Promise(r => setTimeout(r, 0));
     expect(mgr._flagStoreChains.size).toBe(0);
   });
@@ -4779,12 +4781,12 @@ describe('setFlag routing over the persistent session', () => {
     const { mgr, account } = arrange({ persistent });
 
     const single = mgr.setFlag(account, 43, 'INBOX', '\\Seen', true);
-    const bulk = mgr.setFlags(account, 'INBOX', [42, 43], '\\Seen', false);
+    const bulk = mgr.setFlags(account, 'INBOX', [42, 43, 44], '\\Seen', false);
     await new Promise(r => setTimeout(r, 50));
     expect(persistent.getMailboxLock).toHaveBeenCalledOnce(); // the bulk has not even asked for the lock
     finishSingle();
     await single; await bulk;
-    expect(order).toEqual(['43', '42,43']);
+    expect(order).toEqual(['43', '42,43,44']);
   });
 
   it('holds the next store on a letter until a bulk STORE the bulk call gave up on has settled', async () => {

@@ -17,7 +17,7 @@ vi.mock('../utils/redact.js', () => ({ redactEmail: vi.fn() }));
 vi.mock('./hostValidation.js', () => ({ resolveForConnection: vi.fn(), createPinnedLookup: vi.fn() }));
 vi.mock('./connectionPolicy.js', () => ({ getConnectionPolicy: vi.fn() }));
 
-import { ImapManager, MIN_SYNC_INTERVAL_MS, AUTO_IDLE_DELAY_MS, countMissingInboxCopies, fetchBackfillBatch, providerProfile, makeClientCfg, relocateExemptGuard, insertCopiedSibling, deleteMessageCopyRow, emitSectionsChanged, ensureMailbox, createKeyedSemaphore, isConnectionRefusal, extractImapError, isImapAuthFailure, AUTH_FAILURE_COOLDOWN_MS, AUTH_FAILURE_COOLDOWN_MAX_MS, authCooldownMs, connectCooldownMs, effectiveSyncIntervalMs, folderSyncDue, planModseqSync, connectStaggerFor, walkStructure, planBodyParts, extractBodyFromMsg, bodyFallbackApplies, poolSizeFor, rerootThreadChildren, parsePersistentCap, resolvePersistentCap, persistentEligible, shouldRetryIPv4, classifyMoveBySearch, PERSISTENT_FLAG_STORE_TIMEOUT_MS, PERSISTENT_FLAG_LATE_STORE_WAIT_MS } from './imapManager.js';
+import { ImapManager, MIN_SYNC_INTERVAL_MS, AUTO_IDLE_DELAY_MS, countMissingInboxCopies, fetchBackfillBatch, providerProfile, makeClientCfg, relocateExemptGuard, insertCopiedSibling, deleteMessageCopyRow, emitSectionsChanged, ensureMailbox, createKeyedSemaphore, isConnectionRefusal, extractImapError, isImapAuthFailure, AUTH_FAILURE_COOLDOWN_MS, AUTH_FAILURE_COOLDOWN_MAX_MS, authCooldownMs, connectCooldownMs, effectiveSyncIntervalMs, folderSyncDue, planModseqSync, connectStaggerFor, walkStructure, planBodyParts, extractBodyFromMsg, bodyFallbackApplies, poolSizeFor, rerootThreadChildren, parsePersistentCap, resolvePersistentCap, persistentEligible, shouldRetryIPv4, classifyMoveBySearch, PERSISTENT_FLAG_STORE_TIMEOUT_MS, PERSISTENT_FLAG_LATE_STORE_WAIT_MS, PERSISTENT_FLAG_LOCK_WAIT_MS } from './imapManager.js';
 import { pluginRegistry } from '../plugins/registry.js';
 import { EventEmitter } from 'node:events';
 import { ImapFlow } from 'imapflow';
@@ -4288,7 +4288,7 @@ describe('setFlag routing over the persistent session', () => {
 
     await mgr.setFlag(account, 42, 'INBOX', '\\Seen', true);
 
-    expect(persistent.getMailboxLock).toHaveBeenCalledWith('INBOX');
+    expect(persistent.getMailboxLock).toHaveBeenCalledWith('INBOX', { acquireTimeout: PERSISTENT_FLAG_LOCK_WAIT_MS });
     // .SILENT: our own store must not come back as a 'flags' event and a pooled range sync.
     expect(persistent.messageFlagsAdd).toHaveBeenCalledWith('42', ['\\Seen'], { uid: true, silent: true });
     expect(persistent.release).toHaveBeenCalledOnce();   // the lock never leaks
@@ -4493,6 +4493,28 @@ describe('setFlag routing over the persistent session', () => {
     await vi.advanceTimersByTimeAsync(1);
     await mgr.setFlag(account, 44, 'INBOX', '\\Seen', true);
     expect(persistent.messageFlagsAdd).toHaveBeenCalledWith('44', ['\\Seen'], { uid: true, silent: true });
+  });
+
+  it('takes its waiter out of the lock queue when the lock is not granted in time', async () => {
+    // Upstream 24215bef finding 1: a timed-out attempt must not leave a waiter queued on the
+    // session for as long as the lock stays taken.
+    vi.useFakeTimers();
+    const persistent = fakePersistent();
+    const { mgr, account } = arrange({ persistent });
+    const other = await persistent.getMailboxLock('INBOX'); // some other holder keeps INBOX
+
+    const call = mgr.setFlag(account, 42, 'INBOX', '\\Seen', true);
+    await vi.advanceTimersByTimeAsync(PERSISTENT_FLAG_STORE_TIMEOUT_MS + 10);
+    expect(PERSISTENT_FLAG_LOCK_WAIT_MS).toBeLessThan(PERSISTENT_FLAG_STORE_TIMEOUT_MS);
+    expect(persistent.lockQueue).toHaveLength(0);        // the waiter left the queue by the deadline
+    await call;
+    expect(poolClients[0].messageFlagsAdd).toHaveBeenCalled();
+
+    other.release();
+    await vi.advanceTimersByTimeAsync(1);
+    expect(persistent.messageFlagsAdd).not.toHaveBeenCalled();
+    await mgr.setFlag(account, 43, 'INBOX', '\\Seen', true); // not marked stuck: a lock wait is not a lost STORE
+    expect(persistent.messageFlagsAdd).toHaveBeenCalledWith('43', ['\\Seen'], { uid: true, silent: true });
   });
 
   it('uses a reconnected session at once even while the old one still has a STORE out', async () => {

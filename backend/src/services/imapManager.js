@@ -1330,6 +1330,10 @@ export const LONG_POOLED_OPERATION_TIMEOUT_MS = 5 * 60 * 1000;
 // How long setFlag waits for the persistent IDLE session (its INBOX lock, then the STORE)
 // before the pool takes the flag over. Short: a click must not hang behind a busy session.
 export const PERSISTENT_FLAG_STORE_TIMEOUT_MS = 5000;
+// acquireTimeout for that store's INBOX lock, inside the deadline above. ImapFlow then splices
+// a waiter that was not granted in time out of its lock queue and rejects it; without it every
+// timed-out attempt would leave a waiter queued on the session until the lock came free.
+export const PERSISTENT_FLAG_LOCK_WAIT_MS = 4500;
 // How long the next store on a message waits for a persistent STORE the previous call gave up
 // on. Past this it goes ahead: a STORE still unanswered this long is on a session that is almost
 // certainly dead, and the sync tick closes such a session, but the wait itself must not depend on
@@ -6126,7 +6130,8 @@ export class ImapManager {
     let markedStuck = false;
     const attempt = (async () => {
       try {
-        const lock = await client.getMailboxLock('INBOX');
+        const lock = await client.getMailboxLock('INBOX', { acquireTimeout: PERSISTENT_FLAG_LOCK_WAIT_MS });
+        // Still needed with acquireTimeout: a lock granted in the gap between the two timers.
         if (expired) { lock.release(); throw new Error('persistent flag store timed out'); }
         try {
           const opts = { uid: true, silent: true };

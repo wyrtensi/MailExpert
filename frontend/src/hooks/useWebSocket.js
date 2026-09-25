@@ -2,6 +2,7 @@ import { useEffect, useRef, useCallback } from 'react';
 import { useTranslation } from 'react-i18next';
 import { useStore } from '../store/index.js';
 import { api } from '../utils/api.js';
+import { mailboxBusyOr } from '../utils/mailboxBusy.js';
 import { installCapacitorNativeBridge } from '../utils/capacitorNativeBridge.js';
 import { playNotificationSound } from '../utils/notificationSounds.js';
 import { accountAffectsUnifiedInbox } from '../utils/unifiedInbox.js';
@@ -298,7 +299,10 @@ export function useWebSocket(enabled = true) {
         // Background empty finished (see mail.js /folders/empty). Toast the outcome and refresh
         // the view and counts either way — on failure the messages are still on the server and
         // should reappear.
-        addNotification({ title: data.ok ? t('sidebar.emptied') : t('sidebar.emptyFailed') });
+        // A busy mailbox (data.code, see mailboxBusy.js) says so instead of a bare failure.
+        addNotification(data.ok
+          ? { title: t('sidebar.emptied') }
+          : { title: t('sidebar.emptyFailed'), body: mailboxBusyOr(data, t, undefined) });
         window.dispatchEvent(new CustomEvent('mailexpert:refresh'));
         window.dispatchEvent(new CustomEvent('mailexpert:sync_done'));
         api.getUnreadCounts().then(_applyServerCounts).catch(() => {});

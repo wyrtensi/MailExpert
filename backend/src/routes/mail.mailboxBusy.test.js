@@ -13,6 +13,12 @@ vi.mock('../index.js', () => ({
     permanentDeleteMessage: vi.fn(),
     bulkMoveMessages: vi.fn(),
     bulkPermanentDelete: vi.fn(),
+    fetchAttachment: vi.fn(),
+    fetchMultipleAttachments: vi.fn(),
+    ensureFolder: vi.fn(),
+    deleteFolder: vi.fn(),
+    renameFolder: vi.fn(),
+    emptyFolder: vi.fn(),
     syncFolderOnDemand: vi.fn(async () => {}),
     _guardMoveUid: vi.fn(),
     _unguardMoveUid: vi.fn(),
@@ -43,6 +49,7 @@ const SENT_ID = 'e5e5e5e5-5555-4555-8555-e5e5e5e5e5e5';
 const MSG = (id, folder, uid) => ({
   id, account_id: ACCOUNT_ID, uid, folder, is_read: true, message_id: `<${uid}@example.com>`,
   subject: 'Board minutes', from_email: 'sender@example.com', folder_mappings: null,
+  attachments: [{ part: '2', filename: 'minutes.pdf', size: 10, type: 'application/pdf' }],
 });
 const rows = { [INBOX_ID]: MSG(INBOX_ID, 'INBOX', 11), [TRASH_ID]: MSG(TRASH_ID, 'Trash', 22), [SENT_ID]: MSG(SENT_ID, 'Sent', 33) };
 const poolBusy = () => Object.assign(new Error('IMAP pool busy, please retry'), { poolExhausted: true });
@@ -144,10 +151,38 @@ for (const [what, busy] of [['a full pool', poolBusy], ['a login held back', log
     expect(archived.body.archived).toEqual([INBOX_ID]);
   });
 
+  it('on an attachment download and the ZIP of all attachments', async () => {
+    imapManager.fetchAttachment.mockRejectedValue(busy());
+    imapManager.fetchMultipleAttachments.mockRejectedValue(busy());
+    expectBusy(await call('GET', `/messages/${INBOX_ID}/attachments/2`));
+    expectBusy(await call('GET', `/messages/${INBOX_ID}/attachments.zip`));
+  });
+
+  it('on creating, renaming and deleting a folder', async () => {
+    imapManager.ensureFolder.mockRejectedValue(busy());
+    imapManager.renameFolder.mockRejectedValue(busy());
+    imapManager.deleteFolder.mockRejectedValue(busy());
+    expectBusy(await call('POST', '/folders', { accountId: ACCOUNT_ID, name: 'Projects' }));
+    expectBusy(await call('POST', '/folders/rename', { accountId: ACCOUNT_ID, oldPath: 'Projects', newName: 'Clients' }));
+    expectBusy(await call('POST', '/folders/delete', { accountId: ACCOUNT_ID, path: 'Projects' }));
+  });
+
+  it('on emptying a folder, over the folder_emptied event (the request already answered 202)', async () => {
+    imapManager.emptyFolder.mockRejectedValue(busy());
+    const res = await call('POST', '/folders/empty', { accountId: ACCOUNT_ID, path: 'Trash' });
+    expect(res.status).toBe(202);
+    await vi.waitFor(() => expect(imapManager.broadcast).toHaveBeenCalledWith(expect.objectContaining({ type: 'folder_emptied', ok: false, code: 'mailbox_busy' })));
+  });
+
   it('keeps other failures as they were', async () => {
     imapManager.moveMessage.mockRejectedValue(new Error('Mailbox does not exist'));
     const res = await call('DELETE', `/messages/${INBOX_ID}`);
     expect(res.status).toBe(500);
     expect(res.body.code).toBeUndefined();
+    imapManager.emptyFolder.mockRejectedValue(new Error('Mailbox does not exist'));
+    await call('POST', '/folders/empty', { accountId: ACCOUNT_ID, path: 'Junk' });
+    await vi.waitFor(() => expect(imapManager.broadcast).toHaveBeenCalledWith(expect.objectContaining({ type: 'folder_emptied', ok: false })));
+    const emptied = imapManager.broadcast.mock.calls.find(([e]) => e.type === 'folder_emptied')[0];
+    expect(emptied.code).toBeUndefined();
   });
 });

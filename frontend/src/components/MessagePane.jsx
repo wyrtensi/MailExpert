@@ -1427,6 +1427,7 @@ ${bodyContent}
       URL.revokeObjectURL(url);
     } catch (err) {
       console.error('Download error:', err);
+      if (isMailboxBusy(err)) addNotification({ title: t('common.mailboxBusy') });
     } finally {
       setDownloadingPart(null);
     }

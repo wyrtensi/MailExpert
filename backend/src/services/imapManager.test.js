@@ -5882,6 +5882,7 @@ describe('every background login waits out a rejected password', () => {
       ['22', 'message click', live, (mgr, a) => mgr.fetchMessageBody(a, 5, 'INBOX')],
       ['23', 'headers', live, (mgr, a) => mgr.fetchHeaders(a, 5, 'INBOX')],
       ['23', 'attachment', live, (mgr, a) => mgr.fetchAttachment(a, 5, 'INBOX', '2')],
+      ['23', 'attachments as ZIP', live, (mgr, a) => mgr.fetchMultipleAttachments(a, 5, 'INBOX', [{ part: '2' }])],
       ['23', 'move', live, (mgr, a) => mgr.moveMessage(a, 5, 'INBOX', 'Archive')],
       ['23', 'delete from Trash', live, (mgr, a) => mgr.permanentDeleteMessage(a, 5, 'Trash')],
       ['23', 'bulk permanent delete', live, (mgr, a) => mgr.bulkPermanentDelete(a, [5], 'Trash')],

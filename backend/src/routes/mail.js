@@ -771,7 +771,9 @@ router.get('/messages/:id/attachments.zip', async (req, res) => {
     archive.finalize();
   } catch (err) {
     console.error('ZIP fetch error:', err);
-    if (!res.headersSent) res.status(500).json({ error: 'Failed to create ZIP' });
+    if (res.headersSent) return;
+    if (isMailboxBusyError(err)) return sendMailboxBusy(res);
+    res.status(500).json({ error: 'Failed to create ZIP' });
   }
 });
 
@@ -822,6 +824,7 @@ router.get('/messages/:id/attachments/:part', async (req, res) => {
     res.send(buffer);
   } catch (err) {
     console.error('Attachment fetch error:', err);
+    if (isMailboxBusyError(err)) return sendMailboxBusy(res);
     res.status(500).json({ error: 'Failed to fetch attachment' });
   }
 });
@@ -1065,6 +1068,7 @@ router.post('/folders', async (req, res) => {
     res.json({ ok: true, path });
   } catch (err) {
     console.error('Create folder error:', err);
+    if (isMailboxBusyError(err)) return sendMailboxBusy(res);
     res.status(500).json({ error: 'Failed to create folder' });
   }
 });
@@ -1081,6 +1085,7 @@ router.post('/folders/delete', async (req, res) => {
     await imapManager.deleteFolder(check.rows[0], path);
   } catch (err) {
     console.error(`IMAP deleteFolder failed for ${path}:`, err.message);
+    if (isMailboxBusyError(err)) return sendMailboxBusy(res);
     return res.status(500).json({ error: 'Failed to delete folder on server' });
   }
   await query('DELETE FROM folders WHERE account_id = $1 AND path = $2', [accountId, path]);
@@ -1151,6 +1156,7 @@ router.post('/folders/rename', async (req, res) => {
     res.json({ ok: true, newPath });
   } catch (err) {
     console.error('Rename folder error:', err);
+    if (isMailboxBusyError(err)) return sendMailboxBusy(res);
     res.status(500).json({ error: 'Failed to rename folder' });
   }
 });
@@ -1198,7 +1204,8 @@ router.post('/folders/empty', async (req, res) => {
       imapManager.broadcast({ type: 'sync_complete', accountId });
     } catch (err) {
       console.error(`Async emptyFolder failed for ${path}:`, err.message);
-      imapManager.broadcast({ type: 'folder_emptied', accountId, folder: path, ok: false });
+      // The request already answered 202, so a busy mailbox is reported here, with the same code.
+      imapManager.broadcast({ type: 'folder_emptied', accountId, folder: path, ok: false, ...(isMailboxBusyError(err) ? { code: MAILBOX_BUSY_CODE } : {}) });
     } finally {
       emptyInFlight.delete(inflightKey);
     }

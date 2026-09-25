@@ -71,3 +71,14 @@ test('production direct API helpers retain their existing network contracts', as
   assert.equal(direct.attachmentArchiveUrl('message'), '/api/mail/messages/message/attachments.zip');
   assert.equal(direct.gtdPetSheetUrl('pet slug'), '/api/gtd/pet/pet%20slug/sheet');
 });
+
+test('a busy mailbox keeps its code on a failed attachment download', async () => {
+  const failing = (status, body) => createDirectApi({
+    demoMode: false,
+    fetchImpl: async () => ({ ok: false, status, json: async () => body }),
+  });
+  await assert.rejects(failing(503, { error: 'busy', code: 'mailbox_busy' }).downloadAttachment('message', '1'), { code: 'mailbox_busy' });
+  const other = await failing(500, { error: 'Failed to fetch attachment' }).downloadAttachment('message', '1').catch(e => e);
+  assert.equal(other.message, 'Download failed');
+  assert.equal(other.code, undefined);
+});

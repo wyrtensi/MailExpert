@@ -275,8 +275,11 @@ export const PREFETCH_STOP_PAUSE_MS = 60 * 1000;
 //
 // extractImapError prefixes the RFC 5530 response code, so a server that refuses with [LIMIT],
 // [UNAVAILABLE] or [INUSE] is recognised whatever text follows (Yahoo: "[LIMIT] LOGIN error").
+// Dovecot's own text for a temporary failure of its auth backend, "Temporary authentication
+// failure.", counts too, with or without [UNAVAILABLE]: the server could not check the password,
+// it did not reject it, so it must not take the long auth ladder that holds the mailbox back.
 export function isConnectionRefusal(detail) {
-  return /connection not available|too many|maximum number|number of connections|rate.?limit|temporarily|try again|connection limit|over quota|throttl|connect timeout|^\[(?:LIMIT|UNAVAILABLE|INUSE)\]/i.test(String(detail || ''));
+  return /connection not available|too many|maximum number|number of connections|rate.?limit|temporarily|try again|connection limit|over quota|throttl|connect timeout|temporary authentication failure|^\[(?:LIMIT|UNAVAILABLE|INUSE)\]/i.test(String(detail || ''));
 }
 
 // Stamp an account's last successful sync. Shared by both exits of syncMessages so they cannot

@@ -2988,6 +2988,9 @@ describe('isImapAuthFailure', () => {
     ['login-stage connection limit', loginLimitRefusal()],
     ['Gmail simultaneous-connection alert', imapErr({ response: '1 NO [ALERT] Too many simultaneous connections. (Failure)', responseText: 'Too many simultaneous connections. (Failure)', serverResponseCode: 'ALERT', authenticationFailed: true })],
     ['UNAVAILABLE at login', imapErr({ responseText: 'Service temporarily unavailable', serverResponseCode: 'UNAVAILABLE', authenticationFailed: true })],
+    // Dovecot's auth backend failing (its database down): it could not check the password.
+    ['Dovecot temporary auth failure with UNAVAILABLE', imapErr({ response: '1 NO [UNAVAILABLE] Temporary authentication failure.', responseText: 'Temporary authentication failure.', serverResponseCode: 'UNAVAILABLE', authenticationFailed: true })],
+    ['Dovecot temporary auth failure without a code', imapErr({ response: '1 NO Temporary authentication failure.', responseStatus: 'NO', responseText: 'Temporary authentication failure.', authenticationFailed: true })],
     ['Microsoft throttling', imapErr({ responseText: 'Request is throttled. Suggested Backoff Time: 92415 milliseconds', responseStatus: 'BAD', code: 'ETHROTTLE' })],
     ['connection dropped mid-SASL', imapErr({ message: 'Connection not available', code: 'NoConnection', authenticationFailed: true })],
     ['socket closed after connect', imapErr({ message: 'Unexpected close', code: 'ClosedAfterConnectText' })],

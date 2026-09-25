@@ -39,6 +39,9 @@ const NO_BACKOFF = { _poolLoginOpts: () => ({ noNewLogin: false }) };
 
 // The account backoffs a hand-built manager needs to run a background login path for real: the
 // real gates over empty maps, and spies for the two ways a background login arms them.
+// Only for paths with their own connectImapClient: the pool and withFreshLogin arm and consult the
+// most recently constructed ImapManager (helperManager), never this object, so a pool-driven test
+// on it would see another test's ladder state. Use ladderManager() for those.
 const backoffState = () => ({
   connections: new Map(),
   _connectCooldown: new Map(),

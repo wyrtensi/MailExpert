@@ -52,18 +52,6 @@ function sanitizeDbText(value) {
   return value.replace(/\0/g, '');
 }
 
-// Process IMAP operations in bounded batches so a 500-message bulk action
-// does not spawn hundreds of parallel temporary IMAP connections.
-async function runInBatches(items, concurrency, fn) {
-  const results = [];
-  for (let i = 0; i < items.length; i += concurrency) {
-    const batch = items.slice(i, i + concurrency);
-    const batchResults = await Promise.allSettled(batch.map(fn));
-    results.push(...batchResults);
-  }
-  return results;
-}
-
 // Columns copied verbatim when a message row is relocated to a new folder/UID via the
 // DELETE + reinsert CTE used by the bulk trash / move / archive paths on UIDPLUS servers.
 // The destination uid comes from the UIDPLUS map (u.new_uid) and the destination folder is
@@ -1284,25 +1272,33 @@ router.post('/messages/bulk-read', async (req, res) => {
     // Reflect the bulk read/unread change on other open clients in place (no full refetch).
     imapManager.broadcast({ type: 'message_flags', changes: toUpdate.map(m => ({ id: m.id, is_read: read })) });
 
-    // IMAP flag updates — group by account to fetch each account row once.
-    const byAccount = {};
+    // IMAP: one STORE per (account, folder) group, not one per letter. setFlagsGroups reserves
+    // the order of every group of the mailbox at once and stops the mailbox's remaining groups
+    // after a rejected login or a busy mailbox, as the other bulk routes do (bulkBusyTracker).
+    // A group that failed or was not tried goes onto the flag-push queue,
+    // which retries it once logins are allowed again; the DB already holds the new state, so
+    // nothing is lost. A group that went through resolves any push still queued for its letters.
+    const byAccount = new Map();
     for (const msg of toUpdate) {
-      (byAccount[msg.account_id] = byAccount[msg.account_id] || []).push(msg);
+      if (!byAccount.has(msg.account_id)) byAccount.set(msg.account_id, new Map());
+      const byFolder = byAccount.get(msg.account_id);
+      if (!byFolder.has(msg.folder)) byFolder.set(msg.folder, []);
+      byFolder.get(msg.folder).push(msg);
     }
-    for (const [accountId, msgs] of Object.entries(byAccount)) {
+    for (const [accountId, byFolder] of byAccount) {
       const accountResult = await query('SELECT * FROM email_accounts WHERE id = $1', [accountId]);
       const account = accountResult.rows[0];
-      const results = await runInBatches(
-        msgs, 3,
-        msg => imapManager.setFlag(account, msg.uid, msg.folder, '\\Seen', read)
-      );
-      results.forEach((r, i) => {
-        if (r.status === 'rejected') {
-          console.error(`bulk-read IMAP ${msgs[i].id}:`, r.reason.message);
+      const folders = [...byFolder];
+      const results = account
+        ? await imapManager.setFlagsGroups(account, folders.map(([folder, msgs]) => ({ folder, uids: msgs.map(m => m.uid) })), '\\Seen', read)
+        : folders.map(() => ({ stored: false, error: new Error('account not found') }));
+      folders.forEach(([folder, msgs], i) => {
+        const { stored, error } = results[i];
+        if (error) console.error(`bulk-read IMAP ${folder} (${msgs.length} letters):`, error.message);
+        for (const msg of msgs) {
+          if (stored) imapManager._resolveFlagPush(accountId, msg.id, '\\Seen'); // confirmed
           // Durable retry so a later flag-sync pull can't revert this message to unread.
-          imapManager._enqueueFlagPush(accountId, msgs[i].id, '\\Seen', read);
-        } else {
-          imapManager._resolveFlagPush(accountId, msgs[i].id, '\\Seen'); // confirmed
+          else imapManager._enqueueFlagPush(accountId, msg.id, '\\Seen', read);
         }
       });
     }

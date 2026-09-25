@@ -17,7 +17,7 @@ vi.mock('../utils/redact.js', () => ({ redactEmail: vi.fn() }));
 vi.mock('./hostValidation.js', () => ({ resolveForConnection: vi.fn(), createPinnedLookup: vi.fn() }));
 vi.mock('./connectionPolicy.js', () => ({ getConnectionPolicy: vi.fn() }));
 
-import { ImapManager, MIN_SYNC_INTERVAL_MS, AUTO_IDLE_DELAY_MS, countMissingInboxCopies, fetchBackfillBatch, providerProfile, makeClientCfg, relocateExemptGuard, insertCopiedSibling, deleteMessageCopyRow, emitSectionsChanged, ensureMailbox, createKeyedSemaphore, isConnectionRefusal, extractImapError, isImapAuthFailure, AUTH_FAILURE_COOLDOWN_MS, AUTH_FAILURE_COOLDOWN_MAX_MS, authCooldownMs, connectCooldownMs, effectiveSyncIntervalMs, folderSyncDue, planModseqSync, connectStaggerFor, walkStructure, planBodyParts, extractBodyFromMsg, bodyFallbackApplies, poolSizeFor, rerootThreadChildren, parsePersistentCap, resolvePersistentCap, persistentEligible, shouldRetryIPv4, classifyMoveBySearch, PERSISTENT_FLAG_STORE_TIMEOUT_MS, PERSISTENT_FLAG_LATE_STORE_WAIT_MS, PERSISTENT_FLAG_LOCK_WAIT_MS, wrapImapError, acquirePooledClient, releasePooledClient, evictPool, ACQUIRE_TIMEOUT_MS, BACKGROUND_ACQUIRE_TIMEOUT_MS, PREFETCH_MAX_CONSECUTIVE_ERRORS, PREFETCH_STOP_PAUSE_MS } from './imapManager.js';
+import { ImapManager, MIN_SYNC_INTERVAL_MS, AUTO_IDLE_DELAY_MS, countMissingInboxCopies, fetchBackfillBatch, providerProfile, makeClientCfg, relocateExemptGuard, insertCopiedSibling, deleteMessageCopyRow, emitSectionsChanged, ensureMailbox, createKeyedSemaphore, isConnectionRefusal, extractImapError, isImapAuthFailure, AUTH_FAILURE_COOLDOWN_MS, AUTH_FAILURE_COOLDOWN_MAX_MS, authCooldownMs, connectCooldownMs, effectiveSyncIntervalMs, folderSyncDue, planModseqSync, connectStaggerFor, walkStructure, planBodyParts, extractBodyFromMsg, bodyFallbackApplies, poolSizeFor, rerootThreadChildren, parsePersistentCap, resolvePersistentCap, persistentEligible, shouldRetryIPv4, classifyMoveBySearch, PERSISTENT_FLAG_STORE_TIMEOUT_MS, PERSISTENT_FLAG_LATE_STORE_WAIT_MS, PERSISTENT_FLAG_LOCK_WAIT_MS, FLAG_STORE_UID_CHUNK, FLAG_PUSH_MAX_ATTEMPTS, wrapImapError, acquirePooledClient, releasePooledClient, evictPool, ACQUIRE_TIMEOUT_MS, BACKGROUND_ACQUIRE_TIMEOUT_MS, PREFETCH_MAX_CONSECUTIVE_ERRORS, PREFETCH_STOP_PAUSE_MS } from './imapManager.js';
 import { pluginRegistry } from '../plugins/registry.js';
 import { EventEmitter } from 'node:events';
 import { ImapFlow } from 'imapflow';
@@ -4692,6 +4692,268 @@ describe('setFlag routing over the persistent session', () => {
     await expect(b).resolves.toBeUndefined();            // removal succeeded on the persistent session
     expect(persistent.messageFlagsRemove).toHaveBeenCalledOnce();
   });
+
+  // ── setFlags: many letters of one folder in one STORE ──
+
+  it('stores many INBOX letters in one STORE on the persistent session', async () => {
+    const persistent = fakePersistent();
+    const { mgr, account } = arrange({ persistent });
+
+    await mgr.setFlags(account, 'INBOX', [45, 3, 7, 3, 12], '\\Seen', true);
+
+    expect(persistent.messageFlagsAdd).toHaveBeenCalledOnce();
+    expect(persistent.messageFlagsAdd).toHaveBeenCalledWith('3,7,12,45', ['\\Seen'], { uid: true, silent: true });
+    expect(persistent.release).toHaveBeenCalledOnce();
+    expect(ImapFlow).not.toHaveBeenCalled();             // no login at all
+    await new Promise(r => setTimeout(r, 0));
+    expect(mgr._flagStoreChains.size).toBe(0);           // every letter's chain entry is dropped
+  });
+
+  it('stores 50 letters in two folders with two STOREs', async () => {
+    const persistent = fakePersistent();
+    const { mgr, account } = arrange({ persistent });
+    const inbox = Array.from({ length: 25 }, (_, i) => i + 1);
+    const archive = Array.from({ length: 25 }, (_, i) => i + 101);
+
+    await Promise.all([
+      mgr.setFlags(account, 'INBOX', inbox, '\\Seen', true),
+      mgr.setFlags(account, 'Archive', archive, '\\Seen', true),
+    ]);
+
+    expect(persistent.messageFlagsAdd).toHaveBeenCalledOnce();
+    expect(persistent.messageFlagsAdd).toHaveBeenCalledWith(inbox.join(','), ['\\Seen'], { uid: true, silent: true });
+    expect(ImapFlow).toHaveBeenCalledOnce();             // one pooled login for the other folder
+    expect(poolClients[0].getMailboxLock).toHaveBeenCalledWith('Archive');
+    expect(poolClients[0].messageFlagsAdd).toHaveBeenCalledOnce();
+    expect(poolClients[0].messageFlagsAdd).toHaveBeenCalledWith(archive.join(','), ['\\Seen'], { uid: true });
+  });
+
+  it('splits a very long UID set into chunks of FLAG_STORE_UID_CHUNK', async () => {
+    const { mgr, account } = arrange();
+    const uids = Array.from({ length: FLAG_STORE_UID_CHUNK + 1 }, (_, i) => i + 1);
+
+    await mgr.setFlags(account, 'Archive', uids, '\\Seen', false);
+
+    expect(poolClients[0].messageFlagsRemove).toHaveBeenCalledTimes(2);
+    expect(poolClients[0].messageFlagsRemove.mock.calls[0][0]).toBe(uids.slice(0, FLAG_STORE_UID_CHUNK).join(','));
+    expect(poolClients[0].messageFlagsRemove.mock.calls[1][0]).toBe(String(FLAG_STORE_UID_CHUNK + 1));
+  });
+
+  it('a click on a letter waits only for the chunk that holds it, not for the chunks after it', async () => {
+    const { mgr, account } = arrange();
+    let landChunk2;
+    ImapFlow.mockImplementation(function () {
+      const c = Object.assign(new EventEmitter(), {
+        usable: true,
+        connect: vi.fn(() => Promise.resolve()),
+        logout: vi.fn(() => Promise.resolve()),
+        close: vi.fn(),
+        getMailboxLock: vi.fn(async () => ({ release: vi.fn() })),
+        messageFlagsAdd: vi.fn((uids) => (uids === String(FLAG_STORE_UID_CHUNK + 1)
+          ? new Promise(res => { landChunk2 = () => res(true); })
+          : Promise.resolve(true))),
+        messageFlagsRemove: vi.fn(async () => true),
+      });
+      poolClients.push(c);
+      return c;
+    });
+    const uids = Array.from({ length: FLAG_STORE_UID_CHUNK + 1 }, (_, i) => i + 1);
+
+    const bulk = mgr.setFlags(account, 'Archive', uids, '\\Seen', true);
+    await vi.waitFor(() => expect(landChunk2).toBeTypeOf('function')); // chunk 2 is on the wire
+    const inChunk1 = vi.fn();
+    const inChunk2 = vi.fn();
+    const click1 = mgr.setFlag(account, 1, 'Archive', '\\Seen', false).then(inChunk1);
+    const click2 = mgr.setFlag(account, FLAG_STORE_UID_CHUNK + 1, 'Archive', '\\Seen', false).then(inChunk2);
+    await vi.waitFor(() => expect(inChunk1).toHaveBeenCalled());
+    expect(inChunk2).not.toHaveBeenCalled();             // its letter's chunk is still out
+
+    landChunk2();
+    await bulk; await click1; await click2;
+    expect(inChunk2).toHaveBeenCalled();
+  });
+
+  // ── setFlagsGroups: the folders of one mailbox in one call ──
+
+  it('stores two folders with two STOREs and reports each group', async () => {
+    const persistent = fakePersistent();
+    const { mgr, account } = arrange({ persistent });
+    const inbox = Array.from({ length: 25 }, (_, i) => i + 1);
+    const archive = Array.from({ length: 25 }, (_, i) => i + 101);
+
+    const results = await mgr.setFlagsGroups(account, [{ folder: 'INBOX', uids: inbox }, { folder: 'Archive', uids: archive }], '\\Seen', true);
+
+    expect(results).toEqual([{ stored: true }, { stored: true }]);
+    expect(persistent.messageFlagsAdd).toHaveBeenCalledOnce();
+    expect(persistent.messageFlagsAdd).toHaveBeenCalledWith(inbox.join(','), ['\\Seen'], { uid: true, silent: true });
+    expect(poolClients[0].messageFlagsAdd).toHaveBeenCalledOnce();
+    expect(poolClients[0].messageFlagsAdd).toHaveBeenCalledWith(archive.join(','), ['\\Seen'], { uid: true });
+  });
+
+  it('still tries the next group after a failure that is not about the login', async () => {
+    const { mgr, account } = arrange();
+    ImapFlow.mockImplementation(function () {
+      const c = Object.assign(new EventEmitter(), {
+        usable: true,
+        connect: vi.fn(() => Promise.resolve()),
+        logout: vi.fn(() => Promise.resolve()),
+        close: vi.fn(),
+        getMailboxLock: vi.fn(async () => ({ release: vi.fn() })),
+        messageFlagsAdd: vi.fn(async (uids) => uids !== '1,2'), // the server does not apply group 1
+      });
+      poolClients.push(c);
+      return c;
+    });
+
+    const results = await mgr.setFlagsGroups(account, [{ folder: 'Archive', uids: [1, 2] }, { folder: 'Sent', uids: [3] }], '\\Seen', true);
+
+    expect(results[0]).toMatchObject({ stored: false, error: expect.any(Error) });
+    expect(results[1]).toEqual({ stored: true });
+  });
+
+  it.each([
+    ['a pool that stayed full', () => Object.assign(new Error('IMAP pool busy, please retry'), { poolExhausted: true })],
+    ['a login held back', () => Object.assign(new Error('Mail server is not accepting new connections for this account right now'), { providerRefusing: true })],
+  ])('tries no other group after %s', async (_what, busy) => {
+    const { mgr, account } = arrange();
+    const tried = vi.spyOn(mgr, '_setFlagInner').mockRejectedValueOnce(busy()).mockResolvedValue();
+
+    const results = await mgr.setFlagsGroups(account, [{ folder: 'Archive', uids: [1] }, { folder: 'Sent', uids: [2] }], '\\Seen', true);
+
+    expect(tried).toHaveBeenCalledOnce();              // Sent does not wait out the same queue
+    expect(results).toEqual([{ stored: false, error: expect.any(Error) }, { stored: false, skipped: true }]);
+  });
+
+  it('reserves every group at call time: a newer click on a later group is not overtaken', async () => {
+    // Group 1 (INBOX) is slow on the persistent session. The user marks an Archive letter of
+    // group 2 unread meanwhile: the older bulk value must land before the click, not after it.
+    const order = [];
+    let finishInbox;
+    const persistent = fakePersistent({
+      messageFlagsAdd: vi.fn(() => new Promise(res => { finishInbox = () => { order.push('INBOX'); res(true); }; })),
+    });
+    const { mgr, account } = arrange({ persistent });
+    ImapFlow.mockImplementation(function () {
+      const c = Object.assign(new EventEmitter(), {
+        usable: true,
+        connect: vi.fn(() => Promise.resolve()),
+        logout: vi.fn(() => Promise.resolve()),
+        close: vi.fn(),
+        getMailboxLock: vi.fn(async () => ({ release: vi.fn() })),
+        messageFlagsAdd: vi.fn(async (uids) => { order.push(`Archive ${uids} +Seen`); return true; }),
+        messageFlagsRemove: vi.fn(async (uids) => { order.push(`Archive ${uids} -Seen`); return true; }),
+      });
+      poolClients.push(c);
+      return c;
+    });
+
+    const bulk = mgr.setFlagsGroups(account, [{ folder: 'INBOX', uids: [42] }, { folder: 'Archive', uids: [7, 8, 9] }], '\\Seen', true);
+    await new Promise(r => setTimeout(r, 20));          // group 1 is storing
+    const click = mgr.setFlag(account, 8, 'Archive', '\\Seen', false);
+    await new Promise(r => setTimeout(r, 20));
+    expect(order).toEqual([]);                           // the click waits for the bulk's group 2
+    finishInbox();
+    await bulk; await click;
+    expect(order).toEqual(['INBOX', 'Archive 7,8,9 +Seen', 'Archive 8 -Seen']);
+  });
+
+  it('logs a bulk store as its count and first/last UID, not the whole set', async () => {
+    const { mgr, account } = arrange();
+    ImapFlow.mockImplementation(function () {
+      return Object.assign(new EventEmitter(), {
+        connect: vi.fn(() => Promise.resolve()),
+        close: vi.fn(),
+        getMailboxLock: vi.fn(async () => ({ release: vi.fn() })),
+        messageFlagsAdd: vi.fn(async () => false),
+      });
+    });
+    const uids = Array.from({ length: 500 }, (_, i) => i + 1);
+
+    await expect(mgr.setFlags(account, 'Archive', uids, '\\Seen', true)).rejects.toThrow(/for uids=500 \(1\.\.500\)/);
+
+    const lines = [...console.log.mock.calls, ...console.error.mock.calls].map(args => args.join(' '));
+    expect(lines.some(l => l.includes('setFlag: uids=500 (1..500) folder=Archive'))).toBe(true);
+    expect(lines.filter(l => l.includes('1,2,3'))).toEqual([]);
+  });
+
+  it('does nothing for an empty UID list', async () => {
+    const persistent = fakePersistent();
+    const { mgr, account } = arrange({ persistent });
+    await mgr.setFlags(account, 'INBOX', [], '\\Seen', true);
+    expect(persistent.getMailboxLock).not.toHaveBeenCalled();
+    expect(ImapFlow).not.toHaveBeenCalled();
+  });
+
+  // The single store is on the MIDDLE letter of the set: a chain joined on the first or the
+  // last letter only would pass with a single store on that end.
+  it('a single store on a letter waits for a bulk store that holds it, other letters do not', async () => {
+    const order = [];
+    let finishBulk;
+    const persistent = fakePersistent({
+      messageFlagsAdd: vi.fn(() => new Promise(res => { finishBulk = () => { order.push('42,43,44'); res(true); }; })),
+      messageFlagsRemove: vi.fn(async (uid) => { order.push(uid); return true; }),
+    });
+    const { mgr, account } = arrange({ persistent });
+
+    const bulk = mgr.setFlags(account, 'INBOX', [42, 43, 44], '\\Seen', true);
+    const single = mgr.setFlag(account, 43, 'INBOX', '\\Seen', false);
+    const other = mgr.setFlag(account, 45, 'INBOX', '\\Seen', false);
+    await new Promise(r => setTimeout(r, 50));
+    expect(persistent.getMailboxLock).toHaveBeenCalledTimes(2); // the bulk and 45 reached the lock
+    expect(persistent.messageFlagsRemove).not.toHaveBeenCalled(); // 43 waits on its chain
+    finishBulk();
+    await bulk; await single; await other;
+    expect(order).toEqual(['42,43,44', '45', '43']);     // the newest value on 43 lands last
+    await new Promise(r => setTimeout(r, 0));
+    expect(mgr._flagStoreChains.size).toBe(0);
+  });
+
+  it('a bulk store waits for a single store already pending on one of its letters', async () => {
+    const order = [];
+    let finishSingle;
+    const persistent = fakePersistent({
+      messageFlagsAdd: vi.fn(() => new Promise(res => { finishSingle = () => { order.push('43'); res(true); }; })),
+      messageFlagsRemove: vi.fn(async (uid) => { order.push(uid); return true; }),
+    });
+    const { mgr, account } = arrange({ persistent });
+
+    const single = mgr.setFlag(account, 43, 'INBOX', '\\Seen', true);
+    const bulk = mgr.setFlags(account, 'INBOX', [42, 43, 44], '\\Seen', false);
+    await new Promise(r => setTimeout(r, 50));
+    expect(persistent.getMailboxLock).toHaveBeenCalledOnce(); // the bulk has not even asked for the lock
+    finishSingle();
+    await single; await bulk;
+    expect(order).toEqual(['43', '42,43,44']);
+  });
+
+  it('holds the next store on a letter until a bulk STORE the bulk call gave up on has settled', async () => {
+    // The bulk STORE goes out on the persistent session and hangs past the deadline; the pool
+    // stores the set instead. A later store on one of its letters must not overtake the late one.
+    vi.useFakeTimers();
+    const order = [];
+    let landBulk;
+    const persistent = fakePersistent({
+      messageFlagsAdd: vi.fn(() => new Promise(res => { landBulk = () => { order.push('bulk-late'); res(true); }; })),
+      messageFlagsRemove: vi.fn(async (uid) => { order.push(uid); return true; }),
+    });
+    const { mgr, account } = arrange({ persistent });
+
+    const bulk = mgr.setFlags(account, 'INBOX', [42, 43], '\\Seen', true);
+    await vi.advanceTimersByTimeAsync(PERSISTENT_FLAG_STORE_TIMEOUT_MS + 100);
+    await bulk;                                          // done through the pool
+    expect(poolClients[0].messageFlagsAdd).toHaveBeenCalledWith('42,43', ['\\Seen'], { uid: true });
+
+    const done = vi.fn();
+    const single = mgr.setFlag(account, 43, 'INBOX', '\\Seen', false).then(done);
+    await vi.advanceTimersByTimeAsync(100);
+    expect(done).not.toHaveBeenCalled();                 // the bulk STORE is still out
+
+    landBulk();
+    await vi.advanceTimersByTimeAsync(1);
+    await single;
+    expect(order[0]).toBe('bulk-late');
+    expect(done).toHaveBeenCalled();
+  });
 });
 
 // ── Backoff ladders (upstream #474 round) ──────────────────────────────────────
@@ -5538,6 +5800,29 @@ describe('every background login waits out a rejected password', () => {
       expect(clients).toHaveLength(2); // the login and connectImapClient's one retry after a forced refresh
     });
 
+    it('a rejected bulk store tries neither a second time nor its next chunk', async () => {
+      // The pool holds no user login of an OAuth mailbox back, so a second chunk would be a
+      // second rejected login.
+      const acct = oauthAccount();
+      const mgr = liveManager(acct);
+      const uids = Array.from({ length: FLAG_STORE_UID_CHUNK + 1 }, (_, i) => i + 1);
+      await expect(mgr.setFlags(acct, 'Sent', uids, '\\Seen', true)).rejects.toBeTruthy();
+      expect(clients).toHaveLength(2); // one login, as for a single store
+    });
+
+    it('a rejected login on the first group of a bulk read tries no other group', async () => {
+      const acct = oauthAccount();
+      const mgr = liveManager(acct);
+      const results = await mgr.setFlagsGroups(acct, [
+        { folder: 'Sent', uids: [1, 2, 3] },
+        { folder: 'Archive', uids: [4, 5] },
+        { folder: 'Projects', uids: [6] },
+      ], '\\Seen', true);
+      expect(clients).toHaveLength(2); // one login, as for a single store
+      expect(results[0]).toMatchObject({ stored: false, error: expect.anything() });
+      expect(results.slice(1)).toEqual([{ stored: false, skipped: true }, { stored: false, skipped: true }]);
+    });
+
     it('does the same when no persistent connection is up', async () => {
       const acct = oauthAccount();
       const mgr = ladderManager();
@@ -5571,6 +5856,19 @@ describe('every background login waits out a rejected password', () => {
       withStore();
       rejectedPassword(mgr, acct);
       await expect(mgr.setFlag(acct, 7, 'Sent', '\\Seen', true)).rejects.toMatchObject({ providerRefusing: true });
+      expect(clients).toHaveLength(0);
+    });
+
+    it('a bulk read held back by a rejected password on its first group tries no other group', async () => {
+      const acct = account();
+      const mgr = liveManager(acct);
+      withStore();
+      rejectedPassword(mgr, acct);
+      const tried = vi.spyOn(mgr, '_setFlagInner');
+      const results = await mgr.setFlagsGroups(acct, [{ folder: 'Sent', uids: [7] }, { folder: 'Archive', uids: [8] }], '\\Seen', true);
+      expect(results[0]).toMatchObject({ stored: false, error: { providerRefusing: true, authRejected: true } });
+      expect(results[1]).toEqual({ stored: false, skipped: true });
+      expect(tried).toHaveBeenCalledOnce();
       expect(clients).toHaveLength(0);
     });
 
@@ -5676,6 +5974,116 @@ describe('every background login waits out a rejected password', () => {
       const queued = [...mgr._pendingFlagPush.get(acct.id).values()];
       expect(queued).toHaveLength(5);
       expect(queued.filter(op => op.attempts > 0)).toHaveLength(1);
+    });
+  });
+
+  describe('the flag-push reconciler and a newer change queued mid-cycle', () => {
+    // An older op (mark read) is being replayed when the user marks the letter unread and that
+    // store fails: _enqueueFlagPush puts a NEW op under the same key. The replay must neither
+    // write its stale value, nor clear the newer change's marker, nor delete the newer op, or
+    // the next pull reverts the letter to read and the user's change is lost.
+    const arrangeReplay = (acct, hooks = {}) => {
+      const sqls = [];
+      query.mockImplementation(async (sql, params) => {
+        sqls.push([sql, params]);
+        if (sql.startsWith('SELECT * FROM email_accounts')) return { rows: [acct] };
+        if (sql.startsWith('SELECT uid, folder FROM messages')) { await hooks.onReread?.(); return { rows: [{ uid: 7, folder: 'Sent' }] }; }
+        if (sql.includes('read_changed_at = NULL')) await hooks.onClear?.();
+        return { rows: [], rowCount: 1 };
+      });
+      return sqls;
+    };
+    const markUnread = (mgr, acct) => mgr._enqueueFlagPush(acct.id, 'm-1', '\\Seen', false);
+    const queuedValue = (mgr, acct) => mgr._pendingFlagPush.get(acct.id)?.get('m-1:\\Seen')?.value;
+    const clears = (sqls) => sqls.filter(([sql]) => sql.includes('read_changed_at = NULL'));
+
+    it('queued during the re-read: nothing stale is written or pushed', async () => {
+      const acct = account();
+      const mgr = liveManager(acct);
+      mgr._enqueueFlagPush(acct.id, 'm-1', '\\Seen', true);
+      const sqls = arrangeReplay(acct, { onReread: () => markUnread(mgr, acct) });
+      const setFlag = vi.spyOn(mgr, 'setFlag').mockResolvedValue();
+
+      await mgr._reconcileFlagPushes();
+
+      expect(setFlag).not.toHaveBeenCalled();
+      expect(sqls.some(([sql, params]) => sql.startsWith('UPDATE messages SET is_read') && params[0] === true)).toBe(false);
+      expect(clears(sqls)).toHaveLength(0);
+      expect(queuedValue(mgr, acct)).toBe(false);
+    });
+
+    it('queued while the replay stores: its marker and op stay', async () => {
+      const acct = account();
+      const mgr = liveManager(acct);
+      mgr._enqueueFlagPush(acct.id, 'm-1', '\\Seen', true);
+      const sqls = arrangeReplay(acct);
+      vi.spyOn(mgr, 'setFlag').mockImplementation(async () => { markUnread(mgr, acct); });
+
+      await mgr._reconcileFlagPushes();
+
+      expect(clears(sqls)).toHaveLength(0);
+      expect(queuedValue(mgr, acct)).toBe(false);
+    });
+
+    it('queued while the replay clears its marker: the op stays', async () => {
+      const acct = account();
+      const mgr = liveManager(acct);
+      mgr._enqueueFlagPush(acct.id, 'm-1', '\\Seen', true);
+      arrangeReplay(acct, { onClear: () => markUnread(mgr, acct) });
+      vi.spyOn(mgr, 'setFlag').mockResolvedValue();
+
+      await mgr._reconcileFlagPushes();
+
+      expect(queuedValue(mgr, acct)).toBe(false);
+    });
+
+    it('queued while the last attempt fails: the replay does not give the newer op up', async () => {
+      const acct = account();
+      const mgr = liveManager(acct);
+      mgr._enqueueFlagPush(acct.id, 'm-1', '\\Seen', true);
+      mgr._pendingFlagPush.get(acct.id).get('m-1:\\Seen').attempts = FLAG_PUSH_MAX_ATTEMPTS - 1;
+      const sqls = arrangeReplay(acct);
+      vi.spyOn(mgr, 'setFlag').mockImplementation(async () => { markUnread(mgr, acct); throw new Error('NO'); });
+      vi.spyOn(console, 'warn').mockImplementation(() => {});
+
+      await mgr._reconcileFlagPushes();
+
+      expect(clears(sqls)).toHaveLength(0);
+      expect(queuedValue(mgr, acct)).toBe(false);
+    });
+
+    it('clears only the marker its own re-assert wrote', async () => {
+      const acct = account();
+      const mgr = liveManager(acct);
+      mgr._enqueueFlagPush(acct.id, 'm-1', '\\Seen', true);
+      const sqls = [];
+      query.mockImplementation(async (sql, params) => {
+        sqls.push([sql, params]);
+        if (sql.startsWith('SELECT * FROM email_accounts')) return { rows: [acct] };
+        if (sql.startsWith('SELECT uid, folder FROM messages')) return { rows: [{ uid: 7, folder: 'Sent' }] };
+        if (sql.includes('RETURNING read_changed_at::text')) return { rows: [{ marker: '2026-09-26 10:00:00.123456+00' }] };
+        return { rows: [], rowCount: 1 };
+      });
+      vi.spyOn(mgr, 'setFlag').mockResolvedValue();
+
+      await mgr._reconcileFlagPushes();
+
+      expect(clears(sqls)).toEqual([[expect.stringContaining('AND read_changed_at = $2::timestamptz'), ['m-1', '2026-09-26 10:00:00.123456+00']]]);
+      expect(mgr._pendingFlagPush.has(acct.id)).toBe(false);
+    });
+
+    it('queued while the give-up clears its marker: the op stays', async () => {
+      const acct = account();
+      const mgr = liveManager(acct);
+      mgr._enqueueFlagPush(acct.id, 'm-1', '\\Seen', true);
+      mgr._pendingFlagPush.get(acct.id).get('m-1:\\Seen').attempts = FLAG_PUSH_MAX_ATTEMPTS - 1;
+      arrangeReplay(acct, { onClear: () => markUnread(mgr, acct) });
+      vi.spyOn(mgr, 'setFlag').mockRejectedValue(new Error('NO'));
+      vi.spyOn(console, 'warn').mockImplementation(() => {});
+
+      await mgr._reconcileFlagPushes();
+
+      expect(queuedValue(mgr, acct)).toBe(false);
     });
   });
 

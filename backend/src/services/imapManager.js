@@ -549,7 +549,7 @@ const SYNC_HUNG_MS = 30 * 1000;
 // is why we don't need to touch the three pull-sync guards. Give up (clear the marker so
 // the server's truth can show through) after MAX_ATTEMPTS connected failures.
 const FLAG_PUSH_RECONCILE_MS = 15 * 1000;
-const FLAG_PUSH_MAX_ATTEMPTS = 40;   // ~10 min of connected retries before honest revert
+export const FLAG_PUSH_MAX_ATTEMPTS = 40;  // ~10 min of connected retries before honest revert
 const FLAG_PUSH_PER_CYCLE = 30;      // cap setFlag attempts per account per cycle (bounds cycle time)
 
 // Unicode bidi override/embedding characters that can visually reverse a filename,
@@ -1351,6 +1351,26 @@ export const PERSISTENT_FLAG_LOCK_WAIT_MS = 4500;
 // certainly dead, and the sync tick closes such a session, but the wait itself must not depend on
 // that happening (a click on the same message would hang until it did).
 export const PERSISTENT_FLAG_LATE_STORE_WAIT_MS = 15000;
+// UIDs per UID STORE in setFlags. Keeps the command line well under the lengths servers accept
+// (a UID set of scattered 7-digit UIDs is 8 bytes a UID); the bulk routes send at most 500 ids.
+export const FLAG_STORE_UID_CHUNK = 500;
+
+// One UID, or a UID set ('3,7,9') as the count and its ends, for log lines and error texts: a
+// bulk store's set is up to FLAG_STORE_UID_CHUNK UIDs (about 4 KB).
+export function describeUids(uid) {
+  const list = String(uid).split(',');
+  return list.length === 1 ? `uid=${list[0]}` : `uids=${list.length} (${list[0]}..${list[list.length - 1]})`;
+}
+
+// A failed flag store after which setFlagsGroups tries no further group of the mailbox: the
+// login was rejected (isImapAuthFailure), or the store got no session (isMailboxBusyError): a
+// login held back (providerRefusing, with authRejected when the password was rejected) or a pool
+// that stayed full for the whole acquire wait (poolExhausted). The next group would be one more
+// rejected login, held back the same way, or another 15 s in the same queue. The other bulk
+// routes skip a busy mailbox's remaining groups the same way (bulkBusyTracker in routes/mail.js).
+export function stopsFlagStores(err) {
+  return isImapAuthFailure(err) || isMailboxBusyError(err);
+}
 // Clients whose mailbox lock syncMessages holds right now. Module-level because the lock
 // belongs to the client, not to a manager (and tests call syncMessages with a bare `this`).
 const syncLockedClients = new WeakSet();
@@ -2421,12 +2441,31 @@ export class ImapManager {
     }
   }
 
+  // Re-assert a queued op's value on its row with a fresh marker, and return that marker as text
+  // (null when the write failed or the row is gone). Text, not a Date: Postgres keeps
+  // microseconds and a JS Date would drop them, so the conditional clear below would never match.
+  async _reassertFlagPush(op) {
+    const [valueCol, markerCol] = op.flag === '\\Seen' ? ['is_read', 'read_changed_at'] : ['is_starred', 'star_changed_at'];
+    // Both columns are fixed internal literals (not user input), safe to interpolate.
+    const res = await query(
+      `UPDATE messages SET ${valueCol} = $1, ${markerCol} = NOW() WHERE id = $2 RETURNING ${markerCol}::text AS marker`,
+      [op.value, op.messageId]
+    ).catch(() => null);
+    return res?.rows?.[0]?.marker ?? null;
+  }
+
   // Clear the marker for a message+flag once the server has confirmed (or we give up), so a
-  // subsequent flag-sync pull resumes reflecting the server for that message.
-  async _clearFlagMarker(messageId, flag) {
+  // subsequent flag-sync pull resumes reflecting the server for that message. With `marker` (the
+  // one _reassertFlagPush wrote) only while the row still carries it: a route that marked a newer
+  // change since then keeps its marker, so a pull cannot revert that change before its own push.
+  async _clearFlagMarker(messageId, flag, marker = null) {
     const col = flag === '\\Seen' ? 'read_changed_at' : 'star_changed_at';
     // col is a fixed internal literal (not user input) — safe to interpolate.
-    await query(`UPDATE messages SET ${col} = NULL WHERE id = $1`, [messageId]).catch(() => {});
+    if (marker) {
+      await query(`UPDATE messages SET ${col} = NULL WHERE id = $1 AND ${col} = $2::timestamptz`, [messageId, marker]).catch(() => {});
+    } else {
+      await query(`UPDATE messages SET ${col} = NULL WHERE id = $1`, [messageId]).catch(() => {});
+    }
   }
 
   async _reconcileFlagPushes() {
@@ -2469,26 +2508,31 @@ export class ImapManager {
           [op.messageId]
         );
         if (!msg) { ops.delete(key); continue; } // message gone — nothing to push
-        // A concurrent successful push may have resolved this op during the await above —
-        // don't re-assert/re-push a now-stale value over the newer one.
-        if (op.resolved) continue;
-        if (op.flag === '\\Seen') {
-          await query('UPDATE messages SET is_read = $1, read_changed_at = NOW() WHERE id = $2', [op.value, op.messageId]).catch(() => {});
-        } else {
-          await query('UPDATE messages SET is_starred = $1, star_changed_at = NOW() WHERE id = $2', [op.value, op.messageId]).catch(() => {});
-        }
+        // A concurrent successful push may have resolved this op during the await above, or a
+        // newer change may have replaced it (_enqueueFlagPush puts a new object under the same
+        // key and leaves this one unmarked): don't re-assert/re-push a now-stale value over the
+        // newer one. The queue holds the newer op, which a later pass pushes.
+        if (op.resolved || ops.get(key) !== op) continue;
+        const marker = await this._reassertFlagPush(op);
         try {
           await this.setFlag(account, msg.uid, msg.folder, op.flag, op.value, { background: true });
-          // If a newer value was pushed elsewhere while our setFlag was in flight, leave its
-          // marker in place and let the pull reconcile, rather than clearing to our stale push.
-          if (!op.resolved) await this._clearFlagMarker(op.messageId, op.flag); // confirmed on server
-          ops.delete(key);
+          // Only while this op is still the queued one. If a newer value was pushed elsewhere
+          // (resolved: the key is gone) or queued (a new op under the key) while our setFlag
+          // was in flight, its marker and its op stay: clearing the marker would let a pull
+          // revert the newer change, and deleting the key would drop the newer op. Checked
+          // again after the clear's await, for an op queued during it. The clear itself only
+          // takes the marker this pass wrote, for a route that marked a newer change and has
+          // not queued it yet.
+          if (ops.get(key) === op) {
+            await this._clearFlagMarker(op.messageId, op.flag, marker); // confirmed on server
+            if (ops.get(key) === op) ops.delete(key);
+          }
         } catch (err) {
           op.attempts += 1;
-          if (op.attempts >= FLAG_PUSH_MAX_ATTEMPTS) {
+          if (op.attempts >= FLAG_PUSH_MAX_ATTEMPTS && ops.get(key) === op) {
             console.warn(`Flag-push giving up after ${op.attempts} attempts (${op.flag} msg=${op.messageId}): ${extractImapError(err)}`);
-            await this._clearFlagMarker(op.messageId, op.flag); // honest revert to server truth
-            ops.delete(key);
+            await this._clearFlagMarker(op.messageId, op.flag, marker); // honest revert to server truth
+            if (ops.get(key) === op) ops.delete(key);
           }
           // else keep queued; marker + value re-asserted above so nothing is lost before retry
         }
@@ -6590,6 +6634,8 @@ export class ImapManager {
   //
   // flight.attempt is the attempt and flight.sent says whether its STORE went out, so setFlag
   // can hold the next store on this message until a STORE we stopped waiting for has settled.
+  //
+  // uid is one UID or a UID set ('3,7,9'): setFlags stores a whole folder's letters in one STORE.
   async _setFlagOverPersistent(account, uid, folder, flag, value, flight = {}) {
     if (folder !== 'INBOX') return false;
     if (this.syncingAccounts.has(account.id) || this.connectingAccounts.has(account.id)) return false;
@@ -6614,7 +6660,7 @@ export class ImapManager {
             : client.messageFlagsRemove(String(uid), [flag], opts);
           flight.sent = true;
           const applied = await store;
-          if (applied === false) throw new Error(`server did not apply ${flag}=${value} for uid=${uid} on the persistent session`);
+          if (applied === false) throw new Error(`server did not apply ${flag}=${value} for ${describeUids(uid)} on the persistent session`);
         } finally {
           lock.release();
         }
@@ -6629,7 +6675,7 @@ export class ImapManager {
     attempt.catch(() => {}); // detached after a timeout; never an unhandled rejection
     try {
       await raceTimeout(attempt, PERSISTENT_FLAG_STORE_TIMEOUT_MS, 'Persistent flag store');
-      logger.debug(`setFlag success (persistent): uid=${uid} ${flag}=${value}`);
+      logger.debug(`setFlag success (persistent): ${describeUids(uid)} ${flag}=${value}`);
       return true;
     } catch (err) {
       // Mark the detached attempt dead BEFORE falling through: a lock granted late must
@@ -6660,34 +6706,125 @@ export class ImapManager {
   // A store on a message waits for the previous store on the same message, including a
   // persistent STORE the previous call sent and then stopped waiting for (up to
   // PERSISTENT_FLAG_LATE_STORE_WAIT_MS). Upstream serializes per account instead; per message
-  // is enough, since stores on different messages commute, and it keeps bulk read's
-  // concurrency and keeps one slow store (a pool fallback can take minutes) from holding up
-  // every other mark-read in a mailbox the whole team works in.
+  // is enough, since stores on different messages commute, and it keeps one slow store (a pool
+  // fallback can take minutes) from holding up every other mark-read in a mailbox the whole
+  // team works in. setFlag is setFlags with one UID; a bulk store joins the chain of each of
+  // its letters (see setFlags).
   //
   // background: a store nobody is waiting on (a rule, the flag-push reconciler, a snooze
   // wakeup). Held back by a backoff, it fails at once instead of queueing for a busy pooled
   // session (see acquirePooledClient); its caller queues it for the flag-push reconciler.
   // failFastWhenHeld: an inbox rule's store, see acquirePooledClient.
   async setFlag(account, uid, folder, flag, value, { background = false, failFastWhenHeld = false } = {}) {
-    const key = `${account.id}\n${folder}\n${uid}`;
-    const prev = this._flagStoreChains.get(key) || Promise.resolve();
-    const flight = { attempt: null, sent: false };
-    const run = prev.then(() => this._setFlagInner(account, uid, folder, flag, value, flight, { background, failFastWhenHeld }));
-    // Never rejects, so the next store on this message runs whatever this one did. The wait for
-    // an abandoned persistent STORE is bounded (PERSISTENT_FLAG_LATE_STORE_WAIT_MS), so a
-    // STORE that never settles cannot hold this message's next store indefinitely.
-    const tail = run.catch(() => {})
-      .then(() => flight.sent && raceTimeout(flight.attempt, PERSISTENT_FLAG_LATE_STORE_WAIT_MS, 'Late persistent flag store'))
-      .catch(() => {});
-    this._flagStoreChains.set(key, tail);
-    tail.then(() => {
-      if (this._flagStoreChains.get(key) === tail) this._flagStoreChains.delete(key);
+    return this.setFlags(account, folder, [uid], flag, value, { background, failFastWhenHeld });
+  }
+
+  // Store a flag on many letters of ONE folder: one UID STORE per FLAG_STORE_UID_CHUNK UIDs
+  // instead of one per letter. Bulk mark-read of 50 letters used to be 50 STOREs, and on a
+  // mailbox whose login is being rejected up to 50 rejected logins. Same routes as setFlag (the
+  // persistent session for INBOX, the pool otherwise), same retry and give-up rules. Resolves
+  // when every UID is stored; rejects on the first chunk that fails, and then the caller treats
+  // the whole call as not stored (re-storing a flag is idempotent, so queueing a chunk that did
+  // land costs one more STORE, never a wrong value).
+  //
+  // Ordering: see _reserveFlagStores. Each chunk joins the per-message chain of every letter it
+  // holds, so it runs after every store already called on any of them, and every store called
+  // later on any of them runs after it.
+  async setFlags(account, folder, uids, flag, value, { background = false, failFastWhenHeld = false } = {}) {
+    const units = this._reserveFlagStores(account, [{ folder, uids }]);
+    const [result] = await this._runFlagStores(account, 1, units, flag, value, { background, failFastWhenHeld });
+    if (result.error) throw result.error;
+  }
+
+  // Store a flag on letters of several folders of one mailbox (a bulk mark-read across
+  // folders): groups is [{ folder, uids }], one setFlags-style store per group. Resolves, never
+  // rejects, to one result per group, in order: { stored: true }, { stored: false, error }, or
+  // { stored: false, skipped: true } for a group that was not tried.
+  //
+  // The chains of EVERY group are reserved here, at call time, before any group runs. Calling
+  // setFlags once per group instead would reserve a later group only when it is called, after
+  // the groups before it have stored: a newer single click on one of its letters, made while
+  // an earlier group was storing, would then be overtaken by the older bulk value.
+  //
+  // The groups run one after another, so a rejected login is known before the next group logs
+  // in. Once a store fails that way, or gets no session (stopsFlagStores), the remaining groups
+  // are skipped: on an OAuth mailbox the pool does not hold a user's login back, so each would be
+  // one more rejected login, and behind a full pool each would wait out the same queue. The
+  // caller queues what was not stored.
+  async setFlagsGroups(account, groups, flag, value, { background = false, failFastWhenHeld = false } = {}) {
+    const units = this._reserveFlagStores(account, groups);
+    return this._runFlagStores(account, groups.length, units, flag, value, { background, failFastWhenHeld });
+  }
+
+  // Reserve the per-message chains for a set of flag stores, synchronously, before any await:
+  // groups is [{ folder, uids }], and every chunk of FLAG_STORE_UID_CHUNK UIDs of every group
+  // becomes one unit. A unit reads the current tail of each of its letters (prevs) and installs
+  // its own tail on each of them. A store only ever waits for tails installed before it, so
+  // overlapping sets cannot deadlock.
+  //
+  // A unit covers its own letters only, not its whole call: a click on a letter waits for the
+  // chunk that holds it (and whatever that chunk waits for), not for the chunks after it. The
+  // wait itself has the bounds a store behind another store on the same letter always had: the
+  // previous store's run, plus up to PERSISTENT_FLAG_LATE_STORE_WAIT_MS for a persistent STORE
+  // it sent and stopped waiting for. What a bulk store adds is breadth: it waits for the
+  // slowest store still pending on any letter of its chunk, and a click on any of them waits
+  // for the chunk. That is the price of one STORE instead of one per letter.
+  _reserveFlagStores(account, groups) {
+    const units = [];
+    groups.forEach(({ folder, uids }, group) => {
+      const set = [...new Set((uids || []).map(String))].sort((a, b) => Number(a) - Number(b));
+      for (let i = 0; i < set.length; i += FLAG_STORE_UID_CHUNK) {
+        const chunk = set.slice(i, i + FLAG_STORE_UID_CHUNK);
+        const keys = chunk.map(uid => `${account.id}\n${folder}\n${uid}`);
+        const prevs = keys.map(key => this._flagStoreChains.get(key)).filter(Boolean);
+        const flight = { attempt: null, sent: false };
+        let settle;
+        const done = new Promise(resolve => { settle = resolve; });
+        // Never rejects, so the next store on these letters runs whatever this one did. The wait
+        // for an abandoned persistent STORE is bounded (PERSISTENT_FLAG_LATE_STORE_WAIT_MS), so a
+        // STORE that never settles cannot hold these letters' next store indefinitely.
+        const tail = done
+          .then(() => flight.sent && raceTimeout(flight.attempt, PERSISTENT_FLAG_LATE_STORE_WAIT_MS, 'Late persistent flag store'))
+          .catch(() => {});
+        for (const key of keys) this._flagStoreChains.set(key, tail);
+        tail.then(() => {
+          for (const key of keys) if (this._flagStoreChains.get(key) === tail) this._flagStoreChains.delete(key);
+        });
+        units.push({ group, folder, uidSet: chunk.join(','), prevs, flight, settle });
+      }
     });
-    return run;
+    return units;
+  }
+
+  // Run reserved units one after another; resolves (never rejects) to one result per group:
+  // { stored: true }, { stored: false, error } or { stored: false, skipped: true }. The first
+  // chunk that fails ends its group: the caller treats the whole group as not stored anyway
+  // (re-storing a flag is idempotent, so queueing a chunk that did land costs one more STORE,
+  // never a wrong value), and after a rejected login the next chunk would be one more rejected
+  // login (on an OAuth mailbox the pool does not hold a user's login back, see loginHeldBack).
+  // A store that stopsFlagStores skips every later group as well (see setFlagsGroups).
+  // Every unit settles, run or skipped, so no letter's chain is left waiting.
+  async _runFlagStores(account, groupCount, units, flag, value, opts) {
+    const results = Array.from({ length: groupCount }, () => ({ stored: true }));
+    let stopped = false;
+    for (const unit of units) {
+      try {
+        if (results[unit.group].error || results[unit.group].skipped) continue;
+        if (stopped) { results[unit.group] = { stored: false, skipped: true }; continue; }
+        await Promise.all(unit.prevs);
+        await this._setFlagInner(account, unit.uidSet, unit.folder, flag, value, unit.flight, opts);
+      } catch (err) {
+        results[unit.group] = { stored: false, error: err };
+        if (stopsFlagStores(err)) stopped = true;
+      } finally {
+        unit.settle();
+      }
+    }
+    return results;
   }
 
   async _setFlagInner(account, uid, folder, flag, value, flight, { background = false, failFastWhenHeld = false } = {}) {
-    console.log(`setFlag: uid=${uid} folder=${folder} flag=${flag} value=${value}`);
+    console.log(`setFlag: ${describeUids(uid)} folder=${folder} flag=${flag} value=${value}`);
     if (await this._setFlagOverPersistent(account, uid, folder, flag, value, flight)) return;
     // Up to 2 attempts. ImapFlow returns false when the server did NOT apply the flag —
     // typically a stale/half-open pooled connection whose SELECT view is missing the UID.
@@ -6711,9 +6848,9 @@ export class ImapManager {
               ? await client.messageFlagsAdd(String(uid), [flag], { uid: true })
               : await client.messageFlagsRemove(String(uid), [flag], { uid: true });
             if (flagResult === false) {
-              throw new Error(`server did not apply ${flag}=${value} for uid=${uid} (no matching message)`);
+              throw new Error(`server did not apply ${flag}=${value} for ${describeUids(uid)} (no matching message)`);
             }
-            logger.debug(`setFlag success: uid=${uid} ${flag}=${value}`);
+            logger.debug(`setFlag success: ${describeUids(uid)} ${flag}=${value}`);
           } finally {
             lock.release();
           }
@@ -6731,7 +6868,7 @@ export class ImapManager {
         if (attempt < 2) await new Promise(r => setTimeout(r, 400));
       }
     }
-    console.error(`setFlag failed after retry: uid=${uid} ${flag}=${value}:`, lastErr?.message);
+    console.error(`setFlag failed after retry: ${describeUids(uid)} ${flag}=${value}:`, lastErr?.message);
     throw lastErr;
   }
 

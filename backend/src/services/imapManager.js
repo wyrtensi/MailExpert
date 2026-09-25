@@ -1483,6 +1483,10 @@ export const MAIL_NODE_ACTOR = 'MailExpert';
 // How long a node password restore waits for a connect of the same account to finish before its own
 // reconnect (connectAccount would skip it as a duplicate). Just over connectAccount's login timeout.
 const NODE_RESTORE_CONNECT_WAIT_MS = 35000;
+// Node password restores running at once across all mailboxes (see _restoreNodePassword).
+export const NODE_RESTORE_CONCURRENCY = 2;
+const NODE_RESTORE_SLOT = 'mail-node';
+const nodeRestoreSlots = createKeyedSemaphore(NODE_RESTORE_CONCURRENCY);
 
 // The account error for a rejected node password that was not restored (restoreNodeMailboxPassword).
 const NODE_RESTORE_FAILURES = {
@@ -3142,7 +3146,16 @@ export class ImapManager {
   // node, or a node API failure, keeps the ladder and gets an account error saying why.
   async _restoreNodePassword(account) {
     const id = account.id;
-    const result = await restoreNodeMailboxPassword(id);
+    // At most NODE_RESTORE_CONCURRENCY restores talk to the node at once, for all mailboxes: a node-wide
+    // cause (a domain disabled, say) rejects every mailbox of it in the same second, and each restore is
+    // a few API calls. The others wait their turn rather than lose their attempt.
+    await nodeRestoreSlots.acquire(NODE_RESTORE_SLOT);
+    let result;
+    try {
+      result = await restoreNodeMailboxPassword(id);
+    } finally {
+      nodeRestoreSlots.release(NODE_RESTORE_SLOT);
+    }
     if (result.outcome === 'skipped') return;
     if (result.outcome !== 'restored') {
       const detail = nodeRestoreFailureDetail(result);

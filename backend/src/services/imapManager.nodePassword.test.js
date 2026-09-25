@@ -36,7 +36,7 @@ import { resolveForConnection } from './hostValidation.js';
 import { getConnectionPolicy } from './connectionPolicy.js';
 import { getMailbox, getMailNodeConfig, listDomains, setMailboxPassword } from './mailNode/mailcow.js';
 import { recordAudit } from './auditLog.js';
-import { ImapManager, MAIL_NODE_ACTOR, acquirePooledClient, evictPool, releasePooledClient } from './imapManager.js';
+import { ImapManager, MAIL_NODE_ACTOR, NODE_RESTORE_CONCURRENCY, acquirePooledClient, evictPool, releasePooledClient } from './imapManager.js';
 
 const CFG = { mailHost: 'mail.example.com', apiKey: 'api-key', quotaMb: 5120 };
 const NEW_PASSWORD = 'restored-secret-1';
@@ -405,6 +405,26 @@ describe('a mail node mailbox whose password is rejected', () => {
     answer(activeMailbox(acct.email_address));
     await vi.waitFor(() => expect(reconnect).toHaveBeenCalledTimes(1));
     expect(setMailboxPassword).toHaveBeenCalledTimes(1);
+  });
+
+  it('runs at most two restores at once across all mailboxes; the others wait their turn', async () => {
+    const accounts = [stored(nodeAccount()), stored(nodeAccount()), stored(nodeAccount())];
+    const answers = [];
+    getMailbox.mockImplementation((cfg, email) => new Promise(resolve => { answers.push(() => resolve(activeMailbox(email, { active: false, state: 0 }))); }));
+    const mgr = newManager();
+
+    for (const acct of accounts) mgr._noteAuthFailure(acct);
+    await settle();
+    expect(getMailbox).toHaveBeenCalledTimes(NODE_RESTORE_CONCURRENCY);
+    expect(NODE_RESTORE_CONCURRENCY).toBe(2);
+
+    answers[0]();
+    await vi.waitFor(() => expect(getMailbox).toHaveBeenCalledTimes(3));
+    answers[1]();
+    answers[2]();
+    for (const acct of accounts) {
+      await vi.waitFor(() => expect(syncErrorWrites(acct.id)).toContain('Password rejected: the mailbox is disabled on the mail node'));
+    }
   });
 
   it('does not restore again when the restored password is rejected too, until a login succeeds or a reconnect', async () => {

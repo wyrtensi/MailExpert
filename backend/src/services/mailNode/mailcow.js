@@ -219,9 +219,9 @@ export async function provisionMailbox(cfg, { localPart, domain, name }) {
 
 // A new random password for a mailbox that already exists, and nothing else: the attributes sent
 // hold only the password, so mailcow keeps the mailbox's active state, quota and every other
-// setting (provisionMailbox would enable a mailbox an administrator disabled). Returns the password.
-export async function setMailboxPassword(cfg, email) {
-  const password = generateMailboxPassword();
+// setting (provisionMailbox would enable a mailbox an administrator disabled). Returns the password:
+// the one passed in (the restore stores it before asking the node), or a new random one.
+export async function setMailboxPassword(cfg, email, password = generateMailboxPassword()) {
   await editMailbox(cfg, email, { password, password2: password });
   return password;
 }

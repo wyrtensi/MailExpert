@@ -1,7 +1,7 @@
 import { query } from '../db.js';
-import { encrypt } from '../encryption.js';
+import { decrypt, encrypt } from '../encryption.js';
 import { isOAuthAccount } from '../oauth/constants.js';
-import { getMailbox, getMailNodeConfig, listDomains, setMailboxPassword } from './mailcow.js';
+import { generateMailboxPassword, getMailbox, getMailNodeConfig, listDomains, setMailboxPassword } from './mailcow.js';
 
 // The node rejected the password of one of its mailboxes. MailExpert owns that password (nobody
 // can change it in the panel, mail_node_connection_locked), so it sets a new one through the
@@ -17,13 +17,20 @@ import { getMailbox, getMailNodeConfig, listDomains, setMailboxPassword } from '
 // - { outcome: 'disabled' | 'missing' }: the mailbox is inactive or gone on the node;
 // - { outcome: 'receive_only' | 'foreign_authsource' | 'no_imap_access' | 'force_pw_update' |
 //   'domain_missing' | 'domain_inactive' }: the node refuses the login for another reason;
-// - { outcome: 'api_failed', code }: the node API failed (MailNodeError code, or the error name);
+// - { outcome: 'api_failed', code, stage }: the node API failed (MailNodeError code, or the error
+//   name); stage 'set' when it was the password change itself, which may have been applied;
 // - { outcome: 'skipped' }: not a mail node mailbox (anymore), disabled in MailExpert, or no mail
 //   node configured.
 // Throws only when the database fails.
+//
+// The new password is stored (encrypted, node_password_pending) BEFORE the node is asked to take it,
+// and becomes auth_pass only once the node said yes. A timeout after mailcow applied the change, or a
+// database failure after it, therefore never leaves a password nobody knows: the next attempt sends
+// the same pending password again (setting a password to its current value is harmless) and promotes it.
 export async function restoreNodeMailboxPassword(accountId) {
   const { rows } = await query(
-    'SELECT id, email_address, imap_host, mail_node, enabled, protocol, oauth_provider FROM email_accounts WHERE id = $1',
+    `SELECT id, email_address, imap_host, mail_node, enabled, protocol, oauth_provider, node_password_pending
+       FROM email_accounts WHERE id = $1`,
     [accountId],
   );
   const row = rows[0];
@@ -59,14 +66,26 @@ export async function restoreNodeMailboxPassword(accountId) {
   if (!domain.active) return { outcome: 'domain_inactive' };
 
   let password;
+  if (row.node_password_pending) {
+    password = decrypt(row.node_password_pending);
+  } else {
+    password = generateMailboxPassword();
+    const pending = await query(
+      'UPDATE email_accounts SET node_password_pending = $1 WHERE id = $2 AND mail_node = true',
+      [encrypt(password), accountId],
+    );
+    if (!pending.rowCount) return { outcome: 'skipped' };
+  }
   try {
-    password = await setMailboxPassword(cfg, row.email_address);
+    await setMailboxPassword(cfg, row.email_address, password);
   } catch (err) {
-    return { outcome: 'api_failed', code: apiErrorCode(err) };
+    return { outcome: 'api_failed', code: apiErrorCode(err), stage: 'set' };
   }
   const updated = await query(
-    'UPDATE email_accounts SET auth_pass = $1 WHERE id = $2 AND mail_node = true RETURNING *',
-    [encrypt(password), accountId],
+    `UPDATE email_accounts SET auth_pass = node_password_pending, node_password_pending = NULL
+      WHERE id = $1 AND mail_node = true AND node_password_pending IS NOT NULL
+      RETURNING *`,
+    [accountId],
   );
   // Deleted meanwhile: the delete route disables the mailbox on the node, nothing to reconnect.
   if (!updated.rows.length) return { outcome: 'skipped' };

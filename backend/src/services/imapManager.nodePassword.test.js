@@ -23,6 +23,7 @@ vi.mock('./hostValidation.js', () => ({ resolveForConnection: vi.fn(), createPin
 vi.mock('./connectionPolicy.js', () => ({ getConnectionPolicy: vi.fn() }));
 vi.mock('./mailNode/mailcow.js', () => ({
   getMailNodeConfig: vi.fn(),
+  generateMailboxPassword: vi.fn(),
   getMailbox: vi.fn(),
   listDomains: vi.fn(),
   setMailboxPassword: vi.fn(),
@@ -34,7 +35,7 @@ import { ImapFlow } from 'imapflow';
 import { query } from './db.js';
 import { resolveForConnection } from './hostValidation.js';
 import { getConnectionPolicy } from './connectionPolicy.js';
-import { getMailbox, getMailNodeConfig, listDomains, setMailboxPassword } from './mailNode/mailcow.js';
+import { generateMailboxPassword, getMailbox, getMailNodeConfig, listDomains, setMailboxPassword } from './mailNode/mailcow.js';
 import { recordAudit } from './auditLog.js';
 import { ImapManager, MAIL_NODE_ACTOR, NODE_RESTORE_CONCURRENCY, acquirePooledClient, evictPool, releasePooledClient } from './imapManager.js';
 
@@ -90,7 +91,10 @@ function newManager() {
 const syncErrorWrites = (id) => query.mock.calls
   .filter(([sql, params]) => sql.startsWith('UPDATE email_accounts SET sync_error = $1') && params[1] === id)
   .map(([, params]) => params[0]);
+// auth_pass takes a restored password (promoted from node_password_pending).
 const passwordWrites = () => query.mock.calls.filter(([sql]) => sql.startsWith('UPDATE email_accounts SET auth_pass'));
+// The new password stored before the node is asked to take it.
+const pendingWrites = () => query.mock.calls.filter(([sql]) => sql.startsWith('UPDATE email_accounts SET node_password_pending'));
 
 beforeEach(() => {
   vi.clearAllMocks();
@@ -122,7 +126,8 @@ beforeEach(() => {
   getMailNodeConfig.mockResolvedValue(CFG);
   getMailbox.mockImplementation(async (cfg, email) => activeMailbox(email));
   listDomains.mockResolvedValue([{ domain: 'example.com', active: true, maxMailboxes: 500, mailboxes: 10 }]);
-  setMailboxPassword.mockImplementation(async () => { nodePassword = NEW_PASSWORD; return NEW_PASSWORD; });
+  generateMailboxPassword.mockReturnValue(NEW_PASSWORD);
+  setMailboxPassword.mockImplementation(async (cfg, email, password) => { nodePassword = password; return password; });
   query.mockReset();
   query.mockImplementation(async (sql, params = []) => {
     if (sql.startsWith('SELECT id, email_address, imap_host, mail_node') || sql.startsWith('SELECT * FROM email_accounts WHERE id = $1')) {
@@ -130,10 +135,16 @@ beforeEach(() => {
       const row = found && (!sql.includes('enabled = true') || found.enabled) ? found : null;
       return { rows: row ? [row] : [], rowCount: row ? 1 : 0 };
     }
-    if (sql.startsWith('UPDATE email_accounts SET auth_pass')) {
+    if (sql.startsWith('UPDATE email_accounts SET node_password_pending')) {
       const row = rows.get(params[1]);
       if (!row?.mail_node) return { rows: [], rowCount: 0 };
-      const updated = { ...row, auth_pass: params[0] };
+      rows.set(row.id, { ...row, node_password_pending: params[0] });
+      return { rows: [], rowCount: 1 };
+    }
+    if (sql.startsWith('UPDATE email_accounts SET auth_pass = node_password_pending')) {
+      const row = rows.get(params[0]);
+      if (!row?.mail_node || !row.node_password_pending) return { rows: [], rowCount: 0 };
+      const updated = { ...row, auth_pass: row.node_password_pending, node_password_pending: null };
       rows.set(row.id, updated);
       return { rows: [updated], rowCount: 1 };
     }
@@ -166,11 +177,13 @@ describe('a mail node mailbox whose password is rejected', () => {
 
     expect(getMailbox).toHaveBeenCalledWith(CFG, acct.email_address);
     expect(setMailboxPassword).toHaveBeenCalledTimes(1);
-    expect(setMailboxPassword).toHaveBeenCalledWith(CFG, acct.email_address);
     // Stored encrypted, as the create route stores a provisioned password.
+    expect(pendingWrites()).toHaveLength(1);
+    expect(pendingWrites()[0][1]).toEqual([`enc:${NEW_PASSWORD}`, acct.id]);
+    expect(setMailboxPassword).toHaveBeenCalledWith(CFG, acct.email_address, NEW_PASSWORD);
     expect(passwordWrites()).toHaveLength(1);
-    expect(passwordWrites()[0][1]).toEqual([`enc:${NEW_PASSWORD}`, acct.id]);
-    expect(passwordWrites()[0][0]).toMatch(/WHERE id = \$2 AND mail_node = true/);
+    expect(passwordWrites()[0][0]).toMatch(/WHERE id = \$1 AND mail_node = true AND node_password_pending IS NOT NULL/);
+    expect(rows.get(acct.id)).toMatchObject({ auth_pass: `enc:${NEW_PASSWORD}`, node_password_pending: null });
     // All three ladders are gone and nothing holds a login back.
     expect(mgr._connectCooldown.has(acct.id)).toBe(false);
     expect(mgr._secondaryAuthCooldown.has(acct.id)).toBe(false);
@@ -459,6 +472,56 @@ describe('a mail node mailbox whose password is rejected', () => {
     answer(activeMailbox(acct.email_address));
     await vi.waitFor(() => expect(reconnect).toHaveBeenCalledTimes(1));
     expect(setMailboxPassword).toHaveBeenCalledTimes(1);
+  });
+
+  it('a password change the node applied but did not confirm is sent again, not replaced', async () => {
+    const acct = stored(nodeAccount());
+    generateMailboxPassword.mockReturnValueOnce(NEW_PASSWORD).mockReturnValue('never-used');
+    // The node applies the change, then the request times out.
+    setMailboxPassword.mockImplementationOnce(async (cfg, email, password) => { nodePassword = password; throw nodeError('mail_node_unreachable'); });
+    const mgr = newManager();
+    const reconnect = vi.spyOn(mgr, 'connectAccount').mockResolvedValue(true);
+
+    mgr._noteAuthFailure(acct);
+    await vi.waitFor(() => expect(syncErrorWrites(acct.id)).toContain('Password rejected: the mail node did not answer the password change; the same password is sent again on the next attempt'));
+    // The password the node may hold is known: stored as pending, not yet as auth_pass.
+    expect(rows.get(acct.id)).toMatchObject({ auth_pass: 'enc:old-password', node_password_pending: `enc:${NEW_PASSWORD}` });
+    expect(mgr._authLoginBlocked(acct.id)).toBeTruthy();
+    expect(reconnect).not.toHaveBeenCalled();
+
+    // The next window sends the same password again and stores it.
+    mgr._connectCooldown.get(acct.id).until = 0;
+    mgr._noteAuthFailure(acct);
+    await vi.waitFor(() => expect(reconnect).toHaveBeenCalledTimes(1));
+    expect(generateMailboxPassword).toHaveBeenCalledTimes(1);
+    expect(setMailboxPassword.mock.calls.map(c => c[2])).toEqual([NEW_PASSWORD, NEW_PASSWORD]);
+    expect(rows.get(acct.id)).toMatchObject({ auth_pass: `enc:${NEW_PASSWORD}`, node_password_pending: null });
+  });
+
+  it('a database failure after the node took the password leaves it recoverable and says so', async () => {
+    const acct = stored(nodeAccount());
+    const mgr = newManager();
+    const reconnect = vi.spyOn(mgr, 'connectAccount').mockResolvedValue(true);
+    const answer = query.getMockImplementation();
+    let failed = false;
+    query.mockImplementation(async (sql, params) => {
+      if (!failed && sql.startsWith('UPDATE email_accounts SET auth_pass = node_password_pending')) {
+        failed = true;
+        throw Object.assign(new Error('connection terminated'), { code: '57P01' });
+      }
+      return answer(sql, params);
+    });
+
+    mgr._noteAuthFailure(acct);
+    await vi.waitFor(() => expect(syncErrorWrites(acct.id)).toContain('Password rejected: storing the restored password failed; it is retried on the next attempt'));
+    expect(rows.get(acct.id)).toMatchObject({ auth_pass: 'enc:old-password', node_password_pending: `enc:${NEW_PASSWORD}` });
+    expect(reconnect).not.toHaveBeenCalled();
+
+    mgr._connectCooldown.get(acct.id).until = 0;
+    mgr._noteAuthFailure(acct);
+    await vi.waitFor(() => expect(reconnect).toHaveBeenCalledTimes(1));
+    expect(setMailboxPassword.mock.calls.map(c => c[2])).toEqual([NEW_PASSWORD, NEW_PASSWORD]);
+    expect(rows.get(acct.id)).toMatchObject({ auth_pass: `enc:${NEW_PASSWORD}`, node_password_pending: null });
   });
 
   it('runs at most two restores at once across all mailboxes; the others wait their turn', async () => {

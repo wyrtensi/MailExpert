@@ -217,6 +217,12 @@ describe('API requests', () => {
     expect(edit.body).toEqual({ items: ['info@example.com'], attr: { password, password2: password } });
   });
 
+  it('sets the password it is given', async () => {
+    safeFetch.mockResolvedValue(answer(OK));
+    expect(await setMailboxPassword(CFG, 'info@example.com', 'given-password-1')).toBe('given-password-1');
+    expect(calls()[0].body.attr).toEqual({ password: 'given-password-1', password2: 'given-password-1' });
+  });
+
   it('reports a refused password change as a mail node error', async () => {
     safeFetch.mockResolvedValue(answer([{ type: 'danger', msg: ['password_complexity'] }]));
     await expect(setMailboxPassword(CFG, 'info@example.com')).rejects.toMatchObject({ code: 'mail_node_refused' });

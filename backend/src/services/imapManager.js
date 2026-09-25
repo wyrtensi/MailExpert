@@ -1489,6 +1489,7 @@ const NODE_RESTORE_SLOT = 'mail-node';
 const nodeRestoreSlots = createKeyedSemaphore(NODE_RESTORE_CONCURRENCY);
 
 // The account error for a rejected node password that was not restored (restoreNodeMailboxPassword).
+const NODE_RESTORE_DB_FAILED = 'Password rejected: storing the restored password failed; it is retried on the next attempt';
 const NODE_RESTORE_FAILURES = {
   host_mismatch: 'Password rejected: the mailbox is not on the configured mail node',
   disabled: 'Password rejected: the mailbox is disabled on the mail node',
@@ -1501,8 +1502,12 @@ const NODE_RESTORE_FAILURES = {
   domain_inactive: 'Password rejected: the mailbox domain is disabled on the mail node',
 };
 
-function nodeRestoreFailureDetail({ outcome, code }) {
+function nodeRestoreFailureDetail({ outcome, code, stage }) {
   if (NODE_RESTORE_FAILURES[outcome]) return NODE_RESTORE_FAILURES[outcome];
+  // The request may have reached the node: the stored pending password is sent again next time.
+  if (stage === 'set' && code === 'mail_node_unreachable') {
+    return 'Password rejected: the mail node did not answer the password change; the same password is sent again on the next attempt';
+  }
   if (code === 'mail_node_unreachable') return 'Password rejected: the mail node API is unreachable';
   if (code === 'mail_node_auth') return 'Password rejected: the mail node refused the API key';
   return 'Password rejected: the mail node API failed';
@@ -3154,6 +3159,12 @@ export class ImapManager {
     let result;
     try {
       result = await restoreNodeMailboxPassword(id);
+    } catch (err) {
+      // The database failed, possibly after the node took the new password. That password is kept as
+      // pending (restoreNodeMailboxPassword), so the next attempt sends it again and stores it.
+      console.error(`Restoring the mail node password of ${logAccount(account)} failed in the database: ${err?.code || err?.name || 'error'}`);
+      await this._recordAccountError(account, NODE_RESTORE_DB_FAILED);
+      return;
     } finally {
       nodeRestoreSlots.release(NODE_RESTORE_SLOT);
     }

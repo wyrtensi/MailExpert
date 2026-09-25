@@ -110,3 +110,5 @@ describe('GET /api/mail/thread marks the drafts it returns', () => {
     expect(query).toHaveBeenCalledTimes(3);
   });
 });
+
+// Which copies the thread keeps is decided by the SQL itself: see mail.thread.pglite.test.js.

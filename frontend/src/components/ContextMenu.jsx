@@ -1,6 +1,7 @@
 import { useState, useEffect, useRef } from 'react';
 import { useTranslation } from 'react-i18next';
 import { copyToClipboard } from '../utils/clipboard.js';
+import { messageDeepLink } from '../utils/deepLink.js';
 import { useStore, selectAccountFolders } from '../store/index.js';
 import { api } from '../utils/api.js';
 import { getContextMenuPolicy, resolveContextMenuMessage } from '../utils/contextMenuPolicy.js';
@@ -293,14 +294,13 @@ export default function ContextMenu({ x, y, message, onClose, onAction, defaultM
           action: () => { copyToClipboard(message.from_email || ''); onAction('copy'); },
         },
         {
-          // Durable permalink to this email: keyed on the stable Message-ID header (falls back to
-          // the volatile row UUID only when absent) so it survives the message moving folders /
-          // being re-synced. Resolved by /?m= on load — see MailApp deep-link handling (#270, #375).
+          // Durable permalink to this email in this mailbox (utils/deepLink.js). Resolved by /?m=
+          // on load — see MailApp deep-link handling (#270, #375).
           label: t('contextMenu.copyLink'),
           icon: <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.75"><path d="M10 13a5 5 0 0 0 7.54.54l3-3a5 5 0 0 0-7.07-7.07l-1.72 1.71"/><path d="M14 11a5 5 0 0 0-7.54-.54l-3 3a5 5 0 0 0 7.07 7.07l1.71-1.71"/></svg>,
           action: () => {
-            const ref = message.message_id || message.id;
-            if (ref) copyToClipboard(`${window.location.origin}/?m=${encodeURIComponent(ref)}`);
+            const link = messageDeepLink(window.location.origin, message);
+            if (link) copyToClipboard(link);
             onAction('copy');
           },
         },

@@ -258,6 +258,9 @@ router.get('/resolve-message', async (req, res) => {
   try {
     // Durable match on the stable Message-ID header. When the same email exists in more
     // than one folder (e.g. INBOX + Archive), prefer the INBOX copy, then the most recent.
+    // account_id, id make the pick deterministic: one email delivered to two mailboxes has an
+    // INBOX copy in each with the same Date, and a link without a mailbox (older links carry
+    // none) must not open, and mark read, a different mailbox's copy from one click to the next.
     let result = await query(`
       SELECT ${COLS}
       FROM messages m
@@ -265,7 +268,7 @@ router.get('/resolve-message', async (req, res) => {
       WHERE m.message_id = $1
         AND m.is_deleted = false
         AND ($2::uuid IS NULL OR m.account_id = $2)
-      ORDER BY (m.folder = 'INBOX') DESC, m.date DESC NULLS LAST
+      ORDER BY (m.folder = 'INBOX') DESC, m.date DESC NULLS LAST, m.account_id, m.id
       LIMIT 1
     `, [ref, accountId]);
     // Legacy links / push notifications carry the UUID primary key.
@@ -311,11 +314,21 @@ router.get('/thread/:threadId', async (req, res) => {
 
     // Show all non-deleted messages in the thread regardless of folder. This includes
     // Sent replies (which have distinct message_ids) alongside received messages.
-    // DISTINCT ON (m.message_id) deduplicates the same message appearing in multiple
-    // folders (e.g. Gmail's All Mail), preferring the INBOX copy.
+    // DISTINCT ON deduplicates the same message appearing in multiple folders (e.g. Gmail's
+    // All Mail), preferring the INBOX copy.
+    //
+    // The key is scoped to the account. One email delivered to two mailboxes is two separate
+    // mailbox items sharing a Message-ID. Every thread row names its mailbox, so a scoped call
+    // holds one account anyway; a call without accountId spans several, and a bare message_id
+    // key there silently dropped one mailbox's copy. Same-account duplicates (All Mail, the Sent
+    // twin) still collapse.
+    //
+    // A row without a Message-ID keys on its own id, as in services/conversation.js: DISTINCT ON
+    // treats NULLs as equal, so a bare message_id key collapsed every such letter of the thread
+    // into one, and a thread-wide action built from this list left the others behind.
     const result = await query(`
       WITH deduped AS (
-        SELECT DISTINCT ON (m.message_id)
+        SELECT DISTINCT ON (m.account_id, COALESCE(m.message_id, m.id::text))
                m.id, m.uid, m.folder, m.message_id, m.thread_id, m.subject,
                m.from_name, m.from_email, m.to_addresses, m.cc_addresses,
                m.reply_to, m.in_reply_to,
@@ -328,11 +341,14 @@ router.get('/thread/:threadId', async (req, res) => {
         WHERE m.is_deleted = false
           AND m.account_id = ANY($1)
           AND m.thread_key = $2
-        ORDER BY m.message_id,
+        ORDER BY m.account_id,
+                 COALESCE(m.message_id, m.id::text),
                  CASE WHEN m.folder = 'INBOX' THEN 0 ELSE 1 END,
                  m.date ASC
       )
-      SELECT * FROM deduped ORDER BY date ASC
+      -- account_id, id break the tie: two mailboxes' copies of one email carry the same Date,
+      -- so date alone would order them arbitrarily between requests.
+      SELECT * FROM deduped ORDER BY date ASC, account_id, id
     `, [accountIds, threadId]);
 
     // Mark the rows that live in a Drafts folder. A thread-wide delete sends every id it is

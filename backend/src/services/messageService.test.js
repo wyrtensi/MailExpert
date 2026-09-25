@@ -221,6 +221,20 @@ describe('listMessages — threaded grouping is per mailbox', () => {
     expect(query.mock.calls[3][0]).toContain('COUNT(DISTINCT (m.account_id, m.thread_key))');
   });
 
+  it('keeps the per-thread message rows keyed per mailbox, so both copies of one email survive', async () => {
+    // One email delivered to two mailboxes shares a Message-ID; each mailbox's thread row must
+    // keep its own copy, while copies inside one mailbox (All Mail, the Sent twin) collapse.
+    query
+      .mockResolvedValueOnce({ rows: [{ id: 'acc-1', include_in_unified_inbox: true }, { id: 'acc-2', include_in_unified_inbox: true }] })
+      .mockResolvedValueOnce({ rows: [{ n: 2 }] })
+      .mockResolvedValueOnce({ rows: [] })
+      .mockResolvedValueOnce({ rows: [{ total: 0 }] });
+
+    await listMessages({ userId: 'user-1', threaded: 'true' });
+
+    expect(query.mock.calls[2][0]).toContain('DISTINCT ON (m.account_id, m.thread_key, m.message_id)');
+  });
+
   // COUNT(DISTINCT (a, b)) builds a record per row, which cannot be hashed, so the planner sorts
   // the whole filtered set on every threaded list load. Scoped to one mailbox the account id is
   // constant and the pair buys nothing.

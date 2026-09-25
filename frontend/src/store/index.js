@@ -275,10 +275,11 @@ export const useStore = create((set, get) => ({
 
   // Messages
   messages: [],
-  // Dedupe by stable identity on every raw list load: the same email can arrive as two rows
-  // (same message delivered to two unified accounts, or a received copy + its Sent twin) and
-  // must render once, matching isSelectedRow's identity model (#378). appendMessages/restore
-  // dedupe on their own paths; this covers the initial/refresh/page loads that replace wholesale.
+  // Dedupe by delivery on every raw list load: one email can arrive as two rows (a received copy
+  // plus its Sent twin, or an INBOX copy plus its label-folder copy) and must render once,
+  // matching isSelectedRow's identity model (#378). Copies in two different accounts are separate
+  // mail and both render (#476). appendMessages/restore dedupe on their own paths; this covers the
+  // initial/refresh/page loads that replace wholesale.
   setMessages: (messages) => set({ messages: dedupeByIdentity(messages) }),
   appendMessages: (newMessages) => set(state => {
     // Merge by stable identity (Message-ID when present, else id): a same-id row is dropped so the
@@ -1252,16 +1253,32 @@ export function selectAccountFolders(s, accountId) {
   return s.folders[accountId] || NO_FOLDERS;
 }
 
-// __dl_ deep-link stash written by GTD sidebar selection. Returns null when nothing is selected
-// or the selected row has no message_id. Lets the GTD sidebar and message list highlight every
-// copy of the open message by identity (not just the exact DB row that was clicked). A plain selector, not
-// a state field, so it stays in sync with the list automatically; returns a primitive so a
-// useStore(selectSelectedMessageMid) subscription only re-renders when the value changes.
-export function selectSelectedMessageMid(s) {
+// The selected message's RFC message_id and account, read with parseSelectedIdentity. Lets the
+// GTD sidebar and message list highlight every copy of the open message by identity (not just
+// the exact DB row that was clicked, e.g. the __dl_ deep-link stash a GTD sidebar selection
+// writes), scoped to its account so that two accounts' copies of one email (separate rows since
+// #476) do not highlight together. Null when nothing is selected.
+//
+// A plain selector, not a state field, so it stays in sync with the list automatically. It runs
+// on every store update in every subscribed component, so it scans the pools ONCE and returns
+// both values as one primitive string: the subscription re-renders only when either changes.
+export function selectSelectedMessageIdentity(s) {
+  const msg = findSelectedMessage(s);
+  return msg ? JSON.stringify([msg.message_id ?? null, msg.account_id ?? null]) : null;
+}
+
+// { mid, accountId } from a selectSelectedMessageIdentity value; both null for no selection.
+export function parseSelectedIdentity(identity) {
+  if (!identity) return { mid: null, accountId: null };
+  const [mid, accountId] = JSON.parse(identity);
+  return { mid, accountId };
+}
+
+function findSelectedMessage(s) {
   const id = s.selectedMessageId;
   if (id == null) return null;
   const pool = s.searchQuery?.trim() ? s.searchResults : s.messages;
-  const msg = pool.find(m => m.id === id)
-    ?? Object.values(s.threadMessages).flat().find(m => m.id === id);
-  return msg?.message_id ?? null;
+  return pool.find(m => m.id === id)
+    ?? Object.values(s.threadMessages).flat().find(m => m.id === id)
+    ?? null;
 }

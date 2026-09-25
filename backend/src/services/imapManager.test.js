@@ -5650,4 +5650,48 @@ describe('every background login waits out a rejected password', () => {
       mgr.disconnectAccount(acct.id);
     });
   });
+
+  describe('a ladder climbs one step per window', () => {
+    // Logins that started before the window was armed are rejected after it: they must not push
+    // the ladder further. Three concurrent stores used to land it on its third step (2 h).
+    it('three concurrent rejected flag stores arm the status-only ladder once', async () => {
+      const acct = account();
+      const mgr = liveManager(acct);
+      const before = Date.now();
+      const stores = [7, 8, 9].map(uid => mgr.setFlag(acct, uid, 'Sent', '\\Seen', true).catch(e => e));
+      await Promise.all(stores);
+      const cd = mgr._statusAuthCooldown.get(acct.id);
+      expect(cd.failures).toBe(1);
+      expect(cd.until - before).toBeLessThan(2 * AUTH_FAILURE_COOLDOWN_MS);
+    });
+
+    it('the account-wide auth ladder counts one step per open window', () => {
+      const acct = account();
+      const mgr = ladderManager();
+      mgr._noteAuthFailure(acct);
+      mgr._noteAuthFailure(acct);
+      expect(mgr._connectCooldown.get(acct.id).authFailures).toBe(1);
+      mgr._connectCooldown.get(acct.id).until = 0; // the window ran out
+      mgr._noteAuthFailure(acct);
+      expect(mgr._connectCooldown.get(acct.id).authFailures).toBe(2);
+    });
+
+    it('a rejected password still promotes an open refusal window to the auth ladder', () => {
+      const acct = account();
+      const mgr = ladderManager();
+      mgr._noteConnectionRefusal(acct);
+      mgr._noteAuthFailure(acct);
+      const cd = mgr._connectCooldown.get(acct.id);
+      expect(cd.authArmed).toBe(true);
+      expect(cd.authFailures).toBe(1);
+    });
+
+    it('the secondary refusal ladder counts one step per open window', () => {
+      const acct = account();
+      const mgr = ladderManager();
+      mgr._noteSecondaryRefusal(acct);
+      mgr._noteSecondaryRefusal(acct);
+      expect(mgr._secondaryCooldown.get(acct.id).failures).toBe(1);
+    });
+  });
 });

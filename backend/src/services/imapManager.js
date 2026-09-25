@@ -2854,6 +2854,11 @@ export class ImapManager {
     // A late failure must not replace the non-expiring reconnect-required gate with a finite cooldown.
     const prev = this._connectCooldown.get(account.id);
     if (prev?.oauthReconnectRequired) return 0;
+    // One step per window: a rejection that lands while this ladder's window is still open (a
+    // concurrent login that started before it was armed) must not climb it again. A refusal
+    // window does not count: a rejected password still promotes it to the auth ladder.
+    const now = Date.now();
+    if (prev?.authArmed && now < prev.until) return prev.until - now;
     const failures = (prev?.failures || 0) + 1;
     const authFailures = (prev?.authFailures || 0) + 1;
     const ms = authCooldownMs(authFailures);
@@ -2900,7 +2905,11 @@ export class ImapManager {
   // own cooldown, so a refused background connection never delays the account's mail flow.
   // Returns the delay in ms.
   _noteSecondaryRefusal(account) {
-    const failures = (this._secondaryCooldown.get(account.id)?.failures || 0) + 1;
+    // One step per window, as on the auth ladders (see _noteAuthFailure).
+    const prev = this._secondaryCooldown.get(account.id);
+    const now = Date.now();
+    if (prev && now < prev.until) return prev.until - now;
+    const failures = (prev?.failures || 0) + 1;
     const ms = connectCooldownMs(failures);
     this._secondaryCooldown.set(account.id, { until: Date.now() + ms, failures });
     recordImapEvent(account.imap_host, 'secondary_refusal_cooldown');
@@ -3002,7 +3011,11 @@ export class ImapManager {
   // password stayed wrong: exactly what gets a server IP banned by fail2ban on mailcow-style
   // hosts. Returns the delay in ms.
   _noteStatusAuthFailure(account, what = 'Folder status') {
-    const failures = (this._statusAuthCooldown.get(account.id)?.failures || 0) + 1;
+    // One step per window, as on the auth ladders (see _noteAuthFailure).
+    const prev = this._statusAuthCooldown.get(account.id);
+    const now = Date.now();
+    if (prev && now < prev.until) return prev.until - now;
+    const failures = (prev?.failures || 0) + 1;
     const ms = authCooldownMs(failures);
     this._statusAuthCooldown.set(account.id, { until: Date.now() + ms, failures });
     console.warn(`${what} login rejected for ${logAccount(account)} while its persistent connection is up — background logins paused for ${Math.round(ms / 60000)}m (attempt #${failures}); sync continues on the persistent connection`);

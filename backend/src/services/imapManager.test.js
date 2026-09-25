@@ -4122,3 +4122,78 @@ describe('health check asserts that IDLE is running', () => {
     expect(warn.mock.calls.some(([msg]) => String(msg).includes('has not been idling'))).toBe(false);
   });
 });
+
+// ── reconcileDeletes must not trust a SEARCH result the server contradicts (upstream #472) ──
+//
+// On a Dovecot account upstream, deleting one letter of 15 logged "removing 15 server-deleted
+// message(s)": UID SEARCH ALL came back empty for a folder SELECT had just reported non-empty.
+// The Array.isArray guard let the empty array through. Drives the real reconcileDeletes
+// through the real pool with a fake ImapFlow; each test uses its own account id because the
+// pool is module-level and would otherwise hand back a previous test's client.
+describe('reconcileDeletes — SEARCH result vs mailbox.exists (upstream #472)', () => {
+  let seq = 0;
+  function arrange({ exists, searchResult, dbUids }) {
+    const account = { id: `acct-472-${++seq}`, user_id: 'u1', imap_host: 'imap.example.test', email_address: 'x@example.test' };
+    const mgr = new ImapManager(null);
+    clearInterval(mgr._healthCheckTimer);
+    clearInterval(mgr._snippetSchedulerTimer);
+    clearInterval(mgr._providerIdSchedulerTimer);
+    vi.spyOn(mgr, '_isMoveUidGuarded').mockReturnValue(false);
+    mgr.broadcast = vi.fn();
+    vi.spyOn(console, 'log').mockImplementation(() => {});
+    vi.spyOn(console, 'warn').mockImplementation(() => {});
+    ImapFlow.mockImplementation(function () {
+      const client = new EventEmitter();
+      client.usable = true;
+      client.connect = vi.fn(() => Promise.resolve());
+      client.logout = vi.fn(() => Promise.resolve());
+      client.close = vi.fn();
+      client.noop = vi.fn(() => Promise.resolve());
+      client.getMailboxLock = vi.fn(async (path) => {
+        client.mailbox = { path, exists };
+        return { release: vi.fn() };
+      });
+      client.search = vi.fn(async () => searchResult);
+      return client;
+    });
+    getConnectionPolicy.mockResolvedValue({ allowPrivateHosts: true, allowInsecureTls: true });
+    resolveForConnection.mockResolvedValue({ host: '127.0.0.1', addresses: ['127.0.0.1'], servername: null });
+    query.mockReset();
+    query.mockImplementation(async (sql) => {
+      if (sql.includes('SELECT DISTINCT m.folder')) return { rows: [{ folder: 'INBOX' }] };
+      if (sql.includes('SELECT uid FROM messages')) return { rows: dbUids.map(uid => ({ uid })) };
+      return { rows: [], rowCount: 0 };
+    });
+    return { mgr, account };
+  }
+  const deletes = () => query.mock.calls.filter(([sql]) => sql.includes('DELETE FROM messages'));
+  afterEach(() => { vi.restoreAllMocks(); ImapFlow.mockReset(); });
+
+  it('does not purge a folder when SEARCH returns nothing but the server says it is non-empty', async () => {
+    const { mgr, account } = arrange({ exists: 14, searchResult: [], dbUids: [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15] });
+    await mgr.reconcileDeletes(account);
+    expect(deletes()).toHaveLength(0);
+  });
+
+  it('does not purge when SEARCH returns fewer UIDs than the server reports', async () => {
+    const { mgr, account } = arrange({ exists: 14, searchResult: [1, 2, 3, 4, 5, 6, 7, 8, 9, 10], dbUids: [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15] });
+    await mgr.reconcileDeletes(account);
+    expect(deletes()).toHaveLength(0);
+  });
+
+  it('still removes the genuine orphan when SEARCH and the server agree', async () => {
+    const { mgr, account } = arrange({ exists: 14, searchResult: [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14], dbUids: [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15] });
+    await mgr.reconcileDeletes(account);
+    const del = deletes();
+    expect(del).toHaveLength(1);
+    expect(del[0][1][2]).toEqual([15]);
+  });
+
+  it('still empties a folder the server itself reports as empty', async () => {
+    const { mgr, account } = arrange({ exists: 0, searchResult: [], dbUids: [7, 8, 9] });
+    await mgr.reconcileDeletes(account);
+    const del = deletes();
+    expect(del).toHaveLength(1);
+    expect(del[0][1][2]).toEqual([7, 8, 9]);
+  });
+});

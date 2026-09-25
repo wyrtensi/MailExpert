@@ -6910,6 +6910,17 @@ export class ImapManager {
             console.warn(`Reconcile: no UID list for ${logAccount(account)}/${folder} (search returned ${serverUids}) — skipping folder`);
             continue;
           }
+          // An empty or short ARRAY passes the guard above, and trusted it marks every row it
+          // omits an orphan. Upstream #472 (Dovecot): deleting one letter of 15 emptied the
+          // folder locally, backfill restored it and the next reconcile emptied it again. The
+          // SEARCH asks for ALL, so its size must equal what SELECT just reported; when the two
+          // server statements disagree, neither is trusted for deletion. A folder the server
+          // reports as empty still empties: there exists and SEARCH agree.
+          const exists = client.mailbox?.exists;
+          if (Number.isFinite(exists) && serverUids.length !== exists) {
+            console.warn(`Reconcile: UID list for ${logAccount(account)}/${folder} has ${serverUids.length} entries but the server reports ${exists} messages: not trusted, skipping folder`);
+            continue;
+          }
           serverUidsByFolder.set(folder, new Set(serverUids));
         }
         // Background, behind the reader's clicks; one SEARCH per folder of the account can take

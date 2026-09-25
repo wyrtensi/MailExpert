@@ -293,4 +293,15 @@ describe('archiveInChunks', () => {
     assert.equal(result.busy, true);
     assert.equal(result.busyCode, 'mailbox_auth_rejected');
   });
+
+  it('says busy, not rejected password, when the busy chunks disagree', async () => {
+    const answers = [
+      { archived: ['a'], noArchiveFolder: [], busy: true, code: 'mailbox_auth_rejected' },
+      { archived: ['c'], noArchiveFolder: [], busy: true, code: 'mailbox_busy' },
+      { archived: ['e'], noArchiveFolder: [], busy: true, code: 'mailbox_auth_rejected' },
+    ];
+    const result = await threadedArchive.archiveInChunks(['a', 'b', 'c', 'd', 'e', 'f'], async () => answers.shift(), 2);
+    assert.equal(result.busy, true);
+    assert.equal(result.busyCode, 'mailbox_busy');
+  });
 });

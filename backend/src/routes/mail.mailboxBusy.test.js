@@ -52,6 +52,10 @@ const MSG = (id, folder, uid) => ({
   attachments: [{ part: '2', filename: 'minutes.pdf', size: 10, type: 'application/pdf' }],
 });
 const rows = { [INBOX_ID]: MSG(INBOX_ID, 'INBOX', 11), [TRASH_ID]: MSG(TRASH_ID, 'Trash', 22), [SENT_ID]: MSG(SENT_ID, 'Sent', 33) };
+// A letter in a second mailbox, for bulk requests that span two.
+const OTHER_ACCOUNT_ID = 'd4d4d4d4-4444-4444-8444-d4d4d4d4d4d4';
+const OTHER_ID = 'f6f6f6f6-6666-4666-8666-f6f6f6f6f6f6';
+rows[OTHER_ID] = { ...MSG(OTHER_ID, 'Projects', 44), account_id: OTHER_ACCOUNT_ID };
 const poolBusy = () => Object.assign(new Error('IMAP pool busy, please retry'), { poolExhausted: true });
 // A rejected password holds the mailbox's logins back and no pooled session is open: the pool
 // fails at once with providerRefusing instead of logging in (imapManager's loginHeldBack).
@@ -193,5 +197,36 @@ for (const [what, busy, code] of [
     await vi.waitFor(() => expect(imapManager.broadcast).toHaveBeenCalledWith(expect.objectContaining({ type: 'folder_emptied', ok: false })));
     const emptied = imapManager.broadcast.mock.calls.find(([e]) => e.type === 'folder_emptied')[0];
     expect(emptied.code).toBeUndefined();
+  });
+});
+
+describe('a bulk request over two mailboxes names the reason both share', () => {
+  // One code speaks for the whole request: mailbox_auth_rejected only when every busy mailbox had
+  // its password rejected. Mixed with a mailbox that is merely busy, the answer is mailbox_busy.
+  const failBySource = (bySource) => imapManager.bulkMoveMessages.mockImplementation(async (_account, uids, src) => {
+    if (bySource[src]) throw bySource[src]();
+    return { uidMap: new Map(uids.map(u => [Number(u), Number(u) + 900])), succeeded: uids, failed: [] };
+  });
+
+  it('says busy when one mailbox is busy and the other rejects the password', async () => {
+    failBySource({ INBOX: poolBusy, Projects: authHeld });
+    const res = await call('POST', '/messages/bulk-move', { ids: [INBOX_ID, OTHER_ID], folder: 'Archive' });
+    expect(res.status).toBe(503);
+    expect(res.body.code).toBe('mailbox_busy');
+  });
+
+  it('says the password was rejected when that holds back every busy mailbox', async () => {
+    failBySource({ INBOX: authHeld, Projects: authHeld });
+    const res = await call('POST', '/messages/bulk-move', { ids: [INBOX_ID, OTHER_ID], folder: 'Archive' });
+    expect(res.status).toBe(503);
+    expect(res.body.code).toBe('mailbox_auth_rejected');
+  });
+
+  it('keeps the rejected-password code on a partial success where only that mailbox failed', async () => {
+    failBySource({ Projects: authHeld });
+    const res = await call('POST', '/messages/bulk-move', { ids: [INBOX_ID, OTHER_ID], folder: 'Archive' });
+    expect(res.status).toBe(200);
+    expect(res.body.moved).toEqual([INBOX_ID]);
+    expect(res.body.code).toBe('mailbox_auth_rejected');
   });
 });

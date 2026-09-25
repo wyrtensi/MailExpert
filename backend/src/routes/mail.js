@@ -471,9 +471,14 @@ export { MAILBOX_BUSY_CODE };
 // that no longer exist. So the routes answer 503 mailbox_busy only when NO group succeeded, and
 // otherwise their usual partial-success shape (the ids that went through) plus busy: true.
 // Once an account is busy its remaining groups are skipped: each would wait out the same pool.
+//
+// One code speaks for every busy mailbox of the request, so mailbox_auth_rejected is used only
+// when each of them was held back by a rejected password. Mixed with a mailbox that was merely
+// busy, the answer is mailbox_busy: retrying helps that one, and the rejected one shows its own
+// error on the account and answers mailbox_auth_rejected on the retry.
 function bulkBusyTracker() {
-  const busyAccounts = new Set();
-  let authRejected = false; // any group held back because the password was rejected
+  const busyAccounts = new Map(); // accountId -> held back by a rejected password
+  const reason = () => ({ authRejected: busyAccounts.size > 0 && [...busyAccounts.values()].every(Boolean) });
   return {
     skip: accountId => busyAccounts.has(accountId),
     // fn's result, or null when the pool was busy for this group.
@@ -482,16 +487,15 @@ function bulkBusyTracker() {
         return await fn();
       } catch (err) {
         if (!isMailboxBusyError(err)) throw err;
-        busyAccounts.add(accountId);
-        if (err.authRejected) authRejected = true;
+        busyAccounts.set(accountId, !!err.authRejected);
         return null;
       }
     },
     get busy() { return busyAccounts.size > 0; },
     // What sendMailboxBusy needs to pick the code when no group went through.
-    get reason() { return { authRejected }; },
+    get reason() { return reason(); },
     // Spread into a partial-success response.
-    flag() { return busyAccounts.size ? { busy: true, code: mailboxBusyBody({ authRejected }).code } : {}; },
+    flag() { return busyAccounts.size ? { busy: true, code: mailboxBusyBody(reason()).code } : {}; },
   };
 }
 

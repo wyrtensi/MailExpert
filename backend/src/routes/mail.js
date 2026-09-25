@@ -311,11 +311,17 @@ router.get('/thread/:threadId', async (req, res) => {
 
     // Show all non-deleted messages in the thread regardless of folder. This includes
     // Sent replies (which have distinct message_ids) alongside received messages.
-    // DISTINCT ON (m.message_id) deduplicates the same message appearing in multiple
-    // folders (e.g. Gmail's All Mail), preferring the INBOX copy.
+    // DISTINCT ON deduplicates the same message appearing in multiple folders (e.g. Gmail's
+    // All Mail), preferring the INBOX copy.
+    //
+    // The key is scoped to the account. One email delivered to two mailboxes is two separate
+    // mailbox items sharing a Message-ID. Every thread row names its mailbox, so a scoped call
+    // holds one account anyway; a call without accountId spans several, and a bare message_id
+    // key there silently dropped one mailbox's copy. Same-account duplicates (All Mail, the Sent
+    // twin) still collapse.
     const result = await query(`
       WITH deduped AS (
-        SELECT DISTINCT ON (m.message_id)
+        SELECT DISTINCT ON (m.account_id, m.message_id)
                m.id, m.uid, m.folder, m.message_id, m.thread_id, m.subject,
                m.from_name, m.from_email, m.to_addresses, m.cc_addresses,
                m.reply_to, m.in_reply_to,
@@ -328,11 +334,14 @@ router.get('/thread/:threadId', async (req, res) => {
         WHERE m.is_deleted = false
           AND m.account_id = ANY($1)
           AND m.thread_key = $2
-        ORDER BY m.message_id,
+        ORDER BY m.account_id,
+                 m.message_id,
                  CASE WHEN m.folder = 'INBOX' THEN 0 ELSE 1 END,
                  m.date ASC
       )
-      SELECT * FROM deduped ORDER BY date ASC
+      -- account_id, id break the tie: two mailboxes' copies of one email carry the same Date,
+      -- so date alone would order them arbitrarily between requests.
+      SELECT * FROM deduped ORDER BY date ASC, account_id, id
     `, [accountIds, threadId]);
 
     // Mark the rows that live in a Drafts folder. A thread-wide delete sends every id it is

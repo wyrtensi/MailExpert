@@ -14,8 +14,8 @@ import { parseReferences } from './threading/threadId.js';
 // conversation.total counts distinct letters, not rows: the same Gmail letter can live in
 // several folders as separate rows (e.g. INBOX and [Gmail]/All Mail), exactly like the thread
 // list (services/messageService.js's thread_totals, COUNT(DISTINCT message_id)) and
-// GET /thread/:threadId (DISTINCT ON (m.message_id)) already dedupe it. A row with no
-// message_id can't be matched to any duplicate, so it counts as its own letter.
+// GET /thread/:threadId (DISTINCT ON (m.account_id, m.message_id)) already dedupe it. A row
+// with no message_id can't be matched to any duplicate, so it counts as its own letter.
 // conversation.folders stays row-based — it answers "where do the copies live", not "how many
 // letters".
 export async function threadingDiagnostics(messageId) {

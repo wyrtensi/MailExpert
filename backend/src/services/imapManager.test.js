@@ -4235,13 +4235,47 @@ describe('setFlag routing over the persistent session', () => {
     if (persistent) mgr.connections.set(account.id, persistent);
     return { mgr, account };
   }
+  // The persistent session's mailbox lock, modelled on ImapFlow's: one holder at a time, FIFO
+  // waiters, and acquireTimeout splices a waiter out of the queue and rejects it. `release`
+  // counts every release; `lockQueue` exposes the waiters.
   const fakePersistent = (over = {}) => {
     const release = vi.fn();
+    const lockQueue = [];
+    let held = false;
+    const grantNext = () => {
+      if (held || lockQueue.length === 0) return;
+      const next = lockQueue.shift();
+      clearTimeout(next.timer);
+      held = true;
+      let done = false;
+      next.resolve({ release: () => {
+        if (done) return;
+        done = true;
+        held = false;
+        release();
+        grantNext();
+      } });
+    };
     return Object.assign({
       usable: true,
       release,
+      lockQueue,
       close: vi.fn(),
-      getMailboxLock: vi.fn(async () => ({ release })),
+      getMailboxLock: vi.fn((path, opts = {}) => new Promise((resolve, reject) => {
+        const entry = { resolve, timer: null };
+        lockQueue.push(entry);
+        if (Number(opts.acquireTimeout) > 0) {
+          entry.timer = setTimeout(() => {
+            const i = lockQueue.indexOf(entry);
+            if (i === -1) return;
+            lockQueue.splice(i, 1);
+            const err = new Error('Timed out waiting for mailbox lock');
+            err.code = 'LockTimeout';
+            reject(err);
+          }, Number(opts.acquireTimeout));
+        }
+        grantNext();
+      })),
       messageFlagsAdd: vi.fn(async () => true),
       messageFlagsRemove: vi.fn(async () => true),
     }, over);
@@ -4383,7 +4417,8 @@ describe('setFlag routing over the persistent session', () => {
 
   it('applies two rapid opposite stores on one message in order', async () => {
     // A (\Seen=true) is slow on the persistent session, B (\Seen=false) is issued right after.
-    // Unordered, B could land first and A would re-read a message the user just unread.
+    // Unordered, B could land first and A would re-read a message the user just unread. On one
+    // session the FIFO lock orders them too; the persistent-then-pool case is the next test.
     const order = [];
     let finishA;
     const persistent = fakePersistent({
@@ -4430,20 +4465,28 @@ describe('setFlag routing over the persistent session', () => {
     expect(order).toEqual(['A-late', 'B']);
   });
 
-  it('does not make stores on different messages wait for each other', async () => {
+  it('the chain does not hold stores on different messages behind each other', async () => {
+    // The session's mailbox lock still serializes the two STOREs on the wire; what this pins is
+    // that the chain lets uid 43 reach that lock while uid 42 is in flight, instead of queueing
+    // it behind 42 as an account-wide chain would.
+    const order = [];
     let finishA;
     const persistent = fakePersistent({
       messageFlagsAdd: vi.fn((uid) => (uid === '42'
-        ? new Promise(res => { finishA = () => res(true); })
-        : Promise.resolve(true))),
+        ? new Promise(res => { finishA = () => { order.push('42'); res(true); }; })
+        : (order.push(uid), Promise.resolve(true)))),
     });
     const { mgr, account } = arrange({ persistent });
 
     const a = mgr.setFlag(account, 42, 'INBOX', '\\Seen', true);
-    await mgr.setFlag(account, 43, 'INBOX', '\\Seen', true); // completes while 42 is pending
-    expect(persistent.messageFlagsAdd).toHaveBeenCalledWith('43', ['\\Seen'], { uid: true, silent: true });
+    const b = mgr.setFlag(account, 43, 'INBOX', '\\Seen', true);
+    await new Promise(r => setTimeout(r, 20));
+    expect(persistent.getMailboxLock).toHaveBeenCalledTimes(2); // 43 is waiting on the lock
+    expect(persistent.lockQueue).toHaveLength(1);                // not on the chain
     finishA();
-    await a;
+    await a; await b;
+    expect(order).toEqual(['42', '43']);                 // the lock, not the chain, ordered them
+    expect(ImapFlow).not.toHaveBeenCalled();
   });
 
   it('runs the next store on a message after the previous one failed', async () => {

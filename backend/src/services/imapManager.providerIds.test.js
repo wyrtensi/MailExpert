@@ -95,6 +95,15 @@ describe('startProviderIdBackfill', () => {
     expect(runProviderIdBackfill).not.toHaveBeenCalled();
   });
 
+  it('does not start while a background backoff holds the mailbox back', async () => {
+    // The entry gate, ahead of the run's own shouldContinue: no plan query, no running state.
+    const mgr = newManager();
+    mgr._secondaryCooldown.set(gmail.id, { until: Date.now() + 60000, failures: 1 });
+    await mgr.startProviderIdBackfill(gmail);
+    expect(runProviderIdBackfill).not.toHaveBeenCalled();
+    expect(mgr.providerIdBackfillRunning.has(gmail.id)).toBe(false);
+  });
+
   it('marks the mailbox clean after a complete run and skips it next time', async () => {
     const mgr = newManager();
     runProviderIdBackfill.mockResolvedValue({ outcome: 'done', processed: 3, total: 3 });

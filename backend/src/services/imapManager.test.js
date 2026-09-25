@@ -5440,6 +5440,18 @@ describe('every background login waits out a rejected password', () => {
       expect(mgr._statusAuthCooldown.has(acct.id)).toBe(true);
       expect(mgr.snippetBackoff.has('mail.example.com')).toBe(false);
       expect(mgr._bgConnSem.activeCount('mail.example.com')).toBe(0);
+
+    });
+
+    it('neither arms nor clears the host backoff another mailbox left behind', async () => {
+      // An expired host backoff still carries its failure count, which the next refusal on the host
+      // climbs from. One mailbox's wrong password must not reset it for the whole node.
+      const acct = account();
+      const mgr = indexerManager(acct);
+      mgr.snippetBackoff.set('mail.example.com', { until: Date.now() - 1, failures: 3 });
+      await mgr.startSnippetIndexer(acct);
+      expect(clients).toHaveLength(1);
+      expect(mgr.snippetBackoff.get('mail.example.com')?.failures).toBe(3);
     });
   });
 

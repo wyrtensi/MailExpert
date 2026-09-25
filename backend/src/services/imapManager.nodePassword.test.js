@@ -24,6 +24,7 @@ vi.mock('./connectionPolicy.js', () => ({ getConnectionPolicy: vi.fn() }));
 vi.mock('./mailNode/mailcow.js', () => ({
   getMailNodeConfig: vi.fn(),
   getMailbox: vi.fn(),
+  listDomains: vi.fn(),
   setMailboxPassword: vi.fn(),
 }));
 vi.mock('./auditLog.js', () => ({ recordAudit: vi.fn() }));
@@ -33,7 +34,7 @@ import { ImapFlow } from 'imapflow';
 import { query } from './db.js';
 import { resolveForConnection } from './hostValidation.js';
 import { getConnectionPolicy } from './connectionPolicy.js';
-import { getMailbox, getMailNodeConfig, setMailboxPassword } from './mailNode/mailcow.js';
+import { getMailbox, getMailNodeConfig, listDomains, setMailboxPassword } from './mailNode/mailcow.js';
 import { recordAudit } from './auditLog.js';
 import { ImapManager, MAIL_NODE_ACTOR, acquirePooledClient, evictPool, releasePooledClient } from './imapManager.js';
 
@@ -59,6 +60,12 @@ const dovecotAuthFailure = () => Object.assign(new Error('Command failed'), {
   authenticationFailed: true,
 });
 const DOVECOT_TEXT = '[AUTHENTICATIONFAILED] Authentication failed.';
+
+// What getMailbox reports for an active mailbox nothing else keeps from signing in.
+const activeMailbox = (email, extra = {}) => ({
+  email, active: true, quotaMb: 5120, usedBytes: 0,
+  state: 1, authsource: 'mailcow', imapAccess: true, forcePwUpdate: false, domain: 'example.com', ...extra,
+});
 
 const nodeError = (code) => Object.assign(new Error('node'), { name: 'MailNodeError', code });
 
@@ -113,7 +120,8 @@ beforeEach(() => {
   getConnectionPolicy.mockResolvedValue({ allowPrivateHosts: true, allowInsecureTls: true });
   resolveForConnection.mockResolvedValue({ host: '127.0.0.1', addresses: ['127.0.0.1'], servername: null });
   getMailNodeConfig.mockResolvedValue(CFG);
-  getMailbox.mockImplementation(async (cfg, email) => ({ email, active: true, quotaMb: 5120, usedBytes: 0 }));
+  getMailbox.mockImplementation(async (cfg, email) => activeMailbox(email));
+  listDomains.mockResolvedValue([{ domain: 'example.com', active: true, maxMailboxes: 500, mailboxes: 10 }]);
   setMailboxPassword.mockImplementation(async () => { nodePassword = NEW_PASSWORD; return NEW_PASSWORD; });
   query.mockReset();
   query.mockImplementation(async (sql, params = []) => {
@@ -214,6 +222,36 @@ describe('a mail node mailbox whose password is rejected', () => {
     // The error the rejection recorded came first; the reason why it stays is what remains.
     expect(syncErrorWrites(acct.id)).toEqual([DOVECOT_TEXT, 'Password rejected: the mailbox is disabled on the mail node']);
     evictPool(acct.id);
+  });
+
+  it('does not restore when the node refuses the login for a reason other than the password', async () => {
+    const cases = [
+      { mailbox: { active: false, state: 2 }, detail: 'Password rejected: login is disabled for the mailbox on the mail node (receive only)' },
+      { mailbox: { authsource: 'keycloak' }, detail: 'Password rejected: the mailbox signs in through an external identity provider on the mail node' },
+      { mailbox: { imapAccess: false }, detail: 'Password rejected: IMAP access is turned off for the mailbox on the mail node' },
+      { mailbox: { forcePwUpdate: true }, detail: 'Password rejected: the mail node asks for a password change at the next login' },
+      { domains: [{ domain: 'example.com', active: false }], detail: 'Password rejected: the mailbox domain is disabled on the mail node' },
+      { domains: [{ domain: 'other.example', active: true }], detail: 'Password rejected: the mailbox domain is missing on the mail node' },
+      { domainsError: nodeError('mail_node_unreachable'), detail: 'Password rejected: the mail node API is unreachable' },
+    ];
+    for (const { mailbox, domains, domainsError, detail } of cases) {
+      const acct = stored(nodeAccount());
+      if (mailbox) getMailbox.mockResolvedValueOnce(activeMailbox(acct.email_address, mailbox));
+      if (domains) listDomains.mockResolvedValueOnce(domains);
+      if (domainsError) listDomains.mockRejectedValueOnce(domainsError);
+      const mgr = newManager();
+      const reconnect = vi.spyOn(mgr, 'connectAccount');
+
+      await rejectPoolLogin(acct);
+      await vi.waitFor(() => expect(syncErrorWrites(acct.id)).toContain(detail));
+
+      expect(setMailboxPassword).not.toHaveBeenCalled();
+      expect(passwordWrites()).toHaveLength(0);
+      expect(mgr._authLoginBlocked(acct.id)).toBeTruthy();
+      expect(reconnect).not.toHaveBeenCalled();
+      expect(recordAudit).not.toHaveBeenCalled();
+      evictPool(acct.id);
+    }
   });
 
   it('does not restore a mailbox missing on the node', async () => {
@@ -364,7 +402,7 @@ describe('a mail node mailbox whose password is rejected', () => {
     await settle();
     expect(getMailbox).toHaveBeenCalledTimes(1);
 
-    answer({ email: acct.email_address, active: true, quotaMb: 5120, usedBytes: 0 });
+    answer(activeMailbox(acct.email_address));
     await vi.waitFor(() => expect(reconnect).toHaveBeenCalledTimes(1));
     expect(setMailboxPassword).toHaveBeenCalledTimes(1);
   });

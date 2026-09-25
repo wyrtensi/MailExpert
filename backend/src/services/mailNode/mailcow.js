@@ -170,10 +170,26 @@ function mailboxInfo(m) {
   };
 }
 
+// One mailbox with what decides whether it may sign in, besides its password:
+// - state: mailcow's active, 1 (active), 0 (disabled) or 2 (receives mail, login disallowed);
+// - authsource: 'mailcow', or an external identity provider (then mailcow never changes the password);
+// - imapAccess and forcePwUpdate: from its attributes (mailcow sends them as "1" / "0");
+// - domain: the mailbox's domain, whose own active flag the mailbox listing does not carry.
+// A field an older mailcow does not send reads as the permissive default.
 export async function getMailbox(cfg, email) {
   const data = await request(cfg, 'GET', `get/mailbox/${encodeURIComponent(email)}`);
   const item = Array.isArray(data) ? data[0] : data;
-  return item && item.username ? mailboxInfo(item) : null;
+  if (!item || !item.username) return null;
+  const info = mailboxInfo(item);
+  const attributes = item.attributes && typeof item.attributes === 'object' ? item.attributes : {};
+  return {
+    ...info,
+    state: Number(item.active_int ?? item.active),
+    authsource: String(item.authsource ?? 'mailcow').toLowerCase(),
+    imapAccess: attributes.imap_access === undefined ? true : String(attributes.imap_access) === '1',
+    forcePwUpdate: String(attributes.force_pw_update ?? '0') === '1',
+    domain: String(item.domain ?? info.email.split('@')[1] ?? '').toLowerCase(),
+  };
 }
 
 export async function listMailboxes(cfg) {

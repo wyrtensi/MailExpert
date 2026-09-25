@@ -1485,9 +1485,19 @@ export const MAIL_NODE_ACTOR = 'MailExpert';
 const NODE_RESTORE_CONNECT_WAIT_MS = 35000;
 
 // The account error for a rejected node password that was not restored (restoreNodeMailboxPassword).
+const NODE_RESTORE_FAILURES = {
+  disabled: 'Password rejected: the mailbox is disabled on the mail node',
+  missing: 'Password rejected: the mailbox is missing on the mail node',
+  receive_only: 'Password rejected: login is disabled for the mailbox on the mail node (receive only)',
+  foreign_authsource: 'Password rejected: the mailbox signs in through an external identity provider on the mail node',
+  no_imap_access: 'Password rejected: IMAP access is turned off for the mailbox on the mail node',
+  force_pw_update: 'Password rejected: the mail node asks for a password change at the next login',
+  domain_missing: 'Password rejected: the mailbox domain is missing on the mail node',
+  domain_inactive: 'Password rejected: the mailbox domain is disabled on the mail node',
+};
+
 function nodeRestoreFailureDetail({ outcome, code }) {
-  if (outcome === 'disabled') return 'Password rejected: the mailbox is disabled on the mail node';
-  if (outcome === 'missing') return 'Password rejected: the mailbox is missing on the mail node';
+  if (NODE_RESTORE_FAILURES[outcome]) return NODE_RESTORE_FAILURES[outcome];
   if (code === 'mail_node_unreachable') return 'Password rejected: the mail node API is unreachable';
   if (code === 'mail_node_auth') return 'Password rejected: the mail node refused the API key';
   return 'Password rejected: the mail node API failed';

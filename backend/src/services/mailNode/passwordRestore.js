@@ -1,7 +1,7 @@
 import { query } from '../db.js';
 import { encrypt } from '../encryption.js';
 import { isOAuthAccount } from '../oauth/constants.js';
-import { getMailbox, getMailNodeConfig, setMailboxPassword } from './mailcow.js';
+import { getMailbox, getMailNodeConfig, listDomains, setMailboxPassword } from './mailcow.js';
 
 // The node rejected the password of one of its mailboxes. MailExpert owns that password (nobody
 // can change it in the panel, mail_node_connection_locked), so it sets a new one through the
@@ -14,6 +14,8 @@ import { getMailbox, getMailNodeConfig, setMailboxPassword } from './mailcow.js'
 // - { outcome: 'restored', account }: the node took the new password and the row holds it
 //   (account is the updated row);
 // - { outcome: 'disabled' | 'missing' }: the mailbox is inactive or gone on the node;
+// - { outcome: 'receive_only' | 'foreign_authsource' | 'no_imap_access' | 'force_pw_update' |
+//   'domain_missing' | 'domain_inactive' }: the node refuses the login for another reason;
 // - { outcome: 'api_failed', code }: the node API failed (MailNodeError code, or the error name);
 // - { outcome: 'skipped' }: not a mail node mailbox (anymore), disabled in MailExpert, or no mail
 //   node configured.
@@ -35,7 +37,22 @@ export async function restoreNodeMailboxPassword(accountId) {
     return { outcome: 'api_failed', code: apiErrorCode(err) };
   }
   if (!mailbox) return { outcome: 'missing' };
+  // The node refuses the login for a reason a new password does not change: setting one would only
+  // cost another rejected login from the panel (and, for an external authsource, mailcow would report
+  // success without changing anything).
+  if (mailbox.state === 2) return { outcome: 'receive_only' };
   if (!mailbox.active) return { outcome: 'disabled' };
+  if (mailbox.authsource !== 'mailcow') return { outcome: 'foreign_authsource' };
+  if (!mailbox.imapAccess) return { outcome: 'no_imap_access' };
+  if (mailbox.forcePwUpdate) return { outcome: 'force_pw_update' };
+  let domain;
+  try {
+    domain = (await listDomains(cfg)).find((d) => d.domain === mailbox.domain);
+  } catch (err) {
+    return { outcome: 'api_failed', code: apiErrorCode(err) };
+  }
+  if (!domain) return { outcome: 'domain_missing' };
+  if (!domain.active) return { outcome: 'domain_inactive' };
 
   let password;
   try {

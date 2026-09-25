@@ -16,6 +16,7 @@ import {
   addDomain,
   disableMailbox,
   generateMailboxPassword,
+  getMailbox,
   getDiskStatus,
   getMailNodeConfig,
   listDomains,
@@ -184,6 +185,24 @@ describe('API requests', () => {
       { items: ['info@example.com'], attr: { active: 0 } },
       { items: ['info@example.com'], attr: { quota: 10240 } },
     ]);
+  });
+
+  it('reads what besides the password decides whether a mailbox may sign in', async () => {
+    safeFetch.mockResolvedValueOnce(answer({
+      username: 'Info@example.com', domain: 'Example.com', active: '2', active_int: 2, authsource: 'keycloak',
+      quota: 5368709120, quota_used: 0, attributes: { imap_access: '0', force_pw_update: '1' },
+    }));
+    expect(await getMailbox(CFG, 'info@example.com')).toEqual({
+      email: 'info@example.com', active: false, quotaMb: 5120, usedBytes: 0,
+      state: 2, authsource: 'keycloak', imapAccess: false, forcePwUpdate: true, domain: 'example.com',
+    });
+    // An older mailcow without these fields: the permissive defaults.
+    safeFetch.mockResolvedValueOnce(answer({ username: 'info@example.com', active: '1', quota: 0 }));
+    expect(await getMailbox(CFG, 'info@example.com')).toMatchObject({
+      active: true, state: 1, authsource: 'mailcow', imapAccess: true, forcePwUpdate: false, domain: 'example.com',
+    });
+    safeFetch.mockResolvedValueOnce(answer({}));
+    expect(await getMailbox(CFG, 'gone@example.com')).toBeNull();
   });
 
   it('sets a new password on a mailbox and changes nothing else', async () => {

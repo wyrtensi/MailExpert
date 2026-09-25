@@ -5438,6 +5438,88 @@ describe('every background login waits out a rejected password', () => {
     expect(mgr._bgConnSem.activeCount('mail.example.com')).toBe(0);
   });
 
+  describe('flag stores on the pool', () => {
+    // A store the persistent session cannot take (any folder but INBOX) goes to the pool.
+    const withStore = () => {
+      ImapFlow.mockImplementation(function () {
+        const client = Object.assign(new EventEmitter(), {
+          usable: true,
+          connect: vi.fn(() => (connectError ? Promise.reject(connectError()) : Promise.resolve())),
+          logout: vi.fn().mockResolvedValue(),
+          getMailboxLock: vi.fn().mockResolvedValue({ release: vi.fn() }),
+          messageFlagsAdd: vi.fn().mockResolvedValue(true),
+        });
+        client.close = vi.fn(() => { client.usable = false; client.emit('close'); });
+        clients.push(client);
+        return client;
+      });
+    };
+
+    it('does not log in while a rejected password holds logins back, and fails typed', async () => {
+      const acct = account();
+      const mgr = liveManager(acct);
+      withStore();
+      rejectedPassword(mgr, acct);
+      await expect(mgr.setFlag(acct, 7, 'Sent', '\\Seen', true)).rejects.toMatchObject({ providerRefusing: true });
+      expect(clients).toHaveLength(0);
+    });
+
+    it('does not log in while the account-wide auth ladder is armed either', async () => {
+      const acct = account();
+      const mgr = ladderManager();
+      withStore();
+      mgr._noteAuthFailure(acct);
+      mgr._connectCooldown.get(acct.id).until = Date.now() + 60000;
+      await expect(mgr.setFlag(acct, 7, 'Sent', '\\Seen', true)).rejects.toMatchObject({ providerRefusing: true });
+      expect(clients).toHaveLength(0);
+    });
+
+    it('still stores over a pooled session that is already open', async () => {
+      const acct = account();
+      const mgr = liveManager(acct);
+      connectError = null;
+      withStore();
+      releasePooledClient(acct, await acquirePooledClient(acct));
+      rejectedPassword(mgr, acct);
+      await mgr.setFlag(acct, 7, 'Sent', '\\Seen', true);
+      expect(clients).toHaveLength(1);
+      expect(clients[0].messageFlagsAdd).toHaveBeenCalledOnce();
+      evictPool(acct.id);
+    });
+
+    it('still logs in for a user store while the server only refuses extra connections', async () => {
+      const acct = account();
+      const mgr = liveManager(acct);
+      connectError = null;
+      withStore();
+      mgr._secondaryCooldown.set(acct.id, { until: Date.now() + 60000, failures: 1 });
+      await mgr.setFlag(acct, 7, 'Sent', '\\Seen', true);
+      expect(clients).toHaveLength(1);
+      evictPool(acct.id);
+    });
+
+    it('the flag-push reconciler skips the account without spending an attempt', async () => {
+      const acct = account();
+      const mgr = liveManager(acct);
+      query.mockImplementation(async (sql) => {
+        if (sql.startsWith('SELECT * FROM email_accounts')) return { rows: [acct] };
+        if (sql.startsWith('SELECT uid, folder FROM messages')) return { rows: [{ uid: 7, folder: 'Sent' }] };
+        return { rows: [], rowCount: 1 };
+      });
+      mgr._enqueueFlagPush(acct.id, 'm-1', '\\Seen', true);
+      rejectedPassword(mgr, acct);
+      const setFlag = vi.spyOn(mgr, 'setFlag').mockResolvedValue();
+      await mgr._reconcileFlagPushes();
+      expect(setFlag).not.toHaveBeenCalled();
+      expect(mgr._pendingFlagPush.get(acct.id).get('m-1:\\Seen').attempts).toBe(0);
+      // Once the password works again (Reconnect, settings save), the queued store goes out.
+      mgr.clearConnectCooldown(acct.id);
+      await mgr._reconcileFlagPushes();
+      expect(setFlag).toHaveBeenCalledWith(acct, 7, 'Sent', '\\Seen', true);
+      expect(mgr._pendingFlagPush.has(acct.id)).toBe(false);
+    });
+  });
+
   describe('background work on the pool', () => {
     it('does not grow the pool while a rejected password holds background logins back', async () => {
       const acct = account();

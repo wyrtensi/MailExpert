@@ -363,7 +363,9 @@ export async function applyBlockList(messages, account, imapManager) {
     }
     try {
       const strategy = getDeleteStrategy(msg.folder, trashFolder, allTrashPaths);
-      if (strategy.action === 'move') {
+      if (strategy.action === 'move' && destinationHeldBack(imapManager, account, 'block list move', msg, null)) {
+        remaining.push(msg);
+      } else if (strategy.action === 'move') {
         imapManager._guardMoveUid(account.id, msg.folder, msg.uid);
         try {
           const result = await imapManager.bulkMoveMessages(account, [msg.uid], msg.folder, strategy.destination);
@@ -399,6 +401,17 @@ export async function applyBlockList(messages, account, imapManager) {
     }
   }
   return remaining;
+}
+
+// True while the server is known to reject this mailbox's password (the account-wide or the
+// status-only auth ladder in imapManager). A move through the pool would then open a login bound to
+// be rejected, one more strike toward fail2ban on the mail node, whose ban cuts off every mailbox.
+// Rules run once per new message and a move has no retry path, so the letter stays where it is and
+// the skip is logged (ids only: rule actions must not leak message content into the log).
+function destinationHeldBack(imapManager, account, what, msg, ruleId) {
+  if (!imapManager._authLoginBlocked?.(account.id)) return false;
+  console.warn(`inboxRules: ${what} skipped for msg ${msg.id}${ruleId ? ` (rule ${ruleId})` : ''}: the server rejected this mailbox's password on a recent login, so no new login is opened; the letter stays in ${msg.folder} and the action is not retried`);
+  return true;
 }
 
 async function applyAction(action, msg, account, imapManager, ruleId, resolverCache = {}) {
@@ -455,6 +468,7 @@ async function applyAction(action, msg, account, imapManager, ruleId, resolverCa
     case 'move': {
       const destFolder = action.value;
       if (!destFolder) return false;
+      if (destinationHeldBack(imapManager, account, 'move', msg, ruleId)) return false;
       // Save source coordinates before the move so the finally block can unguard the
       // correct slot even after we update msg.folder/uid for subsequent rules.
       const srcFolder = msg.folder;
@@ -514,6 +528,7 @@ async function applyAction(action, msg, account, imapManager, ruleId, resolverCa
       }
       const archiveFolder = resolverCache.archiveFolder;
       if (!archiveFolder) return false;
+      if (destinationHeldBack(imapManager, account, 'archive', msg, ruleId)) return false;
       const srcFolder = msg.folder;
       const srcUid = msg.uid;
       imapManager._guardMoveUid(account.id, srcFolder, srcUid);
@@ -556,6 +571,7 @@ async function applyAction(action, msg, account, imapManager, ruleId, resolverCa
       const strategy = getDeleteStrategy(msg.folder, trashFolder, allTrashPaths);
       if (strategy.action === 'no_trash') return false;
       if (strategy.action === 'move') {
+        if (destinationHeldBack(imapManager, account, 'delete', msg, ruleId)) return false;
         imapManager._guardMoveUid(account.id, msg.folder, msg.uid);
         try {
           const deleteResult = await imapManager.bulkMoveMessages(account, [msg.uid], msg.folder, strategy.destination);

@@ -2349,6 +2349,11 @@ export class ImapManager {
       // ops queued (markers already re-bumped) and wait for reconnect. Not counted as an
       // attempt, so an outage doesn't burn the give-up budget.
       if (!this.connections.has(accountId)) continue;
+      // Same while the account's backoffs hold logins back. A queued store that the persistent
+      // session cannot take (any folder but INBOX, or INBOX while a sync holds it) goes to the
+      // pool, and with a rejected password every pool attempt was one more rejected login: up to
+      // 30 ops a cycle, two logins each, every 15 s. Not counted as an attempt either.
+      if (this._secondaryLoginBlocked(accountId)) continue;
 
       const acct = await query('SELECT * FROM email_accounts WHERE id = $1', [accountId]);
       const account = acct.rows[0];
@@ -2849,7 +2854,8 @@ export class ImapManager {
     const failures = (prev?.failures || 0) + 1;
     const authFailures = (prev?.authFailures || 0) + 1;
     const ms = authCooldownMs(authFailures);
-    this._connectCooldown.set(account.id, { until: Date.now() + ms, failures, authFailures });
+    // authArmed: this window was set by a rejected password, not a refusal (see _authLoginBlocked).
+    this._connectCooldown.set(account.id, { until: Date.now() + ms, failures, authFailures, authArmed: true });
     console.warn(`Authentication rejected for ${logAccount(account)} — not retrying for ${Math.round(ms / 60000)}m (attempt #${authFailures}) unless its credentials change or it is reconnected manually`);
     return ms;
   }
@@ -2929,6 +2935,18 @@ export class ImapManager {
   // folder status client, which checks the two parts itself to report them apart.
   _secondaryLoginBlocked(accountId) {
     return this._secondaryConnectBlocked(accountId) || this._secondaryAuthBlocked(accountId);
+  }
+
+  // The window that holds logins back because the password was rejected, or null: the account-wide
+  // auth ladder (armed by the account's own login) or the status-only one (armed by a background
+  // login while the persistent connection is up). Narrower than _secondaryLoginBlocked on purpose:
+  // user-driven IMAP writes (a flag store, a rule's move) may still try a login while the server
+  // merely refuses extra connections, but a login with a password the server just rejected only
+  // adds a strike toward fail2ban, whose ban cuts off every mailbox on the node.
+  _authLoginBlocked(accountId) {
+    const cd = this._connectCooldown.get(accountId);
+    if (cd?.authArmed && Date.now() < cd.until) return cd;
+    return this._secondaryAuthBlocked(accountId);
   }
 
   // Pool options for background work on the pool (flag sync, reconcile, spam poll, GTD folder
@@ -6519,6 +6537,11 @@ export class ImapManager {
     // retry is safe. Surfacing the final failure keeps callers such as bulk-read from
     // reporting success while the DB read/flag state silently drifts from the server —
     // which a later flag-sync would then revert, leaving the message unexpectedly unread.
+    //
+    // While the password is known to be rejected, the pool may serve this from a session that is
+    // already open but must not log in (noNewLogin): the store fails typed instead, and callers
+    // put it on the flag-push queue as for any failed store.
+    const noNewLogin = !!this._authLoginBlocked(account.id);
     let lastErr = null;
     for (let attempt = 1; attempt <= 2; attempt++) {
       try {
@@ -6535,10 +6558,11 @@ export class ImapManager {
           } finally {
             lock.release();
           }
-        });
+        }, { noNewLogin });
         return; // applied
       } catch (err) {
         lastErr = err;
+        if (err?.providerRefusing) break; // a second attempt would be held back the same way
         if (attempt < 2) await new Promise(r => setTimeout(r, 400));
       }
     }

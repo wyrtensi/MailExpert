@@ -1890,6 +1890,7 @@ export class ImapManager {
     this.syncStartedAt = new Map();   // accountId -> ms when the current sync tick began (hung-sync detection)
     this.syncThrottleSkips = new Map(); // accountId -> remaining ticks to skip when throttled
     this.connectingAccounts = new Set(); // prevent concurrent connectAccount calls for same account
+    this._flagStoreChains = new Map(); // `${accountId}\n${folder}\n${uid}` -> tail promise; orders setFlag per message
     this._startupQueued = new Set(); // accountId — waiting for its turn in connectAllEnabled's queue
     this.syncIntervalMs = DEFAULT_SYNC_INTERVAL_SEC * 1000; // install-wide message sync cadence, see applySyncSettings
     this.folderSyncIntervalMs = DEFAULT_FOLDER_SYNC_INTERVAL_MS; // install-wide folder-structure cadence, 0 = never
@@ -6098,7 +6099,10 @@ export class ImapManager {
   //    pool: our own mark-read would buy a pooled session after all.
   //  - A failure here never tears the persistent client down. A failed STORE is not evidence
   //    the session is dead; the sync tick and the health check own that decision.
-  async _setFlagOverPersistent(account, uid, folder, flag, value) {
+  //
+  // flight.store receives the STORE once it is sent, so setFlag can hold the next store on
+  // this message until a STORE we stopped waiting for has settled.
+  async _setFlagOverPersistent(account, uid, folder, flag, value, flight = {}) {
     if (folder !== 'INBOX') return false;
     if (this.syncingAccounts.has(account.id) || this.connectingAccounts.has(account.id)) return false;
     const client = this.connections.get(account.id);
@@ -6111,9 +6115,10 @@ export class ImapManager {
       if (expired) { lock.release(); throw new Error('persistent flag store timed out'); }
       try {
         const opts = { uid: true, silent: true };
-        const applied = value
-          ? await client.messageFlagsAdd(String(uid), [flag], opts)
-          : await client.messageFlagsRemove(String(uid), [flag], opts);
+        flight.store = value
+          ? client.messageFlagsAdd(String(uid), [flag], opts)
+          : client.messageFlagsRemove(String(uid), [flag], opts);
+        const applied = await flight.store;
         if (applied === false) throw new Error(`server did not apply ${flag}=${value} for uid=${uid} on the persistent session`);
       } finally {
         lock.release();
@@ -6133,9 +6138,35 @@ export class ImapManager {
     }
   }
 
+  // Flag stores are ordered per message. Without that, a delayed STORE can land after a newer
+  // one and invert the flag: call A's persistent STORE gets its lock just before the deadline
+  // and lingers on the wire while A's pool fallback stores too, then call B stores the opposite
+  // value and A's late STORE lands last, silently re-reading a message the user just unread
+  // (a quick toggle, or _reconcileFlagPushes replaying an older op). Routing some stores over
+  // the persistent session and others over the pool makes that reordering likely.
+  //
+  // So a store on a message waits for the previous store on the same message, including a
+  // persistent STORE the previous call sent and then stopped waiting for. Upstream serializes
+  // per account instead; per message is enough, since stores on different messages commute,
+  // and it keeps bulk read's concurrency and keeps one slow store (a pool fallback can take
+  // minutes) from holding up every other mark-read in a mailbox the whole team works in.
   async setFlag(account, uid, folder, flag, value) {
+    const key = `${account.id}\n${folder}\n${uid}`;
+    const prev = this._flagStoreChains.get(key) || Promise.resolve();
+    const flight = { store: null };
+    const run = prev.then(() => this._setFlagInner(account, uid, folder, flag, value, flight));
+    // Never rejects, so the next store on this message runs whatever this one did.
+    const tail = run.catch(() => {}).then(() => flight.store).catch(() => {});
+    this._flagStoreChains.set(key, tail);
+    tail.then(() => {
+      if (this._flagStoreChains.get(key) === tail) this._flagStoreChains.delete(key);
+    });
+    return run;
+  }
+
+  async _setFlagInner(account, uid, folder, flag, value, flight) {
     console.log(`setFlag: uid=${uid} folder=${folder} flag=${flag} value=${value}`);
-    if (await this._setFlagOverPersistent(account, uid, folder, flag, value)) return;
+    if (await this._setFlagOverPersistent(account, uid, folder, flag, value, flight)) return;
     // Up to 2 attempts. ImapFlow returns false when the server did NOT apply the flag —
     // typically a stale/half-open pooled connection whose SELECT view is missing the UID.
     // Throwing on false makes withFreshClient evict that client from the pool, so the

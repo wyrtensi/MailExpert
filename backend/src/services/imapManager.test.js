@@ -4378,4 +4378,90 @@ describe('setFlag routing over the persistent session', () => {
     expect(release).toHaveBeenCalledOnce();              // late lock released
     expect(persistent.messageFlagsAdd).not.toHaveBeenCalled(); // and nothing stored twice
   });
+
+  // ── ordering (upstream 24215bef, serialize flag stores) ──
+
+  it('applies two rapid opposite stores on one message in order', async () => {
+    // A (\Seen=true) is slow on the persistent session, B (\Seen=false) is issued right after.
+    // Unordered, B could land first and A would re-read a message the user just unread.
+    const order = [];
+    let finishA;
+    const persistent = fakePersistent({
+      messageFlagsAdd: vi.fn(() => new Promise(res => { finishA = () => { order.push('A'); res(true); }; })),
+      messageFlagsRemove: vi.fn(async () => { order.push('B'); return true; }),
+    });
+    const { mgr, account } = arrange({ persistent });
+
+    const a = mgr.setFlag(account, 42, 'INBOX', '\\Seen', true);
+    const b = mgr.setFlag(account, 42, 'INBOX', '\\Seen', false);
+    await new Promise(r => setTimeout(r, 50));
+    expect(persistent.messageFlagsRemove).not.toHaveBeenCalled(); // B waits for A
+    finishA();
+    await a; await b;
+    expect(order).toEqual(['A', 'B']);                   // the newest value lands last
+    await new Promise(r => setTimeout(r, 0));            // the chain entry is dropped once its tail settles
+    expect(mgr._flagStoreChains.size).toBe(0);           // nothing left behind
+  });
+
+  it('holds the next store until a persistent STORE the previous call gave up on has settled', async () => {
+    // A's STORE is sent on the persistent session and then hangs past the deadline; A falls
+    // back to the pool and returns. B must not overtake A's STORE, which may still land.
+    vi.useFakeTimers();
+    const order = [];
+    let landA;
+    const persistent = fakePersistent({
+      messageFlagsAdd: vi.fn(() => new Promise(res => { landA = () => { order.push('A-late'); res(true); }; })),
+      messageFlagsRemove: vi.fn(async () => { order.push('B'); return true; }),
+    });
+    const { mgr, account } = arrange({ persistent });
+
+    const a = mgr.setFlag(account, 42, 'INBOX', '\\Seen', true);
+    await vi.advanceTimersByTimeAsync(PERSISTENT_FLAG_STORE_TIMEOUT_MS + 100);
+    await a;                                             // A done through the pool
+    expect(poolClients[0].messageFlagsAdd).toHaveBeenCalled();
+
+    const b = mgr.setFlag(account, 42, 'INBOX', '\\Seen', false);
+    await vi.advanceTimersByTimeAsync(100);
+    expect(persistent.messageFlagsRemove).not.toHaveBeenCalled(); // A's STORE is still out
+
+    landA();
+    await vi.advanceTimersByTimeAsync(1);
+    await b;
+    expect(order).toEqual(['A-late', 'B']);
+  });
+
+  it('does not make stores on different messages wait for each other', async () => {
+    let finishA;
+    const persistent = fakePersistent({
+      messageFlagsAdd: vi.fn((uid) => (uid === '42'
+        ? new Promise(res => { finishA = () => res(true); })
+        : Promise.resolve(true))),
+    });
+    const { mgr, account } = arrange({ persistent });
+
+    const a = mgr.setFlag(account, 42, 'INBOX', '\\Seen', true);
+    await mgr.setFlag(account, 43, 'INBOX', '\\Seen', true); // completes while 42 is pending
+    expect(persistent.messageFlagsAdd).toHaveBeenCalledWith('43', ['\\Seen'], { uid: true, silent: true });
+    finishA();
+    await a;
+  });
+
+  it('runs the next store on a message after the previous one failed', async () => {
+    const persistent = fakePersistent({ messageFlagsAdd: vi.fn(async () => false) });
+    const { mgr, account } = arrange({ persistent });
+    ImapFlow.mockImplementation(function () {
+      return Object.assign(new EventEmitter(), {
+        connect: vi.fn(() => Promise.resolve()),
+        close: vi.fn(),
+        getMailboxLock: vi.fn(async () => ({ release: vi.fn() })),
+        messageFlagsAdd: vi.fn(async () => false),
+      });
+    });
+
+    const a = mgr.setFlag(account, 42, 'INBOX', '\\Seen', true);
+    const b = mgr.setFlag(account, 42, 'INBOX', '\\Seen', false);
+    await expect(a).rejects.toThrow(/did not apply/);
+    await expect(b).resolves.toBeUndefined();            // removal succeeded on the persistent session
+    expect(persistent.messageFlagsRemove).toHaveBeenCalledOnce();
+  });
 });

@@ -10,6 +10,7 @@ import { installResumeRefresh } from '../utils/resumeRefresh.js';
 import { shortcutBus } from '../utils/shortcutBus.js';
 import { oauthMessageToSearchParams, parseOAuthResult } from '../utils/googleOAuth.js';
 import { setPending, pendingMarkReadMap, completedMarkReadMap } from '../utils/pendingReads.js';
+import { readDeepLink } from '../utils/deepLink.js';
 import { buildKeyMap, buildModKeyMap, getEffectiveShortcuts, getGroupedActions, parseModKey, modLabel, SPECIAL_KEYS, SPECIAL_KEY_LABELS } from '../utils/defaultShortcuts.js';
 import Sidebar from './Sidebar.jsx';
 import MessageList from './MessageList.jsx';
@@ -307,11 +308,13 @@ export default function MailApp() {
   // Open a specific message by id (fetch → cache → select). Shared by the on-load
   // deep-link path and the service-worker notification-tap path so both behave
   // identically.
-  const openDeepLinkMessage = useCallback((id) => {
+  const openDeepLinkMessage = useCallback((id, accountId = null) => {
     // resolveMessage matches the stable Message-ID header first, then the UUID — so a link
     // still opens after the email was moved to another folder (#270). Legacy/notification
-    // links carry the UUID and resolve via the fallback.
-    return api.resolveMessage(id)
+    // links carry the UUID and resolve via the fallback. accountId, when the link names its
+    // mailbox, opens that mailbox's copy: the same email delivered to two mailboxes shares the
+    // Message-ID, and the copy opened here is marked read (utils/deepLink.js).
+    return api.resolveMessage(id, accountId)
       .then(msg => {
         // threadMessages is not cleared by setMessages(), so storing the message
         // here keeps it available to MessagePane even after the message list loads
@@ -352,8 +355,8 @@ export default function MailApp() {
     takePendingDeepLink().then((url) => {
       if (!url) return;
       try {
-        const id = new URL(url, window.location.origin).searchParams.get('m');
-        if (id) openDeepLinkMessage(id);
+        const deepLink = readDeepLink(new URL(url, window.location.origin).searchParams);
+        if (deepLink) openDeepLinkMessage(deepLink.ref, deepLink.accountId);
       } catch { /* ignore a malformed persisted deep-link */ }
     });
   }, [openDeepLinkMessage]);
@@ -362,11 +365,14 @@ export default function MailApp() {
   // stored id, plus any target the SW persisted for a notification tap.
   useEffect(() => {
     const params = new URLSearchParams(window.location.search);
-    const deepLinkId = params.get('m') || sessionStorage.getItem('mailexpert_deep_link_id');
-    if (deepLinkId) {
+    const storedId = sessionStorage.getItem('mailexpert_deep_link_id');
+    const deepLink = readDeepLink(params)
+      ?? (storedId ? { ref: storedId, accountId: sessionStorage.getItem('mailexpert_deep_link_account') } : null);
+    if (deepLink) {
       sessionStorage.removeItem('mailexpert_deep_link_id');
+      sessionStorage.removeItem('mailexpert_deep_link_account');
       history.replaceState(null, '', window.location.pathname);
-      openDeepLinkMessage(deepLinkId);
+      openDeepLinkMessage(deepLink.ref, deepLink.accountId);
     }
     consumePendingDeepLink();
   }, [openDeepLinkMessage, consumePendingDeepLink]);

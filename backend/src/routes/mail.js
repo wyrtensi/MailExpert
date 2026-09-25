@@ -258,6 +258,9 @@ router.get('/resolve-message', async (req, res) => {
   try {
     // Durable match on the stable Message-ID header. When the same email exists in more
     // than one folder (e.g. INBOX + Archive), prefer the INBOX copy, then the most recent.
+    // account_id, id make the pick deterministic: one email delivered to two mailboxes has an
+    // INBOX copy in each with the same Date, and a link without a mailbox (older links carry
+    // none) must not open, and mark read, a different mailbox's copy from one click to the next.
     let result = await query(`
       SELECT ${COLS}
       FROM messages m
@@ -265,7 +268,7 @@ router.get('/resolve-message', async (req, res) => {
       WHERE m.message_id = $1
         AND m.is_deleted = false
         AND ($2::uuid IS NULL OR m.account_id = $2)
-      ORDER BY (m.folder = 'INBOX') DESC, m.date DESC NULLS LAST
+      ORDER BY (m.folder = 'INBOX') DESC, m.date DESC NULLS LAST, m.account_id, m.id
       LIMIT 1
     `, [ref, accountId]);
     // Legacy links / push notifications carry the UUID primary key.

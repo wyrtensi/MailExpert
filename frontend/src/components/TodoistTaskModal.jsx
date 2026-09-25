@@ -2,6 +2,7 @@ import { useState, useEffect } from 'react';
 import { useTranslation } from 'react-i18next';
 import { useStore } from '../store/index.js';
 import { api } from '../utils/api.js';
+import { messageDeepLink } from '../utils/deepLink.js';
 
 export default function TodoistTaskModal({ message, onClose }) {
   const { t } = useTranslation();
@@ -49,11 +50,10 @@ export default function TodoistTaskModal({ message, onClose }) {
     setCreating(true);
     setError('');
     try {
-      // Key the deep link on the stable Message-ID header so it survives the email being
-      // moved to another folder (the row's UUID is regenerated on move/resync). Fall back to
-      // the UUID for messages with no Message-ID. Both resolve via /resolve-message (#270).
-      const linkRef = message?.message_id || message?.id;
-      const mailexpertLink = linkRef ? `[View in MailExpert](${window.location.origin}/?m=${encodeURIComponent(linkRef)})` : '';
+      // A durable link to this email in this mailbox (utils/deepLink.js), resolved via
+      // /resolve-message (#270).
+      const link = messageDeepLink(window.location.origin, message);
+      const mailexpertLink = link ? `[View in MailExpert](${link})` : '';
       const fullDescription = [description.trim(), mailexpertLink].filter(Boolean).join('\n\n');
       const task = await api.todoist.createTask({
         content: title.trim(),

@@ -11,6 +11,7 @@ import { isGoogleAuthMode } from './utils/authMode.js';
 import { isDemoMode } from './demo/mode.js';
 import { demoRole } from './utils/demoRole.js';
 import { needsLanguageChoice } from './utils/language.js';
+import { readDeepLink } from './utils/deepLink.js';
 import MailApp from './components/MailApp.jsx';
 import LockScreen from './components/LockScreen.jsx';
 
@@ -112,8 +113,12 @@ export default function App() {
       })
       .catch(() => {
         const params = new URLSearchParams(window.location.search);
-        const m = params.get('m');
-        if (m) sessionStorage.setItem('mailexpert_deep_link_id', m);
+        const deepLink = readDeepLink(params);
+        if (deepLink) {
+          sessionStorage.setItem('mailexpert_deep_link_id', deepLink.ref);
+          if (deepLink.accountId) sessionStorage.setItem('mailexpert_deep_link_account', deepLink.accountId);
+          else sessionStorage.removeItem('mailexpert_deep_link_account');
+        }
         const resetToken = params.get('reset_token');
         if (resetToken) sessionStorage.setItem('mailexpert_reset_token', resetToken);
         setUser(null);

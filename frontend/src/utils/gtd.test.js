@@ -812,6 +812,25 @@ describe('dedupeByIdentity: independent deliveries to different accounts (#476)'
     assert.equal(dedupeByIdentity(list).length, 1);
   });
 
+  it('collapses two same-folder copies of one account even when another account comes first', () => {
+    // Compared only with the first held row, A2 met B's copy, was judged independent and was
+    // pushed without ever meeting A1, so account A rendered twice. Every order must give one
+    // row per account.
+    const b = { id: 'b', message_id: '<m1>', folder: 'INBOX', account_id: 'B', is_read: true };
+    const a1 = { id: 'a1', message_id: '<m1>', folder: 'INBOX', account_id: 'A', is_read: true };
+    const a2 = { id: 'a2', message_id: '<m1>', folder: 'INBOX', account_id: 'A', is_read: true };
+    assert.deepEqual(dedupeByIdentity([b, a1, a2]).map(m => m.id), ['b', 'a1']);
+    assert.deepEqual(dedupeByIdentity([a1, a2, b]).map(m => m.id), ['a1', 'b']);
+    assert.deepEqual(dedupeByIdentity([a2, b, a1]).map(m => m.id), ['a2', 'b']);
+  });
+
+  it('ranks a later same-account copy against its own account, leaving the other one alone', () => {
+    const b = { id: 'b', message_id: '<m1>', folder: 'INBOX', account_id: 'B', is_read: true };
+    const a1 = { id: 'a1', message_id: '<m1>', folder: 'INBOX', account_id: 'A', is_read: true };
+    const a2 = { id: 'a2', message_id: '<m1>', folder: 'INBOX', account_id: 'A', is_read: false };
+    assert.deepEqual(dedupeByIdentity([b, a1, a2]).map(m => m.id), ['b', 'a2']);
+  });
+
   it('collapses when an account id is missing, rather than guessing they are independent', () => {
     const list = [
       { id: 'a', message_id: '<m1>', folder: 'INBOX' },

@@ -630,26 +630,31 @@ export function duplicateRank(m) {
 }
 
 export function dedupeByIdentity(list) {
-  const idxByKey = new Map(); // identity -> index in result
+  const idxByKey = new Map(); // identity -> every index in result holding it
   const result = [];
   for (const m of list || []) {
     if (!m) continue;
     const key = messageIdentity(m);
-    if (!idxByKey.has(key)) {
-      idxByKey.set(key, result.length);
+    const held = idxByKey.get(key);
+    if (!held) {
+      idxByKey.set(key, [result.length]);
       result.push(m);
-    } else {
-      const i = idxByKey.get(key);
-      // Independent deliveries are separate mail and both stay. idxByKey keeps pointing at the
-      // first copy, so a later Sent twin still ranks against a real INBOX row rather than
-      // against whichever copy happened to be appended last.
-      if (areIndependentDeliveries(result[i], m)) {
-        result.push(m);
-        continue;
-      }
-      // Strict improvement only, so an exact tie keeps the earlier row and order stays stable.
-      if (duplicateRank(m) < duplicateRank(result[i])) result[i] = m;
+      continue;
     }
+    // Rank against a held row that is another view of this delivery. Comparing with the first
+    // held row alone let a row through whenever another account's copy came first: with
+    // [B, A1, A2], A2 is independent of B and never met A1, so account A rendered twice. A row
+    // is its own delivery only when EVERY held row is independent of it. Rows are pushed only on
+    // that condition, so no two held rows are views of one delivery, and the non-independent
+    // held row, when there is one, is the one this row collapses into.
+    const i = held.find(j => !areIndependentDeliveries(result[j], m));
+    if (i === undefined) {
+      held.push(result.length);
+      result.push(m);
+      continue;
+    }
+    // Strict improvement only, so an exact tie keeps the earlier row and order stays stable.
+    if (duplicateRank(m) < duplicateRank(result[i])) result[i] = m;
   }
   return result;
 }

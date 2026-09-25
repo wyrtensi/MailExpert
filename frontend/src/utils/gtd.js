@@ -665,12 +665,23 @@ export function dedupeByIdentity(list) {
 //
 // Presence is judged per account. Since #476 the list can hold one row per account for a single
 // Message-ID, and a bare Message-ID key made Undo a no-op: archive one account's copy, press
-// Undo, and the other account's copy answered "already present". A row with no account keys on
-// the Message-ID alone, as before.
+// Undo, and the other account's copy answered "already present". A missing account on either
+// side matches any account, as in isSelectedRow: a row of unknown provenance is present when
+// any copy of its Message-ID is listed, as before.
 export function missingByIdentity(existing, incoming) {
-  const key = m => `${messageIdentity(m)}\u0000${m.account_id ?? ''}`;
-  const present = new Set(existing.map(key));
-  return (incoming || []).filter(m => m && !present.has(key(m)));
+  const accountsByKey = new Map(); // identity -> accounts listing it ('' for unknown)
+  for (const m of existing) {
+    if (!m) continue;
+    const key = messageIdentity(m);
+    if (!accountsByKey.has(key)) accountsByKey.set(key, new Set());
+    accountsByKey.get(key).add(m.account_id || '');
+  }
+  return (incoming || []).filter(m => {
+    if (!m) return false;
+    const accounts = accountsByKey.get(messageIdentity(m));
+    if (!accounts) return true;
+    return !(!m.account_id || accounts.has('') || accounts.has(m.account_id));
+  });
 }
 
 // Choose which message of a thread a deep-link should open, given the thread's rows and

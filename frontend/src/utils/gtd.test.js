@@ -972,6 +972,15 @@ describe('missingByIdentity', () => {
     const incoming = [{ id: 'old', message_id: '<m1>', account_id: 'work' }];
     assert.deepEqual(missingByIdentity(existing, incoming), []);
   });
+
+  it('treats a missing account on either side as matching any account, as isSelectedRow does', () => {
+    // A row of unknown provenance cannot be told apart from a listed copy, so it counts as
+    // present rather than being restored next to it as a duplicate.
+    const listed = [{ id: 'new', message_id: '<m1>', folder: 'INBOX', account_id: 'work' }];
+    const unknown = [{ id: 'old', message_id: '<m1>', folder: 'INBOX' }];
+    assert.deepEqual(missingByIdentity(listed, unknown), []);
+    assert.deepEqual(missingByIdentity(unknown, listed), []);
+  });
 });
 
 describe('openDeepLinkMessage — stale-id recovery', () => {

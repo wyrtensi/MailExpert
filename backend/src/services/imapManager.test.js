@@ -5438,6 +5438,37 @@ describe('every background login waits out a rejected password', () => {
     expect(mgr._bgConnSem.activeCount('mail.example.com')).toBe(0);
   });
 
+  describe('an OAuth mailbox', () => {
+    // Gmail over OAuth: connectImapClient already refreshed the token and retried once. A
+    // leftover rejection is routine there, and fail2ban does not guard Gmail.
+    const oauthAccount = () => ({ ...account(), imap_host: 'imap.gmail.com', oauth_provider: 'google', oauth_access_token: 'enc' });
+
+    it('puts a rejected background login on the short secondary ladder, not the 30 min one', async () => {
+      const acct = oauthAccount();
+      const mgr = liveManager(acct);
+      query.mockImplementation(async (sql) => ({ rows: sql.startsWith('SELECT * FROM email_accounts') ? [acct] : [], rowCount: 1 }));
+      const before = Date.now();
+      await expect(mgr._withCountClient(acct, async () => {})).rejects.toThrow();
+      expect(ensureFreshOAuthAccount.mock.calls.some(([, opts]) => opts?.force)).toBe(true);
+      const cd = mgr._secondaryCooldown.get(acct.id);
+      expect(cd.failures).toBe(1);
+      expect(cd.until - before).toBeLessThan(AUTH_FAILURE_COOLDOWN_MS);
+      expect(mgr._statusAuthCooldown.has(acct.id)).toBe(false);
+      expect(mgr._connectCooldown.has(acct.id)).toBe(false);
+      // Transient: not painted red.
+      expect(query.mock.calls.some(([sql]) => sql.startsWith('UPDATE email_accounts SET sync_error = $1'))).toBe(false);
+    });
+
+    it('does the same when no persistent connection is up', async () => {
+      const acct = oauthAccount();
+      const mgr = ladderManager();
+      query.mockImplementation(async (sql) => ({ rows: sql.startsWith('SELECT * FROM email_accounts') ? [acct] : [], rowCount: 1 }));
+      await expect(mgr._withCountClient(acct, async () => {})).rejects.toThrow();
+      expect(mgr._secondaryCooldown.get(acct.id).failures).toBe(1);
+      expect(mgr._connectCooldown.has(acct.id)).toBe(false);
+    });
+  });
+
   describe('flag stores on the pool', () => {
     // A store the persistent session cannot take (any folder but INBOX) goes to the pool.
     const withStore = () => {

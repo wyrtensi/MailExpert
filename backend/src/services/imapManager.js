@@ -2968,7 +2968,21 @@ export class ImapManager {
   // ladder, as connectAccount would arm. Either way every secondary login path honors the result
   // (_secondaryLoginBlocked), which is what keeps a wrong password from being retried often enough
   // to trip fail2ban on the mail node.
+  //
+  // OAuth mailboxes (Gmail) take the short secondary refusal ladder instead. connectImapClient has
+  // already refreshed the token and retried the login once before a rejection reaches here, and a
+  // single leftover AUTHENTICATIONFAILED after a token refresh is routine at Gmail. The long ladder
+  // exists for fail2ban on our Dovecot node, which does not guard Gmail; on an OAuth mailbox it only
+  // froze every background job, prefetch and uncached-message open of a healthy mailbox for 30
+  // minutes to 6 hours. A grant that is really gone fails its token refresh instead, which
+  // _handleOAuthRefreshFailure turns into oauth_reconnect_required, and the account's own login
+  // still arms the account-wide ladder if the rejection persists.
   async _noteSecondaryAuthFailure(account, err, what) {
+    if (isOAuthAccount(account)) {
+      console.warn(`${what} login rejected for ${logAccount(account)} after a token refresh; OAuth mailbox, so treated as transient`);
+      this._noteSecondaryRefusal(account);
+      return;
+    }
     if (this.connections.has(account.id)) {
       this._noteStatusAuthFailure(account, what);
       await this._recordAccountError(account, extractImapError(err));

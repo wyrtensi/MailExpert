@@ -126,7 +126,8 @@ beforeEach(() => {
   query.mockReset();
   query.mockImplementation(async (sql, params = []) => {
     if (sql.startsWith('SELECT id, email_address, imap_host, mail_node') || sql.startsWith('SELECT * FROM email_accounts WHERE id = $1')) {
-      const row = rows.get(params[0]);
+      const found = rows.get(params[0]);
+      const row = found && (!sql.includes('enabled = true') || found.enabled) ? found : null;
       return { rows: row ? [row] : [], rowCount: row ? 1 : 0 };
     }
     if (sql.startsWith('UPDATE email_accounts SET auth_pass')) {
@@ -251,6 +252,36 @@ describe('a mail node mailbox whose password is rejected', () => {
       expect(reconnect).not.toHaveBeenCalled();
       expect(recordAudit).not.toHaveBeenCalled();
       evictPool(acct.id);
+    }
+  });
+
+  it('stores the password but does not connect a mailbox disabled or deleted in MailExpert while the restore ran', async () => {
+    for (const change of ['disable', 'delete']) {
+      const acct = stored(nodeAccount());
+      const mgr = newManager();
+      setMailboxPassword.mockImplementationOnce(async () => {
+        // The user acts while the node API call is in flight.
+        if (change === 'disable') rows.set(acct.id, { ...rows.get(acct.id), enabled: false });
+        nodePassword = NEW_PASSWORD;
+        return NEW_PASSWORD;
+      });
+      if (change === 'delete') {
+        // Deleted after the password was stored, while the restore waits to reconnect.
+        mgr.connectingAccounts.add(acct.id);
+        setTimeout(() => { rows.delete(acct.id); mgr.connectingAccounts.delete(acct.id); }, 150);
+      }
+      const reconnect = vi.spyOn(mgr, 'connectAccount');
+
+      mgr._noteAuthFailure(acct);
+      await vi.waitFor(() => expect(recordAudit).toHaveBeenCalledTimes(1));
+      await new Promise(resolve => setTimeout(resolve, 400));
+      await settle();
+
+      expect(passwordWrites()).toHaveLength(1); // the node has the new password: it is stored
+      expect(reconnect).not.toHaveBeenCalled();
+      expect(mgr.connections.has(acct.id)).toBe(false);
+      recordAudit.mockClear();
+      query.mockClear();
     }
   });
 

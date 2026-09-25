@@ -3177,7 +3177,14 @@ export class ImapManager {
     while (this.connectingAccounts.has(id) && Date.now() < waitUntil) {
       await new Promise(resolve => setTimeout(resolve, 100));
     }
-    await this.connectAccount(result.account);
+    // Read again: a mailbox disabled or deleted in MailExpert while the restore ran must stay down
+    // (the new password is stored all the same, the node already has it).
+    const { rows } = await query(
+      "SELECT * FROM email_accounts WHERE id = $1 AND enabled = true AND protocol = 'imap'",
+      [id],
+    );
+    if (!rows.length) return;
+    await this.connectAccount(rows[0]);
   }
 
   // Arm the backoff for SECONDARY logins (any but the persistent one: the folder status client,

@@ -17,7 +17,7 @@ vi.mock('../utils/redact.js', () => ({ redactEmail: vi.fn() }));
 vi.mock('./hostValidation.js', () => ({ resolveForConnection: vi.fn(), createPinnedLookup: vi.fn() }));
 vi.mock('./connectionPolicy.js', () => ({ getConnectionPolicy: vi.fn() }));
 
-import { ImapManager, MIN_SYNC_INTERVAL_MS, AUTO_IDLE_DELAY_MS, countMissingInboxCopies, fetchBackfillBatch, providerProfile, makeClientCfg, relocateExemptGuard, insertCopiedSibling, deleteMessageCopyRow, emitSectionsChanged, ensureMailbox, createKeyedSemaphore, isConnectionRefusal, extractImapError, isImapAuthFailure, AUTH_FAILURE_COOLDOWN_MS, AUTH_FAILURE_COOLDOWN_MAX_MS, authCooldownMs, connectCooldownMs, effectiveSyncIntervalMs, folderSyncDue, planModseqSync, connectStaggerFor, walkStructure, planBodyParts, extractBodyFromMsg, bodyFallbackApplies, poolSizeFor, rerootThreadChildren, parsePersistentCap, resolvePersistentCap, persistentEligible, shouldRetryIPv4, classifyMoveBySearch, PERSISTENT_FLAG_STORE_TIMEOUT_MS, PERSISTENT_FLAG_LATE_STORE_WAIT_MS, PERSISTENT_FLAG_LOCK_WAIT_MS, FLAG_STORE_UID_CHUNK, wrapImapError, acquirePooledClient, releasePooledClient, evictPool, ACQUIRE_TIMEOUT_MS, BACKGROUND_ACQUIRE_TIMEOUT_MS, PREFETCH_MAX_CONSECUTIVE_ERRORS, PREFETCH_STOP_PAUSE_MS } from './imapManager.js';
+import { ImapManager, MIN_SYNC_INTERVAL_MS, AUTO_IDLE_DELAY_MS, countMissingInboxCopies, fetchBackfillBatch, providerProfile, makeClientCfg, relocateExemptGuard, insertCopiedSibling, deleteMessageCopyRow, emitSectionsChanged, ensureMailbox, createKeyedSemaphore, isConnectionRefusal, extractImapError, isImapAuthFailure, AUTH_FAILURE_COOLDOWN_MS, AUTH_FAILURE_COOLDOWN_MAX_MS, authCooldownMs, connectCooldownMs, effectiveSyncIntervalMs, folderSyncDue, planModseqSync, connectStaggerFor, walkStructure, planBodyParts, extractBodyFromMsg, bodyFallbackApplies, poolSizeFor, rerootThreadChildren, parsePersistentCap, resolvePersistentCap, persistentEligible, shouldRetryIPv4, classifyMoveBySearch, PERSISTENT_FLAG_STORE_TIMEOUT_MS, PERSISTENT_FLAG_LATE_STORE_WAIT_MS, PERSISTENT_FLAG_LOCK_WAIT_MS, FLAG_STORE_UID_CHUNK, FLAG_PUSH_MAX_ATTEMPTS, wrapImapError, acquirePooledClient, releasePooledClient, evictPool, ACQUIRE_TIMEOUT_MS, BACKGROUND_ACQUIRE_TIMEOUT_MS, PREFETCH_MAX_CONSECUTIVE_ERRORS, PREFETCH_STOP_PAUSE_MS } from './imapManager.js';
 import { pluginRegistry } from '../plugins/registry.js';
 import { EventEmitter } from 'node:events';
 import { ImapFlow } from 'imapflow';
@@ -5809,6 +5809,96 @@ describe('every background login waits out a rejected password', () => {
       const queued = [...mgr._pendingFlagPush.get(acct.id).values()];
       expect(queued).toHaveLength(5);
       expect(queued.filter(op => op.attempts > 0)).toHaveLength(1);
+    });
+  });
+
+  describe('the flag-push reconciler and a newer change queued mid-cycle', () => {
+    // An older op (mark read) is being replayed when the user marks the letter unread and that
+    // store fails: _enqueueFlagPush puts a NEW op under the same key. The replay must neither
+    // write its stale value, nor clear the newer change's marker, nor delete the newer op, or
+    // the next pull reverts the letter to read and the user's change is lost.
+    const arrangeReplay = (acct, hooks = {}) => {
+      const sqls = [];
+      query.mockImplementation(async (sql, params) => {
+        sqls.push([sql, params]);
+        if (sql.startsWith('SELECT * FROM email_accounts')) return { rows: [acct] };
+        if (sql.startsWith('SELECT uid, folder FROM messages')) { await hooks.onReread?.(); return { rows: [{ uid: 7, folder: 'Sent' }] }; }
+        if (sql.includes('read_changed_at = NULL')) await hooks.onClear?.();
+        return { rows: [], rowCount: 1 };
+      });
+      return sqls;
+    };
+    const markUnread = (mgr, acct) => mgr._enqueueFlagPush(acct.id, 'm-1', '\\Seen', false);
+    const queuedValue = (mgr, acct) => mgr._pendingFlagPush.get(acct.id)?.get('m-1:\\Seen')?.value;
+    const clears = (sqls) => sqls.filter(([sql]) => sql.includes('read_changed_at = NULL'));
+
+    it('queued during the re-read: nothing stale is written or pushed', async () => {
+      const acct = account();
+      const mgr = liveManager(acct);
+      mgr._enqueueFlagPush(acct.id, 'm-1', '\\Seen', true);
+      const sqls = arrangeReplay(acct, { onReread: () => markUnread(mgr, acct) });
+      const setFlag = vi.spyOn(mgr, 'setFlag').mockResolvedValue();
+
+      await mgr._reconcileFlagPushes();
+
+      expect(setFlag).not.toHaveBeenCalled();
+      expect(sqls.some(([sql, params]) => sql.startsWith('UPDATE messages SET is_read') && params[0] === true)).toBe(false);
+      expect(clears(sqls)).toHaveLength(0);
+      expect(queuedValue(mgr, acct)).toBe(false);
+    });
+
+    it('queued while the replay stores: its marker and op stay', async () => {
+      const acct = account();
+      const mgr = liveManager(acct);
+      mgr._enqueueFlagPush(acct.id, 'm-1', '\\Seen', true);
+      const sqls = arrangeReplay(acct);
+      vi.spyOn(mgr, 'setFlag').mockImplementation(async () => { markUnread(mgr, acct); });
+
+      await mgr._reconcileFlagPushes();
+
+      expect(clears(sqls)).toHaveLength(0);
+      expect(queuedValue(mgr, acct)).toBe(false);
+    });
+
+    it('queued while the replay clears its marker: the op stays', async () => {
+      const acct = account();
+      const mgr = liveManager(acct);
+      mgr._enqueueFlagPush(acct.id, 'm-1', '\\Seen', true);
+      arrangeReplay(acct, { onClear: () => markUnread(mgr, acct) });
+      vi.spyOn(mgr, 'setFlag').mockResolvedValue();
+
+      await mgr._reconcileFlagPushes();
+
+      expect(queuedValue(mgr, acct)).toBe(false);
+    });
+
+    it('queued while the last attempt fails: the replay does not give the newer op up', async () => {
+      const acct = account();
+      const mgr = liveManager(acct);
+      mgr._enqueueFlagPush(acct.id, 'm-1', '\\Seen', true);
+      mgr._pendingFlagPush.get(acct.id).get('m-1:\\Seen').attempts = FLAG_PUSH_MAX_ATTEMPTS - 1;
+      const sqls = arrangeReplay(acct);
+      vi.spyOn(mgr, 'setFlag').mockImplementation(async () => { markUnread(mgr, acct); throw new Error('NO'); });
+      vi.spyOn(console, 'warn').mockImplementation(() => {});
+
+      await mgr._reconcileFlagPushes();
+
+      expect(clears(sqls)).toHaveLength(0);
+      expect(queuedValue(mgr, acct)).toBe(false);
+    });
+
+    it('queued while the give-up clears its marker: the op stays', async () => {
+      const acct = account();
+      const mgr = liveManager(acct);
+      mgr._enqueueFlagPush(acct.id, 'm-1', '\\Seen', true);
+      mgr._pendingFlagPush.get(acct.id).get('m-1:\\Seen').attempts = FLAG_PUSH_MAX_ATTEMPTS - 1;
+      arrangeReplay(acct, { onClear: () => markUnread(mgr, acct) });
+      vi.spyOn(mgr, 'setFlag').mockRejectedValue(new Error('NO'));
+      vi.spyOn(console, 'warn').mockImplementation(() => {});
+
+      await mgr._reconcileFlagPushes();
+
+      expect(queuedValue(mgr, acct)).toBe(false);
     });
   });
 

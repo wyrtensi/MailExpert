@@ -549,7 +549,7 @@ const SYNC_HUNG_MS = 30 * 1000;
 // is why we don't need to touch the three pull-sync guards. Give up (clear the marker so
 // the server's truth can show through) after MAX_ATTEMPTS connected failures.
 const FLAG_PUSH_RECONCILE_MS = 15 * 1000;
-const FLAG_PUSH_MAX_ATTEMPTS = 40;   // ~10 min of connected retries before honest revert
+export const FLAG_PUSH_MAX_ATTEMPTS = 40;  // ~10 min of connected retries before honest revert
 const FLAG_PUSH_PER_CYCLE = 30;      // cap setFlag attempts per account per cycle (bounds cycle time)
 
 // Unicode bidi override/embedding characters that can visually reverse a filename,
@@ -2472,9 +2472,11 @@ export class ImapManager {
           [op.messageId]
         );
         if (!msg) { ops.delete(key); continue; } // message gone — nothing to push
-        // A concurrent successful push may have resolved this op during the await above —
-        // don't re-assert/re-push a now-stale value over the newer one.
-        if (op.resolved) continue;
+        // A concurrent successful push may have resolved this op during the await above, or a
+        // newer change may have replaced it (_enqueueFlagPush puts a new object under the same
+        // key and leaves this one unmarked): don't re-assert/re-push a now-stale value over the
+        // newer one. The queue holds the newer op, which a later pass pushes.
+        if (op.resolved || ops.get(key) !== op) continue;
         if (op.flag === '\\Seen') {
           await query('UPDATE messages SET is_read = $1, read_changed_at = NOW() WHERE id = $2', [op.value, op.messageId]).catch(() => {});
         } else {
@@ -2482,16 +2484,21 @@ export class ImapManager {
         }
         try {
           await this.setFlag(account, msg.uid, msg.folder, op.flag, op.value, { background: true });
-          // If a newer value was pushed elsewhere while our setFlag was in flight, leave its
-          // marker in place and let the pull reconcile, rather than clearing to our stale push.
-          if (!op.resolved) await this._clearFlagMarker(op.messageId, op.flag); // confirmed on server
-          ops.delete(key);
+          // Only while this op is still the queued one. If a newer value was pushed elsewhere
+          // (resolved: the key is gone) or queued (a new op under the key) while our setFlag
+          // was in flight, its marker and its op stay: clearing the marker would let a pull
+          // revert the newer change, and deleting the key would drop the newer op. Checked
+          // again after the clear's await, for an op queued during it.
+          if (ops.get(key) === op) {
+            await this._clearFlagMarker(op.messageId, op.flag); // confirmed on server
+            if (ops.get(key) === op) ops.delete(key);
+          }
         } catch (err) {
           op.attempts += 1;
-          if (op.attempts >= FLAG_PUSH_MAX_ATTEMPTS) {
+          if (op.attempts >= FLAG_PUSH_MAX_ATTEMPTS && ops.get(key) === op) {
             console.warn(`Flag-push giving up after ${op.attempts} attempts (${op.flag} msg=${op.messageId}): ${extractImapError(err)}`);
             await this._clearFlagMarker(op.messageId, op.flag); // honest revert to server truth
-            ops.delete(key);
+            if (ops.get(key) === op) ops.delete(key);
           }
           // else keep queued; marker + value re-asserted above so nothing is lost before retry
         }

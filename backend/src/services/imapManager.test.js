@@ -5580,6 +5580,39 @@ describe('every background login waits out a rejected password', () => {
       expect(setFlag).toHaveBeenCalledWith(acct, 7, 'Sent', '\\Seen', true);
       expect(mgr._pendingFlagPush.has(acct.id)).toBe(false);
     });
+
+    // The window above runs out while the password is still wrong. Nothing re-armed it, so the
+    // reconciler's next cycle sent up to 30 queued stores to the pool, two rejected logins each:
+    // one cycle is enough for fail2ban to ban the panel's IP.
+    it('arms the auth ladder on a rejected pool login and does not try a second login', async () => {
+      const acct = account();
+      const mgr = liveManager(acct);
+      withStore();
+      await expect(mgr.setFlag(acct, 7, 'Sent', '\Seen', true)).rejects.toBeTruthy();
+      expect(clients).toHaveLength(1);
+      expect(mgr._authLoginBlocked(acct.id)).toBeTruthy();
+    });
+
+    it('the reconciler stops within a cycle once a store re-arms the auth ladder', async () => {
+      const acct = account();
+      const mgr = liveManager(acct);
+      withStore();
+      query.mockImplementation(async (sql) => {
+        if (sql.startsWith('SELECT * FROM email_accounts')) return { rows: [acct] };
+        if (sql.startsWith('SELECT uid, folder FROM messages')) return { rows: [{ uid: 7, folder: 'Sent' }] };
+        return { rows: [], rowCount: 1 };
+      });
+      for (let i = 1; i <= 5; i++) mgr._enqueueFlagPush(acct.id, `m-${i}`, '\Seen', true);
+      await mgr._reconcileFlagPushes();
+      expect(clients).toHaveLength(1);
+      await mgr._reconcileFlagPushes();
+      expect(clients).toHaveLength(1);
+      // Nothing is dropped: every store stays queued for when the password works again, and the
+      // stores that never reached the server spend no attempt toward the give-up budget.
+      const queued = [...mgr._pendingFlagPush.get(acct.id).values()];
+      expect(queued).toHaveLength(5);
+      expect(queued.filter(op => op.attempts > 0)).toHaveLength(1);
+    });
   });
 
   describe('background work on the pool', () => {

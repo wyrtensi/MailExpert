@@ -2362,6 +2362,9 @@ export class ImapManager {
       let processed = 0;
       for (const [key, op] of [...ops]) {
         if (processed >= FLAG_PUSH_PER_CYCLE) break; // rest wait for the next cycle
+        // A store in this cycle may have had its login rejected and re-armed the backoff (see
+        // setFlag): the rest wait, uncounted, instead of each trying the pool again.
+        if (this._secondaryLoginBlocked(accountId)) break;
         if (!ops.has(key)) continue; // resolved by a concurrent successful push mid-cycle
         processed++;
         // Re-read only uid/folder (a move changes them) + existence — NOT the flag value,
@@ -6583,6 +6586,14 @@ export class ImapManager {
       } catch (err) {
         lastErr = err;
         if (err?.providerRefusing) break; // a second attempt would be held back the same way
+        // The pool's login was rejected: arm the auth ladder, as every background login does, and
+        // do not try again. Without this, once a window ran out while the password was still wrong,
+        // nothing re-armed it and each store cost two rejected logins, the flag-push reconciler
+        // sending up to 30 of them a cycle: enough for fail2ban to ban the panel's IP.
+        if (isImapAuthFailure(err)) {
+          await this._noteSecondaryAuthFailure(account, err, 'Flag store');
+          break;
+        }
         if (attempt < 2) await new Promise(r => setTimeout(r, 400));
       }
     }

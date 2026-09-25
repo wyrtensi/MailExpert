@@ -1805,7 +1805,7 @@ describe('account error reporting: transient failures must not paint the account
     await ImapManager.prototype._recordAccountError.call(self, account, 'Connection not available');
     await ImapManager.prototype._clearAccountError.call(self, account);
     await ImapManager.prototype._recordAccountError.call(self, account, 'Connection not available');
-    expect(self.broadcast).not.toHaveBeenCalled();
+    expect(self.broadcast).not.toHaveBeenCalledWith(expect.objectContaining({ type: 'account_error' }));
   });
 
   it('clearing resets the run even when nothing was ever surfaced', async () => {
@@ -2173,8 +2173,8 @@ describe('_recordAccountError / _clearAccountError', () => {
     const m = mgr();
     await m._clearAccountError(acct);
     expect(query).toHaveBeenCalledTimes(1);
-    // ...but stays silent: nothing was showing, so there is no transition to announce.
-    expect(m.broadcast).not.toHaveBeenCalled();
+    // ...and announces it: the frontend may be showing that stale error, read from the DB.
+    expect(m.broadcast).toHaveBeenCalledWith({ type: 'account_connected', accountId: acct.id });
   });
 
   it('skips the redundant UPDATE once known-clear — the sync tick must not write every 10s', async () => {
@@ -5242,13 +5242,25 @@ describe('the live-sync ladder is cleared by a successful sync, not by a login',
         mgr._startSyncInterval = vi.fn();
         mgr._startPluginSyncTimers = vi.fn().mockResolvedValue();
         mgr.syncFolders = vi.fn().mockResolvedValue();
-        mgr._syncErrorState.set(acct.id, 'Maximum number of connections from user+IP exceeded'); // showing red
         return mgr;
       };
       const pmAcct = { ...acct, imap_host: 'imap.purelymail.com' }; // no pool pre-warm
+      // The mailbox fails the real way: two refused sync ticks surface the error in the sidebar.
+      const failUntilRed = async (mgr) => {
+        query.mockImplementation(async (sql) => ({ rows: sql.startsWith('SELECT * FROM email_accounts') ? [pmAcct] : [], rowCount: 1 }));
+        mgr.syncMessages = vi.fn().mockRejectedValue(new Error('Maximum number of connections from user+IP exceeded'));
+        for (let i = 0; i < 2; i++) {
+          await mgr._syncTick(pmAcct);
+          mgr._connectCooldown.get(pmAcct.id).until = 0;
+        }
+        expect(errorBroadcasts(mgr)).toHaveLength(1);
+        query.mockClear();
+        mgr.broadcast.mockClear();
+      };
 
       it('keeps a recorded error red through a login whose initial sync fails', async () => {
         const mgr = connectManager();
+        await failUntilRed(mgr);
         mgr.syncMessages = vi.fn().mockRejectedValue(new Error('Connection not available'));
         expect(await mgr.connectAccount(pmAcct)).toBe(true);
         expect(clears()).toHaveLength(0);
@@ -5257,8 +5269,24 @@ describe('the live-sync ladder is cleared by a successful sync, not by a login',
 
       it('clears it once the initial sync succeeds', async () => {
         const mgr = connectManager();
+        await failUntilRed(mgr);
         mgr.syncMessages = vi.fn().mockResolvedValue({});
         expect(await mgr.connectAccount(pmAcct)).toBe(true);
+        expect(clears()).toHaveLength(1);
+        expect(mgr.broadcast).toHaveBeenCalledWith({ type: 'account_connected', accountId: acct.id });
+      });
+
+      it('turns the sidebar green on the first good tick after a reconnect whose initial sync overran', async () => {
+        // Health check or Reconnect: the login works, the initial sync misses its 40 s budget.
+        // connectAccount drops the cached error state, so the tick that finally syncs must still
+        // tell the frontend, which is showing the error it got earlier.
+        const mgr = connectManager();
+        await failUntilRed(mgr);
+        mgr.syncMessages = vi.fn().mockRejectedValue(new Error('Initial message sync timeout (40000ms)'));
+        expect(await mgr.connectAccount(pmAcct)).toBe(true);
+        expect(mgr.broadcast).not.toHaveBeenCalledWith({ type: 'account_connected', accountId: acct.id });
+        mgr.syncMessages = vi.fn().mockResolvedValue({});
+        await mgr._syncTick(pmAcct);
         expect(clears()).toHaveLength(1);
         expect(mgr.broadcast).toHaveBeenCalledWith({ type: 'account_connected', accountId: acct.id });
       });

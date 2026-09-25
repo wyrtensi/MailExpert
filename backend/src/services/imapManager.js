@@ -3015,8 +3015,8 @@ export class ImapManager {
 
   // Clear a recorded failure on the success side of every path that can record one. Skipped when
   // the account is already known-clear, so the sync tick doesn't issue a redundant UPDATE per
-  // account per tick (every 10s on freshInboxSync providers). Only broadcasts on a real
-  // error -> clear transition; the frontend maps 'account_connected' to clearing sync_error.
+  // account per tick (every 10s on freshInboxSync providers). Broadcasts whenever the state was not
+  // known-clear (an error, or unknown); the frontend maps 'account_connected' to clearing sync_error.
   async _clearAccountError(account) {
     // Reset the streak before the early return: a success ends the run of failures whether or
     // not one of them was ever surfaced, otherwise deferred failures accumulate across hours of
@@ -3038,9 +3038,13 @@ export class ImapManager {
       );
       if (result?.rowCount === 0) return;
       this._syncErrorState.set(account.id, null);
-      if (typeof prev === 'string') {
-        this.broadcast({ type: 'account_connected', accountId: account.id });
-      }
+      // Also when the state was unknown (undefined), not only after an error recorded in this
+      // process: connectAccount drops the cache (disconnectAccount), so after a reconnect whose
+      // initial sync overran, the first successful tick found no string here, cleared the DB and
+      // told nobody, and the sidebar stayed red until a reload. The frontend may still be showing
+      // an error it read from the database, so an unknown state must be announced too. It costs
+      // at most one extra message per mailbox after a restart or reconnect.
+      this.broadcast({ type: 'account_connected', accountId: account.id });
     } catch (err) {
       console.warn(`Could not clear sync_error for ${logAccount(account)}: ${err.message}`);
     }

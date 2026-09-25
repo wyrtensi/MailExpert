@@ -258,6 +258,9 @@ const CONNECT_COOLDOWN_MAX_MS = 15 * 60 * 1000;  // capped at 15 min
 // the server or the connection is the problem.
 export const PREFETCH_MAX_CONSECUTIVE_ERRORS = 3;
 
+// How long an account's body prefetch stays paused after a run stopped on failures.
+export const PREFETCH_STOP_PAUSE_MS = 60 * 1000;
+
 // True when an IMAP error looks like a connection-limit / throttle / temporary refusal —
 // the class of failure that should back off rather than retry hard. Deliberately broad on
 // the safe side: a false positive only means a ~30s backoff, never data loss.
@@ -1939,6 +1942,8 @@ export class ImapManager {
     // window because of a background connection. A successful sync says nothing about whether
     // extra connections are welcome, so only a secondary login that succeeds clears this.
     this._secondaryCooldown = new Map();
+    this._prefetchRunning = new Set(); // accountIds with a body-prefetch run in progress
+    this._prefetchPausedUntil = new Map(); // accountId -> ms; body prefetch paused after a run stopped on failures
     // accountId -> the value last persisted to email_accounts.sync_error: a string (error is
     // showing), null (known clear), or absent (unknown — e.g. just after a restart, where the
     // DB may still hold a stale error, so the next call writes through unconditionally).
@@ -5963,7 +5968,27 @@ export class ImapManager {
   // failure into one more login per remaining message. The folder prefetch runs on every folder
   // view; on the shared mail node every extra login counts against the per-user+IP limit, and every
   // rejected one counts toward fail2ban, whose ban cuts off every mailbox on the node.
-  async _prefetchBodyRun(account, rows, { waitForQuiet }) {
+  //
+  // At most one run per account at a time: switching folders quickly used to start parallel runs,
+  // each paying for its own failure. After a run stops on a failure, the account's prefetch also
+  // pauses for PREFETCH_STOP_PAUSE_MS, so the next folder views do not start over at once. A
+  // refusal or a rejected login arms a longer backoff besides; the pause is what holds back a
+  // server that fails in some other way (FETCH timing out, three messages in a row).
+  async _prefetchBodyRun(account, rows, opts) {
+    if (this._prefetchRunning.has(account.id)) return;
+    if (Date.now() < (this._prefetchPausedUntil.get(account.id) || 0)) return;
+    this._prefetchRunning.add(account.id);
+    try {
+      if (await this._prefetchBodyLoop(account, rows, opts) === 'stopped') {
+        this._prefetchPausedUntil.set(account.id, Date.now() + PREFETCH_STOP_PAUSE_MS);
+      }
+    } finally {
+      this._prefetchRunning.delete(account.id);
+    }
+  }
+
+  // The run itself. Returns 'stopped' when a failure ended it early.
+  async _prefetchBodyLoop(account, rows, { waitForQuiet }) {
     let consecutiveErrors = 0;
     for (const msg of rows) {
       // Checked before every message, not only at entry: a backoff armed meanwhile (by the status
@@ -6021,16 +6046,16 @@ export class ImapManager {
         if (isImapAuthFailure(err)) {
           await this._noteSecondaryAuthFailure(account, err, 'Body prefetch');
           console.log(`Body prefetch stopping for ${logAccount(account)}: login rejected`);
-          return;
+          return 'stopped';
         }
         if (isConnectionRefusal(detail)) {
           this._noteSecondaryRefusal(account);
           console.log(`Body prefetch stopping for ${logAccount(account)}: server is refusing connections`);
-          return;
+          return 'stopped';
         }
         if (++consecutiveErrors >= PREFETCH_MAX_CONSECUTIVE_ERRORS) {
           console.log(`Body prefetch stopping for ${logAccount(account)} after ${consecutiveErrors} consecutive errors`);
-          return;
+          return 'stopped';
         }
         continue;
       }

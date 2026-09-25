@@ -17,7 +17,7 @@ vi.mock('../utils/redact.js', () => ({ redactEmail: vi.fn() }));
 vi.mock('./hostValidation.js', () => ({ resolveForConnection: vi.fn(), createPinnedLookup: vi.fn() }));
 vi.mock('./connectionPolicy.js', () => ({ getConnectionPolicy: vi.fn() }));
 
-import { ImapManager, MIN_SYNC_INTERVAL_MS, AUTO_IDLE_DELAY_MS, countMissingInboxCopies, fetchBackfillBatch, providerProfile, makeClientCfg, relocateExemptGuard, insertCopiedSibling, deleteMessageCopyRow, emitSectionsChanged, ensureMailbox, createKeyedSemaphore, isConnectionRefusal, extractImapError, isImapAuthFailure, AUTH_FAILURE_COOLDOWN_MS, AUTH_FAILURE_COOLDOWN_MAX_MS, authCooldownMs, connectCooldownMs, effectiveSyncIntervalMs, folderSyncDue, planModseqSync, connectStaggerFor, walkStructure, planBodyParts, extractBodyFromMsg, bodyFallbackApplies, poolSizeFor, rerootThreadChildren, parsePersistentCap, resolvePersistentCap, persistentEligible, shouldRetryIPv4, classifyMoveBySearch, PERSISTENT_FLAG_STORE_TIMEOUT_MS, PERSISTENT_FLAG_LATE_STORE_WAIT_MS, PERSISTENT_FLAG_LOCK_WAIT_MS, wrapImapError, acquirePooledClient, releasePooledClient, evictPool } from './imapManager.js';
+import { ImapManager, MIN_SYNC_INTERVAL_MS, AUTO_IDLE_DELAY_MS, countMissingInboxCopies, fetchBackfillBatch, providerProfile, makeClientCfg, relocateExemptGuard, insertCopiedSibling, deleteMessageCopyRow, emitSectionsChanged, ensureMailbox, createKeyedSemaphore, isConnectionRefusal, extractImapError, isImapAuthFailure, AUTH_FAILURE_COOLDOWN_MS, AUTH_FAILURE_COOLDOWN_MAX_MS, authCooldownMs, connectCooldownMs, effectiveSyncIntervalMs, folderSyncDue, planModseqSync, connectStaggerFor, walkStructure, planBodyParts, extractBodyFromMsg, bodyFallbackApplies, poolSizeFor, rerootThreadChildren, parsePersistentCap, resolvePersistentCap, persistentEligible, shouldRetryIPv4, classifyMoveBySearch, PERSISTENT_FLAG_STORE_TIMEOUT_MS, PERSISTENT_FLAG_LATE_STORE_WAIT_MS, PERSISTENT_FLAG_LOCK_WAIT_MS, wrapImapError, acquirePooledClient, releasePooledClient, evictPool, PREFETCH_MAX_CONSECUTIVE_ERRORS, PREFETCH_STOP_PAUSE_MS } from './imapManager.js';
 import { pluginRegistry } from '../plugins/registry.js';
 import { EventEmitter } from 'node:events';
 import { ImapFlow } from 'imapflow';
@@ -4865,6 +4865,59 @@ describe('body prefetch and a rejected password', () => {
     expect(mgr._secondaryCooldown.get(acct.id).failures).toBe(1);
     await mgr.prefetchNewMessageBodies(acct, fresh);
     expect(mgr.fetchMessageBody).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe('body prefetch runs one at a time and pauses after a stop', () => {
+  const acct = { id: 'prefetch-flight', user_id: 'u1', enabled: true, imap_host: 'mail.example.com', imap_port: 993, imap_tls: true };
+  const ids = ['f1', 'f2', 'f3', 'f4'];
+
+  beforeEach(() => {
+    vi.clearAllMocks();
+    query.mockReset();
+    query.mockImplementation(async (sql) => {
+      if (sql.startsWith('SELECT * FROM email_accounts')) return { rows: [acct] };
+      if (sql.includes('body_html IS NULL AND body_text IS NULL')) return { rows: ids.map((id, i) => ({ id, uid: i + 1, folder: 'INBOX' })) };
+      return { rows: [] };
+    });
+    vi.spyOn(console, 'warn').mockImplementation(() => {});
+    vi.spyOn(console, 'log').mockImplementation(() => {});
+  });
+  afterEach(() => { vi.useRealTimers(); vi.restoreAllMocks(); });
+
+  it('does not start a second run for an account while one is in progress', async () => {
+    const mgr = ladderManager();
+    let release;
+    const gate = new Promise(resolve => { release = resolve; });
+    mgr.fetchMessageBody = vi.fn(async () => { await gate; return { html: null, text: 'ok', attachments: [] }; });
+    const first = mgr.prefetchFolderBodies(acct.id, ids);
+    await vi.waitFor(() => expect(mgr.fetchMessageBody).toHaveBeenCalledTimes(1));
+    await mgr.prefetchFolderBodies(acct.id, ids); // a quick switch to another folder and back
+    expect(mgr.fetchMessageBody).toHaveBeenCalledTimes(1);
+    release();
+    await first;
+    expect(mgr.fetchMessageBody).toHaveBeenCalledTimes(ids.length);
+  });
+
+  it('pauses the account after a run stopped on failures, and resumes after the pause', async () => {
+    vi.useFakeTimers({ toFake: ['Date'] });
+    const mgr = ladderManager();
+    mgr.fetchMessageBody = vi.fn().mockRejectedValue(new Error('Pooled IMAP operation timeout (30000ms)'));
+    await mgr.prefetchFolderBodies(acct.id, ids);
+    expect(mgr.fetchMessageBody).toHaveBeenCalledTimes(PREFETCH_MAX_CONSECUTIVE_ERRORS);
+    await mgr.prefetchFolderBodies(acct.id, ids);
+    expect(mgr.fetchMessageBody).toHaveBeenCalledTimes(PREFETCH_MAX_CONSECUTIVE_ERRORS);
+    vi.setSystemTime(Date.now() + PREFETCH_STOP_PAUSE_MS + 1);
+    await mgr.prefetchFolderBodies(acct.id, ids);
+    expect(mgr.fetchMessageBody).toHaveBeenCalledTimes(2 * PREFETCH_MAX_CONSECUTIVE_ERRORS);
+  });
+
+  it('does not pause after a run that went through', async () => {
+    const mgr = ladderManager();
+    mgr.fetchMessageBody = vi.fn().mockResolvedValue({ html: null, text: 'ok', attachments: [] });
+    await mgr.prefetchFolderBodies(acct.id, ids);
+    await mgr.prefetchFolderBodies(acct.id, ids);
+    expect(mgr.fetchMessageBody).toHaveBeenCalledTimes(2 * ids.length);
   });
 });
 

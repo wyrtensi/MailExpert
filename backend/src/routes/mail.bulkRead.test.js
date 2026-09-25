@@ -1,14 +1,15 @@
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 
 // Bulk mark-read stores \Seen with one STORE per (account, folder) group instead of one per
-// letter, and stops trying an account's groups once its login was rejected: every letter not
-// stored goes onto the flag-push queue, since the DB already holds the new state.
+// letter: one setFlagsGroups call per mailbox, which reserves the order of all its groups and
+// stops after a rejected login (tested with the manager). Every letter not stored goes onto the
+// flag-push queue, since the DB already holds the new state.
 vi.mock('../services/db.js', () => ({ query: vi.fn() }));
 vi.mock('../middleware/auth.js', () => ({ requireAuth: (req, _res, next) => { req.session = { userId: 'u1' }; next(); } }));
 vi.mock('../index.js', () => ({
   imapManager: {
     broadcast: vi.fn(),
-    setFlags: vi.fn(),
+    setFlagsGroups: vi.fn(),
     _enqueueFlagPush: vi.fn(),
     _resolveFlagPush: vi.fn(),
     scheduleCountRefresh: vi.fn(),
@@ -39,18 +40,16 @@ const letter = (n, folder, uid, accountId = ACCOUNT_ID) => {
 const inboxIds = Array.from({ length: 30 }, (_, i) => letter(i + 1, 'INBOX', 1000 + i));
 const archiveIds = Array.from({ length: 20 }, (_, i) => letter(i + 101, 'Archive', 500 + i));
 const fifty = [...inboxIds, ...archiveIds];
-// A letter in a second mailbox, whose login has nothing to do with the first one's.
+// A letter in a second mailbox.
 const otherId = letter(201, 'INBOX', 77, OTHER_ACCOUNT_ID);
 
-// A rejected login as ImapFlow reports it (isImapAuthFailure), and the typed error the pool
-// fails with while a rejected password holds the mailbox's logins back.
-const authFailure = () => Object.assign(new Error('Authentication failed.'), {
-  responseStatus: 'NO', serverResponseCode: 'AUTHENTICATIONFAILED', authenticationFailed: true,
-});
-const authHeld = () => Object.assign(new Error('Mail server is not accepting new connections for this account right now'), { providerRefusing: true, authRejected: true });
+const stored = { stored: true };
+const failed = () => ({ stored: false, error: new Error('Authentication failed.') });
+const skipped = { stored: false, skipped: true };
 
 let server;
 let base;
+let accountRows;
 beforeAll(async () => {
   const app = express();
   app.use(express.json());
@@ -62,10 +61,11 @@ afterAll(async () => { await new Promise((resolve) => server.close(resolve)); })
 beforeEach(() => {
   vi.clearAllMocks();
   vi.spyOn(console, 'error').mockImplementation(() => {});
-  imapManager.setFlags.mockReset().mockResolvedValue(); // drops a leftover mockRejectedValueOnce too
+  imapManager.setFlagsGroups.mockReset().mockImplementation(async (_account, groups) => groups.map(() => stored));
+  accountRows = { [ACCOUNT_ID]: { id: ACCOUNT_ID }, [OTHER_ACCOUNT_ID]: { id: OTHER_ACCOUNT_ID } };
   query.mockReset().mockImplementation(async (sql, params) => {
     if (/FROM messages m[\s\S]*m\.id = ANY/.test(sql)) return { rows: params[0].map((i) => rows[i]).filter(Boolean) };
-    if (sql.includes('FROM email_accounts WHERE id = $1')) return { rows: [{ id: params[0] }] };
+    if (sql.includes('FROM email_accounts WHERE id = $1')) return { rows: accountRows[params[0]] ? [accountRows[params[0]]] : [] };
     return { rows: [], rowCount: 0 };
   });
 });
@@ -84,14 +84,16 @@ const enqueued = () => imapManager._enqueueFlagPush.mock.calls.map(([, messageId
 const resolved = () => imapManager._resolveFlagPush.mock.calls.map(([, messageId]) => messageId);
 
 describe('POST /messages/bulk-read', () => {
-  it('stores 50 letters in two folders with one call per folder', async () => {
+  it('stores 50 letters in two folders with one call carrying one group per folder', async () => {
     const { status, body } = await bulkRead(fifty);
 
     expect(status).toBe(200);
     expect(body.updated).toHaveLength(50);
-    expect(imapManager.setFlags).toHaveBeenCalledTimes(2);
-    expect(imapManager.setFlags).toHaveBeenNthCalledWith(1, { id: ACCOUNT_ID }, 'INBOX', uidsOf(inboxIds), '\\Seen', true);
-    expect(imapManager.setFlags).toHaveBeenNthCalledWith(2, { id: ACCOUNT_ID }, 'Archive', uidsOf(archiveIds), '\\Seen', true);
+    expect(imapManager.setFlagsGroups).toHaveBeenCalledOnce();
+    expect(imapManager.setFlagsGroups).toHaveBeenCalledWith({ id: ACCOUNT_ID }, [
+      { folder: 'INBOX', uids: uidsOf(inboxIds) },
+      { folder: 'Archive', uids: uidsOf(archiveIds) },
+    ], '\\Seen', true);
   });
 
   it('resolves the pending pushes of every letter of a group that went through', async () => {
@@ -102,40 +104,44 @@ describe('POST /messages/bulk-read', () => {
     expect(imapManager._enqueueFlagPush).not.toHaveBeenCalled();
   });
 
-  it('queues only the group that failed when the failure is not a rejected login', async () => {
-    imapManager.setFlags.mockRejectedValueOnce(new Error('server did not apply \\Seen=true'));
+  it('queues a group that failed and resolves one that went through', async () => {
+    imapManager.setFlagsGroups.mockResolvedValueOnce([failed(), stored]);
 
     await bulkRead(fifty);
 
-    expect(imapManager.setFlags).toHaveBeenCalledTimes(2); // Archive is still tried
     expect(enqueued().sort()).toEqual([...inboxIds].sort());
     expect(resolved().sort()).toEqual([...archiveIds].sort());
   });
 
-  it.each([
-    ['a rejected login', authFailure],
-    ['a login held back by a rejected password', authHeld],
-  ])('after %s on the first group, tries no other group of that mailbox and queues every letter', async (_what, error) => {
-    imapManager.setFlags.mockRejectedValueOnce(error());
+  it('queues every letter of a failed and a skipped group, with the new value', async () => {
+    imapManager.setFlagsGroups.mockResolvedValueOnce([failed(), skipped]);
 
     const { status, body } = await bulkRead(fifty);
 
     expect(status).toBe(200);                            // the DB holds the change; the queue pushes it
     expect(body.updated).toHaveLength(50);
-    expect(imapManager.setFlags).toHaveBeenCalledOnce();  // no second login attempt
     expect(enqueued().sort()).toEqual([...fifty].sort());
     expect(imapManager._enqueueFlagPush).toHaveBeenCalledWith(ACCOUNT_ID, archiveIds[0], '\\Seen', true);
     expect(imapManager._resolveFlagPush).not.toHaveBeenCalled();
   });
 
-  it('still stores another mailbox of the same request after a rejected login', async () => {
-    imapManager.setFlags.mockRejectedValueOnce(authFailure());
+  it('stores each mailbox of the request with its own call', async () => {
+    imapManager.setFlagsGroups.mockResolvedValueOnce([failed(), skipped]);
 
     await bulkRead([...fifty, otherId]);
 
-    expect(imapManager.setFlags).toHaveBeenCalledTimes(2);
-    expect(imapManager.setFlags).toHaveBeenLastCalledWith({ id: OTHER_ACCOUNT_ID }, 'INBOX', [77], '\\Seen', true);
+    expect(imapManager.setFlagsGroups).toHaveBeenCalledTimes(2);
+    expect(imapManager.setFlagsGroups).toHaveBeenLastCalledWith({ id: OTHER_ACCOUNT_ID }, [{ folder: 'INBOX', uids: [77] }], '\\Seen', true);
     expect(resolved()).toEqual([otherId]);
+    expect(enqueued()).toHaveLength(50);
+  });
+
+  it('queues the letters of a mailbox whose account row is gone', async () => {
+    delete accountRows[ACCOUNT_ID];
+
+    await bulkRead(fifty);
+
+    expect(imapManager.setFlagsGroups).not.toHaveBeenCalled();
     expect(enqueued()).toHaveLength(50);
   });
 });

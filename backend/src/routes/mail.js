@@ -8,7 +8,7 @@ import { shouldBlockImages } from '../utils/imageBlocking.js';
 import { threadingDiagnostics } from '../services/threadingDiagnostics.js';
 import { requireAuth } from '../middleware/auth.js';
 import { imapManager } from '../index.js';
-import { isConnectionRefusal, isImapAuthFailure, isMailboxBusyError } from '../services/imapManager.js';
+import { isConnectionRefusal, isMailboxBusyError } from '../services/imapManager.js';
 import { MAILBOX_BUSY_CODE, mailboxBusyBody, sendMailboxBusy } from '../utils/mailboxBusy.js';
 import { sanitizeEmail, stripEmailHead, hasRemoteImages, blockRemoteImages, rewriteEbayImageserUrls, rewriteAnchorHrefs } from '../services/emailSanitizer.js';
 import { snippetFromBody, decodeMimeWords, parseRawHeaders, buildHeadersFromMessage } from '../services/messageParser.js';
@@ -1272,13 +1272,11 @@ router.post('/messages/bulk-read', async (req, res) => {
     // Reflect the bulk read/unread change on other open clients in place (no full refetch).
     imapManager.broadcast({ type: 'message_flags', changes: toUpdate.map(m => ({ id: m.id, is_read: read })) });
 
-    // IMAP: one STORE per (account, folder) group, not one per letter. The groups of an account
-    // go one after another, so a rejected login is known before the next group logs in: from
-    // then on the account's remaining groups are not tried (on an OAuth mailbox the pool does not
-    // hold a user's login back, so each would be one more rejected login). A group that failed or
-    // was not tried goes onto the flag-push queue, which retries it once logins are allowed again;
-    // the DB already holds the new state, so nothing is lost. A group that went through resolves
-    // any push still queued for its letters.
+    // IMAP: one STORE per (account, folder) group, not one per letter. setFlagsGroups reserves
+    // the order of every group of the mailbox at once and stops the mailbox's remaining groups
+    // after a rejected login. A group that failed or was not tried goes onto the flag-push queue,
+    // which retries it once logins are allowed again; the DB already holds the new state, so
+    // nothing is lost. A group that went through resolves any push still queued for its letters.
     const byAccount = new Map();
     for (const msg of toUpdate) {
       if (!byAccount.has(msg.account_id)) byAccount.set(msg.account_id, new Map());
@@ -1289,24 +1287,19 @@ router.post('/messages/bulk-read', async (req, res) => {
     for (const [accountId, byFolder] of byAccount) {
       const accountResult = await query('SELECT * FROM email_accounts WHERE id = $1', [accountId]);
       const account = accountResult.rows[0];
-      let loginRejected = false;
-      for (const [folder, msgs] of byFolder) {
-        let stored = false;
-        if (!loginRejected) {
-          try {
-            await imapManager.setFlags(account, folder, msgs.map(m => m.uid), '\\Seen', read);
-            stored = true;
-          } catch (err) {
-            console.error(`bulk-read IMAP ${folder} (${msgs.length} letters):`, err.message);
-            loginRejected = isImapAuthFailure(err) || !!err?.authRejected;
-          }
-        }
+      const folders = [...byFolder];
+      const results = account
+        ? await imapManager.setFlagsGroups(account, folders.map(([folder, msgs]) => ({ folder, uids: msgs.map(m => m.uid) })), '\\Seen', read)
+        : folders.map(() => ({ stored: false, error: new Error('account not found') }));
+      folders.forEach(([folder, msgs], i) => {
+        const { stored, error } = results[i];
+        if (error) console.error(`bulk-read IMAP ${folder} (${msgs.length} letters):`, error.message);
         for (const msg of msgs) {
           if (stored) imapManager._resolveFlagPush(accountId, msg.id, '\\Seen'); // confirmed
           // Durable retry so a later flag-sync pull can't revert this message to unread.
           else imapManager._enqueueFlagPush(accountId, msg.id, '\\Seen', read);
         }
-      }
+      });
     }
 
     // Refresh GTD section data for any updated thread that carries a GTD label.

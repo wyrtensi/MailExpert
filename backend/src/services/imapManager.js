@@ -1361,6 +1361,14 @@ export function describeUids(uid) {
   const list = String(uid).split(',');
   return list.length === 1 ? `uid=${list[0]}` : `uids=${list.length} (${list[0]}..${list[list.length - 1]})`;
 }
+
+// A failed flag store after which setFlagsGroups tries no further group of the mailbox: the
+// login was rejected (isImapAuthFailure), or held back because the password was rejected
+// (providerRefusingError with authRejected). The next group would be one more rejected login,
+// or held back the same way.
+export function stopsFlagStores(err) {
+  return isImapAuthFailure(err) || !!err?.authRejected;
+}
 // Clients whose mailbox lock syncMessages holds right now. Module-level because the lock
 // belongs to the client, not to a manager (and tests call syncMessages with a bare `this`).
 const syncLockedClients = new WeakSet();
@@ -6726,6 +6734,25 @@ export class ImapManager {
     if (result.error) throw result.error;
   }
 
+  // Store a flag on letters of several folders of one mailbox (a bulk mark-read across
+  // folders): groups is [{ folder, uids }], one setFlags-style store per group. Resolves, never
+  // rejects, to one result per group, in order: { stored: true }, { stored: false, error }, or
+  // { stored: false, skipped: true } for a group that was not tried.
+  //
+  // The chains of EVERY group are reserved here, at call time, before any group runs. Calling
+  // setFlags once per group instead would reserve a later group only when it is called, after
+  // the groups before it have stored: a newer single click on one of its letters, made while
+  // an earlier group was storing, would then be overtaken by the older bulk value.
+  //
+  // The groups run one after another, so a rejected login is known before the next group logs
+  // in. Once a store fails that way (stopsFlagStores), the remaining groups are skipped: on an
+  // OAuth mailbox the pool does not hold a user's login back, so each would be one more
+  // rejected login. The caller queues what was not stored.
+  async setFlagsGroups(account, groups, flag, value, { background = false, failFastWhenHeld = false } = {}) {
+    const units = this._reserveFlagStores(account, groups);
+    return this._runFlagStores(account, groups.length, units, flag, value, { background, failFastWhenHeld });
+  }
+
   // Reserve the per-message chains for a set of flag stores, synchronously, before any await:
   // groups is [{ folder, uids }], and every chunk of FLAG_STORE_UID_CHUNK UIDs of every group
   // becomes one unit. A unit reads the current tail of each of its letters (prevs) and installs
@@ -6772,16 +6799,20 @@ export class ImapManager {
   // (re-storing a flag is idempotent, so queueing a chunk that did land costs one more STORE,
   // never a wrong value), and after a rejected login the next chunk would be one more rejected
   // login (on an OAuth mailbox the pool does not hold a user's login back, see loginHeldBack).
+  // A store that stopsFlagStores skips every later group as well (see setFlagsGroups).
   // Every unit settles, run or skipped, so no letter's chain is left waiting.
   async _runFlagStores(account, groupCount, units, flag, value, opts) {
     const results = Array.from({ length: groupCount }, () => ({ stored: true }));
+    let stopped = false;
     for (const unit of units) {
       try {
-        if (results[unit.group].error) continue;
+        if (results[unit.group].error || results[unit.group].skipped) continue;
+        if (stopped) { results[unit.group] = { stored: false, skipped: true }; continue; }
         await Promise.all(unit.prevs);
         await this._setFlagInner(account, unit.uidSet, unit.folder, flag, value, unit.flight, opts);
       } catch (err) {
         results[unit.group] = { stored: false, error: err };
+        if (stopsFlagStores(err)) stopped = true;
       } finally {
         unit.settle();
       }

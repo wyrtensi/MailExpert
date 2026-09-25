@@ -583,17 +583,6 @@ export function appendMessagesByIdentity(existing, incoming) {
   return newRows.length ? [...messages, ...newRows] : messages;
 }
 
-// Collapse a message list so no two rows show the same DELIVERY twice. One email can exist as
-// several DB rows in the places the list draws from: a received copy alongside its Sent twin, an
-// INBOX copy alongside its label-folder copy, or two UIDs sharing a Message-ID in one folder.
-// Those are all one piece of mail to the reader, and every raw list load (setMessages) would
-// otherwise render each of them. This is the render-time guard the identity-aware merges
-// (appendMessagesByIdentity) don't cover.
-//
-// Copies delivered to DIFFERENT accounts are not collapsed: see areIndependentDeliveries, which
-// is where the rule and its reasoning live (#476).
-// Order-preserving; on a collision the INBOX copy wins so the list shows the received message.
-// Null-safe: rows without a Message-ID key on their (unique) id, so distinct ones never merge. Pure.
 // Do these two rows represent two INDEPENDENT deliveries of one email, rather than two views
 // of a single delivery? One email sent to two of your connected accounts arrives in each
 // account's INBOX as its own mailbox item, with its own UID and its own \Seen flag. Reading it
@@ -629,6 +618,17 @@ export function duplicateRank(m) {
   return folderRank + (m?.is_read ? 0 : -1);
 }
 
+// Collapse a message list so no two rows show the same DELIVERY twice. One email can exist as
+// several DB rows in the places the list draws from: a received copy alongside its Sent twin, an
+// INBOX copy alongside its label-folder copy, or two UIDs sharing a Message-ID in one folder.
+// Those are all one piece of mail to the reader, and every raw list load (setMessages) would
+// otherwise render each of them. This is the render-time guard the identity-aware merges
+// (appendMessagesByIdentity) don't cover.
+//
+// Copies delivered to DIFFERENT accounts are not collapsed: see areIndependentDeliveries, which
+// is where the rule and its reasoning live (#476).
+// Order-preserving; on a collision the INBOX copy wins so the list shows the received message.
+// Null-safe: rows without a Message-ID key on their (unique) id, so distinct ones never merge. Pure.
 export function dedupeByIdentity(list) {
   const idxByKey = new Map(); // identity -> every index in result holding it
   const result = [];

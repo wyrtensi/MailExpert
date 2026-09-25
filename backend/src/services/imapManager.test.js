@@ -17,7 +17,7 @@ vi.mock('../utils/redact.js', () => ({ redactEmail: vi.fn() }));
 vi.mock('./hostValidation.js', () => ({ resolveForConnection: vi.fn(), createPinnedLookup: vi.fn() }));
 vi.mock('./connectionPolicy.js', () => ({ getConnectionPolicy: vi.fn() }));
 
-import { ImapManager, MIN_SYNC_INTERVAL_MS, AUTO_IDLE_DELAY_MS, countMissingInboxCopies, fetchBackfillBatch, providerProfile, makeClientCfg, relocateExemptGuard, insertCopiedSibling, deleteMessageCopyRow, emitSectionsChanged, ensureMailbox, createKeyedSemaphore, isConnectionRefusal, extractImapError, isImapAuthFailure, AUTH_FAILURE_COOLDOWN_MS, AUTH_FAILURE_COOLDOWN_MAX_MS, authCooldownMs, connectCooldownMs, effectiveSyncIntervalMs, folderSyncDue, planModseqSync, connectStaggerFor, walkStructure, planBodyParts, extractBodyFromMsg, bodyFallbackApplies, poolSizeFor, rerootThreadChildren, parsePersistentCap, resolvePersistentCap, persistentEligible, shouldRetryIPv4, classifyMoveBySearch, PERSISTENT_FLAG_STORE_TIMEOUT_MS } from './imapManager.js';
+import { ImapManager, MIN_SYNC_INTERVAL_MS, AUTO_IDLE_DELAY_MS, countMissingInboxCopies, fetchBackfillBatch, providerProfile, makeClientCfg, relocateExemptGuard, insertCopiedSibling, deleteMessageCopyRow, emitSectionsChanged, ensureMailbox, createKeyedSemaphore, isConnectionRefusal, extractImapError, isImapAuthFailure, AUTH_FAILURE_COOLDOWN_MS, AUTH_FAILURE_COOLDOWN_MAX_MS, authCooldownMs, connectCooldownMs, effectiveSyncIntervalMs, folderSyncDue, planModseqSync, connectStaggerFor, walkStructure, planBodyParts, extractBodyFromMsg, bodyFallbackApplies, poolSizeFor, rerootThreadChildren, parsePersistentCap, resolvePersistentCap, persistentEligible, shouldRetryIPv4, classifyMoveBySearch, PERSISTENT_FLAG_STORE_TIMEOUT_MS, PERSISTENT_FLAG_LATE_STORE_WAIT_MS } from './imapManager.js';
 import { pluginRegistry } from '../plugins/registry.js';
 import { EventEmitter } from 'node:events';
 import { ImapFlow } from 'imapflow';
@@ -4463,6 +4463,72 @@ describe('setFlag routing over the persistent session', () => {
     await vi.advanceTimersByTimeAsync(1);
     await b;
     expect(order).toEqual(['A-late', 'B']);
+  });
+
+  it('sends INBOX flags straight to the pool while an abandoned STORE is still out on the session', async () => {
+    // Half-open socket: usable stays true, DONE goes out, the STORE is never answered, and the
+    // attempt keeps the INBOX lock. Clicks on other messages must not queue behind it.
+    vi.useFakeTimers();
+    let landA;
+    const persistent = fakePersistent({
+      messageFlagsAdd: vi.fn((uid) => (uid === '42'
+        ? new Promise(res => { landA = () => res(true); })
+        : Promise.resolve(true))),
+    });
+    const { mgr, account } = arrange({ persistent });
+
+    const a = mgr.setFlag(account, 42, 'INBOX', '\\Seen', true);
+    await vi.advanceTimersByTimeAsync(PERSISTENT_FLAG_STORE_TIMEOUT_MS + 100);
+    await a;                                             // A done through the pool
+
+    const done = vi.fn();
+    const b = mgr.setFlag(account, 43, 'INBOX', '\\Seen', true).then(done);
+    await vi.advanceTimersByTimeAsync(50);
+    expect(done).toHaveBeenCalled();                     // no 5s wait
+    await b;
+    expect(persistent.getMailboxLock).toHaveBeenCalledOnce(); // nothing new queued on the session
+    expect(poolClients[0].messageFlagsAdd).toHaveBeenCalledWith('43', ['\\Seen'], { uid: true });
+
+    landA();                                             // the session answers after all
+    await vi.advanceTimersByTimeAsync(1);
+    await mgr.setFlag(account, 44, 'INBOX', '\\Seen', true);
+    expect(persistent.messageFlagsAdd).toHaveBeenCalledWith('44', ['\\Seen'], { uid: true, silent: true });
+  });
+
+  it('uses a reconnected session at once even while the old one still has a STORE out', async () => {
+    vi.useFakeTimers();
+    const stuck = fakePersistent({ messageFlagsAdd: vi.fn(() => new Promise(() => {})) });
+    const { mgr, account } = arrange({ persistent: stuck });
+
+    const a = mgr.setFlag(account, 42, 'INBOX', '\\Seen', true);
+    await vi.advanceTimersByTimeAsync(PERSISTENT_FLAG_STORE_TIMEOUT_MS + 100);
+    await a;
+
+    const fresh = fakePersistent();
+    mgr.connections.set(account.id, fresh);             // the sync tick reconnected
+    await mgr.setFlag(account, 43, 'INBOX', '\\Seen', true);
+    expect(fresh.messageFlagsAdd).toHaveBeenCalledWith('43', ['\\Seen'], { uid: true, silent: true });
+  });
+
+  it('bounds how long the next store on a message waits for an abandoned STORE', async () => {
+    vi.useFakeTimers();
+    const persistent = fakePersistent({
+      messageFlagsAdd: vi.fn(() => new Promise(() => {})), // never answered
+    });
+    const { mgr, account } = arrange({ persistent });
+
+    const a = mgr.setFlag(account, 42, 'INBOX', '\\Seen', true);
+    await vi.advanceTimersByTimeAsync(PERSISTENT_FLAG_STORE_TIMEOUT_MS + 100);
+    await a;
+
+    const done = vi.fn();
+    const b = mgr.setFlag(account, 42, 'INBOX', '\\Seen', false).then(done);
+    await vi.advanceTimersByTimeAsync(1000);
+    expect(done).not.toHaveBeenCalled();                 // still ordered behind A's STORE
+    await vi.advanceTimersByTimeAsync(PERSISTENT_FLAG_LATE_STORE_WAIT_MS);
+    expect(done).toHaveBeenCalled();                     // but not forever
+    await b;
+    expect(poolClients[0].messageFlagsRemove).toHaveBeenCalledWith('42', ['\\Seen'], { uid: true });
   });
 
   it('the chain does not hold stores on different messages behind each other', async () => {

@@ -1327,6 +1327,9 @@ export const POOLED_OPERATION_TIMEOUT_MS = 120000;
 export const BODY_FETCH_POOL_TIMEOUT_MS = 30000;
 // Whole-account or whole-folder background passes.
 export const LONG_POOLED_OPERATION_TIMEOUT_MS = 5 * 60 * 1000;
+// How long setFlag waits for the persistent IDLE session (its INBOX lock, then the STORE)
+// before the pool takes the flag over. Short: a click must not hang behind a busy session.
+export const PERSISTENT_FLAG_STORE_TIMEOUT_MS = 5000;
 
 export function poolSizeFor(account) {
   return providerProfile(account).poolSize ?? POOL_SIZE;
@@ -6070,8 +6073,69 @@ export class ImapManager {
     });
   }
 
+  // Attempt 0 of setFlag: store the flag on the account's persistent IDLE session, the way
+  // Thunderbird does (DONE, STORE on the session already selected on the folder, IDLE again).
+  // A mark-read or star then costs no login at all, where the pool costs a pooled session or a
+  // fresh login. ImapFlow breaks IDLE before any command (run() awaits preCheck, which sends
+  // DONE) and re-arms auto-IDLE when the command ends and the lock is released, so the session
+  // is back in IDLE AUTO_IDLE_DELAY_MS after the last store. A burst of stores within that
+  // delay shares one DONE and one IDLE, which also keeps a hibernated Dovecot session on the
+  // mail node from being woken more than once per burst. Returns true when the flag was
+  // applied, false when the caller must use the pool.
+  //
+  // Deliberately narrow:
+  //  - INBOX only. The push session has INBOX selected; selecting another folder on it would
+  //    silence INBOX EXISTS events for that window.
+  //  - Not while this account syncs or connects. syncMessages holds this session's INBOX lock
+  //    for the whole sync and applies inbox rules inside it, so a store from a rule would wait
+  //    for a lock its own caller holds. The initial sync runs under connectingAccounts, before
+  //    syncingAccounts is ever set.
+  //  - Bounded. A timeout falls through to the pool rather than hanging the click. The attempt
+  //    keeps running detached; if its lock arrives after we gave up it releases at once and
+  //    stores nothing, so the lock cannot leak and the store is not sent twice.
+  //  - .SILENT. Without it the server answers with an untagged FETCH (FLAGS) that ImapFlow emits
+  //    as a 'flags' event, and _attachIdleListeners answers that with a range flag sync on the
+  //    pool: our own mark-read would buy a pooled session after all.
+  //  - A failure here never tears the persistent client down. A failed STORE is not evidence
+  //    the session is dead; the sync tick and the health check own that decision.
+  async _setFlagOverPersistent(account, uid, folder, flag, value) {
+    if (folder !== 'INBOX') return false;
+    if (this.syncingAccounts.has(account.id) || this.connectingAccounts.has(account.id)) return false;
+    const client = this.connections.get(account.id);
+    // usable === false: a dead transport, where a queued command hangs or fails late. The pool
+    // path with its eviction and retry is the right place for that.
+    if (!client || client.usable === false) return false;
+    let expired = false;
+    const attempt = (async () => {
+      const lock = await client.getMailboxLock('INBOX');
+      if (expired) { lock.release(); throw new Error('persistent flag store timed out'); }
+      try {
+        const opts = { uid: true, silent: true };
+        const applied = value
+          ? await client.messageFlagsAdd(String(uid), [flag], opts)
+          : await client.messageFlagsRemove(String(uid), [flag], opts);
+        if (applied === false) throw new Error(`server did not apply ${flag}=${value} for uid=${uid} on the persistent session`);
+      } finally {
+        lock.release();
+      }
+    })();
+    attempt.catch(() => {}); // detached after a timeout; never an unhandled rejection
+    try {
+      await raceTimeout(attempt, PERSISTENT_FLAG_STORE_TIMEOUT_MS, 'Persistent flag store');
+      logger.debug(`setFlag success (persistent): uid=${uid} ${flag}=${value}`);
+      return true;
+    } catch (err) {
+      // Mark the detached attempt dead BEFORE falling through: a lock granted late must
+      // release and exit, not store a flag the pool path is about to store again.
+      expired = true;
+      logger.debug(`setFlag persistent attempt failed, using pool: ${extractImapError(err)}`);
+      return false;
+    }
+  }
+
   async setFlag(account, uid, folder, flag, value) {
     console.log(`setFlag: uid=${uid} folder=${folder} flag=${flag} value=${value}`);
+    if (await this._setFlagOverPersistent(account, uid, folder, flag, value)) return;
     // Up to 2 attempts. ImapFlow returns false when the server did NOT apply the flag —
     // typically a stale/half-open pooled connection whose SELECT view is missing the UID.
     // Throwing on false makes withFreshClient evict that client from the pool, so the

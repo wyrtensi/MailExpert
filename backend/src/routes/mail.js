@@ -8,7 +8,7 @@ import { shouldBlockImages } from '../utils/imageBlocking.js';
 import { threadingDiagnostics } from '../services/threadingDiagnostics.js';
 import { requireAuth } from '../middleware/auth.js';
 import { imapManager } from '../index.js';
-import { isConnectionRefusal, isMailboxBusyError } from '../services/imapManager.js';
+import { isConnectionRefusal, isImapAuthFailure, isMailboxBusyError } from '../services/imapManager.js';
 import { MAILBOX_BUSY_CODE, mailboxBusyBody, sendMailboxBusy } from '../utils/mailboxBusy.js';
 import { sanitizeEmail, stripEmailHead, hasRemoteImages, blockRemoteImages, rewriteEbayImageserUrls, rewriteAnchorHrefs } from '../services/emailSanitizer.js';
 import { snippetFromBody, decodeMimeWords, parseRawHeaders, buildHeadersFromMessage } from '../services/messageParser.js';
@@ -50,18 +50,6 @@ function areValidUUIDs(ids) {
 function sanitizeDbText(value) {
   if (typeof value !== 'string') return value;
   return value.replace(/\0/g, '');
-}
-
-// Process IMAP operations in bounded batches so a 500-message bulk action
-// does not spawn hundreds of parallel temporary IMAP connections.
-async function runInBatches(items, concurrency, fn) {
-  const results = [];
-  for (let i = 0; i < items.length; i += concurrency) {
-    const batch = items.slice(i, i + concurrency);
-    const batchResults = await Promise.allSettled(batch.map(fn));
-    results.push(...batchResults);
-  }
-  return results;
 }
 
 // Columns copied verbatim when a message row is relocated to a new folder/UID via the
@@ -1284,27 +1272,41 @@ router.post('/messages/bulk-read', async (req, res) => {
     // Reflect the bulk read/unread change on other open clients in place (no full refetch).
     imapManager.broadcast({ type: 'message_flags', changes: toUpdate.map(m => ({ id: m.id, is_read: read })) });
 
-    // IMAP flag updates — group by account to fetch each account row once.
-    const byAccount = {};
+    // IMAP: one STORE per (account, folder) group, not one per letter. The groups of an account
+    // go one after another, so a rejected login is known before the next group logs in: from
+    // then on the account's remaining groups are not tried (on an OAuth mailbox the pool does not
+    // hold a user's login back, so each would be one more rejected login). A group that failed or
+    // was not tried goes onto the flag-push queue, which retries it once logins are allowed again;
+    // the DB already holds the new state, so nothing is lost. A group that went through resolves
+    // any push still queued for its letters.
+    const byAccount = new Map();
     for (const msg of toUpdate) {
-      (byAccount[msg.account_id] = byAccount[msg.account_id] || []).push(msg);
+      if (!byAccount.has(msg.account_id)) byAccount.set(msg.account_id, new Map());
+      const byFolder = byAccount.get(msg.account_id);
+      if (!byFolder.has(msg.folder)) byFolder.set(msg.folder, []);
+      byFolder.get(msg.folder).push(msg);
     }
-    for (const [accountId, msgs] of Object.entries(byAccount)) {
+    for (const [accountId, byFolder] of byAccount) {
       const accountResult = await query('SELECT * FROM email_accounts WHERE id = $1', [accountId]);
       const account = accountResult.rows[0];
-      const results = await runInBatches(
-        msgs, 3,
-        msg => imapManager.setFlag(account, msg.uid, msg.folder, '\\Seen', read)
-      );
-      results.forEach((r, i) => {
-        if (r.status === 'rejected') {
-          console.error(`bulk-read IMAP ${msgs[i].id}:`, r.reason.message);
-          // Durable retry so a later flag-sync pull can't revert this message to unread.
-          imapManager._enqueueFlagPush(accountId, msgs[i].id, '\\Seen', read);
-        } else {
-          imapManager._resolveFlagPush(accountId, msgs[i].id, '\\Seen'); // confirmed
+      let loginRejected = false;
+      for (const [folder, msgs] of byFolder) {
+        let stored = false;
+        if (!loginRejected) {
+          try {
+            await imapManager.setFlags(account, folder, msgs.map(m => m.uid), '\\Seen', read);
+            stored = true;
+          } catch (err) {
+            console.error(`bulk-read IMAP ${folder} (${msgs.length} letters):`, err.message);
+            loginRejected = isImapAuthFailure(err) || !!err?.authRejected;
+          }
         }
-      });
+        for (const msg of msgs) {
+          if (stored) imapManager._resolveFlagPush(accountId, msg.id, '\\Seen'); // confirmed
+          // Durable retry so a later flag-sync pull can't revert this message to unread.
+          else imapManager._enqueueFlagPush(accountId, msg.id, '\\Seen', read);
+        }
+      }
     }
 
     // Refresh GTD section data for any updated thread that carries a GTD label.

@@ -5116,6 +5116,57 @@ describe('the live-sync ladder is cleared by a successful sync, not by a login',
     expect(mgr._connectCooldown.has(acct.id)).toBe(false);
   });
 
+  describe('the account error follows the sync too', () => {
+    const acct = { id: 'ladder-error', user_id: 'u1', enabled: true, protocol: 'imap', imap_host: 'mail.example.com', imap_port: 993, imap_tls: true, auth_user: 'u', auth_pass: 'enc' };
+    const clears = () => query.mock.calls.filter(([sql]) => sql.startsWith('UPDATE email_accounts SET sync_error = NULL'));
+    const errorBroadcasts = (mgr) => mgr.broadcast.mock.calls.filter(([m]) => m.type === 'account_error');
+
+    it('surfaces a login-ok, sync-refused loop on its second round', async () => {
+      const mgr = ladderManager();
+      query.mockImplementation(async (sql) => ({ rows: sql.startsWith('SELECT * FROM email_accounts') ? [acct] : [], rowCount: 1 }));
+      mgr.syncMessages = vi.fn().mockRejectedValue(new Error('Maximum number of connections from user+IP exceeded'));
+      for (let i = 0; i < 2; i++) {
+        await mgr._syncTick(acct);
+        mgr._connectCooldown.get(acct.id).until = 0; // let the next reconnect through
+      }
+      expect(ImapFlow).toHaveBeenCalledTimes(2); // both reconnects logged in
+      expect(errorBroadcasts(mgr)).toHaveLength(1);
+    });
+
+    describe('connectAccount', () => {
+      const connectManager = () => {
+        const mgr = ladderManager();
+        query.mockResolvedValue({ rows: [], rowCount: 1 });
+        mgr.folderStatusMonitor = null;
+        mgr._shouldAutoBackfillOnConnect = vi.fn().mockResolvedValue(false);
+        mgr.startProviderIdBackfill = vi.fn().mockResolvedValue();
+        mgr._resumeThreadRecompute = vi.fn().mockResolvedValue();
+        mgr._startSyncInterval = vi.fn();
+        mgr._startPluginSyncTimers = vi.fn().mockResolvedValue();
+        mgr.syncFolders = vi.fn().mockResolvedValue();
+        mgr._syncErrorState.set(acct.id, 'Maximum number of connections from user+IP exceeded'); // showing red
+        return mgr;
+      };
+      const pmAcct = { ...acct, imap_host: 'imap.purelymail.com' }; // no pool pre-warm
+
+      it('keeps a recorded error red through a login whose initial sync fails', async () => {
+        const mgr = connectManager();
+        mgr.syncMessages = vi.fn().mockRejectedValue(new Error('Connection not available'));
+        expect(await mgr.connectAccount(pmAcct)).toBe(true);
+        expect(clears()).toHaveLength(0);
+        expect(mgr.broadcast).not.toHaveBeenCalledWith({ type: 'account_connected', accountId: acct.id });
+      });
+
+      it('clears it once the initial sync succeeds', async () => {
+        const mgr = connectManager();
+        mgr.syncMessages = vi.fn().mockResolvedValue({});
+        expect(await mgr.connectAccount(pmAcct)).toBe(true);
+        expect(clears()).toHaveLength(1);
+        expect(mgr.broadcast).toHaveBeenCalledWith({ type: 'account_connected', accountId: acct.id });
+      });
+    });
+  });
+
   it('escalates across logins that succeed and syncs that do not', async () => {
     // The loop itself: each reconnect logs in, each sync is refused. The count must climb.
     const acct = { id: 'ladder-escalate', user_id: 'u1', enabled: true, protocol: 'imap', imap_host: 'mail.example.com', imap_port: 993, imap_tls: true, auth_user: 'u', auth_pass: 'enc' };

@@ -2526,7 +2526,6 @@ export class ImapManager {
       });
       this._attachIdleListeners(client, account);
       this.connections.set(account.id, client);
-      await this._clearAccountError(account);
 
       // Decide whether to auto-backfill BEFORE the initial sync below runs. For providers
       // with autoBackfillExistingOnConnect:false (e.g. PurelyMail) the gate skips backfill
@@ -2540,6 +2539,7 @@ export class ImapManager {
       // Initial sync is non-fatal — throttling or temporary IMAP errors here should
       // not prevent the account from being marked connected. The 60-second interval
       // will retry the sync on the next tick.
+      let initialSyncOk = false;
       try {
         await raceTimeout(this.syncFolders(account, client), 20000, 'Initial folder sync');
         this.lastFolderSyncAt.set(account.id, Date.now());
@@ -2557,6 +2557,12 @@ export class ImapManager {
         // The initial sync SUCCEEDED: that is the health proof the backoff ladder waits for, so
         // clear it now rather than leaving the standing count until the next interval tick.
         this._connectCooldown.delete(account.id);
+        // The account error clears on the same proof, not on the login above. Clearing it on a
+        // login also reset the failure streak _recordAccountError counts, so a server that accepts
+        // every login and fails every sync never reached the surfacing threshold: the mailbox
+        // stayed green for as long as the ladder kept climbing, serving stale mail.
+        await this._clearAccountError(account);
+        initialSyncOk = true;
       } catch (syncErr) {
         console.warn(`Initial sync skipped for ${logAccount(account)}: ${extractImapError(syncErr)}`);
       }
@@ -2612,7 +2618,9 @@ export class ImapManager {
       // a sync is health.
       this.folderStatusMonitor?.refresh(account).catch(() => {});
       console.log(`Connected account: ${logAccount(account)}`);
-      this.broadcast({ type: 'account_connected', accountId: account.id });
+      // The frontend reads account_connected as "error cleared". Without a successful sync the
+      // error (if any) is still recorded, and the next tick either clears it or reports it.
+      if (initialSyncOk) this.broadcast({ type: 'account_connected', accountId: account.id });
       return true;
     } catch (err) {
       const detail = extractImapError(err);
@@ -3133,10 +3141,9 @@ export class ImapManager {
           // (#360) — activeClient is that same pendingClient, so it's already covered here.
           this._attachIdleListeners(activeClient, syncAccount);
           this.connections.set(account.id, activeClient);
-          // Mirror connectAccount's success cleanup for the account ERROR only: clear the stale
-          // sync_error the UI is still showing. The backoff ladder is not cleared by a login; the
-          // sync below clears it if it succeeds (see connectAccount for why).
-          await this._clearAccountError(account);
+          // Neither the backoff ladder nor the account error is cleared by a login: the sync below
+          // clears both if it succeeds (see connectAccount for why). A cleared error here reset the
+          // failure streak on every reconnect, so a login-ok, sync-fails loop never surfaced.
           console.log(`Reconnected ${logAccount(syncAccount)}`);
         } catch (reconnErr) {
           const detail = extractImapError(reconnErr);

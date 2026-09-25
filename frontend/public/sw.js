@@ -28,6 +28,9 @@ self.addEventListener('push', (event) => {
     title       = 'MailExpert',
     body        = 'New message',
     icon        = '/icon-512.png',
+    // Android paints every opaque pixel of a badge white, so the full-colour icon showed as a
+    // white square in the status bar. The badge is an alpha-only envelope (upstream #447).
+    badge       = '/badge-96.png',
     url         = '/',
     unreadCount,          // intentionally no default — undefined means "don't touch badge"
   } = data;
@@ -60,7 +63,7 @@ self.addEventListener('push', (event) => {
           self.registration.showNotification(title, {
             body,
             icon,
-            badge: '/icon-512.png',
+            badge,
             data:  { url },
             // Replace any existing MailExpert notification so rapid arrivals
             // don't stack unboundedly in the notification center.

@@ -1363,11 +1363,13 @@ export function describeUids(uid) {
 }
 
 // A failed flag store after which setFlagsGroups tries no further group of the mailbox: the
-// login was rejected (isImapAuthFailure), or held back because the password was rejected
-// (providerRefusingError with authRejected). The next group would be one more rejected login,
-// or held back the same way.
+// login was rejected (isImapAuthFailure), or the store got no session (isMailboxBusyError): a
+// login held back (providerRefusing, with authRejected when the password was rejected) or a pool
+// that stayed full for the whole acquire wait (poolExhausted). The next group would be one more
+// rejected login, held back the same way, or another 15 s in the same queue. The other bulk
+// routes skip a busy mailbox's remaining groups the same way (bulkBusyTracker in routes/mail.js).
 export function stopsFlagStores(err) {
-  return isImapAuthFailure(err) || !!err?.authRejected;
+  return isImapAuthFailure(err) || isMailboxBusyError(err);
 }
 // Clients whose mailbox lock syncMessages holds right now. Module-level because the lock
 // belongs to the client, not to a manager (and tests call syncMessages with a bare `this`).
@@ -6745,9 +6747,10 @@ export class ImapManager {
   // an earlier group was storing, would then be overtaken by the older bulk value.
   //
   // The groups run one after another, so a rejected login is known before the next group logs
-  // in. Once a store fails that way (stopsFlagStores), the remaining groups are skipped: on an
-  // OAuth mailbox the pool does not hold a user's login back, so each would be one more
-  // rejected login. The caller queues what was not stored.
+  // in. Once a store fails that way, or gets no session (stopsFlagStores), the remaining groups
+  // are skipped: on an OAuth mailbox the pool does not hold a user's login back, so each would be
+  // one more rejected login, and behind a full pool each would wait out the same queue. The
+  // caller queues what was not stored.
   async setFlagsGroups(account, groups, flag, value, { background = false, failFastWhenHeld = false } = {}) {
     const units = this._reserveFlagStores(account, groups);
     return this._runFlagStores(account, groups.length, units, flag, value, { background, failFastWhenHeld });

@@ -4811,6 +4811,19 @@ describe('setFlag routing over the persistent session', () => {
     expect(results[1]).toEqual({ stored: true });
   });
 
+  it.each([
+    ['a pool that stayed full', () => Object.assign(new Error('IMAP pool busy, please retry'), { poolExhausted: true })],
+    ['a login held back', () => Object.assign(new Error('Mail server is not accepting new connections for this account right now'), { providerRefusing: true })],
+  ])('tries no other group after %s', async (_what, busy) => {
+    const { mgr, account } = arrange();
+    const tried = vi.spyOn(mgr, '_setFlagInner').mockRejectedValueOnce(busy()).mockResolvedValue();
+
+    const results = await mgr.setFlagsGroups(account, [{ folder: 'Archive', uids: [1] }, { folder: 'Sent', uids: [2] }], '\\Seen', true);
+
+    expect(tried).toHaveBeenCalledOnce();              // Sent does not wait out the same queue
+    expect(results).toEqual([{ stored: false, error: expect.any(Error) }, { stored: false, skipped: true }]);
+  });
+
   it('reserves every group at call time: a newer click on a later group is not overtaken', async () => {
     // Group 1 (INBOX) is slow on the persistent session. The user marks an Archive letter of
     // group 2 unread meanwhile: the older bulk value must land before the click, not after it.

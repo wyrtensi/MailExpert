@@ -1274,7 +1274,8 @@ router.post('/messages/bulk-read', async (req, res) => {
 
     // IMAP: one STORE per (account, folder) group, not one per letter. setFlagsGroups reserves
     // the order of every group of the mailbox at once and stops the mailbox's remaining groups
-    // after a rejected login. A group that failed or was not tried goes onto the flag-push queue,
+    // after a rejected login or a busy mailbox, as the other bulk routes do (bulkBusyTracker).
+    // A group that failed or was not tried goes onto the flag-push queue,
     // which retries it once logins are allowed again; the DB already holds the new state, so
     // nothing is lost. A group that went through resolves any push still queued for its letters.
     const byAccount = new Map();

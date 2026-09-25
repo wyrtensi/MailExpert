@@ -3,6 +3,11 @@ import { decrypt, encrypt } from '../encryption.js';
 import { isOAuthAccount } from '../oauth/constants.js';
 import { generateMailboxPassword, getMailbox, getMailNodeConfig, listDomains, setMailboxPassword } from './mailcow.js';
 
+// At most one automatic restore per mailbox in this long (email_accounts.node_password_restored_at,
+// so it holds across restarts): a node that rejects a correct password now and then must not get a
+// new password every time the auth ladder, which a restore resets, lets a login through.
+export const NODE_PASSWORD_RESTORE_MIN_INTERVAL_MS = 6 * 60 * 60 * 1000;
+
 // The node rejected the password of one of its mailboxes. MailExpert owns that password (nobody
 // can change it in the panel, mail_node_connection_locked), so it sets a new one through the
 // mailcow API instead of waiting for a human, and stores it encrypted as the create route does.
@@ -14,6 +19,7 @@ import { generateMailboxPassword, getMailbox, getMailNodeConfig, listDomains, se
 // - { outcome: 'restored', account }: the node took the new password and the row holds it
 //   (account is the updated row);
 // - { outcome: 'host_mismatch' }: the row's host is not the configured node;
+// - { outcome: 'rate_limited' }: restored less than NODE_PASSWORD_RESTORE_MIN_INTERVAL_MS ago;
 // - { outcome: 'disabled' | 'missing' }: the mailbox is inactive or gone on the node;
 // - { outcome: 'receive_only' | 'foreign_authsource' | 'no_imap_access' | 'force_pw_update' |
 //   'domain_missing' | 'domain_inactive' }: the node refuses the login for another reason;
@@ -29,7 +35,8 @@ import { generateMailboxPassword, getMailbox, getMailNodeConfig, listDomains, se
 // the same pending password again (setting a password to its current value is harmless) and promotes it.
 export async function restoreNodeMailboxPassword(accountId) {
   const { rows } = await query(
-    `SELECT id, email_address, imap_host, mail_node, enabled, protocol, oauth_provider, node_password_pending
+    `SELECT id, email_address, imap_host, mail_node, enabled, protocol, oauth_provider, node_password_pending,
+            node_password_restored_at
        FROM email_accounts WHERE id = $1`,
     [accountId],
   );
@@ -40,6 +47,8 @@ export async function restoreNodeMailboxPassword(accountId) {
   // The mailbox lives on the node its row names. If the configured node is another host (the admin
   // pointed the panel at a new node name), its same-named mailbox may belong to someone else.
   if (String(row.imap_host || '').toLowerCase() !== cfg.mailHost) return { outcome: 'host_mismatch' };
+  const restoredAt = row.node_password_restored_at ? new Date(row.node_password_restored_at).getTime() : NaN;
+  if (Date.now() - restoredAt < NODE_PASSWORD_RESTORE_MIN_INTERVAL_MS) return { outcome: 'rate_limited' };
 
   let mailbox;
   try {
@@ -82,7 +91,8 @@ export async function restoreNodeMailboxPassword(accountId) {
     return { outcome: 'api_failed', code: apiErrorCode(err), stage: 'set' };
   }
   const updated = await query(
-    `UPDATE email_accounts SET auth_pass = node_password_pending, node_password_pending = NULL
+    `UPDATE email_accounts SET auth_pass = node_password_pending, node_password_pending = NULL,
+            node_password_restored_at = NOW()
       WHERE id = $1 AND mail_node = true AND node_password_pending IS NOT NULL
       RETURNING *`,
     [accountId],

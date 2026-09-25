@@ -37,6 +37,7 @@ import { resolveForConnection } from './hostValidation.js';
 import { getConnectionPolicy } from './connectionPolicy.js';
 import { generateMailboxPassword, getMailbox, getMailNodeConfig, listDomains, setMailboxPassword } from './mailNode/mailcow.js';
 import { recordAudit } from './auditLog.js';
+import { NODE_PASSWORD_RESTORE_MIN_INTERVAL_MS } from './mailNode/passwordRestore.js';
 import { ImapManager, MAIL_NODE_ACTOR, NODE_RESTORE_CONCURRENCY, acquirePooledClient, evictPool, releasePooledClient } from './imapManager.js';
 
 const CFG = { mailHost: 'mail.example.com', apiKey: 'api-key', quotaMb: 5120 };
@@ -60,6 +61,7 @@ const dovecotAuthFailure = () => Object.assign(new Error('Command failed'), {
   serverResponseCode: 'AUTHENTICATIONFAILED',
   authenticationFailed: true,
 });
+const RATE_LIMITED = 'Password rejected: MailExpert already restored it on the mail node in the last 6 hours, so it does not do so again yet';
 const DOVECOT_TEXT = '[AUTHENTICATIONFAILED] Authentication failed.';
 
 // What getMailbox reports for an active mailbox nothing else keeps from signing in.
@@ -144,7 +146,7 @@ beforeEach(() => {
     if (sql.startsWith('UPDATE email_accounts SET auth_pass = node_password_pending')) {
       const row = rows.get(params[0]);
       if (!row?.mail_node || !row.node_password_pending) return { rows: [], rowCount: 0 };
-      const updated = { ...row, auth_pass: row.node_password_pending, node_password_pending: null };
+      const updated = { ...row, auth_pass: row.node_password_pending, node_password_pending: null, node_password_restored_at: new Date() };
       rows.set(row.id, updated);
       return { rows: [updated], rowCount: 1 };
     }
@@ -524,6 +526,32 @@ describe('a mail node mailbox whose password is rejected', () => {
     expect(rows.get(acct.id)).toMatchObject({ auth_pass: `enc:${NEW_PASSWORD}`, node_password_pending: null });
   });
 
+  it('restores a mailbox at most once in six hours, across restarts', async () => {
+    expect(NODE_PASSWORD_RESTORE_MIN_INTERVAL_MS).toBe(6 * 60 * 60 * 1000);
+    const recent = stored(nodeAccount({ node_password_restored_at: new Date(Date.now() - 60 * 60 * 1000) }));
+    const mgr = newManager(); // a fresh process: nothing in memory
+    const reconnect = vi.spyOn(mgr, 'connectAccount').mockResolvedValue(true);
+
+    mgr._noteAuthFailure(recent);
+    await vi.waitFor(() => expect(syncErrorWrites(recent.id)).toContain(RATE_LIMITED));
+    expect(getMailbox).not.toHaveBeenCalled();
+    expect(setMailboxPassword).not.toHaveBeenCalled();
+    expect(mgr._authLoginBlocked(recent.id)).toBeTruthy();
+
+    // Older than six hours: restored, and the time is stored.
+    const older = stored(nodeAccount({ node_password_restored_at: new Date(Date.now() - NODE_PASSWORD_RESTORE_MIN_INTERVAL_MS - 60000) }));
+    mgr._noteAuthFailure(older);
+    await vi.waitFor(() => expect(reconnect).toHaveBeenCalledTimes(1));
+    expect(passwordWrites()[0][0]).toMatch(/node_password_restored_at = NOW\(\)/);
+    expect(Date.now() - rows.get(older.id).node_password_restored_at.getTime()).toBeLessThan(60000);
+
+    // Right after it, a new rejection is limited again, even after a manual reconnect.
+    mgr.clearConnectCooldown(older.id);
+    mgr._noteAuthFailure(older);
+    await vi.waitFor(() => expect(syncErrorWrites(older.id)).toContain(RATE_LIMITED));
+    expect(setMailboxPassword).toHaveBeenCalledTimes(1);
+  });
+
   it('runs at most two restores at once across all mailboxes; the others wait their turn', async () => {
     const accounts = [stored(nodeAccount()), stored(nodeAccount()), stored(nodeAccount())];
     const answers = [];
@@ -565,7 +593,9 @@ describe('a mail node mailbox whose password is rejected', () => {
     expect(setMailboxPassword).toHaveBeenCalledTimes(1);
     expect(logins).toHaveLength(3);
 
-    // A manual reconnect (clearConnectCooldown) lets the next rejection restore again.
+    // A manual reconnect (clearConnectCooldown) lets the next rejection restore again, once the
+    // durable limit allows it (six hours after the last restore).
+    rows.set(acct.id, { ...rows.get(acct.id), node_password_restored_at: new Date(Date.now() - NODE_PASSWORD_RESTORE_MIN_INTERVAL_MS - 1000) });
     mgr.clearConnectCooldown(acct.id);
     expect(await mgr.connectAccount(acct)).toBe(false);
     await vi.waitFor(() => expect(setMailboxPassword).toHaveBeenCalledTimes(2));

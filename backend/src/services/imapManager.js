@@ -1492,6 +1492,7 @@ const nodeRestoreSlots = createKeyedSemaphore(NODE_RESTORE_CONCURRENCY);
 const NODE_RESTORE_DB_FAILED = 'Password rejected: storing the restored password failed; it is retried on the next attempt';
 const NODE_RESTORE_FAILURES = {
   host_mismatch: 'Password rejected: the mailbox is not on the configured mail node',
+  rate_limited: 'Password rejected: MailExpert already restored it on the mail node in the last 6 hours, so it does not do so again yet',
   disabled: 'Password rejected: the mailbox is disabled on the mail node',
   missing: 'Password rejected: the mailbox is missing on the mail node',
   receive_only: 'Password rejected: login is disabled for the mailbox on the mail node (receive only)',

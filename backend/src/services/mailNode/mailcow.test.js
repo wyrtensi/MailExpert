@@ -25,6 +25,7 @@ import {
   parsePingUrl,
   provisionMailbox,
   saveMailNodeConfig,
+  setMailboxPassword,
   setMailboxQuota,
 } from './mailcow.js';
 
@@ -183,6 +184,23 @@ describe('API requests', () => {
       { items: ['info@example.com'], attr: { active: 0 } },
       { items: ['info@example.com'], attr: { quota: 10240 } },
     ]);
+  });
+
+  it('sets a new password on a mailbox and changes nothing else', async () => {
+    safeFetch.mockResolvedValue(answer(OK));
+    const password = await setMailboxPassword(CFG, 'info@example.com');
+    expect(password.length).toBeGreaterThanOrEqual(32);
+    expect(calls()).toHaveLength(1);
+    const [edit] = calls();
+    expect(edit.url).toBe('https://mail.example.com/api/v1/edit/mailbox');
+    expect(edit.method).toBe('POST');
+    // Only the password: no active flag (a disabled mailbox stays disabled), no other attribute.
+    expect(edit.body).toEqual({ items: ['info@example.com'], attr: { password, password2: password } });
+  });
+
+  it('reports a refused password change as a mail node error', async () => {
+    safeFetch.mockResolvedValue(answer([{ type: 'danger', msg: ['password_complexity'] }]));
+    await expect(setMailboxPassword(CFG, 'info@example.com')).rejects.toMatchObject({ code: 'mail_node_refused' });
   });
 
   it('lists mailboxes with quota in MB and usage in bytes', async () => {

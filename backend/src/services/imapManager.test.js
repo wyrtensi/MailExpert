@@ -4846,3 +4846,117 @@ describe('fetchMessageBody opens no fresh login while a backoff is armed', () =>
     expect(created).toBe(2);
   });
 });
+
+describe('the live-sync ladder is cleared by a successful sync, not by a login', () => {
+  // A standing count whose window has run out: the next connect is admitted, and the question
+  // is whether a login alone wipes the count (upstream #474: "refusal #1" forever).
+  const standing = () => ({ until: 0, failures: 3 });
+
+  beforeEach(() => {
+    vi.clearAllMocks();
+    ImapFlow.mockImplementation(function () {
+      return Object.assign(new EventEmitter(), {
+        connect: vi.fn().mockResolvedValue(),
+        close: vi.fn(),
+        logout: vi.fn().mockResolvedValue(),
+      });
+    });
+    getConnectionPolicy.mockResolvedValue({ allowPrivateHosts: true, allowInsecureTls: true });
+    resolveForConnection.mockResolvedValue({ host: '127.0.0.1', addresses: ['127.0.0.1'], servername: null });
+    query.mockReset();
+    vi.spyOn(console, 'error').mockImplementation(() => {});
+    vi.spyOn(console, 'warn').mockImplementation(() => {});
+    vi.spyOn(console, 'log').mockImplementation(() => {});
+  });
+  afterEach(() => { vi.restoreAllMocks(); });
+
+  describe('connectAccount', () => {
+    // PurelyMail host: preferFreshBodyFetch skips the pool pre-warm, so no second client is
+    // built behind the test's back. The path under test is the same for every provider.
+    const acct = { id: 'ladder-connect', user_id: 'u1', enabled: true, imap_host: 'imap.purelymail.com', imap_port: 993, imap_tls: true, auth_user: 'u', auth_pass: 'enc' };
+    const connectManager = () => {
+      const mgr = ladderManager();
+      query.mockResolvedValue({ rows: [], rowCount: 1 });
+      mgr.folderStatusMonitor = null;
+      mgr._shouldAutoBackfillOnConnect = vi.fn().mockResolvedValue(false);
+      mgr.startProviderIdBackfill = vi.fn().mockResolvedValue();
+      mgr._resumeThreadRecompute = vi.fn().mockResolvedValue();
+      mgr._startSyncInterval = vi.fn();
+      mgr._startPluginSyncTimers = vi.fn().mockResolvedValue();
+      mgr.syncFolders = vi.fn().mockResolvedValue();
+      return mgr;
+    };
+
+    it('keeps the count through a login whose initial sync fails', async () => {
+      const mgr = connectManager();
+      mgr._connectCooldown.set(acct.id, standing());
+      mgr.syncMessages = vi.fn().mockRejectedValue(new Error('Connection not available'));
+      expect(await mgr.connectAccount(acct)).toBe(true);
+      expect(mgr._connectCooldown.get(acct.id)?.failures).toBe(3);
+    });
+
+    it('clears the count once the initial sync succeeds', async () => {
+      const mgr = connectManager();
+      mgr._connectCooldown.set(acct.id, standing());
+      mgr.syncMessages = vi.fn().mockResolvedValue({});
+      expect(await mgr.connectAccount(acct)).toBe(true);
+      expect(mgr._connectCooldown.has(acct.id)).toBe(false);
+    });
+  });
+
+  describe('the sync-tick reconnect', () => {
+    const acct = { id: 'ladder-reconnect', user_id: 'u1', enabled: true, protocol: 'imap', imap_host: 'mail.example.com', imap_port: 993, imap_tls: true, auth_user: 'u', auth_pass: 'enc' };
+    const tickManager = () => {
+      const mgr = ladderManager();
+      query.mockImplementation(async (sql) => ({ rows: sql.startsWith('SELECT * FROM email_accounts') ? [acct] : [], rowCount: 1 }));
+      mgr.syncFolders = vi.fn().mockResolvedValue();
+      mgr._syncSpamFolder = vi.fn().mockResolvedValue();
+      return mgr;
+    };
+
+    it('keeps the count through a reconnect whose sync fails', async () => {
+      const mgr = tickManager();
+      mgr._connectCooldown.set(acct.id, standing());
+      // A failure that arms nothing, so any change in the count comes from the reconnect.
+      mgr.syncMessages = vi.fn().mockRejectedValue(new Error('Unexpected server response'));
+      await mgr._syncTick(acct);
+      expect(ImapFlow).toHaveBeenCalledTimes(1); // the reconnect did log in
+      expect(mgr._connectCooldown.get(acct.id)?.failures).toBe(3);
+    });
+
+    it('clears the count once the sync after the reconnect succeeds', async () => {
+      const mgr = tickManager();
+      mgr._connectCooldown.set(acct.id, standing());
+      mgr.syncMessages = vi.fn().mockResolvedValue({});
+      await mgr._syncTick(acct);
+      expect(mgr._connectCooldown.has(acct.id)).toBe(false);
+    });
+  });
+
+  it('clears the count on a successful poll-only tick, the only clear a poll-only account gets', async () => {
+    const acct = { id: 'ladder-poll-only', user_id: 'u1', enabled: true, protocol: 'imap', imap_host: 'mail.example.com', imap_port: 993, imap_tls: true, auth_user: 'u', auth_pass: 'enc' };
+    const mgr = ladderManager();
+    query.mockResolvedValue({ rows: [], rowCount: 1 });
+    mgr.syncFolders = vi.fn().mockResolvedValue();
+    mgr._connectCooldown.set(acct.id, standing());
+    mgr.syncMessages = vi.fn().mockRejectedValue(new Error('Unexpected server response'));
+    await mgr._pollOnlyTick(acct);
+    expect(mgr._connectCooldown.get(acct.id)?.failures).toBe(3);
+    mgr.syncMessages = vi.fn().mockResolvedValue({});
+    await mgr._pollOnlyTick(acct);
+    expect(mgr._connectCooldown.has(acct.id)).toBe(false);
+  });
+
+  it('escalates across logins that succeed and syncs that do not', async () => {
+    // The loop itself: each reconnect logs in, each sync is refused. The count must climb.
+    const acct = { id: 'ladder-escalate', user_id: 'u1', enabled: true, protocol: 'imap', imap_host: 'mail.example.com', imap_port: 993, imap_tls: true, auth_user: 'u', auth_pass: 'enc' };
+    const mgr = ladderManager();
+    query.mockImplementation(async (sql) => ({ rows: sql.startsWith('SELECT * FROM email_accounts') ? [acct] : [], rowCount: 1 }));
+    mgr.syncMessages = vi.fn().mockRejectedValue(new Error('Maximum number of connections from user+IP exceeded'));
+    for (let i = 0; i < 3; i++) {
+      await mgr._syncTick(acct);
+      mgr._connectCooldown.get(acct.id).until = 0; // let the next reconnect through
+    }
+    expect(mgr._connectCooldown.get(acct.id).failures).toBe(3);
+  });
+});

@@ -248,7 +248,8 @@ const ACCOUNT_ERROR_MIN_STREAK = 2;
 // Connection-refusal cooldown. When a provider refuses a NEW connection (per-IP/per-account
 // limit, "try again later", temporary lock, throttling), back that account off with growing
 // delay instead of retrying it every health-check tick — repeated refusals are exactly what
-// escalate a provider to IP bans / account locks. Cleared the moment the account connects.
+// escalate a provider to IP bans / account locks. Cleared by the account's first successful sync
+// (not by a login alone) or by an explicit reconnect (clearConnectCooldown).
 const CONNECT_COOLDOWN_BASE_MS = 30 * 1000;      // first refusal ≈ 30s
 const CONNECT_COOLDOWN_MAX_MS = 15 * 60 * 1000;  // capped at 15 min
 
@@ -2399,8 +2400,11 @@ export class ImapManager {
   async connectAccount(account) {
     // Back off if this account is in a connection-refusal cooldown. Retrying a provider that
     // is rejecting connections (per-IP/per-account limit, temporary lock) every health-check
-    // tick is exactly what escalates to IP bans / account locks. The cooldown is cleared the
-    // moment a connect succeeds (below), so a transient refusal recovers on its own.
+    // tick is exactly what escalates to IP bans / account locks. The cooldown's window is honored
+    // here; its failure COUNT survives a successful login and is cleared by the first successful
+    // SYNC (the initial one below, the sync tick or the poll-only tick), so a transient refusal
+    // still recovers on its own while a server that accepts the login and then fails the session
+    // keeps climbing the ladder.
     // An OAuth grant that was revoked stays down until the user consents again: the consent
     // callbacks reset the flag and reconnect with the fresh row.
     if (account.oauth_reconnect_required) {
@@ -2500,6 +2504,9 @@ export class ImapManager {
             'Initial message sync',
           );
         }
+        // The initial sync SUCCEEDED: that is the health proof the backoff ladder waits for, so
+        // clear it now rather than leaving the standing count until the next interval tick.
+        this._connectCooldown.delete(account.id);
       } catch (syncErr) {
         console.warn(`Initial sync skipped for ${logAccount(account)}: ${extractImapError(syncErr)}`);
       }
@@ -2547,7 +2554,12 @@ export class ImapManager {
       // (Enabling such a feature on a live account takes effect on its next reconnect.)
       this._startPluginSyncTimers(account).catch(err => console.warn(`Plugin sync timer arm failed for ${logAccount(account)}:`, err.message));
 
-      this._connectCooldown.delete(account.id); // healthy again — clear any refusal cooldown
+      // Deliberately NOT clearing _connectCooldown here. A successful LOGIN is not evidence the
+      // server will sustain the session: upstream #474 logged a provider accepting every
+      // reconnect and then failing the session, with this line wiping the count on each login so
+      // the ladder read "refusal #1, backing off 30s" forever. The first successful sync clears
+      // it (the initial sync above, the sync tick, the poll-only tick). A login is a handshake;
+      // a sync is health.
       this.folderStatusMonitor?.refresh(account).catch(() => {});
       console.log(`Connected account: ${logAccount(account)}`);
       this.broadcast({ type: 'account_connected', accountId: account.id });
@@ -3028,9 +3040,9 @@ export class ImapManager {
           // (#360) — activeClient is that same pendingClient, so it's already covered here.
           this._attachIdleListeners(activeClient, syncAccount);
           this.connections.set(account.id, activeClient);
-          // Mirror connectAccount's success cleanup: clear the refusal backoff so the next
-          // failure starts fresh, and clear the stale sync_error the UI is still showing.
-          this._connectCooldown.delete(account.id);
+          // Mirror connectAccount's success cleanup for the account ERROR only: clear the stale
+          // sync_error the UI is still showing. The backoff ladder is not cleared by a login; the
+          // sync below clears it if it succeeds (see connectAccount for why).
           await this._clearAccountError(account);
           console.log(`Reconnected ${logAccount(syncAccount)}`);
         } catch (reconnErr) {
@@ -3060,7 +3072,7 @@ export class ImapManager {
       // freshInboxSync providers (PurelyMail) keep the persistent connection open and sync via
       // a brand-new login every tick, so a refused fresh login never passes through the
       // reconnect gate above — without this check the 10s poll would keep hammering a provider
-      // that's rejecting logins. Cleared on any healthy sync (below) and on a good reconnect.
+      // that's rejecting logins. Cleared on any healthy sync (below), not on a reconnect.
       const syncCd = this._connectCooldown.get(account.id);
       if (syncCd && Date.now() < syncCd.until) return;
       // noBodyParts=true: envelope/flags/uid only — avoids slow servers timing out on body fetches.

@@ -125,7 +125,7 @@ beforeEach(() => {
   setMailboxPassword.mockImplementation(async () => { nodePassword = NEW_PASSWORD; return NEW_PASSWORD; });
   query.mockReset();
   query.mockImplementation(async (sql, params = []) => {
-    if (sql.startsWith('SELECT id, email_address, mail_node') || sql.startsWith('SELECT * FROM email_accounts WHERE id = $1')) {
+    if (sql.startsWith('SELECT id, email_address, imap_host, mail_node') || sql.startsWith('SELECT * FROM email_accounts WHERE id = $1')) {
       const row = rows.get(params[0]);
       return { rows: row ? [row] : [], rowCount: row ? 1 : 0 };
     }
@@ -254,6 +254,29 @@ describe('a mail node mailbox whose password is rejected', () => {
     }
   });
 
+  it('does not touch the configured node for a mailbox whose row names another host', async () => {
+    const acct = stored(nodeAccount({ imap_host: 'Old-Node.example.org' }));
+    const mgr = newManager();
+    const reconnect = vi.spyOn(mgr, 'connectAccount');
+    mgr.connections.set(acct.id, Object.assign(new EventEmitter(), { close: vi.fn() }));
+
+    await rejectPoolLogin(acct);
+    await vi.waitFor(() => expect(syncErrorWrites(acct.id)).toContain('Password rejected: the mailbox is not on the configured mail node'));
+
+    expect(getMailbox).not.toHaveBeenCalled();
+    expect(setMailboxPassword).not.toHaveBeenCalled();
+    expect(passwordWrites()).toHaveLength(0);
+    expect(reconnect).not.toHaveBeenCalled();
+    expect(recordAudit).not.toHaveBeenCalled();
+    evictPool(acct.id);
+
+    // The same host in other letter case is the same node.
+    const same = stored(nodeAccount({ imap_host: 'MAIL.example.com' }));
+    vi.spyOn(mgr, 'connectAccount').mockResolvedValue(true);
+    mgr._noteAuthFailure(same);
+    await vi.waitFor(() => expect(setMailboxPassword).toHaveBeenCalledTimes(1));
+  });
+
   it('does not restore a mailbox missing on the node', async () => {
     const acct = stored(nodeAccount());
     getMailbox.mockResolvedValue(null);
@@ -312,7 +335,7 @@ describe('a mail node mailbox whose password is rejected', () => {
     expect(getMailNodeConfig).not.toHaveBeenCalled();
     expect(getMailbox).not.toHaveBeenCalled();
     expect(setMailboxPassword).not.toHaveBeenCalled();
-    expect(query.mock.calls.some(([sql]) => sql.startsWith('SELECT id, email_address, mail_node'))).toBe(false);
+    expect(query.mock.calls.some(([sql]) => sql.startsWith('SELECT id, email_address, imap_host, mail_node'))).toBe(false);
     expect(recordAudit).not.toHaveBeenCalled();
   });
 

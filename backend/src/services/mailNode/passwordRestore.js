@@ -13,6 +13,7 @@ import { getMailbox, getMailNodeConfig, listDomains, setMailboxPassword } from '
 // Outcomes:
 // - { outcome: 'restored', account }: the node took the new password and the row holds it
 //   (account is the updated row);
+// - { outcome: 'host_mismatch' }: the row's host is not the configured node;
 // - { outcome: 'disabled' | 'missing' }: the mailbox is inactive or gone on the node;
 // - { outcome: 'receive_only' | 'foreign_authsource' | 'no_imap_access' | 'force_pw_update' |
 //   'domain_missing' | 'domain_inactive' }: the node refuses the login for another reason;
@@ -22,13 +23,16 @@ import { getMailbox, getMailNodeConfig, listDomains, setMailboxPassword } from '
 // Throws only when the database fails.
 export async function restoreNodeMailboxPassword(accountId) {
   const { rows } = await query(
-    'SELECT id, email_address, mail_node, enabled, protocol, oauth_provider FROM email_accounts WHERE id = $1',
+    'SELECT id, email_address, imap_host, mail_node, enabled, protocol, oauth_provider FROM email_accounts WHERE id = $1',
     [accountId],
   );
   const row = rows[0];
   if (!row?.mail_node || !row.enabled || row.protocol !== 'imap' || isOAuthAccount(row)) return { outcome: 'skipped' };
   const cfg = await getMailNodeConfig();
   if (!cfg) return { outcome: 'skipped' };
+  // The mailbox lives on the node its row names. If the configured node is another host (the admin
+  // pointed the panel at a new node name), its same-named mailbox may belong to someone else.
+  if (String(row.imap_host || '').toLowerCase() !== cfg.mailHost) return { outcome: 'host_mismatch' };
 
   let mailbox;
   try {

@@ -1490,6 +1490,7 @@ const nodeRestoreSlots = createKeyedSemaphore(NODE_RESTORE_CONCURRENCY);
 
 // The account error for a rejected node password that was not restored (restoreNodeMailboxPassword).
 const NODE_RESTORE_FAILURES = {
+  host_mismatch: 'Password rejected: the mailbox is not on the configured mail node',
   disabled: 'Password rejected: the mailbox is disabled on the mail node',
   missing: 'Password rejected: the mailbox is missing on the mail node',
   receive_only: 'Password rejected: login is disabled for the mailbox on the mail node (receive only)',

@@ -95,6 +95,15 @@ describe('startProviderIdBackfill', () => {
     expect(runProviderIdBackfill).not.toHaveBeenCalled();
   });
 
+  it('does not start while a background backoff holds the mailbox back', async () => {
+    // The entry gate, ahead of the run's own shouldContinue: no plan query, no running state.
+    const mgr = newManager();
+    mgr._secondaryCooldown.set(gmail.id, { until: Date.now() + 60000, failures: 1 });
+    await mgr.startProviderIdBackfill(gmail);
+    expect(runProviderIdBackfill).not.toHaveBeenCalled();
+    expect(mgr.providerIdBackfillRunning.has(gmail.id)).toBe(false);
+  });
+
   it('marks the mailbox clean after a complete run and skips it next time', async () => {
     const mgr = newManager();
     runProviderIdBackfill.mockResolvedValue({ outcome: 'done', processed: 3, total: 3 });
@@ -227,17 +236,34 @@ describe('startProviderIdBackfill connection handling', () => {
     expect(recordProviderIdBackfillError).toHaveBeenCalled();
   });
 
-  it('arms the refusal backoff when the server refuses the connection', async () => {
+  it('arms the secondary backoff, not the live-sync cooldown, when the server refuses the connection', async () => {
+    // A background login: its refusal must not pause the sync tick of the mailbox.
     const mgr = newManager();
     const noteAuth = vi.spyOn(mgr, '_noteAuthFailure');
-    const noteRefusal = vi.spyOn(mgr, '_noteConnectionRefusal');
+    const noteSecondary = vi.spyOn(mgr, '_noteSecondaryRefusal');
     connectError = new Error('Too many simultaneous connections');
     runProviderIdBackfill.mockImplementation(async ({ getClient }) => { await getClient(); });
 
     await mgr.startProviderIdBackfill(gmail);
 
-    expect(noteRefusal).toHaveBeenCalledWith(gmail);
+    expect(noteSecondary).toHaveBeenCalledWith(gmail);
+    expect(mgr._connectCooldown.has(gmail.id)).toBe(false);
     expect(noteAuth).not.toHaveBeenCalled();
+  });
+
+  it('keeps a rejected login off the account-wide ladder while the persistent connection is up', async () => {
+    // One transient AUTHENTICATIONFAILED after a token refresh must not stop the sync tick.
+    const mgr = newManager();
+    mgr.connections.set(gmail.id, { close: vi.fn() });
+    connectError = Object.assign(new Error('Command failed'), {
+      authenticationFailed: true, responseStatus: 'NO', serverResponseCode: 'AUTHENTICATIONFAILED',
+    });
+    runProviderIdBackfill.mockImplementation(async ({ getClient }) => { await getClient(); });
+
+    await mgr.startProviderIdBackfill(gmail);
+
+    expect(mgr._connectCooldown.has(gmail.id)).toBe(false);
+    expect(mgr._statusAuthCooldown.has(gmail.id)).toBe(true);
   });
 });
 

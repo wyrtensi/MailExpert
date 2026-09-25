@@ -152,10 +152,13 @@ async function loadForwardContent({ row, account, imapManager }) {
   let html = row.body_html;
   let fetchedParts = [];
   if (!text && !html) {
+    // allowLogin: a forward runs once per new message and has no retry, so a refusal backoff
+    // must not make it fail without even one login attempt (see fetchMessageBody).
     const fetched = await imapManager.fetchMessageBody(
       account,
       row.uid,
-      row.folder
+      row.folder,
+      { allowLogin: true }
     );
     text = fetched.text;
     html = fetched.html;

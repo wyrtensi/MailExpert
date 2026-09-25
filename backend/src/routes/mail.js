@@ -8,6 +8,7 @@ import { shouldBlockImages } from '../utils/imageBlocking.js';
 import { threadingDiagnostics } from '../services/threadingDiagnostics.js';
 import { requireAuth } from '../middleware/auth.js';
 import { imapManager } from '../index.js';
+import { isConnectionRefusal } from '../services/imapManager.js';
 import { sanitizeEmail, stripEmailHead, hasRemoteImages, blockRemoteImages, rewriteEbayImageserUrls, rewriteAnchorHrefs } from '../services/emailSanitizer.js';
 import { snippetFromBody, decodeMimeWords, parseRawHeaders, buildHeadersFromMessage } from '../services/messageParser.js';
 import { resolveTrashFolder, resolveAllTrashPaths, resolveAllDraftsPaths, resolveArchiveFolder, isAllMailFolder, resolveSpamFolder, resolveAllSpamPaths, getDeleteStrategy, adjustFolderCounts, fanOutReadToSiblings, fanOutStarToSiblings, fanOutBulkReadToSiblings } from '../utils/mailUtils.js';
@@ -631,7 +632,10 @@ router.get('/messages/:id/body', async (req, res) => {
         timeout: true,
       });
     }
-    if (err.poolExhausted) return sendMailboxBusy(res);
+    // Our own pool budget (poolExhausted), a backoff holding new logins back (providerRefusing),
+    // or a server refusing one outright: none is a broken message, and each is worth retrying
+    // shortly, so the same 503 busy answer the UI already explains instead of a raw 500.
+    if (err.poolExhausted || err.providerRefusing || isConnectionRefusal(msg)) return sendMailboxBusy(res);
     res.status(500).json({ error: msg });
   }
 });

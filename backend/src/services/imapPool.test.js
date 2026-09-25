@@ -87,6 +87,9 @@ async function fillPool() {
   return held;
 }
 
+// A `this` for calling fetchMessageBody off the prototype with no backoff armed.
+const NO_BACKOFF = { _poolLoginOpts: () => ({ noNewLogin: false }) };
+
 describe('pool size and waits', () => {
   it('defaults to 4 while Gmail and Yahoo keep their profile values', () => {
     expect(POOL_SIZE).toBe(4);
@@ -314,7 +317,7 @@ describe('a stalled pooled command', () => {
 
   it('bounds a body fetch inside the route budget', async () => {
     hangOnLock();
-    const fetch = settle(ImapManager.prototype.fetchMessageBody.call({}, ACCOUNT, 9, 'INBOX'));
+    const fetch = settle(ImapManager.prototype.fetchMessageBody.call(NO_BACKOFF, ACCOUNT, 9, 'INBOX'));
     await vi.advanceTimersByTimeAsync(BODY_FETCH_POOL_TIMEOUT_MS + 100);
     const { ok } = await fetch;
     expect(ok).toBe(false);
@@ -326,7 +329,7 @@ describe('a stalled pooled command', () => {
 describe('a body fetch on a busy account', () => {
   it('fails as busy and does not fall back to a fresh login', async () => {
     const held = await fillPool();
-    const outcome = settle(ImapManager.prototype.fetchMessageBody.call({}, ACCOUNT, 9, 'INBOX'));
+    const outcome = settle(ImapManager.prototype.fetchMessageBody.call(NO_BACKOFF, ACCOUNT, 9, 'INBOX'));
     await vi.advanceTimersByTimeAsync(ACQUIRE_TIMEOUT_MS + 1000);
     const { ok, e } = await outcome;
     expect(ok).toBe(false);

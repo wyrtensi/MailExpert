@@ -1354,6 +1354,13 @@ export const PERSISTENT_FLAG_LATE_STORE_WAIT_MS = 15000;
 // UIDs per UID STORE in setFlags. Keeps the command line well under the lengths servers accept
 // (a UID set of scattered 7-digit UIDs is 8 bytes a UID); the bulk routes send at most 500 ids.
 export const FLAG_STORE_UID_CHUNK = 500;
+
+// One UID, or a UID set ('3,7,9') as the count and its ends, for log lines and error texts: a
+// bulk store's set is up to FLAG_STORE_UID_CHUNK UIDs (about 4 KB).
+export function describeUids(uid) {
+  const list = String(uid).split(',');
+  return list.length === 1 ? `uid=${list[0]}` : `uids=${list.length} (${list[0]}..${list[list.length - 1]})`;
+}
 // Clients whose mailbox lock syncMessages holds right now. Module-level because the lock
 // belongs to the client, not to a manager (and tests call syncMessages with a bare `this`).
 const syncLockedClients = new WeakSet();
@@ -6643,7 +6650,7 @@ export class ImapManager {
             : client.messageFlagsRemove(String(uid), [flag], opts);
           flight.sent = true;
           const applied = await store;
-          if (applied === false) throw new Error(`server did not apply ${flag}=${value} for uid=${uid} on the persistent session`);
+          if (applied === false) throw new Error(`server did not apply ${flag}=${value} for ${describeUids(uid)} on the persistent session`);
         } finally {
           lock.release();
         }
@@ -6658,7 +6665,7 @@ export class ImapManager {
     attempt.catch(() => {}); // detached after a timeout; never an unhandled rejection
     try {
       await raceTimeout(attempt, PERSISTENT_FLAG_STORE_TIMEOUT_MS, 'Persistent flag store');
-      logger.debug(`setFlag success (persistent): uid=${uid} ${flag}=${value}`);
+      logger.debug(`setFlag success (persistent): ${describeUids(uid)} ${flag}=${value}`);
       return true;
     } catch (err) {
       // Mark the detached attempt dead BEFORE falling through: a lock granted late must
@@ -6749,7 +6756,7 @@ export class ImapManager {
   }
 
   async _setFlagInner(account, uid, folder, flag, value, flight, { background = false, failFastWhenHeld = false } = {}) {
-    console.log(`setFlag: uid=${uid} folder=${folder} flag=${flag} value=${value}`);
+    console.log(`setFlag: ${describeUids(uid)} folder=${folder} flag=${flag} value=${value}`);
     if (await this._setFlagOverPersistent(account, uid, folder, flag, value, flight)) return;
     // Up to 2 attempts. ImapFlow returns false when the server did NOT apply the flag —
     // typically a stale/half-open pooled connection whose SELECT view is missing the UID.
@@ -6773,9 +6780,9 @@ export class ImapManager {
               ? await client.messageFlagsAdd(String(uid), [flag], { uid: true })
               : await client.messageFlagsRemove(String(uid), [flag], { uid: true });
             if (flagResult === false) {
-              throw new Error(`server did not apply ${flag}=${value} for uid=${uid} (no matching message)`);
+              throw new Error(`server did not apply ${flag}=${value} for ${describeUids(uid)} (no matching message)`);
             }
-            logger.debug(`setFlag success: uid=${uid} ${flag}=${value}`);
+            logger.debug(`setFlag success: ${describeUids(uid)} ${flag}=${value}`);
           } finally {
             lock.release();
           }
@@ -6793,7 +6800,7 @@ export class ImapManager {
         if (attempt < 2) await new Promise(r => setTimeout(r, 400));
       }
     }
-    console.error(`setFlag failed after retry: uid=${uid} ${flag}=${value}:`, lastErr?.message);
+    console.error(`setFlag failed after retry: ${describeUids(uid)} ${flag}=${value}:`, lastErr?.message);
     throw lastErr;
   }
 

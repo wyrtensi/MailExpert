@@ -4739,6 +4739,25 @@ describe('setFlag routing over the persistent session', () => {
     expect(poolClients[0].messageFlagsRemove.mock.calls[1][0]).toBe(String(FLAG_STORE_UID_CHUNK + 1));
   });
 
+  it('logs a bulk store as its count and first/last UID, not the whole set', async () => {
+    const { mgr, account } = arrange();
+    ImapFlow.mockImplementation(function () {
+      return Object.assign(new EventEmitter(), {
+        connect: vi.fn(() => Promise.resolve()),
+        close: vi.fn(),
+        getMailboxLock: vi.fn(async () => ({ release: vi.fn() })),
+        messageFlagsAdd: vi.fn(async () => false),
+      });
+    });
+    const uids = Array.from({ length: 500 }, (_, i) => i + 1);
+
+    await expect(mgr.setFlags(account, 'Archive', uids, '\\Seen', true)).rejects.toThrow(/for uids=500 \(1\.\.500\)/);
+
+    const lines = [...console.log.mock.calls, ...console.error.mock.calls].map(args => args.join(' '));
+    expect(lines.some(l => l.includes('setFlag: uids=500 (1..500) folder=Archive'))).toBe(true);
+    expect(lines.filter(l => l.includes('1,2,3'))).toEqual([]);
+  });
+
   it('does nothing for an empty UID list', async () => {
     const persistent = fakePersistent();
     const { mgr, account } = arrange({ persistent });

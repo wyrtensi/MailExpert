@@ -1740,6 +1740,7 @@
       "actionMailboxConnectionChanged": "Connection settings changed",
       "actionMailboxEnabled": "Mailbox enabled",
       "actionMailboxDisabled": "Mailbox disabled",
+      "actionMailboxPasswordRestored": "Mailbox password restored on the mail node",
       "actionMessageSent": "Message sent",
       "actionMessageDeleted": "Message deleted",
       "actionUserAdded": "User added",

@@ -6241,6 +6241,31 @@ describe('every background login waits out a rejected password', () => {
       evictPool(acct.id);
     });
 
+    it('a waiter that may log in does not wait behind a held-back one for a free slot', async () => {
+      // A refusal window (not a rejected password): a message click waits for a busy session with
+      // noNewLogin, while a move behind it may log in, and the pool has room.
+      const acct = account();
+      const mgr = liveManager(acct);
+      connectError = null;
+      const busy = await acquirePooledClient(acct);
+      mgr._secondaryCooldown.set(acct.id, { until: Date.now() + 60000, failures: 1 });
+      const click = acquirePooledClient(acct, { noNewLogin: true });
+      let secondSettled = false;
+      const secondClick = acquirePooledClient(acct, { noNewLogin: true }).finally(() => { secondSettled = true; });
+      const move = await acquirePooledClient(acct);
+      expect(move).not.toBe(busy);
+      expect(clients).toHaveLength(2); // one login, for the move only
+      await new Promise(r => setImmediate(r));
+      expect(secondSettled).toBe(false); // the other held-back click did not log in either
+      releasePooledClient(acct, busy);
+      expect(await click).toBe(busy); // the released session still goes to the head
+      releasePooledClient(acct, move);
+      expect(await secondClick).toBe(move);
+      releasePooledClient(acct, busy);
+      releasePooledClient(acct, move);
+      evictPool(acct.id);
+    });
+
     it('a waiting user action fails typed when the last open session closes', async () => {
       const acct = account();
       const mgr = liveManager(acct);

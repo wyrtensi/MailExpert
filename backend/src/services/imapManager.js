@@ -1600,7 +1600,17 @@ function drainWaiters(pool) {
     // left to wait for. This also covers a waiter that queued before the window opened.
     const headAuthHeld = loginHeldBack(head.account, { background: head.background });
     if (head.noNewLogin || headAuthHeld) {
-      if (pool.clients.length > 0) break;
+      if (pool.clients.length > 0) {
+        // The held head waits for a released session (freed sessions still go to the head, above).
+        // A waiter behind it that may log in (a move while the server only refuses extra
+        // connections, say) must not wait behind it for a slot it can fill now.
+        const i = pool.waiters.findIndex(w => !w.noNewLogin && !loginHeldBack(w.account, { background: w.background }));
+        if (i === -1) break;
+        const [entry] = pool.waiters.splice(i, 1);
+        clearTimeout(entry.timer);
+        growPool(pool, entry.account).then(entry.resolve, entry.reject);
+        continue;
+      }
       pool.waiters.shift();
       clearTimeout(head.timer);
       head.reject(providerRefusingError({ authRejected: headAuthHeld }));

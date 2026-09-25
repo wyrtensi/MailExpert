@@ -842,8 +842,11 @@ describe('rules and block list are per mailbox', () => {
 
 describe('destination actions while the mailbox password is rejected', () => {
   // A move goes through the IMAP pool, which would open a login the server is bound to reject:
-  // a fail2ban strike against the whole mail node. The letter stays put and the skip is logged.
-  const heldImap = () => ({ ...mockImap, _authLoginBlocked: vi.fn(() => ({ until: Date.now() + 60000 })) });
+  // a fail2ban strike against the whole mail node. The pool holds that login back and fails the
+  // move with providerRefusing (imapManager's loginHeldBack); the letter stays put and the skip
+  // is logged.
+  const heldBack = () => Object.assign(new Error('Mail server is not accepting new connections for this account right now'), { providerRefusing: true });
+  const heldImap = () => ({ ...mockImap, bulkMoveMessages: vi.fn().mockRejectedValue(heldBack()) });
 
   it.each([
     ['move', { type: 'move', value: 'INBOX/Processed' }],
@@ -860,8 +863,8 @@ describe('destination actions while the mailbox password is rejected', () => {
     try {
       const imap = heldImap();
       const result = await applyInboxRules([mkMsg()], account, imap);
-      expect(imap.bulkMoveMessages).not.toHaveBeenCalled();
       expect(result.remaining).toHaveLength(1);
+      expect(query.mock.calls.some(([sql]) => /^UPDATE messages SET folder|^DELETE FROM messages/.test(sql))).toBe(false);
       expect(warn).toHaveBeenCalledWith(expect.stringMatching(new RegExp(`^inboxRules: ${what} skipped for msg msg-1 \\(rule rule-1\\).*stays in INBOX`)));
     } finally { warn.mockRestore(); }
   });
@@ -869,13 +872,13 @@ describe('destination actions while the mailbox password is rejected', () => {
   it('still moves when nothing holds logins back', async () => {
     query.mockResolvedValueOnce({ rows: [mkRule([{ type: 'move', value: 'INBOX/Processed' }])] }).mockResolvedValue({ rows: [] });
     mockImap.bulkMoveMessages.mockResolvedValue({ failed: [], uidMap: new Map([[100, 200]]) });
-    const imap = { ...mockImap, _authLoginBlocked: vi.fn(() => null) };
+    const imap = { ...mockImap };
     const result = await applyInboxRules([mkMsg()], account, imap);
     expect(imap.bulkMoveMessages).toHaveBeenCalledOnce();
     expect(result.remaining).toHaveLength(0);
   });
 
-  it('keeps a blocked sender in place rather than logging in to move it', async () => {
+  it('keeps a blocked sender in place when the pool holds the login back', async () => {
     query.mockResolvedValueOnce({ rows: [{ email_address: 'sender@example.com' }] });
     resolveTrashFolder.mockResolvedValue('Trash');
     resolveAllTrashPaths.mockResolvedValue(['Trash']);
@@ -884,8 +887,8 @@ describe('destination actions while the mailbox password is rejected', () => {
     try {
       const imap = heldImap();
       const remaining = await applyBlockList([mkMsg()], account, imap);
-      expect(imap.bulkMoveMessages).not.toHaveBeenCalled();
       expect(remaining).toHaveLength(1);
+      expect(query.mock.calls.some(([sql]) => /^UPDATE messages SET folder/.test(sql))).toBe(false);
       expect(warn).toHaveBeenCalledWith(expect.stringContaining('block list move skipped for msg msg-1'));
     } finally { warn.mockRestore(); }
   });

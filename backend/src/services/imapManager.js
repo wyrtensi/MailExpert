@@ -6122,11 +6122,12 @@ export class ImapManager {
         console.warn(`Body prefetch failed for uid ${msg.uid}:`, detail);
 
         // Three guards, each stopping the run:
-        //  - a rejected login stops at the first one and goes on the same auth handling as the
-        //    folder status client (_noteSecondaryAuthFailure): the long status-only ladder while
-        //    the persistent connection is up, the account-wide one otherwise. Without it a wrong
-        //    password behind a live IDLE session cost three rejected logins per folder view.
-        //    fetchMessageBody keeps the fields isImapAuthFailure reads when it rewraps the error;
+        //  - a rejected login stops at the first one. The pool (or withFreshLogin) has already put
+        //    it on the auth handling every login shares (applyHelperAuthFailure): the long
+        //    status-only ladder while the persistent connection is up, the account-wide one
+        //    otherwise. Without the stop a wrong password behind a live IDLE session cost three
+        //    rejected logins per folder view. fetchMessageBody keeps the fields isImapAuthFailure
+        //    reads when it rewraps the error;
         //  - an explicit refusal stops at the first one and arms the SECONDARY backoff, never the
         //    account's connect cooldown, which gates live sync. Arming is what stops the next
         //    folder view from paying for the same refusal again;
@@ -6135,7 +6136,6 @@ export class ImapManager {
         //    resets the count, so one bad message does not stop the rest of the folder.
         // Prefetch is best-effort: bodies are fetched on demand when a message is opened.
         if (isImapAuthFailure(err)) {
-          await this._noteSecondaryAuthFailure(account, err, 'Body prefetch');
           console.log(`Body prefetch stopping for ${logAccount(account)}: login rejected`);
           return 'stopped';
         }
@@ -6168,10 +6168,10 @@ export class ImapManager {
     // revoked OAuth grant is left to the token refresh, which fails with its stable error.
     //
     // allowLogin (a rule forward, which nobody can retry by clicking again): only a rejected
-    // password holds the login back. While the server merely refuses extra connections, one
-    // login attempt beats losing the forward; a login with a rejected password is only another
-    // strike toward fail2ban.
-    const loginHeld = () => (allowLogin ? !!this._authLoginBlocked(account.id) : this._poolLoginOpts(account.id).noNewLogin);
+    // password holds the login back, and the pool and withFreshLogin already do that for every
+    // caller (loginHeldBack), failing with providerRefusing. While the server merely refuses
+    // extra connections, one login attempt beats losing the forward.
+    const loginHeld = () => !allowLogin && this._poolLoginOpts(account.id).noNewLogin;
     const noNewLogin = loginHeld();
     // Inner fetch — called up to twice. `acquire` selects how the connection is obtained:
     // the first attempt uses the pool (withFreshClient); the retry uses a genuinely fresh
@@ -6353,7 +6353,8 @@ export class ImapManager {
         // secondary one or a rejected secondary login). The retry is a brand-new LOGIN, exactly the request the backoff exists
         // to hold back; against a server already refusing us it only adds one more refusal per
         // click. Rethrow the first failure instead, typed so the route answers 503 rather than a
-        // raw 500. Re-read here: a backoff armed while the first attempt ran counts too.
+        // raw 500. Re-read here: a backoff armed while the first attempt ran counts too. A rule
+        // forward (allowLogin) is held back only by a rejected password, inside withFreshLogin.
         if (noNewLogin || loginHeld()) {
           const held = wrapImapError(firstErr, detail);
           held.providerRefusing = true;
@@ -6362,6 +6363,7 @@ export class ImapManager {
         try {
           return await doFetch(withFreshLogin);
         } catch (retryErr) {
+          if (retryErr?.providerRefusing) throw retryErr; // held back by the login gate: keep it typed
           const retryDetail = extractImapError(retryErr);
           // 'Command failed' on the retry means the UID FETCH returned nothing both
           // times — the message may not exist on the server (deleted, UID mismatch).
@@ -6613,10 +6615,9 @@ export class ImapManager {
     // reporting success while the DB read/flag state silently drifts from the server —
     // which a later flag-sync would then revert, leaving the message unexpectedly unread.
     //
-    // While the password is known to be rejected, the pool may serve this from a session that is
-    // already open but must not log in (noNewLogin): the store fails typed instead, and callers
+    // While the password is known to be rejected, the pool serves this from a session that is
+    // already open but does not log in (loginHeldBack): the store fails typed instead, and callers
     // put it on the flag-push queue as for any failed store.
-    const noNewLogin = !!this._authLoginBlocked(account.id);
     let lastErr = null;
     for (let attempt = 1; attempt <= 2; attempt++) {
       try {
@@ -6633,19 +6634,15 @@ export class ImapManager {
           } finally {
             lock.release();
           }
-        }, { noNewLogin });
+        });
         return; // applied
       } catch (err) {
         lastErr = err;
         if (err?.providerRefusing) break; // a second attempt would be held back the same way
-        // The pool's login was rejected: arm the auth ladder, as every background login does, and
-        // do not try again. Without this, once a window ran out while the password was still wrong,
-        // nothing re-armed it and each store cost two rejected logins, the flag-push reconciler
-        // sending up to 30 of them a cycle: enough for fail2ban to ban the panel's IP.
-        if (isImapAuthFailure(err)) {
-          await this._noteSecondaryAuthFailure(account, err, 'Flag store');
-          break;
-        }
+        // The pool's login was rejected (the pool has armed the auth ladder): do not try again. On
+        // an OAuth mailbox, whose short ladder does not hold user logins back, a second attempt
+        // would be a second rejected login.
+        if (isImapAuthFailure(err)) break;
         if (attempt < 2) await new Promise(r => setTimeout(r, 400));
       }
     }

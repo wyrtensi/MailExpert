@@ -5123,6 +5123,24 @@ describe('fetchMessageBody opens no fresh login while a backoff is armed', () =>
     expect(created).toBe(0);
   });
 
+  it('opens no fresh login for a rule forward on a fresh-login provider while the password is rejected', async () => {
+    const mgr = ladderManager();
+    const acct = { ...account('body-forward-auth-fresh'), imap_host: 'imap.purelymail.com' };
+    arms['a rejected secondary login'](mgr, acct.id);
+    await expect(mgr.fetchMessageBody(acct, 9, 'INBOX', { allowLogin: true })).rejects.toMatchObject({ providerRefusing: true });
+    expect(created).toBe(0);
+  });
+
+  it('a rule forward uses an idle session while the password is rejected, and its retry fails typed', async () => {
+    const mgr = ladderManager();
+    const acct = account('body-forward-auth-idle');
+    await primeIdleSession(acct);
+    arms['a rejected secondary login'](mgr, acct.id);
+    await expect(mgr.fetchMessageBody(acct, 9, 'INBOX', { allowLogin: true })).rejects.toMatchObject({ providerRefusing: true });
+    expect(created).toBe(1); // the idle session only: the fresh-login retry is held back
+    evictPool(acct.id);
+  });
+
   it('still retries over a fresh login when nothing is armed', async () => {
     const mgr = ladderManager();
     const acct = account('body-retry-free');
@@ -5488,6 +5506,16 @@ describe('every background login waits out a rejected password', () => {
       expect(mgr._connectCooldown.has(acct.id)).toBe(false);
       // Transient: not painted red.
       expect(query.mock.calls.some(([sql]) => sql.startsWith('UPDATE email_accounts SET sync_error = $1'))).toBe(false);
+    });
+
+    it('a rejected flag store is not tried a second time', async () => {
+      // Its short ladder holds no user login back, so only setFlag's own stop prevents a second
+      // rejected login for the same store.
+      const acct = oauthAccount();
+      const mgr = liveManager(acct);
+      await expect(mgr.setFlag(acct, 7, 'Sent', '\\Seen', true)).rejects.toBeTruthy();
+      expect(ensureFreshOAuthAccount.mock.calls.filter(([, opts]) => opts?.force)).toHaveLength(1);
+      expect(clients).toHaveLength(2); // the login and connectImapClient's one retry after a forced refresh
     });
 
     it('does the same when no persistent connection is up', async () => {

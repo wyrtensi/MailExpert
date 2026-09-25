@@ -32,6 +32,7 @@ import {
 import { runRecompute, RECOMPUTE_BATCH_DELAY_MS } from './threading/recompute.js';
 import { loadRecompute, recomputeState, recordRecomputeError } from './threading/recomputeStore.js';
 import { restoreNodeMailboxPassword } from './mailNode/passwordRestore.js';
+import { currentAuthPass, noteRestoredPassword } from './mailNode/currentPassword.js';
 import { recordAudit } from './auditLog.js';
 import { randomUUID } from 'crypto';
 
@@ -1462,22 +1463,6 @@ export function classifyOAuthRefreshError(err) {
   return null;
 }
 
-// resolved comes from resolveForConnection(), which limits sockets to the validated
-// address set so DNS rebinding cannot change the target between validation and connect.
-// policy: result of getConnectionPolicy() — gates TLS verification override.
-// accountId -> the encrypted password MailExpert last set on the mail node for that mailbox
-// (ImapManager._restoreNodePassword), as stored in email_accounts.auth_pass. Every login takes the
-// password from here when there is one (currentAuthPass), so a job, a timer or a pool caller still
-// holding a row read before the restore does not log in with the replaced password: that login would
-// only be rejected and arm the ladder again. Nothing else changes a node mailbox's password while the
-// process runs (the settings route refuses it, mail_node_connection_locked), so this never goes stale;
-// after a restart every row read carries the stored password.
-const restoredAuthPass = new Map();
-
-function currentAuthPass(account) {
-  return restoredAuthPass.get(account?.id) ?? account?.auth_pass;
-}
-
 // Who the audit log names for a password MailExpert restored by itself.
 export const MAIL_NODE_ACTOR = 'MailExpert';
 // How long a node password restore waits for a connect of the same account to finish before its own
@@ -1514,6 +1499,11 @@ function nodeRestoreFailureDetail({ outcome, code, stage }) {
   return 'Password rejected: the mail node API failed';
 }
 
+// resolved comes from resolveForConnection(), which limits sockets to the validated
+// address set so DNS rebinding cannot change the target between validation and connect.
+// policy: result of getConnectionPolicy() — gates TLS verification override.
+// The password is currentAuthPass(account): the restored one for a row read before a node password
+// restore (services/mailNode/currentPassword.js).
 export function makeClientCfg(account, resolved, { enableIdle = false, policy = {}, idleKeepaliveMs } = {}) {
   if (!policy.allowInsecureTls && !account.imap_tls) {
     throw new Error('Plain-text IMAP is not allowed: admin must enable "Allow insecure TLS"');
@@ -3176,7 +3166,7 @@ export class ImapManager {
       await this._recordAccountError(account, detail);
       return;
     }
-    restoredAuthPass.set(id, result.account.auth_pass);
+    noteRestoredPassword(id, result.replacedAuthPass, result.account.auth_pass);
     evictPool(id);
     this.clearConnectCooldown(id);
     // After clearConnectCooldown, which drops it: set until a login accepts the new password.

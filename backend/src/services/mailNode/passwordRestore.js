@@ -16,8 +16,8 @@ export const NODE_PASSWORD_RESTORE_MIN_INTERVAL_MS = 6 * 60 * 60 * 1000;
 // new password, and the edit carries nothing but the password (setMailboxPassword).
 //
 // Outcomes:
-// - { outcome: 'restored', account }: the node took the new password and the row holds it
-//   (account is the updated row);
+// - { outcome: 'restored', account, replacedAuthPass }: the node took the new password and the row
+//   holds it (account is the updated row, replacedAuthPass the auth_pass it replaced);
 // - { outcome: 'host_mismatch' }: the row's host is not the configured node;
 // - { outcome: 'rate_limited' }: restored less than NODE_PASSWORD_RESTORE_MIN_INTERVAL_MS ago;
 // - { outcome: 'disabled' | 'missing' }: the mailbox is inactive or gone on the node;
@@ -36,7 +36,7 @@ export const NODE_PASSWORD_RESTORE_MIN_INTERVAL_MS = 6 * 60 * 60 * 1000;
 export async function restoreNodeMailboxPassword(accountId) {
   const { rows } = await query(
     `SELECT id, email_address, imap_host, mail_node, enabled, protocol, oauth_provider, node_password_pending,
-            node_password_restored_at
+            node_password_restored_at, auth_pass
        FROM email_accounts WHERE id = $1`,
     [accountId],
   );
@@ -99,7 +99,7 @@ export async function restoreNodeMailboxPassword(accountId) {
   );
   // Deleted meanwhile: the delete route disables the mailbox on the node, nothing to reconnect.
   if (!updated.rows.length) return { outcome: 'skipped' };
-  return { outcome: 'restored', account: updated.rows[0] };
+  return { outcome: 'restored', account: updated.rows[0], replacedAuthPass: row.auth_pass };
 }
 
 function apiErrorCode(err) {

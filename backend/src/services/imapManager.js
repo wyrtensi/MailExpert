@@ -4453,6 +4453,15 @@ export class ImapManager {
   async backfillMessages(account, folder = 'INBOX', session = null) {
     const backfillKey = `${account.id}:${folder}`;
     if (this.backfillRunning.has(backfillKey)) return;
+    // Backfill logs in on its own, so it honors the account's backoffs like every other
+    // background login. backfillAllFolders checks before each folder; the integrity-gap and
+    // UIDVALIDITY callers did not check at all. The skipped folder is picked up by the next
+    // backfill once the backoff clears (the UID diff is idempotent).
+    const blocked = this._secondaryLoginBlocked(account.id);
+    if (blocked) {
+      logger.debug(`Backfill skipped for ${logAccount(account)}/${folder}: backing off ${Math.round((blocked.until - Date.now()) / 1000)}s`);
+      return { aborted: 'cooldown' };
+    }
     this.backfillRunning.add(backfillKey);
 
     // Spread into a local copy so per-run mutations (e.g. batchSize reduction on rate-limit)
@@ -4646,11 +4655,10 @@ export class ImapManager {
 
         // Periodically reconnect to keep connections fresh and pick up refreshed OAuth tokens
         if (sess.batchesOnConn >= cfg.batchesPerConn) {
-          // Another path (connectAccount, the sync tick) armed a refusal or auth cooldown while this
-          // folder was running: do not keep logging in behind its back.
-          const cd = this._connectCooldown.get(account.id);
-          if (cd && Date.now() < cd.until) {
-            console.warn(`Backfill for ${logAccount(account)}/${folder} stopped: connect cooldown active`);
+          // Another path (connectAccount, the sync tick, the status client, another background job)
+          // armed a backoff while this folder was running: do not keep logging in behind its back.
+          if (this._secondaryLoginBlocked(account.id)) {
+            console.warn(`Backfill for ${logAccount(account)}/${folder} stopped: backing off`);
             return { aborted: 'cooldown' };
           }
           try { await openBfClient(); }
@@ -4665,12 +4673,16 @@ export class ImapManager {
             // Same handling as the initial login below: a refusal or rejected credentials will not
             // clear by retrying every errorDelay, so report it and let backfillAllFolders stop.
             if (await this._handleOAuthRefreshFailure(account, reconnErr)) return { aborted: 'oauth' };
-            // Auth first, as on the other paths. A rejected login stops the run without arming the
-            // auth cooldown: the account's persistent connection may still be working, and that
-            // cooldown would also stop its sync tick.
-            if (isImapAuthFailure(reconnErr)) return { aborted: 'auth' };
+            // Auth first, as on the other paths. Backfill is a background login, so a rejection
+            // goes on the secondary auth handling (status-only ladder while the persistent
+            // connection is up, so the sync tick keeps running) and a refusal on the secondary
+            // backoff; both used to hit only this run, or the live-sync cooldown.
+            if (isImapAuthFailure(reconnErr)) {
+              await this._noteSecondaryAuthFailure(account, reconnErr, 'Backfill');
+              return { aborted: 'auth' };
+            }
             if (isConnectionRefusal(detail)) {
-              this._noteConnectionRefusal(account);
+              this._noteSecondaryRefusal(account);
               return { aborted: 'refused' };
             }
             await new Promise(r => setTimeout(r, cfg.errorDelay));
@@ -4946,12 +4958,16 @@ export class ImapManager {
       }
       // After a failure the next folder logs in again, so a provider refusing us (or rejecting
       // the credentials) would otherwise be hit once per remaining folder. Report it so
-      // backfillAllFolders stops; a refusal also arms the account's shared backoff.
+      // backfillAllFolders stops, and arm the secondary backoff that every other background login
+      // (and the next backfill) waits out.
       if (await this._handleOAuthRefreshFailure(account, err)) return { aborted: 'oauth' };
-      // Auth first, without arming the auth cooldown (see the reconnect branch above).
-      if (isImapAuthFailure(err)) return { aborted: 'auth' };
+      // Auth first (see the reconnect branch above).
+      if (isImapAuthFailure(err)) {
+        await this._noteSecondaryAuthFailure(account, err, 'Backfill');
+        return { aborted: 'auth' };
+      }
       if (isConnectionRefusal(detail)) {
-        this._noteConnectionRefusal(account);
+        this._noteSecondaryRefusal(account);
         return { aborted: 'refused' };
       }
     } finally {
@@ -5103,16 +5119,13 @@ export class ImapManager {
       // Stop opening per-folder logins once the provider has refused us or rejected the
       // credentials. The skipped folders are not lost: the UID-diff backfill is idempotent, so
       // the next successful connect (or a manual reindex) runs the whole sequence again.
-      const coolingDown = () => {
-        const cd = this._connectCooldown.get(account.id);
-        return !!cd && Date.now() < cd.until;
-      };
+      const coolingDown = () => !!this._secondaryLoginBlocked(account.id);
       const deferRest = (folders, reason) => {
         if (folders.length) console.warn(`Backfill for ${logAccount(account)} stopped (${reason}); deferred until next connect: ${folders.join(', ')}`);
       };
 
       if (coolingDown()) {
-        deferRest(['all folders'], 'connect cooldown active');
+        deferRest(['all folders'], 'backing off');
         return;
       }
 
@@ -5136,7 +5149,7 @@ export class ImapManager {
       for (let i = 0; i < folders.length; i++) {
         const path = folders[i];
         if (coolingDown()) {
-          deferRest(folders.slice(i), 'connect cooldown active');
+          deferRest(folders.slice(i), 'backing off');
           return;
         }
         const outcome = await this.backfillMessages(account, path, session).catch(err =>
@@ -5317,7 +5330,7 @@ export class ImapManager {
             consecutiveErrors = 0;
           } catch (err) {
             consecutiveErrors++;
-            console.error(`Snippet indexer batch error ${logAccount(account)}/${folder}:`, err.message);
+            console.error(`Snippet indexer batch error ${logAccount(account)}/${folder}:`, extractImapError(err));
             // Connection refusal = the provider is at its per-host/per-IP connection limit
             // (iCloud especially, or many accounts on one server, right after a startup backfill
             // burst). Reopening a fresh connection to retry would only pile on more pressure and

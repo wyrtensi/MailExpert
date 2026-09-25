@@ -33,6 +33,20 @@ import { GMAIL_KEY_PREFIX } from './threading/threadId.js';
 const account = (imap_host, oauth_provider = null) => ({ imap_host, oauth_provider });
 
 const resolved = { host: '127.0.0.1', servername: null };
+
+// The account backoffs a hand-built manager needs to run a background login path for real: the
+// real gates over empty maps, and spies for the two ways a background login arms them.
+const backoffState = () => ({
+  connections: new Map(),
+  _connectCooldown: new Map(),
+  _secondaryCooldown: new Map(),
+  _statusAuthCooldown: new Map(),
+  _secondaryConnectBlocked: ImapManager.prototype._secondaryConnectBlocked,
+  _secondaryAuthBlocked: ImapManager.prototype._secondaryAuthBlocked,
+  _secondaryLoginBlocked: ImapManager.prototype._secondaryLoginBlocked,
+  _noteSecondaryRefusal: vi.fn(),
+  _noteSecondaryAuthFailure: vi.fn(),
+});
 const baseAccount = { imap_host: '127.0.0.1', imap_port: 1143, imap_tls: true, imap_skip_tls_verify: false, auth_user: 'user', auth_pass: 'enc' };
 
 // ── providerProfile — host detection ─────────────────────────────────────────
@@ -2397,7 +2411,7 @@ describe('Gmail label memberships (#418)', () => {
     });
   });
   afterEach(() => { vi.clearAllTimers(); vi.useRealTimers(); vi.restoreAllMocks(); });
-  const manager = () => ({ backfillRunning: new Set(), broadcast: vi.fn(), pluginFacade: {} });
+  const manager = () => ({ ...backoffState(), backfillRunning: new Set(), broadcast: vi.fn(), pluginFacade: {} });
   async function sync(mgr, folder) {
     await ImapManager.prototype.syncMessages.call(mgr, acct, clientFor(folder), folder, 20, false, true);
   }
@@ -3281,7 +3295,7 @@ describe('backfill stops on a provider refusal (#433)', () => {
   function backfillManager() {
     return {
       backfillRunning: new Set(),
-      _connectCooldown: new Map(),
+      ...backoffState(),
       broadcast: vi.fn(),
       pluginFacade: {},
       _noteConnectionRefusal: vi.fn(),
@@ -3300,7 +3314,9 @@ describe('backfill stops on a provider refusal (#433)', () => {
     const mgr = backfillManager();
     const outcome = await ImapManager.prototype.backfillMessages.call(mgr, acct, 'Sent');
     expect(outcome).toEqual({ aborted: 'refused' });
-    expect(mgr._noteConnectionRefusal).toHaveBeenCalledTimes(1);
+    // A background login: the secondary backoff, never the cooldown that gates live sync.
+    expect(mgr._noteSecondaryRefusal).toHaveBeenCalledTimes(1);
+    expect(mgr._noteConnectionRefusal).not.toHaveBeenCalled();
     const logged = console.error.mock.calls.map(args => args.join(' ')).join('\n');
     expect(logged).toContain('[LIMIT] Too many simultaneous connections');
     expect(mgr.backfillRunning.size).toBe(0);
@@ -3319,15 +3335,19 @@ describe('backfill stops on a provider refusal (#433)', () => {
     const mgr = backfillManager();
     const outcome = await ImapManager.prototype.backfillMessages.call(mgr, acct, 'Sent');
     expect(outcome).toEqual({ aborted: 'refused' });
-    expect(mgr._noteConnectionRefusal).toHaveBeenCalledTimes(1);
+    // A background login: the secondary backoff, never the cooldown that gates live sync.
+    expect(mgr._noteSecondaryRefusal).toHaveBeenCalledTimes(1);
+    expect(mgr._noteConnectionRefusal).not.toHaveBeenCalled();
   });
 
-  it('reports an auth outcome without arming the refusal backoff', async () => {
+  it('reports an auth outcome and puts the rejection on the secondary auth handling', async () => {
     rejectConnectWith(gmailXoauthFailure);
     const mgr = backfillManager();
     const outcome = await ImapManager.prototype.backfillMessages.call(mgr, acct, 'Sent');
     expect(outcome).toEqual({ aborted: 'auth' });
+    expect(mgr._noteSecondaryAuthFailure).toHaveBeenCalledTimes(1);
     expect(mgr._noteConnectionRefusal).not.toHaveBeenCalled();
+    expect(mgr._noteSecondaryRefusal).not.toHaveBeenCalled();
   });
 
   // Mid-folder reconnect: the first login succeeds and the first batch fails, which forces the
@@ -3377,7 +3397,8 @@ describe('backfill stops on a provider refusal (#433)', () => {
       await vi.advanceTimersByTimeAsync(errorDelay);
       expect(ImapFlow).toHaveBeenCalledTimes(2);
       expect(await p).toEqual({ aborted: 'refused' });
-      expect(mgr._noteConnectionRefusal).toHaveBeenCalledTimes(1);
+      expect(mgr._noteSecondaryRefusal).toHaveBeenCalledTimes(1);
+      expect(mgr._noteConnectionRefusal).not.toHaveBeenCalled();
       const logged = console.error.mock.calls.map(args => args.join(' ')).join('\n');
       expect(logged).toContain('[LIMIT] Too many simultaneous connections');
       expect(logged).not.toContain('Command failed');
@@ -3393,6 +3414,7 @@ describe('backfill stops on a provider refusal (#433)', () => {
       await vi.advanceTimersByTimeAsync(errorDelay);
       expect(ImapFlow).toHaveBeenCalledTimes(2);
       expect(await p).toEqual({ aborted: 'auth' });
+      expect(mgr._noteSecondaryAuthFailure).toHaveBeenCalledTimes(1);
       expect(mgr._noteConnectionRefusal).not.toHaveBeenCalled();
       const logged = console.error.mock.calls.map(args => args.join(' ')).join('\n');
       expect(logged).toContain('[AUTHENTICATIONFAILED] Invalid credentials (Failure)');
@@ -3411,6 +3433,19 @@ describe('backfill stops on a provider refusal (#433)', () => {
       expect(await p).toEqual({ aborted: 'cooldown' });
       expect(reconnect).not.toHaveBeenCalled();
       expect(mgr.backfillRunning.size).toBe(0);
+    });
+
+    it('does not log in again once another background login armed the secondary backoff', async () => {
+      const reconnect = vi.fn(() => Promise.reject(loginLimitRefusal()));
+      connectOnceThen(reconnect);
+      const mgr = backfillManager();
+      const p = ImapManager.prototype.backfillMessages.call(mgr, acct, 'Sent');
+      // The folder status client was refused while this folder is mid-backfill.
+      mgr._secondaryCooldown.set(acct.id, { until: Date.now() + 60000, failures: 1 });
+      await vi.advanceTimersByTimeAsync(errorDelay);
+      await vi.advanceTimersByTimeAsync(errorDelay);
+      expect(await p).toEqual({ aborted: 'cooldown' });
+      expect(reconnect).not.toHaveBeenCalled();
     });
 
     it('still retries a transient reconnect failure after errorDelay', async () => {
@@ -3496,6 +3531,29 @@ describe('backfill stops on a provider refusal (#433)', () => {
     });
   });
 
+  it('opens no login at all while a background backoff is armed', async () => {
+    // The integrity-gap and UIDVALIDITY callers reach backfillMessages directly, without the
+    // folder walk's own check.
+    ImapFlow.mockImplementation(function () { throw new Error('no login expected'); });
+    for (const arm of [
+      m => m._secondaryCooldown.set(acct.id, { until: Date.now() + 30000, failures: 1 }),
+      m => m._statusAuthCooldown.set(acct.id, { until: Date.now() + AUTH_FAILURE_COOLDOWN_MS, failures: 1 }),
+    ]) {
+      const mgr = backfillManager();
+      arm(mgr);
+      expect(await ImapManager.prototype.backfillMessages.call(mgr, acct, 'Sent')).toEqual({ aborted: 'cooldown' });
+      expect(mgr.backfillRunning.size).toBe(0);
+    }
+  });
+
+  it('skips the whole folder walk while the secondary backoff is armed', async () => {
+    query.mockImplementation(async () => ({ rows: [{ path: 'A' }] }));
+    const mgr = allFoldersManager(async () => undefined);
+    mgr._secondaryCooldown.set(acct.id, { until: Date.now() + 30000, failures: 1 });
+    await ImapManager.prototype.backfillAllFolders.call(mgr, acct);
+    expect(mgr.backfillMessages).not.toHaveBeenCalled();
+  });
+
   it('stops the folder loop on a cooldown outcome', async () => {
     query.mockImplementation(async () => ({ rows: [{ path: 'A' }, { path: 'B' }] }));
     const mgr = allFoldersManager(async (_m, folder) => (folder === 'A' ? { aborted: 'cooldown' } : undefined));
@@ -3507,7 +3565,7 @@ describe('backfill stops on a provider refusal (#433)', () => {
     const mgr = {
       backfillAllRunning: new Set(),
       _bgConnSem: createKeyedSemaphore(2),
-      _connectCooldown: new Map(),
+      ...backoffState(),
       broadcast: vi.fn(),
       refreshBulkFlags: vi.fn().mockResolvedValue(),
       startSnippetIndexer: vi.fn().mockResolvedValue(),
@@ -3701,7 +3759,7 @@ describe('backfillAllFolders reuses one connection across folders', () => {
       backfillRunning: new Set(),
       backfillAllRunning: new Set(),
       _bgConnSem: createKeyedSemaphore(2),
-      _connectCooldown: new Map(),
+      ...backoffState(),
       broadcast: vi.fn(),
       pluginFacade: {},
       _noteConnectionRefusal: vi.fn(),
@@ -3811,7 +3869,7 @@ describe('backfill and UIDs the server will not hand over', () => {
   function manager() {
     return {
       backfillRunning: new Set(),
-      _connectCooldown: new Map(),
+      ...backoffState(),
       broadcast: vi.fn(),
       pluginFacade: {},
       _noteConnectionRefusal: vi.fn(),

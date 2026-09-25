@@ -6717,42 +6717,76 @@ export class ImapManager {
   // the whole call as not stored (re-storing a flag is idempotent, so queueing a chunk that did
   // land costs one more STORE, never a wrong value).
   //
-  // Ordering: the call joins the per-message chain of EVERY UID in the set (see setFlag). It
-  // reads each UID's current tail and installs its own tail on each UID synchronously, before
-  // its first await, so it runs after every store already called on any of its letters, and
-  // every store called later on any of them runs after it. A store only ever waits for tails
-  // installed before it, so overlapping sets cannot deadlock. The price is that a bulk store
-  // waits for the slowest store still pending on any of its letters.
+  // Ordering: see _reserveFlagStores. Each chunk joins the per-message chain of every letter it
+  // holds, so it runs after every store already called on any of them, and every store called
+  // later on any of them runs after it.
   async setFlags(account, folder, uids, flag, value, { background = false, failFastWhenHeld = false } = {}) {
-    const set = [...new Set((uids || []).map(String))].sort((a, b) => Number(a) - Number(b));
-    if (set.length === 0) return;
-    const keys = set.map(uid => `${account.id}\n${folder}\n${uid}`);
-    const prevs = keys.map(key => this._flagStoreChains.get(key)).filter(Boolean);
-    const flights = [];
-    const run = Promise.all(prevs).then(() => this._setFlagsInner(account, folder, set, flag, value, flights, { background, failFastWhenHeld }));
-    // Never rejects, so the next store on these letters runs whatever this one did. The wait for
-    // an abandoned persistent STORE is bounded (PERSISTENT_FLAG_LATE_STORE_WAIT_MS), so a
-    // STORE that never settles cannot hold these letters' next store indefinitely.
-    const tail = run.catch(() => {})
-      .then(() => Promise.all(flights.filter(f => f.sent).map(f => raceTimeout(f.attempt, PERSISTENT_FLAG_LATE_STORE_WAIT_MS, 'Late persistent flag store').catch(() => {}))))
-      .catch(() => {});
-    for (const key of keys) this._flagStoreChains.set(key, tail);
-    tail.then(() => {
-      for (const key of keys) if (this._flagStoreChains.get(key) === tail) this._flagStoreChains.delete(key);
-    });
-    return run;
+    const units = this._reserveFlagStores(account, [{ folder, uids }]);
+    const [result] = await this._runFlagStores(account, 1, units, flag, value, { background, failFastWhenHeld });
+    if (result.error) throw result.error;
   }
 
-  // The chunks of one setFlags call, one after another. The first chunk that fails ends the call:
-  // its caller treats the whole call as not stored anyway, and after a rejected login the next
-  // chunk would be one more rejected login (on an OAuth mailbox the pool does not hold a user's
-  // login back, see loginHeldBack).
-  async _setFlagsInner(account, folder, set, flag, value, flights, opts) {
-    for (let i = 0; i < set.length; i += FLAG_STORE_UID_CHUNK) {
-      const flight = { attempt: null, sent: false };
-      flights.push(flight);
-      await this._setFlagInner(account, set.slice(i, i + FLAG_STORE_UID_CHUNK).join(','), folder, flag, value, flight, opts);
+  // Reserve the per-message chains for a set of flag stores, synchronously, before any await:
+  // groups is [{ folder, uids }], and every chunk of FLAG_STORE_UID_CHUNK UIDs of every group
+  // becomes one unit. A unit reads the current tail of each of its letters (prevs) and installs
+  // its own tail on each of them. A store only ever waits for tails installed before it, so
+  // overlapping sets cannot deadlock.
+  //
+  // A unit covers its own letters only, not its whole call: a click on a letter waits for the
+  // chunk that holds it (and whatever that chunk waits for), not for the chunks after it. The
+  // wait itself has the bounds a store behind another store on the same letter always had: the
+  // previous store's run, plus up to PERSISTENT_FLAG_LATE_STORE_WAIT_MS for a persistent STORE
+  // it sent and stopped waiting for. What a bulk store adds is breadth: it waits for the
+  // slowest store still pending on any letter of its chunk, and a click on any of them waits
+  // for the chunk. That is the price of one STORE instead of one per letter.
+  _reserveFlagStores(account, groups) {
+    const units = [];
+    groups.forEach(({ folder, uids }, group) => {
+      const set = [...new Set((uids || []).map(String))].sort((a, b) => Number(a) - Number(b));
+      for (let i = 0; i < set.length; i += FLAG_STORE_UID_CHUNK) {
+        const chunk = set.slice(i, i + FLAG_STORE_UID_CHUNK);
+        const keys = chunk.map(uid => `${account.id}\n${folder}\n${uid}`);
+        const prevs = keys.map(key => this._flagStoreChains.get(key)).filter(Boolean);
+        const flight = { attempt: null, sent: false };
+        let settle;
+        const done = new Promise(resolve => { settle = resolve; });
+        // Never rejects, so the next store on these letters runs whatever this one did. The wait
+        // for an abandoned persistent STORE is bounded (PERSISTENT_FLAG_LATE_STORE_WAIT_MS), so a
+        // STORE that never settles cannot hold these letters' next store indefinitely.
+        const tail = done
+          .then(() => flight.sent && raceTimeout(flight.attempt, PERSISTENT_FLAG_LATE_STORE_WAIT_MS, 'Late persistent flag store'))
+          .catch(() => {});
+        for (const key of keys) this._flagStoreChains.set(key, tail);
+        tail.then(() => {
+          for (const key of keys) if (this._flagStoreChains.get(key) === tail) this._flagStoreChains.delete(key);
+        });
+        units.push({ group, folder, uidSet: chunk.join(','), prevs, flight, settle });
+      }
+    });
+    return units;
+  }
+
+  // Run reserved units one after another; resolves (never rejects) to one result per group:
+  // { stored: true }, { stored: false, error } or { stored: false, skipped: true }. The first
+  // chunk that fails ends its group: the caller treats the whole group as not stored anyway
+  // (re-storing a flag is idempotent, so queueing a chunk that did land costs one more STORE,
+  // never a wrong value), and after a rejected login the next chunk would be one more rejected
+  // login (on an OAuth mailbox the pool does not hold a user's login back, see loginHeldBack).
+  // Every unit settles, run or skipped, so no letter's chain is left waiting.
+  async _runFlagStores(account, groupCount, units, flag, value, opts) {
+    const results = Array.from({ length: groupCount }, () => ({ stored: true }));
+    for (const unit of units) {
+      try {
+        if (results[unit.group].error) continue;
+        await Promise.all(unit.prevs);
+        await this._setFlagInner(account, unit.uidSet, unit.folder, flag, value, unit.flight, opts);
+      } catch (err) {
+        results[unit.group] = { stored: false, error: err };
+      } finally {
+        unit.settle();
+      }
     }
+    return results;
   }
 
   async _setFlagInner(account, uid, folder, flag, value, flight, { background = false, failFastWhenHeld = false } = {}) {

@@ -4739,6 +4739,40 @@ describe('setFlag routing over the persistent session', () => {
     expect(poolClients[0].messageFlagsRemove.mock.calls[1][0]).toBe(String(FLAG_STORE_UID_CHUNK + 1));
   });
 
+  it('a click on a letter waits only for the chunk that holds it, not for the chunks after it', async () => {
+    const { mgr, account } = arrange();
+    let landChunk2;
+    ImapFlow.mockImplementation(function () {
+      const c = Object.assign(new EventEmitter(), {
+        usable: true,
+        connect: vi.fn(() => Promise.resolve()),
+        logout: vi.fn(() => Promise.resolve()),
+        close: vi.fn(),
+        getMailboxLock: vi.fn(async () => ({ release: vi.fn() })),
+        messageFlagsAdd: vi.fn((uids) => (uids === String(FLAG_STORE_UID_CHUNK + 1)
+          ? new Promise(res => { landChunk2 = () => res(true); })
+          : Promise.resolve(true))),
+        messageFlagsRemove: vi.fn(async () => true),
+      });
+      poolClients.push(c);
+      return c;
+    });
+    const uids = Array.from({ length: FLAG_STORE_UID_CHUNK + 1 }, (_, i) => i + 1);
+
+    const bulk = mgr.setFlags(account, 'Archive', uids, '\\Seen', true);
+    await vi.waitFor(() => expect(landChunk2).toBeTypeOf('function')); // chunk 2 is on the wire
+    const inChunk1 = vi.fn();
+    const inChunk2 = vi.fn();
+    const click1 = mgr.setFlag(account, 1, 'Archive', '\\Seen', false).then(inChunk1);
+    const click2 = mgr.setFlag(account, FLAG_STORE_UID_CHUNK + 1, 'Archive', '\\Seen', false).then(inChunk2);
+    await vi.waitFor(() => expect(inChunk1).toHaveBeenCalled());
+    expect(inChunk2).not.toHaveBeenCalled();             // its letter's chunk is still out
+
+    landChunk2();
+    await bulk; await click1; await click2;
+    expect(inChunk2).toHaveBeenCalled();
+  });
+
   it('logs a bulk store as its count and first/last UID, not the whole set', async () => {
     const { mgr, account } = arrange();
     ImapFlow.mockImplementation(function () {

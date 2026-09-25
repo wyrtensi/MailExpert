@@ -5609,6 +5609,22 @@ describe('every background login waits out a rejected password', () => {
       expect(mgr._pendingFlagPush.has(acct.id)).toBe(false);
     });
 
+    it('the flag-push reconciler drains a poll-only account, which has no persistent connection', async () => {
+      const acct = account();
+      const mgr = ladderManager();
+      mgr._pollOnlyAccounts.add(acct.id);
+      query.mockImplementation(async (sql) => {
+        if (sql.startsWith('SELECT * FROM email_accounts')) return { rows: [acct] };
+        if (sql.startsWith('SELECT uid, folder FROM messages')) return { rows: [{ uid: 7, folder: 'Sent' }] };
+        return { rows: [], rowCount: 1 };
+      });
+      mgr._enqueueFlagPush(acct.id, 'm-1', '\\Seen', true);
+      const setFlag = vi.spyOn(mgr, 'setFlag').mockResolvedValue();
+      await mgr._reconcileFlagPushes();
+      expect(setFlag).toHaveBeenCalledWith(acct, 7, 'Sent', '\\Seen', true);
+      expect(mgr._pendingFlagPush.has(acct.id)).toBe(false);
+    });
+
     // The window above runs out while the password is still wrong. Nothing re-armed it, so the
     // reconciler's next cycle sent up to 30 queued stores to the pool, two rejected logins each:
     // one cycle is enough for fail2ban to ban the panel's IP.

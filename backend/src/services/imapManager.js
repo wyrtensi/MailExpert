@@ -2384,10 +2384,11 @@ export class ImapManager {
       // whether we can push right now.
       await this._rebumpFlagMarkers(ops);
 
-      // Only attempt pushes while the account has a live connection; otherwise keep the
-      // ops queued (markers already re-bumped) and wait for reconnect. Not counted as an
+      // Only attempt pushes while the account is connected: a live persistent connection, or a
+      // poll-only account (which has none by design and stores over the pool); otherwise keep
+      // the ops queued (markers already re-bumped) and wait for reconnect. Not counted as an
       // attempt, so an outage doesn't burn the give-up budget.
-      if (!this.connections.has(accountId)) continue;
+      if (!this.connections.has(accountId) && !this._pollOnlyAccounts.has(accountId)) continue;
       // Same while the account's backoffs hold logins back. A queued store that the persistent
       // session cannot take (any folder but INBOX, or INBOX while a sync holds it) goes to the
       // pool, and with a rejected password every pool attempt was one more rejected login: up to

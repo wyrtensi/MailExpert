@@ -63,6 +63,9 @@ beforeAll(async () => {
     // hands them over in Message-ID order, and only the id tie-break puts them in a fixed one.
     [7, SALES, 'INBOX', '<q@c>', '2026-09-04T10:00:00Z'],
     [8, SALES, 'INBOX', '<p@c>', '2026-09-04T10:00:00Z'],
+    // Two letters without a Message-ID: nothing says they are copies of one letter.
+    [9, SALES, 'INBOX', null, '2026-09-05T10:00:00Z'],
+    [10, SALES, 'INBOX', null, '2026-09-06T10:00:00Z'],
   ];
   for (const [n, account, folder, messageId, date, deleted = false] of rows) {
     await db.query(`INSERT INTO messages (id, account_id, folder, message_id, thread_key, date, is_deleted)
@@ -89,22 +92,30 @@ async function thread(query = '') {
 
 describe('GET /api/mail/thread in Postgres', () => {
   it('keeps each mailbox copy of a letter when the call spans mailboxes', async () => {
-    expect(await thread()).toEqual([id(3), id(4), id(5), id(7), id(8)]);
+    expect(await thread()).toEqual([id(3), id(4), id(5), id(7), id(8), id(9), id(10)]);
   });
 
   it('keeps the same copies in a unified call', async () => {
-    expect(await thread('?unified=true')).toEqual([id(3), id(4), id(5), id(7), id(8)]);
+    expect(await thread('?unified=true')).toEqual([id(3), id(4), id(5), id(7), id(8), id(9), id(10)]);
   });
 
   it('holds a scoped call to its mailbox', async () => {
-    expect(await thread(`?accountId=${SALES}`)).toEqual([id(3), id(5), id(7), id(8)]);
+    expect(await thread(`?accountId=${SALES}`)).toEqual([id(3), id(5), id(7), id(8), id(9), id(10)]);
     expect(await thread(`?accountId=${OPS}`)).toEqual([id(4)]);
   });
 
   it('orders letters that share a Date by mailbox, then row id', async () => {
     const ids = await thread();
     expect(ids.slice(0, 2)).toEqual([id(3), id(4)]); // SALES before OPS
-    expect(ids.slice(-2)).toEqual([id(7), id(8)]);
+    expect(ids.slice(3, 5)).toEqual([id(7), id(8)]);
+  });
+
+  it('keeps every letter without a Message-ID instead of collapsing them into one', async () => {
+    // A thread action builds its id list from this route, so a dropped row would be left
+    // behind by an archive, delete or move of the conversation.
+    const ids = await thread(`?accountId=${SALES}`);
+    expect(ids).toContain(id(9));
+    expect(ids).toContain(id(10));
   });
 
   it('collapses the label copy and the Sent twin into the INBOX copy within one mailbox', async () => {

@@ -319,9 +319,13 @@ router.get('/thread/:threadId', async (req, res) => {
     // holds one account anyway; a call without accountId spans several, and a bare message_id
     // key there silently dropped one mailbox's copy. Same-account duplicates (All Mail, the Sent
     // twin) still collapse.
+    //
+    // A row without a Message-ID keys on its own id, as in services/conversation.js: DISTINCT ON
+    // treats NULLs as equal, so a bare message_id key collapsed every such letter of the thread
+    // into one, and a thread-wide action built from this list left the others behind.
     const result = await query(`
       WITH deduped AS (
-        SELECT DISTINCT ON (m.account_id, m.message_id)
+        SELECT DISTINCT ON (m.account_id, COALESCE(m.message_id, m.id::text))
                m.id, m.uid, m.folder, m.message_id, m.thread_id, m.subject,
                m.from_name, m.from_email, m.to_addresses, m.cc_addresses,
                m.reply_to, m.in_reply_to,
@@ -335,7 +339,7 @@ router.get('/thread/:threadId', async (req, res) => {
           AND m.account_id = ANY($1)
           AND m.thread_key = $2
         ORDER BY m.account_id,
-                 m.message_id,
+                 COALESCE(m.message_id, m.id::text),
                  CASE WHEN m.folder = 'INBOX' THEN 0 ELSE 1 END,
                  m.date ASC
       )

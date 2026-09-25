@@ -6182,19 +6182,23 @@ export class ImapManager {
     }
   }
 
-  // Flag stores are ordered per message. Without that, a delayed STORE can land after a newer
-  // one and invert the flag: call A's persistent STORE gets its lock just before the deadline
-  // and lingers on the wire while A's pool fallback stores too, then call B stores the opposite
-  // value and A's late STORE lands last, silently re-reading a message the user just unread
-  // (a quick toggle, or _reconcileFlagPushes replaying an older op). Routing some stores over
-  // the persistent session and others over the pool makes that reordering likely.
+  // Flag stores on one message reach the server in the order setFlag was called. Without that,
+  // transport reordering between two calls can invert the flag: call A's persistent STORE gets
+  // its lock just before the deadline and lingers on the wire while A's pool fallback stores
+  // too, then call B stores the opposite value and A's late STORE lands last, re-reading a
+  // message the user just unread with a quick toggle. Routing some stores over the persistent
+  // session and others over the pool makes that reordering likely.
   //
-  // So a store on a message waits for the previous store on the same message, including a
+  // This preserves call order only, not freshness: a caller that decides on a stale value and
+  // calls last still wins (for example _reconcileFlagPushes replaying an op after the route's
+  // newer store has started but before it resolved the op). That race predates this chain.
+  //
+  // A store on a message waits for the previous store on the same message, including a
   // persistent STORE the previous call sent and then stopped waiting for (up to
-  // PERSISTENT_FLAG_LATE_STORE_WAIT_MS). Upstream serializes
-  // per account instead; per message is enough, since stores on different messages commute,
-  // and it keeps bulk read's concurrency and keeps one slow store (a pool fallback can take
-  // minutes) from holding up every other mark-read in a mailbox the whole team works in.
+  // PERSISTENT_FLAG_LATE_STORE_WAIT_MS). Upstream serializes per account instead; per message
+  // is enough, since stores on different messages commute, and it keeps bulk read's
+  // concurrency and keeps one slow store (a pool fallback can take minutes) from holding up
+  // every other mark-read in a mailbox the whole team works in.
   async setFlag(account, uid, folder, flag, value) {
     const key = `${account.id}\n${folder}\n${uid}`;
     const prev = this._flagStoreChains.get(key) || Promise.resolve();

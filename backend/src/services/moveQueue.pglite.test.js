@@ -558,6 +558,54 @@ describe('a restart', () => {
   });
 });
 
+// I1: after a restart the source is checked first. The destination is looked at only for a letter
+// gone from the source, so a letter that is there anyway is never taken for the moved one.
+describe('a restart with a move whose answer was lost, the letter still at its source', () => {
+  async function restartWithSentMove(dest, opts) {
+    await queue.enqueue(ACCOUNT, await rowsOf([A]), dest, opts);
+    await db.query("UPDATE message_moves SET state = 'moving', claimed_at = now(), sent_at = now()");
+    mgr = fakeManager();
+    queue = newQueue();
+    queue.start = vi.fn();
+    await queue.resume();
+    mgr.searchUids.mockResolvedValue([11]); // the server still has the letter in INBOX
+  }
+
+  it('Gmail archive: All Mail holds every letter, so it proves nothing; the MOVE is sent again', async () => {
+    await restartWithSentMove('[Gmail]/All Mail', { dropRow: true });
+    mgr.findUidByMessageId.mockResolvedValue(5000);
+    serverMoves(6000);
+    await queue.runAccount(ACCOUNT);
+    // Queued again and sent in the same run; nothing was taken from All Mail.
+    expect(mgr.findUidByMessageId).not.toHaveBeenCalled();
+    expect(mgr.bulkMoveMessages).toHaveBeenCalledWith(expect.anything(), [11], 'INBOX', '[Gmail]/All Mail', expect.anything());
+    expect(await row(A)).toBeUndefined();
+    expect(await moves()).toEqual([]);
+  });
+
+  it('Dovecot: another copy with the same Message-ID in the destination is left alone', async () => {
+    const COPY = '41000000-0000-4000-8000-000000000009';
+    await db.query("INSERT INTO messages (id, account_id, uid, folder, message_id) VALUES ($1, $2, 77, 'Archive', '<a@example.com>')", [COPY, ACCOUNT]);
+    await restartWithSentMove('Archive');
+    mgr.findUidByMessageId.mockResolvedValue(77);
+    serverMoves(900);
+    await queue.runAccount(ACCOUNT);
+    expect(mgr.findUidByMessageId).not.toHaveBeenCalled();
+    expect(mgr.bulkMoveMessages).toHaveBeenCalledWith(expect.anything(), [11], 'INBOX', 'Archive', expect.anything());
+    expect(await row(A)).toMatchObject({ uid: 900, folder: 'Archive' });
+    expect(await row(COPY)).toMatchObject({ uid: 77, folder: 'Archive' });
+  });
+
+  it('keeps the retry backoff of a move that already failed', async () => {
+    await restartWithSentMove('Archive');
+    await db.query('UPDATE message_moves SET attempts = 2');
+    await queue.runAccount(ACCOUNT);
+    const [op] = await moves();
+    expect(op).toMatchObject({ state: 'queued', attempts: 2 });
+    expect(new Date(op.next_attempt_at).getTime()).toBeGreaterThan(Date.now());
+  });
+});
+
 describe('a restart with a claimed move whose MOVE was never sent', () => {
   it('queues it again without looking anything up', async () => {
     await queue.enqueue(ACCOUNT, await rowsOf([A]), 'Archive');

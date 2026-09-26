@@ -541,8 +541,12 @@ export class MoveQueue {
     return false;
   }
 
-  // Moves whose MOVE went through but whose new uid is unknown (no COPYUID, or a restart cut the
-  // answer off). Returns true when the mailbox gave no session.
+  // Moves whose MOVE may have gone out but whose new uid is unknown: no COPYUID, a restart or a
+  // failed run cut the answer off. The SOURCE is checked first: a letter still there was never
+  // moved, and the move is queued again. Only a letter gone from the source is looked for in the
+  // destination by its Message-ID. Looking in the destination first would "find" a letter that is
+  // there anyway: on Gmail every letter is in All Mail, and on any server the destination may hold
+  // another copy with the same Message-ID. Returns true when the mailbox gave no session.
   async _resolveAwaiting(account) {
     const mgr = this.mgr;
     const { rows } = await query(
@@ -552,37 +556,45 @@ export class MoveQueue {
       [account.id, MOVE_CLAIM_LIMIT]
     );
     const settled = [];
+    const opts = this._poolOpts(account.id);
     try {
       for (const op of rows) {
         this._expect(op);
         let uid = null;
-        let present = null;
         try {
-          if (op.message_id_header) {
-            uid = await mgr.findUidByMessageId(account, op.dest_folder, op.message_id_header, this._poolOpts(account.id));
+          const present = await mgr.searchUids(account, op.src_folder, [Number(op.src_uid)], opts);
+          if (present.length) {
+            // The MOVE never happened: queue it again (not an attempt: nothing failed here).
+            await query(
+              `UPDATE message_moves SET state = 'queued', sent_at = NULL, updated_at = now(),
+                      next_attempt_at = now() + ($2::int * interval '1 millisecond')
+                WHERE id = $1 AND state = 'awaiting_uid'`,
+              [op.id, Number(op.attempts) > 0 ? moveRetryDelayMs(Number(op.attempts)) : 0]
+            );
+            this._unexpect(op);
+            continue;
           }
-          if (!uid) present = await mgr.searchUids(account, op.src_folder, [Number(op.src_uid)], this._poolOpts(account.id));
+          if (op.message_id_header) uid = await mgr.findUidByMessageId(account, op.dest_folder, op.message_id_header, opts);
         } catch (err) {
           if (isMailboxBusyError(err)) return true;
           console.warn(`Move queue: looking up moved letter failed: ${err.message}`);
           // A lookup that keeps failing (a folder gone, say) ends like one that finds nothing.
           if (Date.now() - new Date(op.updated_at).getTime() > MOVE_AWAITING_UID_MAX_MS) await this._drop(op);
-          else await query(`UPDATE message_moves SET next_attempt_at = now() + ($2::int * interval '1 millisecond') WHERE id = $1`, [op.id, MOVE_AWAITING_RETRY_MS]);
+          else await this._lookAgainLater(op);
           continue;
         }
         if (uid) {
           const s = await this._settle(op, Number(uid));
           if (s?.row) settled.push(s);
-        } else if (present?.length) {
-          // The MOVE never happened: queue it again (not an attempt: nothing failed).
-          await query(`UPDATE message_moves SET state = 'queued', next_attempt_at = now(), updated_at = now() WHERE id = $1 AND state = 'awaiting_uid'`, [op.id]);
-          this._unexpect(op);
+        } else if (op.drop_row) {
+          // Gone from the source into a destination we do not keep (Gmail All Mail): the row goes.
+          await this._drop(op);
         } else if (Date.now() - new Date(op.updated_at).getTime() > MOVE_AWAITING_UID_MAX_MS) {
-          // Neither in the destination by its Message-ID nor at the source: the row is dropped and
-          // the destination sync inserts the letter as it finds it.
+          // Gone from the source and not found in the destination: the row is dropped and the
+          // syncs insert the letter wherever the server has it.
           await this._drop(op);
         } else {
-          await query(`UPDATE message_moves SET next_attempt_at = now() + ($2::int * interval '1 millisecond') WHERE id = $1`, [op.id, MOVE_AWAITING_RETRY_MS]);
+          await this._lookAgainLater(op);
         }
       }
     } finally {
@@ -590,6 +602,10 @@ export class MoveQueue {
       if (settled.some(s => s.needsProviderIds)) mgr._scheduleProviderIdBackfill(account);
     }
     return false;
+  }
+
+  async _lookAgainLater(op) {
+    await query(`UPDATE message_moves SET next_attempt_at = now() + ($2::int * interval '1 millisecond') WHERE id = $1`, [op.id, MOVE_AWAITING_RETRY_MS]);
   }
 
   async _markAwaiting(op) {

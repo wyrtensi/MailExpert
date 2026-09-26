@@ -51,6 +51,16 @@ describe('POST /api/rules/run — background sweep', () => {
     method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{}',
   });
 
+  // A letter whose DB-first move is pending holds a placeholder uid (services/moveQueue.js): a
+  // rule would move, flag or delete it at a uid the server does not have. The sweep skips it.
+  it('leaves letters whose move is pending out of the sweep', async () => {
+    applyInboxRules.mockImplementation(async (messages) => ({ remaining: messages, mutedIds: new Set() }));
+    await run();
+    await tick();
+    const pick = query.mock.calls.find(([sql]) => sql.includes('FROM messages'))[0];
+    expect(pick).toMatch(/AND uid > 0/);
+  });
+
   it('returns 202 immediately and broadcasts the totals when the sweep finishes', async () => {
     applyInboxRules.mockImplementation(async (messages) => ({ remaining: messages.slice(1), mutedIds: new Set() }));
     const res = await run();

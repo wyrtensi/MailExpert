@@ -9,7 +9,11 @@ vi.mock('../middleware/auth.js', () => ({
   },
 }));
 vi.mock('../index.js', () => ({
-  imapManager: { fetchHeaders: vi.fn() },
+  imapManager: {
+    fetchHeaders: vi.fn(),
+    // A letter with no pending move is read where its row says (moveQueue.serverLocation).
+    moveQueue: { serverLocation: async (m) => ({ folder: m.folder, uid: Number(m.uid) }) },
+  },
 }));
 
 import express from 'express';

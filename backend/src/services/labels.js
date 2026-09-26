@@ -1,5 +1,24 @@
 import { query } from './db.js';
 import { fanOutReadToSiblings } from '../utils/mailUtils.js';
+import { movePendingError } from '../utils/mailboxBusy.js';
+
+// A negative uid is the placeholder of a letter whose DB-first move has not reached the server
+// (services/moveQueue.js): no server has it, so no COPY, STORE or delete may be sent for it.
+// Label work on such a letter throws movePendingError before anything is changed.
+const pendingUid = (uid) => uid != null && Number(uid) < 0;
+
+// Throws movePendingError when the message, or a copy of it (same Message-ID) in one of
+// `folders`, is waiting for its move. Callers that change several copies (GTD done) check first,
+// so they never stop half-way.
+export async function assertNoPendingCopies(message, folders = []) {
+  if (pendingUid(message.uid)) throw movePendingError();
+  if (!message.message_id || !folders.length) return;
+  const { rows } = await query(
+    'SELECT 1 FROM messages WHERE account_id = $1 AND message_id = $2 AND folder = ANY($3::text[]) AND uid < 0 LIMIT 1',
+    [message.account_id, message.message_id, folders]
+  );
+  if (rows.length) throw movePendingError();
+}
 
 // Generic "labels" capability (v3.0 plugin platform).
 //
@@ -18,12 +37,16 @@ import { fanOutReadToSiblings } from '../utils/mailUtils.js';
 // (an IMAP COPY duplicates it verbatim) joins to the sibling copy. A message with no
 // Message-ID can only be resolved via the acted-row case.
 export async function resolveLabelCopyUid(message, folder) {
-  if (message.folder === folder) return message.uid;
+  if (message.folder === folder) {
+    if (pendingUid(message.uid)) throw movePendingError();
+    return message.uid;
+  }
   if (!message.message_id) return null;
   const { rows } = await query(
-    'SELECT uid FROM messages WHERE account_id = $1 AND folder = $2 AND message_id = $3 AND is_deleted = false LIMIT 1',
+    'SELECT uid FROM messages WHERE account_id = $1 AND folder = $2 AND message_id = $3 AND is_deleted = false ORDER BY uid DESC LIMIT 1',
     [message.account_id, folder, message.message_id]
   );
+  if (pendingUid(rows[0]?.uid)) throw movePendingError();
   return rows[0]?.uid ?? null;
 }
 
@@ -38,6 +61,8 @@ export async function applyLabel(imapManager, account, message, labelFolder) {
   if (existingUid != null) {
     return { applied: false, uid: existingUid, reason: 'already-labelled' };
   }
+  // The COPY is sent from the message's uid, which a pending move has replaced by a placeholder.
+  if (pendingUid(message.uid)) throw movePendingError();
   await imapManager.ensureFolder(account, labelFolder);
   const uid = await imapManager.copyMessage(account.id, message.uid, message.folder, labelFolder);
   return { applied: true, uid: uid ?? null };
@@ -106,6 +131,8 @@ export async function markThreadRead(imapManager, account, message) {
     [message.account_id, 'INBOX', message.message_id]
   );
   const inboxCopy = rows[0] || null;
+  // An INBOX copy whose move is pending has no uid to STORE at, and cannot be archived either.
+  if (pendingUid(inboxCopy?.uid)) throw movePendingError();
   try {
     await fanOutReadToSiblings(message.account_id, message.message_id, true);
     if (inboxCopy && !inboxCopy.is_read) {

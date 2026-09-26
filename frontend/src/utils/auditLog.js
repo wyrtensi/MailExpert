@@ -11,6 +11,7 @@ export const AUDIT_ACTION_LABEL_KEYS = Object.freeze({
   'mailbox.password_restored': 'admin.audit.actionMailboxPasswordRestored',
   'message.sent': 'admin.audit.actionMessageSent',
   'message.deleted': 'admin.audit.actionMessageDeleted',
+  'message.move_reverted': 'admin.audit.actionMessageMoveReverted',
   'user.added': 'admin.audit.actionUserAdded',
   'user.deleted': 'admin.audit.actionUserDeleted',
   'user.enabled': 'admin.audit.actionUserEnabled',
@@ -20,6 +21,14 @@ export const AUDIT_ACTION_LABEL_KEYS = Object.freeze({
 });
 
 export const AUDIT_ACTIONS = Object.freeze(Object.keys(AUDIT_ACTION_LABEL_KEYS));
+
+// Why a queued move was reverted: the letter was gone from the server, the destination folder was
+// gone, or the server kept refusing the move.
+const MOVE_REVERTED_DETAIL_KEYS = Object.freeze({
+  gone: 'admin.audit.detailMoveRevertedGone',
+  destination_gone: 'admin.audit.detailMoveRevertedDestinationGone',
+  gave_up: 'admin.audit.detailMoveRevertedGaveUp',
+});
 
 export function auditActionLabelKey(action) {
   return AUDIT_ACTION_LABEL_KEYS[action] ?? null;
@@ -82,6 +91,12 @@ export function auditDetail(entry) {
         values: { from: details.from, folder },
       };
     }
+    case 'message.move_reverted':
+      // A queued move the mail server could not do: the letter went back (services/moveQueue.js).
+      return {
+        key: MOVE_REVERTED_DETAIL_KEYS[details.reason] ?? 'admin.audit.detailMoveRevertedGaveUp',
+        values: { from: details.from ?? '', to: details.to ?? '' },
+      };
     case 'user.admin_changed':
       return {
         key: details.isAdmin ? 'admin.audit.detailAdminGranted' : 'admin.audit.detailAdminRevoked',

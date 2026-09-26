@@ -245,6 +245,12 @@ setupWebSocket(wss, sessionMiddleware);
 // Run pending schema migrations then start
 await runMigrations();
 
+// Resume the queued server MOVEs of DB-first moves (services/moveQueue.js) before any mailbox
+// syncs: the guards that keep sync from re-adding a moved letter at its source live in memory and
+// are rebuilt here from the queue.
+const resumedMoves = await imapManager.moveQueue.resume();
+if (resumedMoves) console.log(`Move queue: resumed ${resumedMoves} pending move(s)`);
+
 // A failed concurrent build (migration 0061) leaves an unusable index that no later migration repairs.
 providerThreadIndexState(query)
   .then(state => {

@@ -286,7 +286,7 @@ export default function MessagePane({ windowMessageId = null, onWindowClose = nu
         addNotification({
           type: 'error',
           title: t(label === 'spam' ? 'spam.failTitle' : 'spam.failHamTitle'),
-          body: mailboxBusyOr(err, t, err.message || t(label === 'spam' ? 'spam.failBody' : 'spam.failHamBody')),
+          body: err.message || t(label === 'spam' ? 'spam.failBody' : 'spam.failHamBody'),
         });
       }
     }, 4500);
@@ -1582,7 +1582,7 @@ ${bodyContent}
         console.error('Move failed:', err);
         useStore.getState().restoreMessages([moved]);
         if (!moved.is_read) incrementUnread(moved.account_id);
-        addNotification({ title: t('message.moved.failTitle'), body: mailboxBusyOr(err, t, t('message.moved.failBody')) });
+        addNotification({ title: t('message.moved.failTitle'), body: t('message.moved.failBody') });
       }
     }, 4500);
     addNotification({
@@ -1731,7 +1731,7 @@ ${bodyContent}
         }
       } catch (err) {
         console.error('Archive failed:', err);
-        addNotification({ title: t('message.archived.failTitle'), body: mailboxBusyOr(err, t, t('message.archived.failBody')) });
+        addNotification({ title: t('message.archived.failTitle'), body: t('message.archived.failBody') });
       }
     }, 4500);
     addNotification({

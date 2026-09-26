@@ -28,3 +28,31 @@ export function mailboxBusyBody(err) {
 export function sendMailboxBusy(res, err) {
   return res.status(503).json({ ...mailboxBusyBody(err), busy: true });
 }
+
+// A letter whose DB-first move has not reached the mail server yet (services/moveQueue.js) is
+// between folders for a moment. Work that needs its server location and stays server-first
+// (permanent delete, snooze, reading an uncached body while its MOVE is in flight) answers 409
+// with this code; retrying in a few seconds works.
+export const MOVE_PENDING_CODE = 'move_pending';
+const MOVE_PENDING_ERROR = 'This letter is still being moved on the mail server. Please try again in a few seconds.';
+
+export function movePendingBody() {
+  return { error: MOVE_PENDING_ERROR, code: MOVE_PENDING_CODE };
+}
+
+export function sendMovePending(res) {
+  return res.status(409).json(movePendingBody());
+}
+
+// The error for work that met a letter whose move is pending (a placeholder uid): nothing was
+// sent. Routes answer it with sendMovePending.
+export function movePendingError() {
+  const err = new Error(MOVE_PENDING_ERROR);
+  err.movePending = true;
+  err.code = MOVE_PENDING_CODE;
+  return err;
+}
+
+export function isMovePendingError(err) {
+  return !!err?.movePending;
+}

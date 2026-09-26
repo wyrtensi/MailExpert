@@ -4,7 +4,7 @@ import { getGtdSections } from './gtdSections.js';
 import { queueGistGeneration } from './gtdGist.js';
 import { importPet, decodeUploadedSheet, getPetMeta, getPetSheet, parsePetSlug, customPetSlug } from './gtdPet.js';
 import { getGtdConfig, resolveGtdStateFolder, sanitizeGtdFolders, sanitizeGtdFoldersDetailed, DEFAULT_GTD_FOLDERS, planGtdFolderPersist, invalidateGtdConfigCache } from './gtdConfig.js';
-import { applyLabel, removeExactLabelCopy, removeLabel, markThreadRead, ensureLabelFolders, archiveInboxCopy, broadcast, loadOwnedMessage, getOwnedAccount, getMessageCopyFolders, getAccountConfig, setAccountConfig } from '../api.js';
+import { applyLabel, removeExactLabelCopy, removeLabel, markThreadRead, ensureLabelFolders, archiveInboxCopy, broadcast, loadOwnedMessage, getOwnedAccount, getMessageCopyFolders, getAccountConfig, setAccountConfig, assertNoPendingCopies } from '../api.js';
 
 const router = Router();
 router.use(requireAuth);
@@ -13,6 +13,11 @@ router.use(requireAuth);
 // id is a clean 400 rather than a parametrized query that just finds nothing (404) or a
 // driver cast error. Same idiom + regex as mail.js.
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+// A letter (or one of its copies) whose move has not reached the mail server holds a placeholder
+// uid: label work on it throws an error with movePending, answered 409 { code: 'move_pending' }
+// ("try again in a few seconds"), the same answer the mail routes give.
+const sendMovePending = (res, err) => res.status(409).json({ error: err.message, code: err.code });
 
 // Shared classify precondition: an account must have GTD enabled and the request's
 // state must resolve to a designated folder. Returns { folder } to proceed, or
@@ -160,6 +165,7 @@ router.post('/classify', async (req, res) => {
   try {
     result = await applyLabel(account, msg, toFolder);
   } catch (err) {
+    if (err.movePending) return sendMovePending(res, err);
     console.error(`GTD classify failed for message ${messageId} -> ${toFolder}:`, err.message);
     return res.status(500).json({ error: 'Failed to apply GTD label' });
   }
@@ -229,6 +235,7 @@ router.delete('/classify', async (req, res) => {
     const { removed } = await removeLabel(msg, stateFolder);
     if (!removed) return res.json({ ok: true, removed: false });
   } catch (err) {
+    if (err.movePending) return sendMovePending(res, err);
     console.error(`GTD unclassify failed for message ${messageId} in ${stateFolder}:`, err.message);
     return res.status(500).json({ error: 'Failed to remove GTD label' });
   }
@@ -273,11 +280,28 @@ router.post('/done', async (req, res) => {
 
   const account = await getOwnedAccount(req.session.userId, msg.account_id);
 
+  // A copy this action would change (the acted row, the INBOX copy, a label copy) whose move has
+  // not reached the server holds no server uid: answer before anything is changed, so done never
+  // stops half-way. markThreadRead checks the INBOX copy again for a move queued meanwhile.
+  try {
+    await assertNoPendingCopies(msg, ['INBOX', ...target.folders]);
+  } catch (err) {
+    if (err.movePending) return sendMovePending(res, err);
+    throw err;
+  }
+
   // (a) Mark the whole thread read. The DB fan-out (by Message-ID) covers every sibling
   // copy and adjusts each folder's unread count; \Seen is set on the durable INBOX copy
   // only (it rides the archive move; Gmail propagates message-wide) — the same per-copy
   // asymmetry the ordinary read route accepts. A best-effort flag push is never fatal.
-  const { inboxCopy, error: markReadError } = await markThreadRead(account, msg);
+  let marked;
+  try {
+    marked = await markThreadRead(account, msg);
+  } catch (err) {
+    if (err.movePending) return sendMovePending(res, err);
+    throw err;
+  }
+  const { inboxCopy, error: markReadError } = marked;
   if (markReadError) console.warn(`GTD done: mark-read for ${id} degraded:`, markReadError.message);
 
   // (b) Strip this row's GTD label copies. Each is a distinct folder copy resolved from
@@ -301,6 +325,7 @@ router.post('/done', async (req, res) => {
       if (didRemove) removed.push(folder);
     }
   } catch (err) {
+    if (err.movePending) return sendMovePending(res, err);
     console.error(`GTD done: label strip for ${id} failed:`, err.message);
     return res.status(500).json({ error: 'Failed to mark done' });
   }

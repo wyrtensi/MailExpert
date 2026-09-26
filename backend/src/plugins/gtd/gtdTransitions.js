@@ -137,6 +137,12 @@ export async function runGtdTransitions(imapManager, account, threadKeys) {
       if (!shouldStrip) continue;
 
       for (const copy of threadRows.filter((r) => r.folder === folder)) {
+        // A copy whose move has not reached the server (placeholder uid, moveQueue.js) has
+        // nothing to delete yet; a later run strips it once its move has settled.
+        if (Number(copy.uid) < 0) {
+          logger.debug(`gtdTransitions: skipped ${copy.folder} copy ${copy.id}: its move is still pending`);
+          continue;
+        }
         anyStripped = true;
         try {
           // background: this engine runs from the GTD tick, inbox ingest and a sent reply, which

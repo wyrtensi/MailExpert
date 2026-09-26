@@ -4,7 +4,15 @@ vi.mock('../services/db.js', () => ({ query: vi.fn() }));
 vi.mock('../middleware/auth.js', () => ({
   requireAuth: (req, _res, next) => { req.session = { userId: 'user-1' }; next(); },
 }));
-vi.mock('../index.js', () => ({ imapManager: { emptyFolder: vi.fn(), broadcast: vi.fn() } }));
+const released = vi.fn();
+vi.mock('../index.js', () => ({
+  imapManager: {
+    emptyFolder: vi.fn(),
+    broadcast: vi.fn(),
+    // DB-first moves: the folder is held for the whole empty (services/moveQueue.js).
+    moveQueue: { holdFolder: vi.fn(() => released) },
+  },
+}));
 vi.mock('../services/auditLog.js', () => ({ recordAudit: vi.fn(async () => {}) }));
 
 import express from 'express';
@@ -101,5 +109,38 @@ describe('POST /api/mail/folders/empty — async background empty', () => {
     expect(second.status).toBe(409);
     release();                            // let the first complete so the guard clears
     await tick();
+  });
+
+  // A queued DB-first move out of the folder would find its letter expunged (services/moveQueue.js):
+  // emptying waits for it. Moves in are held by the worker instead, see the next test.
+  it('answers 409 move_pending while a move out of the folder is queued', async () => {
+    const base = query.getMockImplementation();
+    query.mockImplementation((sql, params) => (sql.includes('FROM message_moves')
+      ? Promise.resolve({ rows: [{ '?column?': 1 }] })
+      : base(sql, params)));
+    const res = await empty('Trash');
+    expect(res.status).toBe(409);
+    expect((await res.json()).code).toBe('move_pending');
+    expect(imapManager.emptyFolder).not.toHaveBeenCalled();
+    const check = query.mock.calls.find(([sql]) => sql.includes('FROM message_moves'));
+    expect(check[0]).toMatch(/src_folder = \$2/);
+    expect(check[0]).not.toMatch(/dest_folder/);
+    expect(check[1]).toEqual([ACCOUNT_ID, 'Trash']);
+    expect(released).toHaveBeenCalledOnce();
+  });
+
+  it('holds the folder for the whole empty and keeps the placeholder rows of letters moved in', async () => {
+    let finish;
+    imapManager.emptyFolder.mockImplementation(() => new Promise(r => { finish = r; }));
+    released.mockClear();
+    const res = await empty('Trash');
+    expect(res.status).toBe(202);
+    expect(imapManager.moveQueue.holdFolder).toHaveBeenCalledWith(ACCOUNT_ID, 'Trash', { kind: 'empty' });
+    expect(released).not.toHaveBeenCalled();
+    finish();
+    await tick();
+    expect(released).toHaveBeenCalledOnce();
+    const removed = query.mock.calls.find(([sql]) => sql.startsWith('DELETE FROM messages WHERE account_id = $1 AND folder = $2'));
+    expect(removed[0]).toMatch(/AND uid > 0/);
   });
 });

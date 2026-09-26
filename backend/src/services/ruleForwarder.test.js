@@ -159,6 +159,8 @@ describe('forwardRuleMessage', () => {
     imapManager = {
       fetchMessageBody: vi.fn(),
       fetchMultipleAttachments: vi.fn().mockResolvedValue(new Map()),
+      // A letter with no pending move is read where its row says (moveQueue.serverLocation).
+      moveQueue: { serverLocation: vi.fn(async (row) => ({ folder: row.folder, uid: Number(row.uid) })) },
     };
     input = {
       ruleId: 'rule-1',
@@ -310,6 +312,24 @@ describe('forwardRuleMessage', () => {
         },
       ],
     }));
+  });
+
+  // A user moved the letter (DB-first, services/moveQueue.js) after the rule matched: its row
+  // holds a placeholder uid, and the body and attachments are read where the server has it.
+  it('reads a letter whose move is pending at the source of its move', async () => {
+    const row = { ...messageRow, uid: -12, folder: 'Archive', body_text: '', body_html: null, attachments: [storedAttachments[0]] };
+    imapManager.moveQueue.serverLocation.mockResolvedValueOnce({ folder: 'INBOX', uid: 41 });
+    imapManager.fetchMessageBody.mockResolvedValue({ text: 'Body', html: null, attachments: [] });
+    imapManager.fetchMultipleAttachments.mockResolvedValue(new Map([['2', Buffer.from('pdf')]]));
+    query
+      .mockResolvedValueOnce({ rows: [{ id: 'delivery-1' }] })
+      .mockResolvedValueOnce({ rows: [row] })
+      .mockResolvedValueOnce({ rows: [] });
+    vi.spyOn(console, 'log').mockImplementation(() => {});
+    await expect(forwardRuleMessage(input)).resolves.toBe('sent');
+    expect(imapManager.moveQueue.serverLocation).toHaveBeenCalledWith(expect.objectContaining({ uid: -12 }), account);
+    expect(imapManager.fetchMessageBody).toHaveBeenCalledWith(account, 41, 'INBOX', expect.anything());
+    expect(imapManager.fetchMultipleAttachments).toHaveBeenCalledWith(account, 41, 'INBOX', expect.anything(), expect.anything());
   });
 
   it('fetches an uncached body, sanitizes HTML, and embeds inline data images', async () => {

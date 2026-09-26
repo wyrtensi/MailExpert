@@ -11,6 +11,7 @@ import {
   resolveLabelCopyUid,
   markThreadRead,
   ensureLabelFolders,
+  assertNoPendingCopies,
 } from './labels.js';
 
 const account = { id: 'acct-1' };
@@ -198,5 +199,45 @@ describe('markThreadRead', () => {
     const r = await markThreadRead(imap, { id: 'acct-1' }, msg);
     expect(r.inboxCopy).toEqual({ id: 'i1', uid: 5, is_read: false }); // still available for archive
     expect(r.error).toBeInstanceOf(Error);
+  });
+});
+
+// A letter whose DB-first move is pending holds a placeholder uid (services/moveQueue.js): no
+// COPY, STORE or delete may be sent for it. Label work throws movePending before changing anything.
+describe('a letter whose move is pending', () => {
+  it('is not labelled: no COPY from a placeholder uid', async () => {
+    const imap = mkImap();
+    query.mockResolvedValueOnce({ rows: [] }); // no label copy yet
+    await expect(applyLabel(imap, account, { uid: -4, folder: 'INBOX', account_id: 'a', message_id: '<m>' }, 'Todo'))
+      .rejects.toMatchObject({ movePending: true, code: 'move_pending' });
+    expect(imap.ensureFolder).not.toHaveBeenCalled();
+    expect(imap.copyMessage).not.toHaveBeenCalled();
+  });
+
+  it('has no label copy to remove while it or that copy is pending', async () => {
+    const imap = mkImap();
+    await expect(removeLabel(imap, { uid: -4, folder: 'Todo', account_id: 'a', message_id: '<m>' }, 'Todo'))
+      .rejects.toMatchObject({ movePending: true });
+    query.mockResolvedValueOnce({ rows: [{ uid: '-9' }] });
+    await expect(removeLabel(imap, { uid: 1, folder: 'INBOX', account_id: 'a', message_id: '<m>' }, 'Todo'))
+      .rejects.toMatchObject({ movePending: true });
+    expect(imap.removeMessageCopy).not.toHaveBeenCalled();
+  });
+
+  it('is not marked read at its INBOX copy while that copy is pending', async () => {
+    const imap = { setFlag: vi.fn() };
+    query.mockResolvedValueOnce({ rows: [{ id: 'ib', uid: '-3', is_read: false }] });
+    await expect(markThreadRead(imap, account, { account_id: 'a', message_id: '<m>' })).rejects.toMatchObject({ movePending: true });
+    expect(fanOutReadToSiblings).not.toHaveBeenCalled();
+    expect(imap.setFlag).not.toHaveBeenCalled();
+  });
+
+  it('is found by assertNoPendingCopies, itself or a copy in the given folders', async () => {
+    await expect(assertNoPendingCopies({ uid: -1, account_id: 'a', message_id: '<m>' }, ['INBOX'])).rejects.toMatchObject({ movePending: true });
+    query.mockResolvedValueOnce({ rows: [{ '?column?': 1 }] });
+    await expect(assertNoPendingCopies({ uid: 5, account_id: 'a', message_id: '<m>' }, ['INBOX', 'Todo'])).rejects.toMatchObject({ movePending: true });
+    expect(query.mock.calls.at(-1)[1]).toEqual(['a', '<m>', ['INBOX', 'Todo']]);
+    query.mockResolvedValueOnce({ rows: [] });
+    await expect(assertNoPendingCopies({ uid: 5, account_id: 'a', message_id: '<m>' }, ['INBOX'])).resolves.toBeUndefined();
   });
 });

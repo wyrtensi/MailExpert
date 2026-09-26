@@ -23,7 +23,8 @@
     "loadMore": "Загрузить ещё",
     "adminOnly": "Изменить это может только администратор.",
     "mailboxBusy": "Ящик занят, попробуйте через несколько секунд",
-    "mailboxAuthRejected": "Почтовый сервер не принимает вход в этот ящик. Попросите администратора проверить ящик."
+    "mailboxAuthRejected": "Почтовый сервер не принимает вход в этот ящик. Попросите администратора проверить ящик.",
+    "movePending": "Письмо ещё перемещается, попробуйте через несколько секунд"
   },
   "login": {
     "google": {
@@ -265,6 +266,16 @@
       "title": "Сообщение перемещено",
       "failTitle": "Не удалось переместить",
       "failBody": "Не удалось переместить сообщение."
+    },
+    "moveReverted": {
+      "title_one": "Не удалось переместить {{count}} письмо",
+      "title_few": "Не удалось переместить {{count}} письма",
+      "title_many": "Не удалось переместить {{count}} писем",
+      "title_other": "Не удалось переместить {{count}} писем",
+      "body_one": "Письмо возвращено в папку {{folder}}.",
+      "body_few": "Письма возвращены в папку {{folder}}.",
+      "body_many": "Письма возвращены в папку {{folder}}.",
+      "body_other": "Письма возвращены в папку {{folder}}."
     },
     "snoozed": {
       "title": "Сообщение отложено",
@@ -1761,6 +1772,9 @@
       "detailMovedToTrash": "От {{from}}, {{folder}}, перемещено в корзину",
       "detailDeletedForever": "От {{from}}, {{folder}}, удалено навсегда",
       "detailMovedToTrashNoSender": "{{folder}}, перемещено в корзину",
+      "detailMoveRevertedGone": "Не перемещено в {{from}}: письма больше нет на почтовом сервере; возвращено в {{to}}",
+      "detailMoveRevertedDestinationGone": "Не перемещено в {{from}}: папки больше нет; возвращено в {{to}}",
+      "detailMoveRevertedGaveUp": "Не перемещено в {{from}}: почтовый сервер раз за разом отказывал; возвращено в {{to}}",
       "detailDeletedForeverNoSender": "{{folder}}, удалено навсегда",
       "detailAdminGranted": "{{email}} теперь администратор",
       "detailAdminRevoked": "{{email}} больше не администратор",
@@ -1773,6 +1787,7 @@
       "actionMailboxPasswordRestored": "Пароль ящика восстановлен на почтовом узле",
       "actionMessageSent": "Письмо отправлено",
       "actionMessageDeleted": "Письмо удалено",
+      "actionMessageMoveReverted": "Перемещение отменено",
       "actionUserAdded": "Пользователь добавлен",
       "actionUserDeleted": "Пользователь удалён",
       "actionUserEnabled": "Пользователь включён",

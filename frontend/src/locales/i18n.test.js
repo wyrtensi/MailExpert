@@ -182,6 +182,8 @@ const LOCALE_SPECIFIC_KEYS_BY_LOCALE = {
     'message.senderHistory.more_few', 'message.senderHistory.more_many',
     'message.senderHistory.threadTitle_few', 'message.senderHistory.threadTitle_many',
     'message.threading.conversationCount_few', 'message.threading.conversationCount_many',
+    'message.moveReverted.title_few', 'message.moveReverted.title_many',
+    'message.moveReverted.body_few', 'message.moveReverted.body_many',
   ]),
 };
 const LOCALE_SPECIFIC_KEYS = new Set(

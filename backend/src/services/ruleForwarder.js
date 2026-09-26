@@ -151,6 +151,10 @@ async function loadForwardContent({ row, account, imapManager }) {
   let text = row.body_text;
   let html = row.body_html;
   let fetchedParts = [];
+  // Where the server has the letter: a user may have moved it (DB-first, moveQueue.js) since the
+  // rule matched, leaving a placeholder uid on the row; its queued move's source is still right.
+  const loc = await imapManager.moveQueue.serverLocation(row, account);
+  if (!loc) throw new Error('Forward source is being moved on the mail server');
   if (!text && !html) {
     // allowLogin: a forward runs once per new message and has no retry, so a refusal backoff
     // must not make it fail without even one login attempt (see fetchMessageBody).
@@ -158,8 +162,8 @@ async function loadForwardContent({ row, account, imapManager }) {
     // fail at once rather than queue for a busy pooled session; otherwise it waits as usual.
     const fetched = await imapManager.fetchMessageBody(
       account,
-      row.uid,
-      row.folder,
+      loc.uid,
+      loc.folder,
       { allowLogin: true, failFastWhenHeld: true }
     );
     text = fetched.text;
@@ -201,8 +205,8 @@ async function loadForwardContent({ row, account, imapManager }) {
   if (storedParts.length) {
     const buffers = await imapManager.fetchMultipleAttachments(
       account,
-      row.uid,
-      row.folder,
+      loc.uid,
+      loc.folder,
       storedParts,
       { failFastWhenHeld: true }
     );

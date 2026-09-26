@@ -1419,8 +1419,9 @@ export function poolSizeFor(account) {
 }
 
 // How many of an account's pooled sessions background callers (sync of other folders, flag sync,
-// delete reconcile, the spam poll, body prefetch, the folder status monitor on Gmail) may hold at
-// once, counting sessions being opened for them. One session stays for user actions, so a click,
+// delete reconcile, the spam poll, body prefetch, the folder status monitor on Gmail) and inbox
+// rules (the block list, rule moves, stores and forwards: failFastWhenHeld) may hold at once,
+// counting sessions being opened for them. One session stays for user actions, so a click,
 // a move or an attachment never waits behind background work: 3 of 4 by default, 2 of Gmail's 3.
 //
 // A pool of 1 (Yahoo) keeps its one session open to background work, as before: a cap of 0 would
@@ -1700,12 +1701,12 @@ export function disarmPoolIdleClose(pool, client) {
   pool.idleTimers.delete(client);
 }
 
-// Hand an open pooled session to a caller. pool.bgInUse marks the sessions background callers
-// hold, for backgroundPoolCap.
-function handOutPooled(pool, client, background) {
+// Hand an open pooled session to a caller. pool.bgInUse marks the sessions callers in the
+// background share hold (background work, inbox rules), for backgroundPoolCap.
+function handOutPooled(pool, client, inShare) {
   disarmPoolIdleClose(pool, client);
   pool.inUse.add(client);
-  if (background) pool.bgInUse.add(client);
+  if (inShare) pool.bgInUse.add(client);
   return client;
 }
 
@@ -1716,7 +1717,8 @@ function markPooledFree(pool, client) {
   pool.bgInUse.delete(client);
 }
 
-// True while background callers hold (or are opening) every session backgroundPoolCap allows them.
+// True while callers in the background share hold (or are opening) every session backgroundPoolCap
+// allows them.
 function backgroundPoolFull(pool, account) {
   return pool.bgInUse.size + pool.bgConnecting >= backgroundPoolCap(account);
 }
@@ -1731,19 +1733,19 @@ function backgroundPoolFull(pool, account) {
 // A head waiter a backoff holds back (noNewLogin, loginHeldBack) never grows the pool: it waits
 // for a session to be released, and the grow goes to the first waiter behind it that may log in.
 // With no session open or being opened, the held head fails at once with providerRefusing.
-// A background head gets nothing while background callers hold their share of the pool
-// (backgroundPoolCap): the rest is kept for user actions.
+// A waiter counted in the background share (inShare: background work, inbox rules) gets nothing
+// while that share is taken (backgroundPoolCap): it is passed over, and the first waiter after it
+// that is not held by the share is served as the head. The rest is kept for user actions.
 function drainWaiters(pool) {
   while (pool.waiters.length > 0) {
-    const head = pool.waiters[0];
-    // Interactive waiters are always queued ahead of background ones, so behind a background head
-    // only background work waits, and none of it may take the session kept for user actions.
-    if (head.background && backgroundPoolFull(pool, head.account)) break;
+    const at = pool.waiters.findIndex(w => !(w.inShare && backgroundPoolFull(pool, w.account)));
+    if (at === -1) break;
+    const head = pool.waiters[at];
     const free = pool.clients.find(c => !pool.inUse.has(c));
     if (free) {
-      pool.waiters.shift();
+      pool.waiters.splice(at, 1);
       clearTimeout(head.timer);
-      head.resolve(handOutPooled(pool, free, head.background));
+      head.resolve(handOutPooled(pool, free, head.inShare));
       continue;
     }
     if (pool.clients.length + (pool.connecting || 0) >= poolSizeFor(head.account)) break;
@@ -1758,21 +1760,21 @@ function drainWaiters(pool) {
         // A waiter behind it that may log in (a move while the server only refuses extra
         // connections, say) must not wait behind it for a slot it can fill now.
         const i = pool.waiters.findIndex(w => !w.noNewLogin && !loginHeldBack(w.account, { background: w.background })
-          && !(w.background && backgroundPoolFull(pool, w.account)));
+          && !(w.inShare && backgroundPoolFull(pool, w.account)));
         if (i === -1) break;
         const [entry] = pool.waiters.splice(i, 1);
         clearTimeout(entry.timer);
-        growPool(pool, entry.account, { background: entry.background }).then(entry.resolve, entry.reject);
+        growPool(pool, entry.account, { inShare: entry.inShare }).then(entry.resolve, entry.reject);
         continue;
       }
-      pool.waiters.shift();
+      pool.waiters.splice(at, 1);
       clearTimeout(head.timer);
       head.reject(providerRefusingError({ authRejected: headAuthHeld }));
       continue;
     }
-    pool.waiters.shift();
+    pool.waiters.splice(at, 1);
     clearTimeout(head.timer);
-    growPool(pool, head.account, { background: head.background }).then(head.resolve, head.reject);
+    growPool(pool, head.account, { inShare: head.inShare }).then(head.resolve, head.reject);
   }
 }
 
@@ -1781,15 +1783,15 @@ function drainWaiters(pool) {
 // check while the first connect is still running, and the pool opens one login per request.
 // This counter is what makes the pool size a ceiling under concurrency (upstream measured 12
 // sockets on a pool of 4 without it); it is released on success and on failure alike. A grow for a
-// background caller reserves its share the same way (pool.bgConnecting, see backgroundPoolCap).
-async function growPool(pool, account, { background = false } = {}) {
+// caller in the background share reserves it the same way (pool.bgConnecting, see backgroundPoolCap).
+async function growPool(pool, account, { inShare = false } = {}) {
   const id = account.id;
   let client;
   pool.connecting = (pool.connecting || 0) + 1;
-  if (background) pool.bgConnecting++;
+  if (inShare) pool.bgConnecting++;
   const unreserve = () => {
     pool.connecting--;
-    if (background) pool.bgConnecting--;
+    if (inShare) pool.bgConnecting--;
   };
   try {
     const freshAccount = await ensureFreshToken(account);
@@ -1817,7 +1819,7 @@ async function growPool(pool, account, { background = false } = {}) {
     }
   });
   pool.clients.push(client);
-  return handOutPooled(pool, client, background);
+  return handOutPooled(pool, client, inShare);
 }
 
 // A full pool never opens another connection: the caller queues, and past the acquire timeout
@@ -1842,9 +1844,12 @@ async function growPool(pool, account, { background = false } = {}) {
 // mailbox's rule move must not lose the interactive queue and its 15 s wait, since a rule that
 // gives up is not retried.
 //
-// Background callers together hold at most backgroundPoolCap sessions (all but one), so one is
-// always there for a user action. Past that share a background caller queues as usual, behind
-// every user action, and gives up after BACKGROUND_ACQUIRE_TIMEOUT_MS; held back, it fails at once.
+// Background callers and inbox rules (failFastWhenHeld: rules, the block list, a rule forward)
+// together hold at most backgroundPoolCap sessions (all but one), so one is always there for a
+// user action. Past that share such a caller waits in its usual place: background work behind
+// every user action, giving up after BACKGROUND_ACQUIRE_TIMEOUT_MS; a rule in the interactive
+// queue with its 15 s wait, passed over by the user actions behind it until the share has room.
+// Held back, either fails at once.
 export async function acquirePooledClient(account, { background = false, noNewLogin = false, failFastWhenHeld = false } = {}) {
   const id = account.id;
   if (!connectionPools.has(id)) {
@@ -1856,21 +1861,23 @@ export async function acquirePooledClient(account, { background = false, noNewLo
   const pool = connectionPools.get(id);
   const authHeld = loginHeldBack(account, { background });
   const loginHeld = noNewLogin || authHeld;
-  // The session kept for user actions is never handed to background work, open and idle or not.
-  const backgroundFull = background && backgroundPoolFull(pool, account);
+  // The session kept for user actions is never handed to work in the background share, open and
+  // idle or not.
+  const inShare = background || failFastWhenHeld;
+  const shareFull = inShare && backgroundPoolFull(pool, account);
 
   if (loginHeld && (background || failFastWhenHeld)) {
-    const idle = !backgroundFull && pool.waiters.length === 0 && pool.clients.find(c => !pool.inUse.has(c));
-    if (idle) return handOutPooled(pool, idle, background);
+    const idle = !shareFull && pool.waiters.length === 0 && pool.clients.find(c => !pool.inUse.has(c));
+    if (idle) return handOutPooled(pool, idle, inShare);
     throw providerRefusingError({ authRejected: authHeld });
   }
 
   // Nobody queued: take an idle client, or grow the pool if it is under its size.
-  if (pool.waiters.length === 0 && !backgroundFull) {
+  if (pool.waiters.length === 0 && !shareFull) {
     const idle = pool.clients.find(c => !pool.inUse.has(c));
-    if (idle) return handOutPooled(pool, idle, background);
+    if (idle) return handOutPooled(pool, idle, inShare);
     if (!loginHeld && pool.clients.length + (pool.connecting || 0) < poolSizeFor(account)) {
-      return growPool(pool, account, { background });
+      return growPool(pool, account, { inShare });
     }
   }
 
@@ -1886,7 +1893,7 @@ export async function acquirePooledClient(account, { background = false, noNewLo
   // variable, offlineimap blocks on a bounded semaphore; RFC 2683 3.1.1 asks clients not to
   // open extra connections to the same mailbox.
   return new Promise((resolve, reject) => {
-    const entry = { resolve, reject, timer: null, account, background, noNewLogin };
+    const entry = { resolve, reject, timer: null, account, background, noNewLogin, inShare };
     entry.timer = setTimeout(() => {
       pool.waiters = pool.waiters.filter(w => w !== entry);
       recordImapEvent(account.imap_host, 'pool_busy');

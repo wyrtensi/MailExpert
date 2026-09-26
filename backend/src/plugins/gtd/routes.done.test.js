@@ -194,3 +194,30 @@ describe('POST /api/gtd/done — strip-ok + archive-fail', () => {
     expect(imapManager.moveMessage).not.toHaveBeenCalled(); // never reached the archive step
   });
 });
+
+// A copy /done would change whose DB-first move is pending (placeholder uid, services/moveQueue.js):
+// answer before anything is changed, so done never stops half-way.
+describe('POST /api/gtd/done — a copy whose move is pending', () => {
+  it('answers 409 move_pending before marking read, stripping or archiving', async () => {
+    stubQueries();
+    const base = query.getMockImplementation();
+    query.mockImplementation(async (sql, params) => (sql.includes('uid < 0') ? { rows: [{ '?column?': 1 }] } : base(sql, params)));
+    const res = await done({ id: MSG_ID, states: ['watch'] });
+    expect(res.status).toBe(409);
+    expect((await res.json()).code).toBe('move_pending');
+    const check = query.mock.calls.find(([sql]) => sql.includes('uid < 0'));
+    expect(check[1]).toEqual([ACCT_ID, '<m@x>', ['INBOX', 'Watch']]);
+    expect(fanOutReadToSiblings).not.toHaveBeenCalled();
+    expect(imapManager.removeMessageCopy).not.toHaveBeenCalled();
+    expect(imapManager.moveMessage).not.toHaveBeenCalled();
+  });
+
+  it('answers 409 when the INBOX copy became pending after the check', async () => {
+    stubQueries({ inbox: { id: 'ib-1', uid: '-2', is_read: false } });
+    const res = await done({ id: MSG_ID, states: ['watch'] });
+    expect(res.status).toBe(409);
+    expect(fanOutReadToSiblings).not.toHaveBeenCalled();
+    expect(imapManager.setFlag).not.toHaveBeenCalled();
+    expect(imapManager.moveMessage).not.toHaveBeenCalled();
+  });
+});

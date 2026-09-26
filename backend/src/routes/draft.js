@@ -225,8 +225,10 @@ router.post('/draft', async (req, res) => {
 });
 
 router.delete('/draft/:uid', async (req, res) => {
-  const uid = parseInt(req.params.uid, 10);
-  if (!uid || !Number.isFinite(uid)) return res.status(400).json({ error: 'Invalid uid' });
+  // A single positive uid, as POST /draft checks existingUid: a negative one is a placeholder of
+  // a letter whose move is pending (moveQueue.js), which no server has.
+  if (!/^[1-9]\d*$/.test(req.params.uid)) return res.status(400).json({ error: 'Invalid uid' });
+  const uid = Number(req.params.uid);
 
   const { accountId, folder } = req.query;
   if (!accountId || !folder) return res.status(400).json({ error: 'accountId and folder required' });

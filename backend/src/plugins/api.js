@@ -37,6 +37,9 @@ export const removeExactLabelCopy = (message, labelFolder, uid) => labelsWrite.r
 export const markThreadRead = (account, message) => labelsWrite.markThreadRead(getMailEngine(), account, message);
 export const ensureLabelFolders = (account, folderPaths) => labelsWrite.ensureLabelFolders(getMailEngine(), account, folderPaths);
 export const resolveLabelCopyUid = labelsWrite.resolveLabelCopyUid;
+// Throws an error with movePending: true when the message or one of its copies in `folders` is
+// waiting for its move to reach the mail server; answer it with 409 { code: 'move_pending' }.
+export const assertNoPendingCopies = labelsWrite.assertNoPendingCopies;
 
 // ── Archive ───────────────────────────────────────────────────────────────────
 // Archive a message's INBOX copy (used by GTD "done"). Engine bound by the platform.

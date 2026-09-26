@@ -158,6 +158,10 @@ async function runRulesSweep(accountIds, imapMgr) {
           `SELECT id, uid, folder, from_email, from_name, to_addresses, subject, has_attachments, is_read
            FROM messages
            WHERE account_id = $1 AND lower(folder) = 'inbox'
+             -- uid > 0: a letter whose move is pending holds a placeholder uid (moveQueue.js);
+             -- a rule would move, flag or delete it at a uid the server does not have. It is
+             -- left to the next run, once its move has settled.
+             AND uid > 0
              ${lastId ? 'AND id > $3' : ''}
            ORDER BY id
            LIMIT $2`,

@@ -62,6 +62,9 @@ function stubQueries({ msg = inboxMsg, acct = account, sibling = null, exact = {
   });
 }
 
+// A letter whose DB-first move is pending holds a placeholder uid (services/moveQueue.js).
+const pendingMsg = { ...inboxMsg, uid: -8 };
+
 function buildApp() {
   const app = express();
   app.use(express.json());
@@ -276,6 +279,24 @@ describe('POST /api/gtd/classify/undo — remove only the request-owned copy', (
     const res = await undoClassify(token);
     expect(res.status).toBe(200);
     expect(await res.json()).toEqual({ ok: true, removed: false, folder: 'Todo' });
+    expect(imapManager.removeMessageCopy).not.toHaveBeenCalled();
+  });
+});
+
+describe('GTD classify of a letter whose move is pending', () => {
+  it('answers 409 move_pending and copies nothing', async () => {
+    stubQueries({ msg: pendingMsg });
+    const res = await classify({ messageId: MSG_ID, state: 'todo' });
+    expect(res.status).toBe(409);
+    expect((await res.json()).code).toBe('move_pending');
+    expect(imapManager.copyMessage).not.toHaveBeenCalled();
+  });
+
+  it('answers 409 move_pending when the label copy to remove is pending', async () => {
+    stubQueries({ sibling: { uid: '-3' } });
+    const res = await unclassify({ messageId: MSG_ID, state: 'todo' });
+    expect(res.status).toBe(409);
+    expect((await res.json()).code).toBe('move_pending');
     expect(imapManager.removeMessageCopy).not.toHaveBeenCalled();
   });
 });

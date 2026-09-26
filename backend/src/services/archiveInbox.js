@@ -1,5 +1,6 @@
 import { query } from './db.js';
 import { resolveArchiveFolder, isAllMailFolder, adjustFolderCounts } from '../utils/mailUtils.js';
+import { movePendingError } from '../utils/mailboxBusy.js';
 
 // Archive a single INBOX copy of a message: the one guarded per-copy archive move, shared
 // by any route that needs "move this INBOX row to the account's Archive and repoint the DB".
@@ -34,6 +35,8 @@ import { resolveArchiveFolder, isAllMailFolder, adjustFolderCounts } from '../ut
 // guard for the sync that learns the real uid only when the row was actually moved; a lost
 // race (rowCount 0) or a throw releases it immediately, since there is nothing to protect.
 export async function archiveInboxCopy(imapManager, account, inboxCopy) {
+  // A copy whose DB-first move is pending (placeholder uid, moveQueue.js) is on its way elsewhere.
+  if (Number(inboxCopy.uid) < 0) throw movePendingError();
   const accountId = account.id;
   const archiveFolder = await resolveArchiveFolder(accountId, account.folder_mappings);
   if (!archiveFolder) return { archived: false, noArchiveFolder: true };

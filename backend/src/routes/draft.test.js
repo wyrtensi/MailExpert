@@ -313,6 +313,16 @@ describe('DELETE /api/mail/draft/:uid — Drafts folders only', () => {
 
   const del = (qs) => fetch(`${base}/api/mail/draft/9?accountId=${ACCOUNT_ID}&${qs}`, { method: 'DELETE' });
 
+  // A negative uid is the placeholder of a letter whose move is pending (services/moveQueue.js).
+  it('rejects a uid that is not a single positive number', async () => {
+    for (const uid of ['-42', '0', '9abc', '1.5']) {
+      const res = await fetch(`${base}/api/mail/draft/${uid}?accountId=${ACCOUNT_ID}&folder=Drafts`, { method: 'DELETE' });
+      expect(res.status).toBe(400);
+    }
+    expect(query).not.toHaveBeenCalled();
+    expect(imapManager.permanentDeleteMessage).not.toHaveBeenCalled();
+  });
+
   it('deletes a draft from the Drafts folder', async () => {
     query.mockResolvedValueOnce({ rows: [ACCOUNT_ROW] });          // owner check
     query.mockResolvedValueOnce({ rows: [{ path: 'Drafts' }] });   // resolveDraftsFolder

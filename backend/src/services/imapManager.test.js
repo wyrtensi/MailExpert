@@ -6772,6 +6772,15 @@ describe('every background login waits out a rejected password', () => {
       expect(snoozeRowDeleted()).toBe(false);
     });
 
+    it('wakes no letter whose move is pending: it has no uid in the snoozed folder yet', async () => {
+      const acct = account();
+      const mgr = snoozeManager(acct);
+      rejectedPassword(mgr, acct);
+      await mgr._runSnoozeWakeup();
+      const due = query.mock.calls.find(([sql]) => sql.includes('SELECT sm.id AS snooze_id'))[0];
+      expect(due).toMatch(/AND m\.uid > 0/);
+    });
+
     it('leaves a disabled mailbox alone', async () => {
       const acct = { ...account(), enabled: false };
       const mgr = snoozeManager(acct);

@@ -250,6 +250,19 @@ describe('runGtdTransitions', () => {
     expect(mgr.broadcast).not.toHaveBeenCalled();
   });
 
+  // A label copy whose DB-first move is pending (placeholder uid, services/moveQueue.js) has
+  // nothing on the server to delete yet: skipped, and not counted as stripped.
+  it('skips a label copy whose move is pending instead of deleting a placeholder uid', async () => {
+    mockQuery({ rows: [
+      { thread_key: 't1', uid: 70, folder: 'INBOX', from_email: 'me@example.com', date: '2026-07-09T10:00:00Z', id: 'r1' },
+      { thread_key: 't1', uid: -5, folder: 'Todo',  from_email: 'me@example.com', date: '2026-07-09T10:00:00Z', id: 'r2' },
+    ] });
+    const mgr = fakeManager();
+    await runGtdTransitions(mgr, account, ['t1']);
+    expect(mgr.removeMessageCopy).not.toHaveBeenCalled();
+    expect(mgr.broadcast).not.toHaveBeenCalled();
+  });
+
   it('tolerates a removeMessageCopy rejection (concurrent external strip) as success', async () => {
     mockQuery({ rows: [
       { thread_key: 't1', uid: 70, folder: 'INBOX', from_email: 'me@example.com', date: '2026-07-09T10:00:00Z', id: 'r1' },

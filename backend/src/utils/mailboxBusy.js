@@ -43,3 +43,16 @@ export function movePendingBody() {
 export function sendMovePending(res) {
   return res.status(409).json(movePendingBody());
 }
+
+// The error for work that met a letter whose move is pending (a placeholder uid): nothing was
+// sent. Routes answer it with sendMovePending.
+export function movePendingError() {
+  const err = new Error(MOVE_PENDING_ERROR);
+  err.movePending = true;
+  err.code = MOVE_PENDING_CODE;
+  return err;
+}
+
+export function isMovePendingError(err) {
+  return !!err?.movePending;
+}

@@ -7926,6 +7926,9 @@ export class ImapManager {
                      AND m.message_id = sm.message_id_header
                      AND m.folder = sm.snoozed_folder
                      AND m.is_deleted = false
+                     -- A row whose move is pending holds a placeholder uid (moveQueue.js): its
+                     -- letter is not in the snoozed folder on the server yet. It wakes once moved.
+                     AND m.uid > 0
       WHERE sm.snooze_until <= NOW()
     `);
 

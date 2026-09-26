@@ -2198,6 +2198,7 @@ export class ImapManager {
     this._prefetchRunning = new Set(); // accountIds with a folder-view body-prefetch run in progress
     this._prefetchNewRunning = new Set(); // accountIds with a new-mail body-prefetch run in progress
     this._prefetchNewPending = new Map(); // accountId -> Map(id -> row) of new letters that run takes next
+    this._prefetchGeneration = new Map(); // accountId -> bumped by disconnectAccount; a prefetch run of an older one stops
     this._prefetchPausedUntil = new Map(); // accountId -> ms; body prefetch paused after a run stopped on failures
     // accountId -> the value last persisted to email_accounts.sync_error: a string (error is
     // showing), null (known clear), or absent (unknown — e.g. just after a restart, where the
@@ -2967,7 +2968,16 @@ export class ImapManager {
     if (flagTimer) { clearTimeout(flagTimer); this._flagDebounceTimers.delete(accountId); }
     const expungeTimer = this._expungeDebounceTimers.get(accountId);
     if (expungeTimer) { clearTimeout(expungeTimer); this._expungeDebounceTimers.delete(accountId); }
+    // Stop the account's body prefetch runs before their next letter; the letters queued for the
+    // new-mail lane end the same way. Without this a run went on after the mailbox was disabled
+    // or deleted: each next letter opened a new pooled login, which on a node mailbox deleted
+    // meanwhile is a rejected login, one more strike toward fail2ban.
+    this._prefetchGeneration.set(accountId, this._prefetchGenerationOf(accountId) + 1);
     evictPool(accountId);
+  }
+
+  _prefetchGenerationOf(accountId) {
+    return this._prefetchGeneration.get(accountId) || 0;
   }
 
   // Effective per-host persistent-connection cap for an account: the tighter of the env default and
@@ -6396,12 +6406,14 @@ export class ImapManager {
     while (pending.size > NODE_NEW_BODY_PREFETCH_MAX) pending.delete(pending.keys().next().value);
     if (this._prefetchNewRunning.has(account.id)) return; // the running lane takes them next
     this._prefetchNewRunning.add(account.id);
+    // disconnectAccount (a disabled, deleted or reconfigured mailbox) ends this lane: see there.
+    const generation = this._prefetchGenerationOf(account.id);
     try {
       while (pending.size > 0) {
         if (Date.now() < (this._prefetchPausedUntil.get(account.id) || 0)) return;
         const rows = [...pending.values()].reverse();
         pending.clear();
-        if (await this._prefetchBodyLoop(account, rows, { waitForQuiet: false }) === 'stopped') {
+        if (await this._prefetchBodyLoop(account, rows, { waitForQuiet: false, generation }) === 'stopped') {
           this._prefetchPausedUntil.set(account.id, Date.now() + PREFETCH_STOP_PAUSE_MS);
           return;
         }
@@ -6471,11 +6483,25 @@ export class ImapManager {
   // and counts no error toward the stop. The acquire wait itself spaces the tries. Only
   // PREFETCH_MAX_BUSY_WAITS busy answers in a row, as long as the longest pooled operation may
   // run, end the run, without the pause; the letters left are fetched on open.
-  async _prefetchBodyLoop(account, rows, { waitForQuiet }) {
+  //
+  // generation: the account's prefetch generation when the run began. disconnectAccount bumps it,
+  // and the run ends before its next letter.
+  async _prefetchBodyLoop(account, rows, { waitForQuiet, generation = this._prefetchGenerationOf(account.id) }) {
     let consecutiveErrors = 0;
     let busyWaits = 0;
     for (let i = 0; i < rows.length; i++) {
       const msg = rows[i];
+      if (waitForQuiet) {
+        const quietFor = Date.now() - (this.lastUserActivity.get(account.id) || 0);
+        if (quietFor < QUIET_WINDOW_MS) {
+          await new Promise(r => setTimeout(r, QUIET_WINDOW_MS - quietFor));
+        }
+      }
+      // The mailbox was disconnected (disabled, deleted, reconfigured) since the run began.
+      if (this._prefetchGenerationOf(account.id) !== generation) {
+        logger.debug(`Body prefetch ended for ${logAccount(account)}: the mailbox was disconnected`);
+        return;
+      }
       // Checked before every message, not only at entry: a backoff armed meanwhile (by the status
       // client, or by this run's own previous failure) must stop a run already in progress. Covers
       // the live-sync cooldown, the secondary refusal backoff and a rejected secondary login.
@@ -6484,20 +6510,17 @@ export class ImapManager {
         logger.debug(`Body prefetch skipped for ${logAccount(account)}: backing off ${Math.round((blocked.until - Date.now()) / 1000)}s`);
         return;
       }
-      if (waitForQuiet) {
-        const quietFor = Date.now() - (this.lastUserActivity.get(account.id) || 0);
-        if (quietFor < QUIET_WINDOW_MS) {
-          await new Promise(r => setTimeout(r, QUIET_WINDOW_MS - quietFor));
-        }
-      }
 
       try {
-        // Skip if body already cached (a concurrent click may have fetched it).
-        const existing = await query(
-          'SELECT id FROM messages WHERE id = $1 AND (body_html IS NOT NULL OR body_text IS NOT NULL)',
+        // The letter as the database has it now. No row: the letter is gone, or its mailbox was
+        // disabled or deleted (a login there could only be rejected). Cached: a click fetched it.
+        const { rows: [live] } = await query(
+          `SELECT (m.body_html IS NOT NULL OR m.body_text IS NOT NULL) AS cached
+             FROM messages m JOIN email_accounts a ON a.id = m.account_id AND a.enabled
+            WHERE m.id = $1`,
           [msg.id]
         );
-        if (existing.rows.length) continue;
+        if (!live || live.cached) continue;
 
         const { html, text, attachments } = await this.fetchMessageBody(account, msg.uid, msg.folder, { background: true });
         const safeHtml = html ? sanitizeEmail(html) : null;

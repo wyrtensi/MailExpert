@@ -1182,6 +1182,15 @@ router.post('/folders/empty', async (req, res) => {
   if (!check.rows.length) return res.status(404).json({ error: 'Account not found' });
   const account = check.rows[0];
 
+  // A queued move into this folder would land its letter after the empty (and the row deleted
+  // below would be its placeholder); one out of it would find its letter gone. Emptying waits for
+  // them (services/moveQueue.js).
+  const pendingMoves = await query(
+    'SELECT 1 FROM message_moves WHERE account_id = $1 AND (dest_folder = $2 OR src_folder = $2) LIMIT 1',
+    [accountId, path]
+  );
+  if (pendingMoves.rows.length) return sendMovePending(res);
+
   const inflightKey = `${accountId}:${path}`;
   if (emptyInFlight.has(inflightKey)) return res.status(409).json({ error: 'This folder is already being emptied' });
   emptyInFlight.add(inflightKey);

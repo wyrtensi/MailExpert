@@ -102,4 +102,19 @@ describe('POST /api/mail/folders/empty — async background empty', () => {
     release();                            // let the first complete so the guard clears
     await tick();
   });
+
+  // A queued DB-first move into the folder would land its letter after the empty; one out of it
+  // would find its letter gone (services/moveQueue.js). Emptying waits for them.
+  it('answers 409 move_pending while a move into or out of the folder is queued', async () => {
+    const base = query.getMockImplementation();
+    query.mockImplementation((sql, params) => (sql.includes('FROM message_moves')
+      ? Promise.resolve({ rows: [{ '?column?': 1 }] })
+      : base(sql, params)));
+    const res = await empty('Trash');
+    expect(res.status).toBe(409);
+    expect((await res.json()).code).toBe('move_pending');
+    expect(imapManager.emptyFolder).not.toHaveBeenCalled();
+    const check = query.mock.calls.find(([sql]) => sql.includes('FROM message_moves'));
+    expect(check[1]).toEqual([ACCOUNT_ID, 'Trash']);
+  });
 });

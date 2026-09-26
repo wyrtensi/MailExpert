@@ -5223,7 +5223,9 @@ describe('body prefetch runs one at a time and pauses after a stop', () => {
     expect(mgr._prefetchPausedUntil.has(acct.id)).toBe(false);
   });
 
-  it('counts busy answers per letter, so a busy pool now and then does not end the run', async () => {
+  it('counts busy answers over the whole run, not per letter', async () => {
+    // Every letter waiting out almost the whole allowance would otherwise hold the run (and the
+    // folder-view one-run guard) for hours.
     const mgr = ladderManager();
     mgr.fetchMessageBody = vi.fn();
     for (let n = 0; n < ids.length; n++) {
@@ -5231,7 +5233,31 @@ describe('body prefetch runs one at a time and pauses after a stop', () => {
       mgr.fetchMessageBody.mockResolvedValueOnce(ok);
     }
     await mgr.prefetchFolderBodies(acct.id, ids);
-    expect(mgr.fetchMessageBody).toHaveBeenCalledTimes(ids.length * PREFETCH_MAX_BUSY_WAITS);
+    // The first letter after 29 busy answers, then the 30th busy answer ends the run.
+    expect(mgr.fetchMessageBody).toHaveBeenCalledTimes(PREFETCH_MAX_BUSY_WAITS + 1);
+    expect(mgr._prefetchPausedUntil.has(acct.id)).toBe(false);
+  });
+
+  it('counts busy answers over every batch of a new-mail run', async () => {
+    const mgr = ladderManager();
+    let release;
+    const gate = new Promise(resolve => { release = resolve; });
+    const rows = ids.map((id, i) => ({ id, uid: i + 1, folder: 'INBOX' }));
+    let calls = 0;
+    mgr.fetchMessageBody = vi.fn(async () => {
+      calls++;
+      if (calls === 1) await gate;
+      if (calls <= PREFETCH_MAX_BUSY_WAITS - 1) throw busy();
+      if (calls === PREFETCH_MAX_BUSY_WAITS) return ok;
+      throw busy();
+    });
+    const first = mgr.prefetchNewMessageBodies(acct, rows.slice(0, 1));
+    await vi.waitFor(() => expect(calls).toBe(1));
+    await mgr.prefetchNewMessageBodies(acct, rows.slice(1, 2)); // the next sync's batch
+    release();
+    await first;
+    // 29 busy answers and a success in the first batch; the next batch's first busy answer ends it.
+    expect(calls).toBe(PREFETCH_MAX_BUSY_WAITS + 1);
   });
 
   it('ends the run without the pause when the pool stays busy as long as any pooled operation may run', async () => {

@@ -274,9 +274,11 @@ export const PREFETCH_MAX_CONSECUTIVE_ERRORS = 3;
 // How long an account's body prefetch stays paused after a run stopped on failures.
 export const PREFETCH_STOP_PAUSE_MS = 60 * 1000;
 
-// Busy pool answers in a row (each after the 10 s background acquire wait) a prefetch run waits
-// out before it ends: 5 minutes, the bound of the longest pooled operation
-// (LONG_POOLED_OPERATION_TIMEOUT_MS), after which a busy pool is not a passing burst.
+// Busy pool answers (each after the 10 s background acquire wait) a prefetch run waits out, in
+// all, before it ends: 5 minutes, the bound of the longest pooled operation
+// (LONG_POOLED_OPERATION_TIMEOUT_MS). Counted over the whole run, not per letter: 50 letters each
+// waiting 29 times would hold the run, and the folder-view one-run-per-account guard with it,
+// for hours.
 export const PREFETCH_MAX_BUSY_WAITS = 30;
 
 // Letters of one sync whose bodies a mailbox on our own mail node (account.mail_node) fetches
@@ -6435,12 +6437,13 @@ export class ImapManager {
     this._prefetchNewRunning.add(account.id);
     // disconnectAccount (a disabled, deleted or reconfigured mailbox) ends this lane: see there.
     const generation = this._prefetchGenerationOf(account.id);
+    const busy = { waits: 0 }; // busy pool answers of this whole run (see _prefetchBodyLoop)
     try {
       while (pending.size > 0) {
         if (Date.now() < (this._prefetchPausedUntil.get(account.id) || 0)) return;
         const rows = [...pending.values()].reverse();
         pending.clear();
-        if (await this._prefetchBodyLoop(account, rows, { waitForQuiet: false, generation }) === 'stopped') {
+        if (await this._prefetchBodyLoop(account, rows, { waitForQuiet: false, generation, busy }) === 'stopped') {
           this._prefetchPausedUntil.set(account.id, Date.now() + PREFETCH_STOP_PAUSE_MS);
           return;
         }
@@ -6507,15 +6510,14 @@ export class ImapManager {
   //
   // A busy pool (poolExhausted: the background share stayed taken for the whole acquire wait, and
   // no login was tried) is not a failure: the run waits for it by trying the same letter again,
-  // and counts no error toward the stop. The acquire wait itself spaces the tries. Only
-  // PREFETCH_MAX_BUSY_WAITS busy answers in a row, as long as the longest pooled operation may
-  // run, end the run, without the pause; the letters left are fetched on open.
+  // and counts no error toward the stop. The acquire wait itself spaces the tries. After
+  // PREFETCH_MAX_BUSY_WAITS busy answers in all (busy.waits, shared by every batch of a new-mail
+  // lane run) the run ends, without the pause; the letters left are fetched on open.
   //
   // generation: the account's prefetch generation when the run began. disconnectAccount bumps it,
   // and the run ends before its next letter.
-  async _prefetchBodyLoop(account, rows, { waitForQuiet, generation = this._prefetchGenerationOf(account.id) }) {
+  async _prefetchBodyLoop(account, rows, { waitForQuiet, generation = this._prefetchGenerationOf(account.id), busy = { waits: 0 } }) {
     let consecutiveErrors = 0;
-    let busyWaits = 0;
     for (let i = 0; i < rows.length; i++) {
       const msg = rows[i];
       if (waitForQuiet) {
@@ -6569,7 +6571,7 @@ export class ImapManager {
         }
       } catch (err) {
         if (err?.poolExhausted) {
-          if (++busyWaits >= PREFETCH_MAX_BUSY_WAITS) {
+          if (++busy.waits >= PREFETCH_MAX_BUSY_WAITS) {
             console.log(`Body prefetch ending for ${logAccount(account)}: the pool stayed busy`);
             return;
           }
@@ -6614,7 +6616,6 @@ export class ImapManager {
         if (hostSlot) this._nodePrefetchSem.release(hostSlot);
       }
       consecutiveErrors = 0;
-      busyWaits = 0;
     }
   }
 

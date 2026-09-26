@@ -123,6 +123,25 @@ describe('enqueue: the database moves at once', () => {
     expect(await moves()).toEqual([]);
   });
 
+  // M10: two bulk moves over overlapping letters must lock them in the same order, or Postgres
+  // aborts one with a deadlock. PGlite has one connection and cannot interleave them, so this pins
+  // the order in the statements themselves.
+  it('locks several rows in id order', async () => {
+    const seen = [];
+    const realQuery = dbState.db.query.bind(dbState.db);
+    dbState.db.query = async (sql, params) => { seen.push(sql); return realQuery(sql, params); };
+    try {
+      await queue.enqueue(ACCOUNT, await rowsOf([B, A]), 'Archive');
+      await queue.deferFlags(await rowsOf([B, A]), '\\Seen', true);
+    } finally {
+      dbState.db.query = realQuery;
+    }
+    const locking = seen.filter(sql => /FOR UPDATE/.test(sql) && /ANY\(\$1::uuid\[\]\)/.test(sql));
+    expect(locking).toHaveLength(2);
+    for (const sql of locking) expect(sql).toMatch(/ORDER BY (mv\.)?id\s+FOR UPDATE/);
+    expect((await moves()).every(o => o.set_seen === true)).toBe(true);
+  });
+
   // M3: two requests act on the same letter, both from their own read of it in INBOX.
   it('reports the folder the row was really in when a second request moves it again', async () => {
     const stale = await rowsOf([A]);

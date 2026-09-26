@@ -211,6 +211,9 @@ export class MoveQueue {
 
   // ── Routes ───────────────────────────────────────────────────────────────────────────────
 
+  // Locking: every statement that locks several rows locks them in id order (messages here, moves
+  // in deferFlags and the claim), so overlapping bulk requests queue instead of deadlocking.
+  //
   // Move `rows` (message rows of one account, as the route read them) to `dest` in the database
   // and queue the server MOVE. dropRow: the destination is not synced (Gmail All Mail), so the
   // row is deleted once the server has moved the letter. Returns one { id, from, isRead } per row
@@ -235,6 +238,7 @@ export class MoveQueue {
         `WITH src AS (
            SELECT id, account_id, folder, uid, message_id, is_read FROM messages
             WHERE id = ANY($1::uuid[]) AND account_id = $2 AND uid > 0 AND folder <> $3
+            ORDER BY id
             FOR UPDATE
          ), ins AS (
            INSERT INTO message_moves (account_id, message_row_id, message_id_header, src_folder, src_uid, dest_folder, drop_row, moved_by)
@@ -373,11 +377,18 @@ export class MoveQueue {
     const col = FLAG_COLUMNS[flag];
     if (!col) throw new Error(`deferFlags: unknown flag ${flag}`);
     // col is one of two fixed literals above, never input.
+    // The move rows are locked in id order, like every multi-row lock here: two requests over
+    // overlapping letters then wait for each other instead of deadlocking.
     const { rows: done } = await query(
-      `UPDATE message_moves mv SET ${col} = $2
-         FROM messages m
-        WHERE m.id = ANY($1::uuid[]) AND mv.id = -m.uid AND mv.message_row_id = m.id
-        RETURNING m.id`,
+      `WITH target AS (
+         SELECT mv.id FROM message_moves mv JOIN messages m ON mv.id = -m.uid AND mv.message_row_id = m.id
+          WHERE m.id = ANY($1::uuid[])
+          ORDER BY mv.id
+          FOR UPDATE OF mv
+       )
+       UPDATE message_moves mv SET ${col} = $2
+         FROM target WHERE mv.id = target.id
+        RETURNING mv.message_row_id AS id`,
       [pending, value]
     );
     for (const r of done) deferred.add(r.id);

@@ -7,7 +7,7 @@ describe('AUDIT_ACTIONS', () => {
     assert.deepEqual(AUDIT_ACTIONS, [
       'mailbox.added', 'mailbox.reconnected', 'mailbox.deleted', 'mailbox.connection_changed',
       'mailbox.enabled', 'mailbox.disabled', 'mailbox.password_restored', 'message.sent', 'message.deleted',
-      'user.added', 'user.deleted', 'user.enabled', 'user.disabled', 'user.admin_changed',
+      'message.move_reverted', 'user.added', 'user.deleted', 'user.enabled', 'user.disabled', 'user.admin_changed',
       'access.sync_aborted',
     ]);
     assert.equal(auditActionLabelKey('message.sent'), 'admin.audit.actionMessageSent');
@@ -46,6 +46,14 @@ describe('auditQuery', () => {
 });
 
 describe('auditDetail', () => {
+  it('says why a queued move was reverted and where the letter went back', () => {
+    const detail = (reason) => auditDetail({ action: 'message.move_reverted', details: { messageId: '<m@x>', from: 'Trash', to: 'INBOX', reason } });
+    assert.deepEqual(detail('gone'), { key: 'admin.audit.detailMoveRevertedGone', values: { from: 'Trash', to: 'INBOX' } });
+    assert.deepEqual(detail('destination_gone'), { key: 'admin.audit.detailMoveRevertedDestinationGone', values: { from: 'Trash', to: 'INBOX' } });
+    assert.deepEqual(detail('gave_up'), { key: 'admin.audit.detailMoveRevertedGaveUp', values: { from: 'Trash', to: 'INBOX' } });
+    assert.equal(auditActionLabelKey('message.move_reverted'), 'admin.audit.actionMessageMoveReverted');
+  });
+
   it('names the OAuth provider of an added or reconnected mailbox', () => {
     assert.deepEqual(
       auditDetail({ action: 'mailbox.added', details: { protocol: 'imap', oauthProvider: 'google' } }),

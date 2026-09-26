@@ -9,6 +9,8 @@
 -- set_seen/set_flagged: a read or star change made while the move was pending, stored at the
 -- destination after the MOVE (the letter has no server location to store it at before that).
 -- drop_row: the destination is not synced (Gmail All Mail), so the row is deleted once moved.
+-- moved_by: the user whose move this is (the last one to move the letter while it was queued).
+-- A revert is journaled for them and only they get the move_reverted notice.
 -- state: queued (waiting for its turn or a retry), moving (claimed by the worker, MOVE on its way),
 -- awaiting_uid (moved, but the server did not name the new uid; it is looked up).
 -- claimed_at: when the worker claimed the move, renewed right before its MOVE: a lease. A move
@@ -25,6 +27,7 @@ CREATE TABLE IF NOT EXISTS message_moves (
   dest_folder text NOT NULL,
   predecessor_id bigint,
   drop_row boolean NOT NULL DEFAULT false,
+  moved_by uuid REFERENCES users(id) ON DELETE SET NULL,
   set_seen boolean,
   set_flagged boolean,
   state text NOT NULL DEFAULT 'queued' CHECK (state IN ('queued', 'moving', 'awaiting_uid')),

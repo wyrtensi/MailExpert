@@ -70,7 +70,7 @@ function newQueue() {
 beforeEach(async () => {
   vi.clearAllMocks();
   vi.spyOn(console, 'warn').mockImplementation(() => {});
-  await db.exec('DELETE FROM message_moves; DELETE FROM messages; DELETE FROM folders; DELETE FROM email_accounts; DELETE FROM users;');
+  await db.exec('DELETE FROM mailbox_audit_log; DELETE FROM message_moves; DELETE FROM messages; DELETE FROM folders; DELETE FROM email_accounts; DELETE FROM users;');
   await db.query("INSERT INTO users (id, username) VALUES ($1, 'anna')", [USER]);
   await db.query("INSERT INTO email_accounts (id, name, email_address) VALUES ($1, 'Office', 'office@example.com')", [ACCOUNT]);
   for (const path of ['INBOX', 'Archive', 'Trash', 'Projects']) {
@@ -184,6 +184,37 @@ describe('a move cancelled by moving the letter back', () => {
 });
 
 // M1, M2: a folder being emptied, renamed or deleted is held.
+// M4, M5: a revert is journaled for, and told only to, the user whose move it was.
+describe('the user whose move it was', () => {
+  const OTHER = '42000000-0000-4000-8000-000000000002';
+
+  it('gets the move_reverted notice alone, everyone refreshes, and the journal says it came back', async () => {
+    mgr.bulkMoveMessages.mockResolvedValue({ uidMap: new Map(), succeeded: [], failed: [11] });
+    mgr.searchUids.mockResolvedValue([]);
+    await queue.enqueue(ACCOUNT, await rowsOf([A]), 'Trash', { movedBy: USER });
+    expect((await moves())[0].moved_by).toBe(USER);
+    await queue.runAccount(ACCOUNT);
+
+    expect(mgr.broadcast).toHaveBeenCalledWith({ type: 'move_reverted', accountId: ACCOUNT, folder: 'INBOX', reason: 'gone', ids: [A] }, USER);
+    expect(mgr.broadcast).toHaveBeenCalledWith({ type: 'folder_updated', folder: 'INBOX', accountId: ACCOUNT });
+    expect(mgr.broadcast.mock.calls.filter(([e]) => e.type === 'move_reverted').every(([, userId]) => userId === USER)).toBe(true);
+    await vi.waitFor(async () => {
+      const { rows } = await db.query('SELECT actor_user_id, account_id, action, details FROM mailbox_audit_log');
+      expect(rows).toEqual([{
+        actor_user_id: USER, account_id: ACCOUNT, action: 'message.move_reverted',
+        details: { messageId: '<a@example.com>', from: 'Trash', to: 'INBOX', reason: 'gone' },
+      }]);
+    });
+  });
+
+  it('is the last user who moved the letter while its move was queued', async () => {
+    await db.query("INSERT INTO users (id, username) VALUES ($1, 'boris')", [OTHER]);
+    await queue.enqueue(ACCOUNT, await rowsOf([A]), 'Trash', { movedBy: USER });
+    await queue.enqueue(ACCOUNT, await rowsOf([A]), 'Archive', { movedBy: OTHER });
+    expect((await moves())[0]).toMatchObject({ dest_folder: 'Archive', moved_by: OTHER });
+  });
+});
+
 describe('a held folder', () => {
   it('while Trash is emptied: letters may be moved in, their MOVE waits, nothing is moved out', async () => {
     serverMoves();

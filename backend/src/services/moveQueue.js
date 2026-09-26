@@ -31,6 +31,7 @@
 // to its source folder and uid and tell every client (move_reverted).
 import { query, withTransaction } from './db.js';
 import { adjustFolderCounts } from '../utils/mailUtils.js';
+import { recordAudit } from './auditLog.js';
 import { isMailboxBusyError } from './imapManager.js';
 
 export const MOVE_MAX_ATTEMPTS = 8;
@@ -210,7 +211,7 @@ export class MoveQueue {
   // read state as the statement that moved it saw them under its lock, for the folder counts
   // (from === dest: it was there already, nothing to count). A route's own read of the row may be
   // stale: another request can have moved it in between.
-  async enqueue(accountId, rows, dest, { dropRow = false } = {}) {
+  async enqueue(accountId, rows, dest, { dropRow = false, movedBy = null } = {}) {
     // The route's read of a row may be stale, so even a row it saw in `dest` goes through the
     // locked statements below; they tell a row that is really there already from one that is not.
     const moved = new Map();
@@ -229,15 +230,15 @@ export class MoveQueue {
             WHERE id = ANY($1::uuid[]) AND account_id = $2 AND uid > 0 AND folder <> $3
             FOR UPDATE
          ), ins AS (
-           INSERT INTO message_moves (account_id, message_row_id, message_id_header, src_folder, src_uid, dest_folder, drop_row)
-           SELECT account_id, id, message_id, folder, uid, $3, $4 FROM src
+           INSERT INTO message_moves (account_id, message_row_id, message_id_header, src_folder, src_uid, dest_folder, drop_row, moved_by)
+           SELECT account_id, id, message_id, folder, uid, $3, $4, $5 FROM src
            RETURNING *
          )
          UPDATE messages m SET folder = $3, uid = -ins.id
            FROM ins JOIN src ON src.id = ins.message_row_id
           WHERE m.id = ins.message_row_id
          RETURNING ins.*, src.is_read AS from_is_read`,
-        [fresh.map(r => r.id), accountId, dest, dropRow]
+        [fresh.map(r => r.id), accountId, dest, dropRow, movedBy]
       );
       for (const op of ops) {
         created.push(op);
@@ -248,7 +249,7 @@ export class MoveQueue {
     }
 
     for (const rowId of retry) {
-      const outcome = await this._enqueuePending(accountId, rowId, dest, dropRow);
+      const outcome = await this._enqueuePending(accountId, rowId, dest, dropRow, movedBy);
       if (outcome?.moved) moved.set(rowId, outcome.moved);
       if (outcome?.op) created.push(outcome.op);
     }
@@ -266,7 +267,7 @@ export class MoveQueue {
   // the row did not move (gone, or moved by another request this very moment). `moved` is the
   // { id, from, isRead } of enqueue. Each statement locks the message row first, as the worker's
   // settle does, so a settle and this never interleave.
-  async _enqueuePending(accountId, rowId, dest, dropRow) {
+  async _enqueuePending(accountId, rowId, dest, dropRow, movedBy) {
     // The latest move is still queued and its source is the new destination: drop it, and the row
     // goes back to the letter's server location (or to its predecessor's placeholder). A read/star
     // change deferred onto the dropped move is kept: it goes to the predecessor, which stores it
@@ -302,13 +303,13 @@ export class MoveQueue {
     const changed = await query(
       `WITH m AS (SELECT id, uid, folder, is_read FROM messages WHERE id = $1 AND account_id = $2 AND uid < 0 AND folder <> $3 FOR UPDATE),
        op AS (
-         UPDATE message_moves mv SET dest_folder = $3, drop_row = $4, updated_at = now() FROM m
+         UPDATE message_moves mv SET dest_folder = $3, drop_row = $4, moved_by = $5, updated_at = now() FROM m
           WHERE mv.id = -m.uid AND mv.message_row_id = m.id AND mv.state = 'queued'
          RETURNING mv.*
        )
        UPDATE messages x SET folder = $3 FROM op, m WHERE x.id = op.message_row_id
        RETURNING op.*, m.folder AS from_folder, m.is_read AS from_is_read`,
-      [rowId, accountId, dest, dropRow]
+      [rowId, accountId, dest, dropRow, movedBy]
     );
     const retargeted = changed.rows[0];
     if (retargeted) return { op: retargeted, moved: { id: rowId, from: retargeted.from_folder, isRead: !!retargeted.from_is_read } };
@@ -319,13 +320,13 @@ export class MoveQueue {
          SELECT mv.* FROM message_moves mv, m
           WHERE mv.id = -m.uid AND mv.message_row_id = m.id AND mv.state <> 'queued'
        ), ins AS (
-         INSERT INTO message_moves (account_id, message_row_id, message_id_header, src_folder, src_uid, dest_folder, drop_row, predecessor_id)
-         SELECT account_id, message_row_id, message_id_header, dest_folder, NULL, $3, $4, id FROM prev
+         INSERT INTO message_moves (account_id, message_row_id, message_id_header, src_folder, src_uid, dest_folder, drop_row, predecessor_id, moved_by)
+         SELECT account_id, message_row_id, message_id_header, dest_folder, NULL, $3, $4, id, $5 FROM prev
          RETURNING *
        )
        UPDATE messages x SET folder = $3, uid = -ins.id FROM ins, m WHERE x.id = ins.message_row_id
        RETURNING ins.*, m.folder AS from_folder, m.is_read AS from_is_read`,
-      [rowId, accountId, dest, dropRow]
+      [rowId, accountId, dest, dropRow, movedBy]
     );
     const following = next.rows[0];
     if (following) return { op: following, moved: { id: rowId, from: following.from_folder, isRead: !!following.from_is_read } };
@@ -334,7 +335,7 @@ export class MoveQueue {
     if (!row) return null;
     if (row.folder === dest) return { moved: { id: rowId, from: dest, isRead: !!row.is_read } };
     if (isPendingUid(row.uid)) return null; // moved by another request at this very moment
-    const [again] = await this.enqueue(accountId, [row], dest, { dropRow });
+    const [again] = await this.enqueue(accountId, [row], dest, { dropRow, movedBy });
     return again ? { moved: again } : null;
   }
 
@@ -913,6 +914,13 @@ export class MoveQueue {
       if (cur.set_seen != null) this.mgr._enqueueFlagPush(cur.account_id, row.id, '\\Seen', cur.set_seen);
       if (cur.set_flagged != null) this.mgr._enqueueFlagPush(cur.account_id, row.id, '\\Flagged', cur.set_flagged);
       console.warn(`Move queue: move ${cur.id} ${cur.src_folder} -> ${cur.dest_folder} reverted (${reason})`);
+      // The journal said the user moved (or deleted) the letter; it says it came back too.
+      recordAudit({
+        actorUserId: cur.moved_by,
+        accountId: cur.account_id,
+        action: 'message.move_reverted',
+        details: { messageId: cur.message_id_header ?? null, from: cur.dest_folder, to: cur.src_folder, reason },
+      });
     }
     return out;
   }
@@ -969,20 +977,22 @@ export class MoveQueue {
     }
   }
 
-  // Tell every client which rows went back, per source folder, and refresh the lists.
+  // Tell the user whose move it was which rows went back, per source folder (a move from before
+  // moved_by existed, or of a deleted user, tells everyone), and refresh every client's lists.
   _notifyReverted(accountId, reverted) {
     if (!reverted.length) return;
-    const bySource = new Map();
+    const notices = new Map();
     const folders = new Set();
     for (const { op, row, reason } of reverted) {
-      const key = `${op.src_folder}\n${reason}`;
-      if (!bySource.has(key)) bySource.set(key, { folder: op.src_folder, reason, ids: [] });
-      bySource.get(key).ids.push(row.id);
+      const key = `${op.moved_by ?? ''}\n${op.src_folder}\n${reason}`;
+      if (!notices.has(key)) notices.set(key, { userId: op.moved_by ?? null, notice: { folder: op.src_folder, reason, ids: [] } });
+      notices.get(key).notice.ids.push(row.id);
       folders.add(op.src_folder);
       folders.add(op.dest_folder);
     }
-    for (const notice of bySource.values()) {
-      this.mgr.broadcast({ type: 'move_reverted', accountId, ...notice });
+    for (const { userId, notice } of notices.values()) {
+      if (userId) this.mgr.broadcast({ type: 'move_reverted', accountId, ...notice }, userId);
+      else this.mgr.broadcast({ type: 'move_reverted', accountId, ...notice });
     }
     for (const folder of folders) this.mgr.broadcast({ type: 'folder_updated', folder, accountId });
   }

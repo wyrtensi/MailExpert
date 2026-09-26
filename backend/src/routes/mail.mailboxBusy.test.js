@@ -120,7 +120,7 @@ describe('a move never answers busy: it changes the database and queues the serv
   it('on delete (move to Trash)', async () => {
     const res = await call('DELETE', `/messages/${INBOX_ID}`);
     expect(res.status).toBe(200);
-    expect(imapManager.moveQueue.enqueue).toHaveBeenCalledWith(ACCOUNT_ID, [expect.objectContaining({ id: INBOX_ID })], 'Trash', { dropRow: false });
+    expect(imapManager.moveQueue.enqueue).toHaveBeenCalledWith(ACCOUNT_ID, [expect.objectContaining({ id: INBOX_ID })], 'Trash', { dropRow: false, movedBy: 'u1' });
   });
 
   it('on bulk move, bulk delete to Trash and bulk archive', async () => {
@@ -136,7 +136,7 @@ describe('a move never answers busy: it changes the database and queues the serv
     const res = await call('POST', `/messages/${INBOX_ID}/spam`);
     expect(res.status).toBe(200);
     expect(res.body.folder).toBe('Junk');
-    expect(imapManager.moveQueue.enqueue).toHaveBeenCalledWith(ACCOUNT_ID, [expect.objectContaining({ id: INBOX_ID })], 'Junk', { dropRow: false });
+    expect(imapManager.moveQueue.enqueue).toHaveBeenCalledWith(ACCOUNT_ID, [expect.objectContaining({ id: INBOX_ID })], 'Junk', { dropRow: false, movedBy: 'u1' });
   });
 
   afterEach(() => {

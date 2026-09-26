@@ -452,8 +452,8 @@ function bulkBusyTracker() {
 // allMail: the destination is Gmail's All Mail, which is not synced: its counts are not kept and
 // the row goes once the server has moved the letter. Returns the rows that moved (a row already in
 // `dest` counts).
-async function queueMove(accountId, rows, dest, { allMail = false } = {}) {
-  const results = await imapManager.moveQueue.enqueue(accountId, rows, dest, { dropRow: allMail });
+async function queueMove(accountId, rows, dest, { allMail = false, movedBy = null } = {}) {
+  const results = await imapManager.moveQueue.enqueue(accountId, rows, dest, { dropRow: allMail, movedBy });
   const movedIds = new Set(results.map(r => r.id));
   const moved = rows.filter(m => movedIds.has(m.id));
   // Counted from the folder and read state the move saw under its lock, not from the route's own
@@ -1496,7 +1496,7 @@ router.post('/messages/bulk-delete', async (req, res) => {
       }
 
       if (toMove.length) {
-        const moved = await queueMove(accountId, toMove, trashPath);
+        const moved = await queueMove(accountId, toMove, trashPath, { movedBy: req.session.userId });
         trashMoved.push(...moved);
         if (moved.length) imapManager.broadcast({ type: 'folder_updated', folder: trashPath, accountId });
       }
@@ -1662,7 +1662,7 @@ router.post('/messages/bulk-move', async (req, res) => {
         console.warn(`bulk-move: folder "${folder}" not found for account ${accountId}, skipping`);
         continue;
       }
-      const moved = await queueMove(accountId, msgs, folder);
+      const moved = await queueMove(accountId, msgs, folder, { movedBy: req.session.userId });
       movedIds.push(...moved.map(m => m.id));
       // Every client refreshes its view: the rows left their folders and are in the destination.
       if (moved.length) imapManager.broadcast({ type: 'folder_updated', folder, accountId });
@@ -1719,7 +1719,7 @@ router.post('/messages/bulk-archive', async (req, res) => {
       // archived there leaves our view: its row is dropped once the server has moved it, and
       // All Mail counts are not kept.
       const allMail = await isAllMailFolder(accountId, archiveFolder);
-      const moved = await queueMove(accountId, msgs, archiveFolder, { allMail });
+      const moved = await queueMove(accountId, msgs, archiveFolder, { allMail, movedBy: req.session.userId });
       archivedIds.push(...moved.map(m => m.id));
       if (moved.length) imapManager.broadcast({ type: 'folder_updated', folder: archiveFolder, accountId });
     }
@@ -1969,7 +1969,7 @@ router.delete('/messages/:id', async (req, res) => {
 
   if (strategy.action === 'move') {
     // DB-first: the row is in Trash at once and the server MOVE is queued (queueMove).
-    await queueMove(message.account_id, [message], trashPath);
+    await queueMove(message.account_id, [message], trashPath, { movedBy: req.session.userId });
     imapManager.broadcast({ type: 'folder_updated', folder: trashPath, accountId: message.account_id });
   } else {
     // strategy.action === 'expunge': message is already in Trash — permanently delete. That stays
@@ -2036,7 +2036,7 @@ async function moveForSpamLabel(messageId, userId, destinationFolder, label) {
   const account = accountResult.rows[0];
 
   // DB-first: the row is in the destination at once and the server MOVE is queued (queueMove).
-  await queueMove(account.id, [message], destinationFolder);
+  await queueMove(account.id, [message], destinationFolder, { movedBy: userId });
   await query(
     `UPDATE messages SET spam_user_override = $1, spam_verdict = $1, spam_analyzed_at = NOW() WHERE id = $2`,
     [label, messageId]

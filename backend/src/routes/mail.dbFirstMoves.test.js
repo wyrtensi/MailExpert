@@ -100,7 +100,7 @@ describe('a move changes the database at once', () => {
     expect(res).toEqual({ status: 200, body: { ok: true, moved: [UNREAD_ID, READ_ID] } });
     expect(imapManager.moveQueue.enqueue).toHaveBeenCalledOnce();
     expect(imapManager.moveQueue.enqueue).toHaveBeenCalledWith(
-      ACCOUNT_ID, [expect.objectContaining({ id: UNREAD_ID, folder: 'INBOX' }), expect.objectContaining({ id: READ_ID })], 'Projects', { dropRow: false },
+      ACCOUNT_ID, [expect.objectContaining({ id: UNREAD_ID, folder: 'INBOX' }), expect.objectContaining({ id: READ_ID })], 'Projects', { dropRow: false, movedBy: 'u1' },
     );
     // Two letters leave INBOX, one of them unread, and land in Projects.
     expect(adjustFolderCounts).toHaveBeenCalledWith(ACCOUNT_ID, 'INBOX', -2, -1);
@@ -131,7 +131,7 @@ describe('a move changes the database at once', () => {
   it('archives to Gmail All Mail: the row goes once moved, All Mail counts are not kept', async () => {
     const res = await call('POST', '/messages/bulk-archive', { ids: [UNREAD_ID] });
     expect(res.body.archived).toEqual([UNREAD_ID]);
-    expect(imapManager.moveQueue.enqueue).toHaveBeenCalledWith(ACCOUNT_ID, [expect.objectContaining({ id: UNREAD_ID })], '[Gmail]/All Mail', { dropRow: true });
+    expect(imapManager.moveQueue.enqueue).toHaveBeenCalledWith(ACCOUNT_ID, [expect.objectContaining({ id: UNREAD_ID })], '[Gmail]/All Mail', { dropRow: true, movedBy: 'u1' });
     expect(adjustFolderCounts).toHaveBeenCalledTimes(1);
     expect(adjustFolderCounts).toHaveBeenCalledWith(ACCOUNT_ID, 'INBOX', -1, -1);
   });

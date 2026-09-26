@@ -17,7 +17,7 @@ vi.mock('../utils/redact.js', () => ({ redactEmail: vi.fn() }));
 vi.mock('./hostValidation.js', () => ({ resolveForConnection: vi.fn(), createPinnedLookup: vi.fn() }));
 vi.mock('./connectionPolicy.js', () => ({ getConnectionPolicy: vi.fn() }));
 
-import { ImapManager, MIN_SYNC_INTERVAL_MS, AUTO_IDLE_DELAY_MS, countMissingInboxCopies, fetchBackfillBatch, providerProfile, makeClientCfg, relocateExemptGuard, insertCopiedSibling, deleteMessageCopyRow, emitSectionsChanged, ensureMailbox, createKeyedSemaphore, isConnectionRefusal, extractImapError, isImapAuthFailure, AUTH_FAILURE_COOLDOWN_MS, AUTH_FAILURE_COOLDOWN_MAX_MS, authCooldownMs, connectCooldownMs, effectiveSyncIntervalMs, folderSyncDue, planModseqSync, connectStaggerFor, walkStructure, planBodyParts, extractBodyFromMsg, bodyFallbackApplies, poolSizeFor, backgroundPoolCap, rerootThreadChildren, parsePersistentCap, resolvePersistentCap, persistentEligible, shouldRetryIPv4, classifyMoveBySearch, PERSISTENT_FLAG_STORE_TIMEOUT_MS, PERSISTENT_FLAG_LATE_STORE_WAIT_MS, PERSISTENT_FLAG_LOCK_WAIT_MS, FLAG_STORE_UID_CHUNK, FLAG_PUSH_MAX_ATTEMPTS, wrapImapError, acquirePooledClient, releasePooledClient, evictPool, ACQUIRE_TIMEOUT_MS, BACKGROUND_ACQUIRE_TIMEOUT_MS, PREFETCH_MAX_CONSECUTIVE_ERRORS, PREFETCH_STOP_PAUSE_MS, newBodyPrefetchCount, NODE_NEW_BODY_PREFETCH_MAX } from './imapManager.js';
+import { ImapManager, MIN_SYNC_INTERVAL_MS, AUTO_IDLE_DELAY_MS, countMissingInboxCopies, fetchBackfillBatch, providerProfile, makeClientCfg, relocateExemptGuard, insertCopiedSibling, deleteMessageCopyRow, emitSectionsChanged, ensureMailbox, createKeyedSemaphore, isConnectionRefusal, extractImapError, isImapAuthFailure, AUTH_FAILURE_COOLDOWN_MS, AUTH_FAILURE_COOLDOWN_MAX_MS, authCooldownMs, connectCooldownMs, effectiveSyncIntervalMs, folderSyncDue, planModseqSync, connectStaggerFor, walkStructure, planBodyParts, extractBodyFromMsg, bodyFallbackApplies, poolSizeFor, backgroundPoolCap, rerootThreadChildren, parsePersistentCap, resolvePersistentCap, persistentEligible, shouldRetryIPv4, classifyMoveBySearch, PERSISTENT_FLAG_STORE_TIMEOUT_MS, PERSISTENT_FLAG_LATE_STORE_WAIT_MS, PERSISTENT_FLAG_LOCK_WAIT_MS, FLAG_STORE_UID_CHUNK, FLAG_PUSH_MAX_ATTEMPTS, wrapImapError, acquirePooledClient, releasePooledClient, evictPool, ACQUIRE_TIMEOUT_MS, BACKGROUND_ACQUIRE_TIMEOUT_MS, PREFETCH_MAX_CONSECUTIVE_ERRORS, PREFETCH_STOP_PAUSE_MS, PREFETCH_MAX_BUSY_WAITS, newBodyPrefetchCount, NODE_NEW_BODY_PREFETCH_MAX } from './imapManager.js';
 import { pluginRegistry } from '../plugins/registry.js';
 import { EventEmitter } from 'node:events';
 import { ImapFlow } from 'imapflow';
@@ -5181,6 +5181,60 @@ describe('body prefetch runs one at a time and pauses after a stop', () => {
     vi.setSystemTime(Date.now() + PREFETCH_STOP_PAUSE_MS + 1);
     await mgr.prefetchFolderBodies(acct.id, ids);
     expect(mgr.fetchMessageBody).toHaveBeenCalledTimes(2 * PREFETCH_MAX_CONSECUTIVE_ERRORS);
+  });
+
+  // The pool's own "busy" (the background share stayed taken for the whole acquire wait; no login
+  // was tried) is not a failure of the server or of the letter.
+  const busy = () => Object.assign(new Error('IMAP pool busy, please retry'), { poolExhausted: true });
+  const ok = { html: null, text: 'ok', attachments: [] };
+
+  it.each([
+    ['the folder view', (mgr) => mgr.prefetchFolderBodies(acct.id, ids)],
+    ['new mail', (mgr) => mgr.prefetchNewMessageBodies(acct, ids.map((id, i) => ({ id, uid: i + 1, folder: 'INBOX' })).reverse())],
+  ])('waits out a busy pool instead of stopping (%s)', async (_lane, run) => {
+    const mgr = ladderManager();
+    mgr.fetchMessageBody = vi.fn();
+    for (let i = 0; i < PREFETCH_MAX_CONSECUTIVE_ERRORS + 1; i++) mgr.fetchMessageBody.mockRejectedValueOnce(busy());
+    mgr.fetchMessageBody.mockResolvedValue(ok);
+    await run(mgr);
+    const uids = mgr.fetchMessageBody.mock.calls.map(c => c[1]);
+    // The first letter is tried again until the pool has room, then the rest follow.
+    expect(uids).toEqual([...Array(PREFETCH_MAX_CONSECUTIVE_ERRORS + 2).fill(uids[0]), ...uids.slice(PREFETCH_MAX_CONSECUTIVE_ERRORS + 2)]);
+    expect(new Set(uids).size).toBe(ids.length);
+    expect(mgr._prefetchPausedUntil.has(acct.id)).toBe(false);
+  });
+
+  it('counts busy answers per letter, so a busy pool now and then does not end the run', async () => {
+    const mgr = ladderManager();
+    mgr.fetchMessageBody = vi.fn();
+    for (let n = 0; n < ids.length; n++) {
+      for (let i = 0; i < PREFETCH_MAX_BUSY_WAITS - 1; i++) mgr.fetchMessageBody.mockRejectedValueOnce(busy());
+      mgr.fetchMessageBody.mockResolvedValueOnce(ok);
+    }
+    await mgr.prefetchFolderBodies(acct.id, ids);
+    expect(mgr.fetchMessageBody).toHaveBeenCalledTimes(ids.length * PREFETCH_MAX_BUSY_WAITS);
+  });
+
+  it('ends the run without the pause when the pool stays busy as long as any pooled operation may run', async () => {
+    const mgr = ladderManager();
+    // Each answer after a macrotask, as the real acquire wait is: an unbounded wait then fails on
+    // the test timeout instead of spinning forever on microtasks.
+    mgr.fetchMessageBody = vi.fn(() => new Promise((_, reject) => setImmediate(() => reject(busy()))));
+    await mgr.prefetchFolderBodies(acct.id, ids);
+    expect(mgr.fetchMessageBody).toHaveBeenCalledTimes(PREFETCH_MAX_BUSY_WAITS);
+    expect(mgr._prefetchPausedUntil.has(acct.id)).toBe(false);
+    // The next folder view tries again.
+    mgr.fetchMessageBody.mockResolvedValue(ok);
+    await mgr.prefetchFolderBodies(acct.id, ids);
+    expect(mgr.fetchMessageBody).toHaveBeenCalledTimes(PREFETCH_MAX_BUSY_WAITS + ids.length);
+  });
+
+  it('still stops on a held-back pool answer (providerRefusing), as before', async () => {
+    const mgr = ladderManager();
+    mgr.fetchMessageBody = vi.fn().mockRejectedValue(Object.assign(new Error('Mail server is not accepting new connections for this account right now'), { providerRefusing: true }));
+    await mgr.prefetchFolderBodies(acct.id, ids);
+    expect(mgr.fetchMessageBody).toHaveBeenCalledTimes(PREFETCH_MAX_CONSECUTIVE_ERRORS);
+    expect(mgr._prefetchPausedUntil.has(acct.id)).toBe(true);
   });
 
   it('does not pause after a run that went through', async () => {

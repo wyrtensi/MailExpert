@@ -274,6 +274,11 @@ export const PREFETCH_MAX_CONSECUTIVE_ERRORS = 3;
 // How long an account's body prefetch stays paused after a run stopped on failures.
 export const PREFETCH_STOP_PAUSE_MS = 60 * 1000;
 
+// Busy pool answers in a row (each after the 10 s background acquire wait) a prefetch run waits
+// out before it ends: 5 minutes, the bound of the longest pooled operation
+// (LONG_POOLED_OPERATION_TIMEOUT_MS), after which a busy pool is not a passing burst.
+export const PREFETCH_MAX_BUSY_WAITS = 30;
+
 // Letters of one sync whose bodies a mailbox on our own mail node (account.mail_node) fetches
 // right after it, newest first. The node is close: a body is one speculative FETCH round trip
 // of a few milliseconds on one background pooled session, so a usual tick (a handful of letters)
@@ -6460,9 +6465,17 @@ export class ImapManager {
   }
 
   // The run itself. Returns 'stopped' when a failure ended it early.
+  //
+  // A busy pool (poolExhausted: the background share stayed taken for the whole acquire wait, and
+  // no login was tried) is not a failure: the run waits for it by trying the same letter again,
+  // and counts no error toward the stop. The acquire wait itself spaces the tries. Only
+  // PREFETCH_MAX_BUSY_WAITS busy answers in a row, as long as the longest pooled operation may
+  // run, end the run, without the pause; the letters left are fetched on open.
   async _prefetchBodyLoop(account, rows, { waitForQuiet }) {
     let consecutiveErrors = 0;
-    for (const msg of rows) {
+    let busyWaits = 0;
+    for (let i = 0; i < rows.length; i++) {
+      const msg = rows[i];
       // Checked before every message, not only at entry: a backoff armed meanwhile (by the status
       // client, or by this run's own previous failure) must stop a run already in progress. Covers
       // the live-sync cooldown, the secondary refusal backoff and a rejected secondary login.
@@ -6499,6 +6512,14 @@ export class ImapManager {
           );
         }
       } catch (err) {
+        if (err?.poolExhausted) {
+          if (++busyWaits >= PREFETCH_MAX_BUSY_WAITS) {
+            console.log(`Body prefetch ending for ${logAccount(account)}: the pool stayed busy`);
+            return;
+          }
+          i--; // the same letter again, once the pool has room
+          continue;
+        }
         const detail = extractImapError(err);
         console.warn(`Body prefetch failed for uid ${msg.uid}:`, detail);
 
@@ -6532,6 +6553,7 @@ export class ImapManager {
         continue;
       }
       consecutiveErrors = 0;
+      busyWaits = 0;
     }
   }
 

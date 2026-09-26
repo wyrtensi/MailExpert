@@ -3,11 +3,8 @@
 // (source, destination) group, the row takes the uid the server names, a destination sync that
 // sees the letter first attaches it instead of inserting it again, and a permanent failure puts
 // the row back where the server has the letter. The mail server is a fake manager.
-import { readFileSync } from 'node:fs';
-import { dirname, join } from 'node:path';
-import { fileURLToPath } from 'node:url';
 import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
-import { PGlite } from '@electric-sql/pglite';
+import { createRealSchemaDb } from './testing/realSchema.js';
 
 const dbState = { db: null };
 vi.mock('./db.js', () => ({
@@ -21,46 +18,19 @@ const { MoveQueue, MOVE_MAX_ATTEMPTS, placeholderUid } = await import('./moveQue
 const { ImapManager } = await import('./imapManager.js');
 const { adjustFolderCounts } = await import('../utils/mailUtils.js');
 
-const migrationsDir = join(dirname(fileURLToPath(import.meta.url)), '..', '..', 'migrations');
 const ACCOUNT = '40000000-0000-4000-8000-000000000001';
+const USER = '42000000-0000-4000-8000-000000000001';
 const A = '41000000-0000-4000-8000-000000000001';
 const B = '41000000-0000-4000-8000-000000000002';
 const C = '41000000-0000-4000-8000-000000000003';
 let db;
 
-async function runMigrationFile(filename) {
-  const statements = readFileSync(join(migrationsDir, filename), 'utf8')
-    .replace(/--[^\n]*/g, '')
-    .split(';')
-    .map((s) => s.trim())
-    .filter(Boolean);
-  for (const statement of statements) await db.query(statement);
-}
-
+// The real schema, every migration applied: the real messages table with its UNIQUE, generated
+// columns and indexes, not a hand-written subset.
 beforeAll(async () => {
-  db = await PGlite.create();
+  db = await createRealSchemaDb();
   dbState.db = db;
-  // The columns the queue touches, as the baseline and later migrations define them.
-  await db.exec(`
-    CREATE TABLE email_accounts (id uuid PRIMARY KEY);
-    CREATE TABLE folders (account_id uuid NOT NULL, path text NOT NULL, PRIMARY KEY (account_id, path));
-    CREATE TABLE messages (
-      id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
-      account_id uuid NOT NULL REFERENCES email_accounts(id) ON DELETE CASCADE,
-      uid bigint NOT NULL,
-      folder text NOT NULL,
-      message_id text,
-      is_read boolean NOT NULL DEFAULT false,
-      is_starred boolean NOT NULL DEFAULT false,
-      read_changed_at timestamptz,
-      star_changed_at timestamptz,
-      synced_at timestamptz DEFAULT now(),
-      provider_message_id text,
-      UNIQUE (account_id, uid, folder)
-    );
-  `);
-  await runMigrationFile('0075_message_moves.sql');
-});
+}, 120000);
 afterAll(async () => { await db.close(); });
 
 // The manager surface the queue uses. Guards are the real ref-counted ones.
@@ -100,10 +70,11 @@ function newQueue() {
 beforeEach(async () => {
   vi.clearAllMocks();
   vi.spyOn(console, 'warn').mockImplementation(() => {});
-  await db.exec('DELETE FROM message_moves; DELETE FROM messages; DELETE FROM folders; DELETE FROM email_accounts;');
-  await db.query('INSERT INTO email_accounts (id) VALUES ($1)', [ACCOUNT]);
+  await db.exec('DELETE FROM message_moves; DELETE FROM messages; DELETE FROM folders; DELETE FROM email_accounts; DELETE FROM users;');
+  await db.query("INSERT INTO users (id, username) VALUES ($1, 'anna')", [USER]);
+  await db.query("INSERT INTO email_accounts (id, name, email_address) VALUES ($1, 'Office', 'office@example.com')", [ACCOUNT]);
   for (const path of ['INBOX', 'Archive', 'Trash', 'Projects', '[Gmail]/All Mail']) {
-    await db.query('INSERT INTO folders (account_id, path) VALUES ($1, $2)', [ACCOUNT, path]);
+    await db.query('INSERT INTO folders (account_id, path, name) VALUES ($1, $2, $2)', [ACCOUNT, path]);
   }
   await db.query(
     `INSERT INTO messages (id, account_id, uid, folder, message_id, is_read) VALUES

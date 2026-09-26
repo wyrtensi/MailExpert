@@ -37,9 +37,9 @@ export function createPluginMailFacade(engine) {
     // Sync-capability primitives — all run on pooled connections, never disturbing the IDLE client.
     folderFingerprint: (accountId, folder) => engine.folderFingerprint(accountId, folder),
     syncFolderViaPool: (account, folder) => engine.syncFolderViaPool(account, folder),
-    syncFolderOnDemand: (account, folder) => engine.syncFolderOnDemand(account, folder),
+    syncFolderOnDemand: (account, folder, opts) => engine.syncFolderOnDemand(account, folder, opts),
 
     // Remove a message's copy from a label folder (GTD transition strips).
-    removeMessageCopy: (accountId, uid, folder) => engine.removeMessageCopy(accountId, uid, folder),
+    removeMessageCopy: (accountId, uid, folder, opts) => engine.removeMessageCopy(accountId, uid, folder, opts),
   });
 }

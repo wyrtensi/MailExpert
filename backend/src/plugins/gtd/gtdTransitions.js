@@ -139,7 +139,9 @@ export async function runGtdTransitions(imapManager, account, threadKeys) {
       for (const copy of threadRows.filter((r) => r.folder === folder)) {
         anyStripped = true;
         try {
-          await imapManager.removeMessageCopy(account.id, copy.uid, copy.folder);
+          // background: this engine runs from the GTD tick, inbox ingest and a sent reply, which
+          // nobody waits on, so the strip cannot take the pooled session kept for user actions.
+          await imapManager.removeMessageCopy(account.id, copy.uid, copy.folder, { background: true });
         } catch (err) {
           // An external automation may strip the same label concurrently, so the copy
           // can already be gone on the server. Treat a failed removal as a successful

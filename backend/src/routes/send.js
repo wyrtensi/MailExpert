@@ -496,7 +496,7 @@ router.post('/send', async (req, res) => {
               .catch(err => console.warn('Sent metadata upsert failed:', err.message));
           }
           setTimeout(() => {
-            imapManager.syncFolderOnDemand(account, sentFolder)
+            imapManager.syncFolderOnDemand(account, sentFolder, { background: true })
               // Once the Sent copy is in the DB, notify label plugins the message synced: GTD
               // re-runs transitions for its thread (a reply to a Todo/Someday thread means the
               // owner acted, so that label should drop). The sent message reaches no other hook
@@ -511,7 +511,7 @@ router.post('/send', async (req, res) => {
           // The append may still have landed (or land shortly) — pull the folder so a
           // late-completing append self-corrects the DB rather than staying invisible.
           setTimeout(() => {
-            imapManager.syncFolderOnDemand(account, sentFolder)
+            imapManager.syncFolderOnDemand(account, sentFolder, { background: true })
               .catch(e => console.error(`Post-append fallback sync failed: ${e.message}`));
           }, 8000);
         }
@@ -523,7 +523,7 @@ router.post('/send', async (req, res) => {
         // catches it, the 15s pass is the safety net. GTD transitions run after each: the 3s
         // attempt may miss (Sent copy not yet visible → empty thread set → no-op) and the 15s
         // attempt then catches it; if 3s already stripped, 15s is an idempotent no-op.
-        const syncAttempt = (label) => imapManager.syncFolderOnDemand(account, sentFolder)
+        const syncAttempt = (label) => imapManager.syncFolderOnDemand(account, sentFolder, { background: true })
           .then(() => {
             console.log(`Post-send ${label} sync done: ${redactEmail(account.email_address)}/${sentFolder}`);
             return pluginRegistry.runHook('onSentMessage', { imapManager: imapManager.pluginFacade, account, messageId: mailOptions.messageId });

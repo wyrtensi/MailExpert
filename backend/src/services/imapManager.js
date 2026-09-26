@@ -6326,7 +6326,10 @@ export class ImapManager {
   // Syncs the most recent messages in a specific folder on demand.
   // Called when the user navigates to a folder that has no local messages yet.
   // Uses a pooled connection — does NOT touch the main sync connection.
-  async syncFolderOnDemand(account, folder) {
+  // background: a follow-up sync nobody waits on (after a send, a move, a GTD copy): it may not
+  // take the pooled session kept for user actions (backgroundPoolCap). A folder the reader opens
+  // keeps the interactive default.
+  async syncFolderOnDemand(account, folder, { background = false } = {}) {
     const key = `${account.id}:${folder}`;
     if (this.onDemandSyncing.has(key)) {
       console.log(`syncFolderOnDemand skipped (already running): ${logAccount(account)}/${folder}`);
@@ -6337,7 +6340,7 @@ export class ImapManager {
     try {
       await withFreshClient(account, async (client) => {
         await this.syncMessages(account, client, folder, 100, false, true);
-      });
+      }, { background });
       console.log(`syncFolderOnDemand done: ${logAccount(account)}/${folder}`);
       // sync_complete fires mailexpert:refresh in the frontend, reloading the message list
       this.broadcast({ type: 'sync_complete', accountId: account.id });
@@ -7360,7 +7363,8 @@ export class ImapManager {
     return newUid;
   }
 
-  async permanentDeleteMessage(account, uid, folder) {
+  // background: see syncFolderOnDemand (a GTD transition strip).
+  async permanentDeleteMessage(account, uid, folder, { background = false } = {}) {
     await withFreshClient(account, async (client) => {
       const lock = await client.getMailboxLock(folder);
       try {
@@ -7369,7 +7373,7 @@ export class ImapManager {
       } finally {
         lock.release();
       }
-    });
+    }, { background });
   }
 
   // Apply a label = COPY the message into the label folder, keeping the source copy.
@@ -7427,12 +7431,14 @@ export class ImapManager {
   // If the IMAP delete throws, the DB row is left in place so the two never silently diverge.
   // Post-remove notification is a plugin concern (generic `afterLabelRemove` hook), so this
   // stays label-feature-agnostic.
-  async removeMessageCopy(accountId, uid, folder) {
+  // background: a GTD transition strip (the GTD tick, inbox ingest, a sent reply), which nobody
+  // waits on; a user removing a label keeps the interactive default.
+  async removeMessageCopy(accountId, uid, folder, { background = false } = {}) {
     const accountResult = await query('SELECT * FROM email_accounts WHERE id = $1', [accountId]);
     const account = accountResult.rows[0];
     if (!account) throw new Error(`removeMessageCopy: account ${accountId} not found`);
 
-    await this.permanentDeleteMessage(account, uid, folder);
+    await this.permanentDeleteMessage(account, uid, folder, { background });
     const result = await deleteMessageCopyRow(accountId, uid, folder);
     // Removing a label copy changes label-feed data — let plugins broadcast their refresh.
     await pluginRegistry.runHook('afterLabelRemove', { mgr: this.pluginFacade, account, folder, uid });
@@ -7512,7 +7518,7 @@ export class ImapManager {
         // periodic sync — the same on-demand resync the routes already do for non-UIDPLUS moves.
         // Fire-and-forget; syncFolderOnDemand de-dups concurrent runs for the same folder.
         if (toFolder !== fromFolder) {
-          this.syncFolderOnDemand(account, toFolder)
+          this.syncFolderOnDemand(account, toFolder, { background: true })
             .catch(err => console.warn(`bulkMoveMessages: post-stale destination resync failed (${err.message})`));
         }
       }

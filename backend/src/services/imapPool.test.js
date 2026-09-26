@@ -446,6 +446,52 @@ describe('a session kept for user actions', () => {
     releaseAll(held);
   });
 
+  it('leaves the kept session to a click while a follow-up folder sync marked background waits', async () => {
+    // After a send, a move or a GTD copy the panel pulls a folder nobody is waiting on.
+    const held = await holdBackground(POOL_SIZE - 1);
+    const mgr = { onDemandSyncing: new Set(), syncMessages: vi.fn(async () => {}), broadcast: vi.fn() };
+    vi.spyOn(console, 'log').mockImplementation(() => {});
+    vi.spyOn(console, 'error').mockImplementation(() => {});
+    const sync = ImapManager.prototype.syncFolderOnDemand.call(mgr, ACCOUNT, 'Sent', { background: true });
+    await vi.advanceTimersByTimeAsync(0);
+    expect(mgr.syncMessages).not.toHaveBeenCalled();
+    const click = await acquirePooledClient(ACCOUNT);
+    expect(ImapFlow).toHaveBeenCalledTimes(POOL_SIZE);
+    // A background session coming back goes to the sync.
+    releasePooledClient(ACCOUNT, held[0]);
+    await sync;
+    expect(mgr.syncMessages).toHaveBeenCalledTimes(1);
+    releasePooledClient(ACCOUNT, click);
+    releaseAll(held);
+  });
+
+  it('still lets a folder the reader opens take the last session', async () => {
+    const held = await holdBackground(POOL_SIZE - 1);
+    const mgr = { onDemandSyncing: new Set(), syncMessages: vi.fn(async () => {}), broadcast: vi.fn() };
+    vi.spyOn(console, 'log').mockImplementation(() => {});
+    await ImapManager.prototype.syncFolderOnDemand.call(mgr, ACCOUNT, 'Archive');
+    expect(mgr.syncMessages).toHaveBeenCalledTimes(1);
+    expect(ImapFlow).toHaveBeenCalledTimes(POOL_SIZE);
+    releaseAll(held);
+  });
+
+  it('leaves the kept session to a click while a GTD strip marked background waits', async () => {
+    const held = await holdBackground(POOL_SIZE - 1);
+    query.mockImplementation(async sql => ({ rows: sql.includes('FROM email_accounts') ? [ACCOUNT] : [] }));
+    const mgr = Object.create(ImapManager.prototype);
+    const strip = settle(mgr.removeMessageCopy(ACCOUNT.id, 7, 'Todo', { background: true }));
+    await vi.advanceTimersByTimeAsync(0);
+    const click = await acquirePooledClient(ACCOUNT);
+    expect(ImapFlow).toHaveBeenCalledTimes(POOL_SIZE);
+    // Nothing came back within the background wait: the strip gives up without a session.
+    await vi.advanceTimersByTimeAsync(BACKGROUND_ACQUIRE_TIMEOUT_MS);
+    const { ok, e } = await strip;
+    expect(ok).toBe(false);
+    expect(e.poolExhausted).toBe(true);
+    releasePooledClient(ACCOUNT, click);
+    releaseAll(held);
+  });
+
   it('keeps one of Gmail\'s three sessions for user actions', async () => {
     const gmail = { ...ACCOUNT, id: 'acct-gmail-reserve', imap_host: 'imap.gmail.com' };
     try {
@@ -475,6 +521,30 @@ describe('a session kept for user actions', () => {
       expect(ImapFlow).toHaveBeenCalledTimes(1);
       releasePooledClient(yahoo, bg);
     } finally { evictPool(yahoo.id); }
+  });
+});
+
+describe('a stale bulk move', () => {
+  it('pulls the destination as background work', async () => {
+    // Dovecot without a UIDPLUS map for a batch holding a stale UID: the move reports all failed
+    // and pulls the destination folder, which nobody waits on.
+    ImapFlow.mockImplementation(function () {
+      const client = new EventEmitter();
+      client.connect = vi.fn(() => Promise.resolve());
+      client.logout = vi.fn(() => Promise.resolve());
+      client.close = vi.fn();
+      client.status = vi.fn(async () => ({ uidNext: 10 }));
+      client.getMailboxLock = vi.fn(async () => ({ release: vi.fn() }));
+      client.messageMove = vi.fn(async () => ({}));
+      sockets.push(client);
+      return client;
+    });
+    const mgr = {
+      _reconcileMoveBySearch: vi.fn(async () => ({ staleCount: 1, succeeded: [], failed: [1, 2] })),
+      syncFolderOnDemand: vi.fn(async () => {}),
+    };
+    await ImapManager.prototype.bulkMoveMessages.call(mgr, ACCOUNT, [1, 2], 'INBOX', 'Archive');
+    expect(mgr.syncFolderOnDemand).toHaveBeenCalledWith(ACCOUNT, 'Archive', { background: true });
   });
 });
 

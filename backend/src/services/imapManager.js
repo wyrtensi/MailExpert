@@ -2190,7 +2190,9 @@ export class ImapManager {
     // after every window, each time with one more rejected login.
     this._nodePasswordRestoring = new Set();
     this._nodePasswordRestored = new Set();
-    this._prefetchRunning = new Set(); // accountIds with a body-prefetch run in progress
+    this._prefetchRunning = new Set(); // accountIds with a folder-view body-prefetch run in progress
+    this._prefetchNewRunning = new Set(); // accountIds with a new-mail body-prefetch run in progress
+    this._prefetchNewPending = new Map(); // accountId -> Map(id -> row) of new letters that run takes next
     this._prefetchPausedUntil = new Map(); // accountId -> ms; body prefetch paused after a run stopped on failures
     // accountId -> the value last persisted to email_accounts.sync_error: a string (error is
     // showing), null (known clear), or absent (unknown — e.g. just after a restart, where the
@@ -6373,9 +6375,36 @@ export class ImapManager {
   // Called in the background (via setImmediate) so it doesn't block the sync path.
   // By the time the user clicks the email (typically 2–10s later), the body is already
   // in the DB and the click returns instantly without a live IMAP round-trip.
+  //
+  // A lane of its own, apart from the folder-view prefetch: that run pauses between letters
+  // while the reader clicks and starts on every folder view, and new mail that arrived meanwhile
+  // used to be dropped rather than wait for it. Letters of a sync that arrive while this lane is
+  // running are queued, and the running lane takes them next (the newest
+  // NODE_NEW_BODY_PREFETCH_MAX are kept); none is dropped. Newest first: the letter most likely
+  // to be clicked is warm first. Both lanes stop the same way (_prefetchBodyLoop) and share the
+  // pause after a stop, and each takes one background pooled session at a time.
   async prefetchNewMessageBodies(account, messages) {
     if (!messages.length) return;
-    await this._prefetchBodyRun(account, messages.map(m => ({ ...m, folder: m.folder || 'INBOX' })), { waitForQuiet: false });
+    let pending = this._prefetchNewPending.get(account.id);
+    if (!pending) this._prefetchNewPending.set(account.id, pending = new Map());
+    for (const m of messages) pending.set(m.id, { id: m.id, uid: m.uid, folder: m.folder || 'INBOX' });
+    while (pending.size > NODE_NEW_BODY_PREFETCH_MAX) pending.delete(pending.keys().next().value);
+    if (this._prefetchNewRunning.has(account.id)) return; // the running lane takes them next
+    this._prefetchNewRunning.add(account.id);
+    try {
+      while (pending.size > 0) {
+        if (Date.now() < (this._prefetchPausedUntil.get(account.id) || 0)) return;
+        const rows = [...pending.values()].reverse();
+        pending.clear();
+        if (await this._prefetchBodyLoop(account, rows, { waitForQuiet: false }) === 'stopped') {
+          this._prefetchPausedUntil.set(account.id, Date.now() + PREFETCH_STOP_PAUSE_MS);
+          return;
+        }
+      }
+    } finally {
+      this._prefetchNewRunning.delete(account.id);
+      this._prefetchNewPending.delete(account.id);
+    }
   }
 
   // Background body prefetch for messages currently visible in a folder.
@@ -6401,9 +6430,10 @@ export class ImapManager {
     await this._prefetchBodyRun(account, uncachedResult.rows, { waitForQuiet: true });
   }
 
-  // One best-effort body-prefetch run over `rows` ({ id, uid, folder }). Shared by the folder-view
-  // prefetch and the new-mail prefetch after a sync, so both stop the same way. waitForQuiet pauses
-  // between messages while the user is clicking, so live fetches stay snappy.
+  // One best-effort folder-view body-prefetch run over `rows` ({ id, uid, folder }). The new-mail
+  // prefetch after a sync runs the same loop in a lane of its own (prefetchNewMessageBodies), so
+  // both stop the same way. waitForQuiet pauses between messages while the user is clicking, so
+  // live fetches stay snappy.
   //
   // Each message draws its own connection (a pooled session, or a fresh login on retry), so against
   // a server that is refusing us or rejecting the password, walking the rest of the list turns one
@@ -6411,7 +6441,7 @@ export class ImapManager {
   // view; on the shared mail node every extra login counts against the per-user+IP limit, and every
   // rejected one counts toward fail2ban, whose ban cuts off every mailbox on the node.
   //
-  // At most one run per account at a time: switching folders quickly used to start parallel runs,
+  // At most one folder-view run per account at a time: switching folders quickly used to start parallel runs,
   // each paying for its own failure. After a run stops on a failure, the account's prefetch also
   // pauses for PREFETCH_STOP_PAUSE_MS, so the next folder views do not start over at once. A
   // refusal or a rejected login arms a longer backoff besides; the pause is what holds back a

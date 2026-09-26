@@ -5293,9 +5293,89 @@ describe('a sync stores the bodies of a node mailbox\'s new letters', () => {
       await mgr.syncMessages(acct, syncClient(12), 'INBOX', 20, false, true);
       await vi.waitFor(() => expect(bodies.size).toBe(12));
       for (let uid = WATERMARK + 1; uid <= WATERMARK + 12; uid++) expect(bodies.get(`row-${uid}`)).toBe(`Body of ${uid}`);
+      // Newest first: the letter most likely to be opened is warm first.
+      expect(bodyFetchOrder).toEqual(Array.from({ length: 12 }, (_, i) => WATERMARK + 12 - i));
       // One pooled session did it all, as background work.
       expect(pooledLogins).toBe(1);
     } finally { evictPool(acct.id); }
+  });
+
+  it('fetches them while a folder-view prefetch of the same mailbox is running', async () => {
+    const acct = mailbox('node-bodies-folder-run');
+    const mgr = ladderManager();
+    // A folder-view run pauses between letters while the reader clicks, so it can last long.
+    mgr._prefetchRunning.add(acct.id);
+    try {
+      await mgr.syncMessages(acct, syncClient(3), 'INBOX', 20, false, true);
+      await vi.waitFor(() => expect(bodies.size).toBe(3));
+    } finally { evictPool(acct.id); }
+  });
+
+  const newRows = (from, to) => Array.from({ length: to - from + 1 }, (_, i) => ({ id: `row-${from + i}`, uid: from + i, folder: 'INBOX' }));
+
+  it('queues the letters of a sync that arrive while the previous ones are being fetched', async () => {
+    const acct = mailbox('node-bodies-queue');
+    const mgr = ladderManager();
+    let release;
+    const gate = new Promise(resolve => { release = resolve; });
+    mgr.fetchMessageBody = vi.fn(async (_a, uid) => {
+      if (uid === 103) await gate;
+      return { html: null, text: `Body of ${uid}`, attachments: [] };
+    });
+    const first = mgr.prefetchNewMessageBodies(acct, newRows(101, 103));
+    await vi.waitFor(() => expect(mgr.fetchMessageBody).toHaveBeenCalledTimes(1));
+    await mgr.prefetchNewMessageBodies(acct, newRows(104, 105)); // the next sync, mid-run
+    release();
+    await first;
+    expect(mgr.fetchMessageBody.mock.calls.map(c => c[1])).toEqual([103, 102, 101, 105, 104]);
+    expect([...bodies.keys()].sort()).toEqual(['row-101', 'row-102', 'row-103', 'row-104', 'row-105']);
+    // The lane is free again for the sync after that.
+    await mgr.prefetchNewMessageBodies(acct, newRows(106, 106));
+    expect(bodies.has('row-106')).toBe(true);
+  });
+
+  it('drops the letters queued behind a run that stopped; they are fetched on open', async () => {
+    vi.useFakeTimers({ toFake: ['Date'] });
+    try {
+      const acct = mailbox('node-bodies-stop-queue');
+      const mgr = ladderManager();
+      let release;
+      const gate = new Promise(resolve => { release = resolve; });
+      mgr.fetchMessageBody = vi.fn(async (_a, uid) => {
+        if (uid === 103) await gate;
+        if (uid <= 103) throw new Error('Pooled IMAP operation timeout (30000ms)');
+        return { html: null, text: `Body of ${uid}`, attachments: [] };
+      });
+      const first = mgr.prefetchNewMessageBodies(acct, newRows(101, 103));
+      await vi.waitFor(() => expect(mgr.fetchMessageBody).toHaveBeenCalledTimes(1));
+      await mgr.prefetchNewMessageBodies(acct, newRows(104, 104));
+      release();
+      await first;
+      expect(mgr.fetchMessageBody).toHaveBeenCalledTimes(PREFETCH_MAX_CONSECUTIVE_ERRORS);
+      vi.setSystemTime(Date.now() + PREFETCH_STOP_PAUSE_MS + 1);
+      await mgr.prefetchNewMessageBodies(acct, newRows(105, 105));
+      expect(mgr.fetchMessageBody.mock.calls.slice(PREFETCH_MAX_CONSECUTIVE_ERRORS).map(c => c[1])).toEqual([105]);
+    } finally { vi.useRealTimers(); }
+  });
+
+  it('keeps only the newest letters waiting, up to the per-sync bound', async () => {
+    const acct = mailbox('node-bodies-queue-bound');
+    const mgr = ladderManager();
+    mgr.fetchMessageBody = vi.fn(async (_a, uid) => ({ html: null, text: `Body of ${uid}`, attachments: [] }));
+    await mgr.prefetchNewMessageBodies(acct, newRows(101, 100 + NODE_NEW_BODY_PREFETCH_MAX + 10));
+    expect(mgr.fetchMessageBody).toHaveBeenCalledTimes(NODE_NEW_BODY_PREFETCH_MAX);
+    expect(bodies.has(`row-${100 + NODE_NEW_BODY_PREFETCH_MAX + 10}`)).toBe(true);
+    expect(bodies.has('row-110')).toBe(false);
+  });
+
+  it('pauses the new-mail lane after a run stopped on failures', async () => {
+    const acct = mailbox('node-bodies-pause');
+    const mgr = ladderManager();
+    mgr.fetchMessageBody = vi.fn().mockRejectedValue(new Error('Pooled IMAP operation timeout (30000ms)'));
+    await mgr.prefetchNewMessageBodies(acct, newRows(101, 105));
+    expect(mgr.fetchMessageBody).toHaveBeenCalledTimes(PREFETCH_MAX_CONSECUTIVE_ERRORS);
+    await mgr.prefetchNewMessageBodies(acct, newRows(106, 106));
+    expect(mgr.fetchMessageBody).toHaveBeenCalledTimes(PREFETCH_MAX_CONSECUTIVE_ERRORS);
   });
 
   it('fetches only the newest letters of a flood, up to the per-sync bound', async () => {

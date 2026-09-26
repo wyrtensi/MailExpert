@@ -176,6 +176,8 @@ describe('reading a letter whose move has not reached the server', () => {
     const res = await call('GET', `/messages/${PENDING_ID}/body`);
     expect(res.status).toBe(200);
     expect(imapManager.fetchMessageBody).toHaveBeenCalledWith(expect.anything(), 21, 'INBOX');
+    // With the account, so a letter whose MOVE may have gone out can be placed on the server.
+    expect(imapManager.moveQueue.serverLocation).toHaveBeenCalledWith(expect.objectContaining({ id: PENDING_ID }), expect.objectContaining({ id: ACCOUNT_ID }));
   });
 
   it('answers move_pending while the MOVE is in flight', async () => {

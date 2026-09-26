@@ -577,7 +577,7 @@ router.get('/messages/:id/body', async (req, res) => {
     imapManager.noteUserActivity(account.id);
 
     // A letter whose move is pending is read at its source until the MOVE (moveQueue.js).
-    const loc = await imapManager.moveQueue.serverLocation(message);
+    const loc = await imapManager.moveQueue.serverLocation(message, account);
     if (!loc) return sendMovePending(res);
     const { html, text, attachments } = await fetchWithTimeout(
       imapManager.fetchMessageBody(account, loc.uid, loc.folder),
@@ -656,7 +656,7 @@ router.get('/messages/:id/headers', async (req, res) => {
     try {
       // A letter whose MOVE is in flight has no location for a moment: the headers are then
       // rebuilt from the row below.
-      const loc = await imapManager.moveQueue.serverLocation(message);
+      const loc = await imapManager.moveQueue.serverLocation(message, account);
       if (loc) headers = await imapManager.fetchHeaders(account, loc.uid, loc.folder);
     } catch (fetchErr) {
       console.warn('Headers IMAP fetch failed:', fetchErr.message);
@@ -728,7 +728,7 @@ router.get('/messages/:id/attachments.zip', async (req, res) => {
     if (!accountResult.rows.length) return res.status(404).json({ error: 'Account not found' });
     const account = accountResult.rows[0];
 
-    const loc = await imapManager.moveQueue.serverLocation(message);
+    const loc = await imapManager.moveQueue.serverLocation(message, account);
     if (!loc) return sendMovePending(res);
     const bufferMap = await imapManager.fetchMultipleAttachments(account, loc.uid, loc.folder, eligible);
     if (bufferMap.size === 0) return res.status(404).json({ error: 'Could not fetch attachments' });
@@ -812,7 +812,7 @@ router.get('/messages/:id/attachments/:part', async (req, res) => {
   try {
     const accountResult = await query('SELECT * FROM email_accounts WHERE id = $1', [message.account_id]);
     if (!accountResult.rows.length) return res.status(404).json({ error: 'Account not found' });
-    const loc = await imapManager.moveQueue.serverLocation(message);
+    const loc = await imapManager.moveQueue.serverLocation(message, accountResult.rows[0]);
     if (!loc) return sendMovePending(res);
     const buffer = await imapManager.fetchAttachment(accountResult.rows[0], loc.uid, loc.folder, partNum);
 

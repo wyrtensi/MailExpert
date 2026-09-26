@@ -852,7 +852,33 @@ describe('serverLocation', () => {
     await queue.enqueue(ACCOUNT, await rowsOf([A]), 'Archive');
     const [pending] = await rowsOf([A]);
     expect(await queue.serverLocation(pending)).toEqual({ folder: 'INBOX', uid: 11 });
-    await db.query("UPDATE message_moves SET state = 'moving'");
+    // Claimed, MOVE not sent yet: still at the source.
+    await db.query("UPDATE message_moves SET state = 'moving', claimed_at = now()");
+    expect(await queue.serverLocation(pending)).toEqual({ folder: 'INBOX', uid: 11 });
+    // Sent: without the account nobody can ask the server.
+    await db.query('UPDATE message_moves SET sent_at = now()');
     expect(await queue.serverLocation(pending)).toBeNull();
+  });
+
+  // M6: a letter whose MOVE may have gone out (sent, or awaiting its uid) is placed by asking the
+  // server, source first, instead of answering move_pending for up to ten minutes.
+  it('asks the server where a letter whose MOVE may have gone out is', async () => {
+    const account = { id: ACCOUNT };
+    await queue.enqueue(ACCOUNT, await rowsOf([A]), 'Archive');
+    const [pending] = await rowsOf([A]);
+    await db.query("UPDATE message_moves SET state = 'awaiting_uid', sent_at = now()");
+
+    mgr.searchUids.mockResolvedValueOnce([11]);
+    expect(await queue.serverLocation(pending, account)).toEqual({ folder: 'INBOX', uid: 11 });
+    expect(mgr.searchUids).toHaveBeenLastCalledWith(account, 'INBOX', [11]);
+
+    mgr.searchUids.mockResolvedValueOnce([]);
+    mgr.findMessageIdInFolders.mockResolvedValueOnce([{ folder: 'Archive', uids: [903] }]);
+    expect(await queue.serverLocation(pending, account)).toEqual({ folder: 'Archive', uid: 903 });
+    expect(mgr.findMessageIdInFolders).toHaveBeenLastCalledWith(account, ['Archive'], '<a@example.com>');
+
+    mgr.searchUids.mockResolvedValueOnce([]);
+    mgr.findMessageIdInFolders.mockResolvedValueOnce([]);
+    expect(await queue.serverLocation(pending, account)).toBeNull();
   });
 });

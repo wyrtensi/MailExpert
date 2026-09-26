@@ -383,18 +383,32 @@ export class MoveQueue {
   }
 
   // Where the letter of `row` is on the server right now, for a route that reads it (body,
-  // headers, attachments): its own folder and uid, or the source of its queued move. null while
-  // the MOVE is in flight: the letter is between folders for a moment.
-  async serverLocation(row) {
+  // headers, attachments): its own folder and uid, or the source of its move while the MOVE has
+  // not gone out (queued, or claimed but not sent). Once the MOVE may have gone out (sent, or
+  // awaiting its uid) and `account` is given, the server is asked, as the worker would: the
+  // source first, then the destination by Message-ID. The route is interactive, so these lookups
+  // use the pool as a user action does. null when the letter cannot be placed (no account, a
+  // move that follows one still in flight, or found nowhere): the route answers move_pending.
+  async serverLocation(row, account = null) {
     if (!isPendingUid(row.uid)) return { folder: row.folder, uid: Number(row.uid) };
     const { rows: [op] } = await query(
-      'SELECT state, src_folder, src_uid FROM message_moves WHERE id = $1 AND message_row_id = $2',
+      'SELECT * FROM message_moves WHERE id = $1 AND message_row_id = $2',
       [-Number(row.uid), row.id]
     );
-    if (op && op.state === 'queued' && op.src_uid != null) return { folder: op.src_folder, uid: Number(op.src_uid) };
-    const { rows: [fresh] } = await query('SELECT uid, folder FROM messages WHERE id = $1', [row.id]);
-    if (fresh && !isPendingUid(fresh.uid)) return { folder: fresh.folder, uid: Number(fresh.uid) };
-    return null;
+    if (!op) {
+      // Settled in the meantime: the row has its server uid again.
+      const { rows: [fresh] } = await query('SELECT uid, folder FROM messages WHERE id = $1', [row.id]);
+      return fresh && !isPendingUid(fresh.uid) ? { folder: fresh.folder, uid: Number(fresh.uid) } : null;
+    }
+    if (op.src_uid == null) return null;
+    const source = { folder: op.src_folder, uid: Number(op.src_uid) };
+    if (op.state === 'queued' || (op.state === 'moving' && !op.sent_at)) return source;
+    if (!account) return null;
+    const present = await this.mgr.searchUids(account, op.src_folder, [Number(op.src_uid)]);
+    if (present.length) return source;
+    if (!op.message_id_header) return null;
+    const [found] = await this.mgr.findMessageIdInFolders(account, [op.dest_folder], op.message_id_header);
+    return found?.uids?.length ? { folder: op.dest_folder, uid: Math.max(...found.uids) } : null;
   }
 
   // ── Worker ───────────────────────────────────────────────────────────────────────────────

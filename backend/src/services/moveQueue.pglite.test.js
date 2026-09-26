@@ -173,6 +173,45 @@ describe('a move cancelled by moving the letter back', () => {
   });
 });
 
+// M1, M2: a folder being emptied, renamed or deleted is held.
+describe('a held folder', () => {
+  it('while Trash is emptied: letters may be moved in, their MOVE waits, nothing is moved out', async () => {
+    serverMoves();
+    const release = queue.holdFolder(ACCOUNT, 'Trash', { kind: 'empty' });
+    expect(await queue.enqueue(ACCOUNT, await rowsOf([A]), 'Trash')).toEqual([A]);
+    await queue.runAccount(ACCOUNT);
+    expect(mgr.bulkMoveMessages).not.toHaveBeenCalled();
+    expect(await moves()).toMatchObject([{ state: 'queued', attempts: 0 }]);
+
+    // A letter in Trash is not moved out while it is emptied.
+    await db.query("UPDATE messages SET folder = 'Trash', uid = 44 WHERE id = $1", [B]);
+    expect(await queue.enqueue(ACCOUNT, await rowsOf([B]), 'INBOX')).toEqual([]);
+    expect((await row(B)).folder).toBe('Trash');
+
+    release();
+    expect(queue.kick).toHaveBeenCalledWith(ACCOUNT);
+    await queue.runAccount(ACCOUNT);
+    expect(await row(A)).toMatchObject({ folder: 'Trash', uid: 900 });
+  });
+
+  it('while a folder is renamed or deleted, nothing is moved into it', async () => {
+    const release = queue.holdFolder(ACCOUNT, 'Projects', { kind: 'rename', delimiter: '/' });
+    expect(await queue.enqueue(ACCOUNT, await rowsOf([A]), 'Projects/2026')).toEqual([]);
+    expect(await queue.enqueue(ACCOUNT, await rowsOf([A]), 'Projects')).toEqual([]);
+    expect(await queue.enqueue(ACCOUNT, await rowsOf([A]), 'Archive')).toEqual([A]);
+    release();
+  });
+
+  it('leaves awaiting moves of a held folder to be looked up after it', async () => {
+    await queue.enqueue(ACCOUNT, await rowsOf([A]), 'Archive');
+    await db.query("UPDATE message_moves SET state = 'awaiting_uid'");
+    const release = queue.holdFolder(ACCOUNT, 'Archive', { kind: 'rename', delimiter: '/' });
+    await queue.runAccount(ACCOUNT);
+    expect(mgr.searchUids).not.toHaveBeenCalled();
+    release();
+  });
+});
+
 describe('the worker', () => {
   it('sends one MOVE per (source, destination) group and the rows take the uids the server names', async () => {
     serverMoves();

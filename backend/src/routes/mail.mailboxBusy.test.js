@@ -30,6 +30,8 @@ vi.mock('../index.js', () => ({
       // Every row moves in the database; the MOVE is queued for the worker.
       enqueue: vi.fn(async (_accountId, rows) => rows.map(r => r.id)),
       serverLocation: async (m) => ({ folder: m.folder, uid: Number(m.uid) }),
+      holdFolder: vi.fn(() => () => {}),
+      reguardAccount: vi.fn(async () => {}),
     },
   },
 }));

@@ -1086,17 +1086,42 @@ router.post('/folders/delete', async (req, res) => {
   const check = await query('SELECT * FROM email_accounts WHERE id = $1', [accountId]);
   if (!check.rows.length) return res.status(404).json({ error: 'Account not found' });
 
+  // A queued move into or out of the folder (or its subfolders) would lose its letter or its
+  // destination: the delete waits for them. The hold keeps new ones from starting meanwhile.
+  const delim = (await query('SELECT delimiter FROM folders WHERE account_id = $1 AND path = $2', [accountId, path])).rows[0]?.delimiter || '/';
+  const release = imapManager.moveQueue.holdFolder(accountId, path, { kind: 'delete', delimiter: delim });
   try {
-    await imapManager.deleteFolder(check.rows[0], path);
-  } catch (err) {
-    console.error(`IMAP deleteFolder failed for ${path}:`, err.message);
-    if (isMailboxBusyError(err)) return sendMailboxBusy(res, err);
-    return res.status(500).json({ error: 'Failed to delete folder on server' });
+    if (await movesTouchFolder(accountId, path, delim)) return sendMovePending(res);
+    try {
+      await imapManager.deleteFolder(check.rows[0], path);
+    } catch (err) {
+      console.error(`IMAP deleteFolder failed for ${path}:`, err.message);
+      if (isMailboxBusyError(err)) return sendMailboxBusy(res, err);
+      return res.status(500).json({ error: 'Failed to delete folder on server' });
+    }
+    await query('DELETE FROM folders WHERE account_id = $1 AND path = $2', [accountId, path]);
+    await query('DELETE FROM messages WHERE account_id = $1 AND folder = $2', [accountId, path]);
+    res.json({ ok: true });
+  } finally {
+    release();
   }
-  await query('DELETE FROM folders WHERE account_id = $1 AND path = $2', [accountId, path]);
-  await query('DELETE FROM messages WHERE account_id = $1 AND folder = $2', [accountId, path]);
-  res.json({ ok: true });
 });
+
+// Whether a DB-first move (services/moveQueue.js) goes into or out of `path` or its subtree.
+// states: only moves in these states (default: any).
+async function movesTouchFolder(accountId, path, delim, states = null) {
+  const prefix = delim ? path + delim : null;
+  const { rows } = await query(
+    `SELECT 1 FROM message_moves
+      WHERE account_id = $1
+        AND ($4::text[] IS NULL OR state = ANY($4::text[]))
+        AND (src_folder = $2 OR dest_folder = $2
+             OR ($3::text IS NOT NULL AND (starts_with(src_folder, $3) OR starts_with(dest_folder, $3))))
+      LIMIT 1`,
+    [accountId, path, prefix, states]
+  );
+  return rows.length > 0;
+}
 
 // Rename folder
 router.post('/folders/rename', async (req, res) => {
@@ -1114,7 +1139,12 @@ router.post('/folders/rename', async (req, res) => {
   parts[parts.length - 1] = newName.trim();
   const newPath = parts.join(delim);
 
+  // A move whose MOVE is on its way names the old path on the server: the rename waits for it.
+  // Queued moves follow the rename (their paths are rewritten below). The hold keeps the worker
+  // from starting one of them, and new moves from coming in, meanwhile.
+  const release = imapManager.moveQueue.holdFolder(accountId, oldPath, { kind: 'rename', delimiter: delim });
   try {
+    if (await movesTouchFolder(accountId, oldPath, delim, ['moving', 'awaiting_uid'])) return sendMovePending(res);
     await imapManager.renameFolder(check.rows[0], oldPath, newPath);
     // IMAP RENAME moves the entire subtree server-side — mirror that in the DB.
     // Updating only the exact path left every child folder (and its messages)
@@ -1158,11 +1188,26 @@ router.post('/folders/rename', async (req, res) => {
       WHERE account_id = $1
         AND (folder = $2 OR substr(folder, 1, length($3)) = $3)`,
       [accountId, oldPath, childPrefix, newPath]);
+    // Queued moves into or out of the renamed tree follow it; their guards are keyed by path.
+    await query(`
+      UPDATE message_moves SET
+        src_folder = CASE WHEN src_folder = $2 OR substr(src_folder, 1, length($3)) = $3
+                          THEN $4 || substr(src_folder, length($2) + 1) ELSE src_folder END,
+        dest_folder = CASE WHEN dest_folder = $2 OR substr(dest_folder, 1, length($3)) = $3
+                           THEN $4 || substr(dest_folder, length($2) + 1) ELSE dest_folder END,
+        updated_at = now()
+      WHERE account_id = $1
+        AND (src_folder = $2 OR substr(src_folder, 1, length($3)) = $3
+             OR dest_folder = $2 OR substr(dest_folder, 1, length($3)) = $3)`,
+      [accountId, oldPath, childPrefix, newPath]);
+    await imapManager.moveQueue.reguardAccount(accountId);
     res.json({ ok: true, newPath });
   } catch (err) {
     console.error('Rename folder error:', err);
     if (isMailboxBusyError(err)) return sendMailboxBusy(res, err);
     res.status(500).json({ error: 'Failed to rename folder' });
+  } finally {
+    release();
   }
 });
 
@@ -1182,18 +1227,27 @@ router.post('/folders/empty', async (req, res) => {
   if (!check.rows.length) return res.status(404).json({ error: 'Account not found' });
   const account = check.rows[0];
 
-  // A queued move into this folder would land its letter after the empty (and the row deleted
-  // below would be its placeholder); one out of it would find its letter gone. Emptying waits for
-  // them (services/moveQueue.js).
-  const pendingMoves = await query(
-    'SELECT 1 FROM message_moves WHERE account_id = $1 AND (dest_folder = $2 OR src_folder = $2) LIMIT 1',
-    [accountId, path]
-  );
-  if (pendingMoves.rows.length) return sendMovePending(res);
-
   const inflightKey = `${accountId}:${path}`;
   if (emptyInFlight.has(inflightKey)) return res.status(409).json({ error: 'This folder is already being emptied' });
-  emptyInFlight.add(inflightKey);
+
+  // DB-first moves (services/moveQueue.js). For the whole empty the folder is held: no MOVE into
+  // or out of it runs and nothing is moved out of it; a letter moved in meanwhile keeps its
+  // placeholder row, which the empty leaves alone, and its MOVE runs afterwards. A move out that
+  // is already queued would find its letter expunged: the empty waits for it. The hold comes
+  // first, so the worker cannot start such a move after the check.
+  const release = imapManager.moveQueue.holdFolder(accountId, path, { kind: 'empty' });
+  let started = false;
+  try {
+    const movesOut = await query(
+      'SELECT 1 FROM message_moves WHERE account_id = $1 AND src_folder = $2 LIMIT 1',
+      [accountId, path]
+    );
+    if (movesOut.rows.length) return sendMovePending(res);
+    emptyInFlight.add(inflightKey);
+    started = true;
+  } finally {
+    if (!started) release();
+  }
 
   res.status(202).json({ ok: true, started: true });
 
@@ -1201,8 +1255,9 @@ router.post('/folders/empty', async (req, res) => {
     try {
       await imapManager.emptyFolder(account, path);
       // Every row removed here is a message the user deleted for good; journal each one.
+      // uid > 0: a placeholder is a letter moved in during the empty; its MOVE runs afterwards.
       const removed = await query(
-        'DELETE FROM messages WHERE account_id = $1 AND folder = $2 RETURNING message_id, from_email',
+        'DELETE FROM messages WHERE account_id = $1 AND folder = $2 AND uid > 0 RETURNING message_id, from_email',
         [accountId, path],
       );
       recordAudit(deletedMessageEntries(
@@ -1222,6 +1277,7 @@ router.post('/folders/empty', async (req, res) => {
       imapManager.broadcast({ type: 'folder_emptied', accountId, folder: path, ok: false, ...(isMailboxBusyError(err) ? { code: mailboxBusyBody(err).code } : {}) });
     } finally {
       emptyInFlight.delete(inflightKey);
+      release();
     }
   })();
 });

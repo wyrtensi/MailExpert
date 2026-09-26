@@ -70,6 +70,7 @@ export class MoveQueue {
     this._arrivals = new Map(); // `${accountId}\n${folder}` -> Map<message id header, Set<moveId>>
     this._running = new Set();  // accountId with a worker run in progress
     this._again = new Set();    // accountId kicked while its run was in progress
+    this._holds = new Map();    // accountId -> Set<{ path, prefix, kind }>: folders being emptied, renamed or deleted
     this._timer = null;
   }
 
@@ -154,6 +155,52 @@ export class MoveQueue {
     return true;
   }
 
+  // ── Folder holds ─────────────────────────────────────────────────────────────────────────
+
+  // A folder being emptied, renamed or deleted on the server. While the hold lasts, the worker
+  // sends no MOVE into or out of it (the moves wait, without an attempt), and no letter is moved
+  // out of it. kind 'empty' still lets letters be moved in: their rows keep their placeholder,
+  // which the empty leaves alone, and their MOVE runs once the empty is done. Any other kind
+  // (a rename or delete, with `delimiter` for the subtree) refuses moves in as well. Returns the
+  // release function.
+  holdFolder(accountId, path, { kind = 'change', delimiter = null } = {}) {
+    const hold = { path, prefix: delimiter ? path + delimiter : null, kind };
+    if (!this._holds.has(accountId)) this._holds.set(accountId, new Set());
+    this._holds.get(accountId).add(hold);
+    let released = false;
+    return () => {
+      if (released) return;
+      released = true;
+      const holds = this._holds.get(accountId);
+      holds?.delete(hold);
+      if (holds && !holds.size) this._holds.delete(accountId);
+      this.kick(accountId);
+    };
+  }
+
+  _heldBy(accountId, folder) {
+    for (const hold of this._holds.get(accountId) || []) {
+      if (folder === hold.path || (hold.prefix && folder.startsWith(hold.prefix))) return hold;
+    }
+    return null;
+  }
+
+  _opHeld(op) {
+    return !!(this._heldBy(op.account_id, op.src_folder) || this._heldBy(op.account_id, op.dest_folder));
+  }
+
+  // After a folder rename rewrote the paths of the account's moves: guards and expected arrivals
+  // are keyed by path, so they are rebuilt from the table.
+  async reguardAccount(accountId) {
+    for (const [id, entry] of [...this._guards]) if (entry.accountId === accountId) this._unguard(id);
+    for (const key of [...this._arrivals.keys()]) if (key.startsWith(`${accountId}\n`)) this._arrivals.delete(key);
+    const { rows } = await query('SELECT * FROM message_moves WHERE account_id = $1 ORDER BY id', [accountId]);
+    for (const op of rows) {
+      this._guard(op);
+      if (op.state !== 'queued') this._expect(op);
+    }
+  }
+
   // ── Routes ───────────────────────────────────────────────────────────────────────────────
 
   // Move `rows` (message rows of one account, as the route read them) to `dest` in the database
@@ -162,6 +209,10 @@ export class MoveQueue {
   // `dest` as far as the panel is concerned (a row already there counts).
   async enqueue(accountId, rows, dest, { dropRow = false } = {}) {
     const moved = new Set(rows.filter(r => r.folder === dest).map(r => r.id));
+    // Nothing moves out of a held folder, nor into one being renamed or deleted (holdFolder).
+    const destHold = this._heldBy(accountId, dest);
+    if (destHold && destHold.kind !== 'empty') return [...moved];
+    rows = rows.filter(r => !this._heldBy(accountId, r.folder));
     const fresh = rows.filter(r => r.folder !== dest && !isPendingUid(r.uid));
     let retry = rows.filter(r => r.folder !== dest && isPendingUid(r.uid)).map(r => r.id);
     const created = [];
@@ -446,7 +497,7 @@ export class MoveQueue {
         console.error(`Move queue: looking up moved letters failed: ${err.message}`);
       }
       if (busy) return;
-      const { rows: claimed } = await query(
+      let { rows: claimed } = await query(
         `UPDATE message_moves SET state = 'moving', claimed_at = now(), sent_at = NULL, updated_at = now()
           WHERE id IN (
             SELECT id FROM message_moves
@@ -457,6 +508,10 @@ export class MoveQueue {
          RETURNING *`,
         [accountId, MOVE_CLAIM_LIMIT]
       );
+      // Moves into or out of a folder being emptied, renamed or deleted wait for it.
+      const held = claimed.filter(op => this._opHeld(op));
+      if (held.length) await this._release(held);
+      claimed = claimed.filter(op => !this._opHeld(op));
       if (!claimed.length) return;
       claimed.sort((a, b) => Number(a.id) - Number(b.id));
       for (const op of claimed) this._expect(op);
@@ -645,6 +700,7 @@ export class MoveQueue {
     const opts = this._poolOpts(account.id);
     try {
       for (const op of rows) {
+        if (this._opHeld(op)) continue; // looked up once the folder change is done
         this._expect(op);
         try {
           const present = await mgr.searchUids(account, op.src_folder, [Number(op.src_uid)], opts);

@@ -137,11 +137,49 @@ describe('a move changes the database at once', () => {
   });
 
   it('marks as spam in the database and records the verdict', async () => {
+    imapManager.moveQueue.serverLocation.mockResolvedValueOnce({ folder: 'INBOX', uid: 11 });
     const res = await call('POST', `/messages/${UNREAD_ID}/spam`);
     expect(res.body).toEqual({ ok: true, folder: 'Junk', newUid: null });
     expect(query.mock.calls.some(([sql, params]) => sql.includes('SET spam_user_override') && params[0] === 'spam')).toBe(true);
     const log = query.mock.calls.find(([sql]) => sql.includes('INSERT INTO spam_training_log'));
     expect(log[1]).toEqual(['u1', ACCOUNT_ID, '<11@example.com>', 11, 'INBOX', 'spam']);
+  });
+
+  // M11: a letter whose earlier move is pending holds a placeholder uid; the training log records
+  // where the server has it, or nothing, never the placeholder or the folder it is only going to.
+  it('records the server location of a letter whose move is pending, or none', async () => {
+    imapManager.moveQueue.serverLocation.mockResolvedValueOnce({ folder: 'INBOX', uid: 21 });
+    await call('POST', `/messages/${PENDING_ID}/spam`);
+    let log = query.mock.calls.filter(([sql]) => sql.includes('INSERT INTO spam_training_log')).at(-1);
+    expect(log[1]).toEqual(['u1', ACCOUNT_ID, '<-9@example.com>', 21, 'INBOX', 'spam']);
+
+    imapManager.moveQueue.serverLocation.mockResolvedValueOnce(null);
+    await call('POST', `/messages/${PENDING_ID}/spam`);
+    log = query.mock.calls.filter(([sql]) => sql.includes('INSERT INTO spam_training_log')).at(-1);
+    expect(log[1]).toEqual(['u1', ACCOUNT_ID, '<-9@example.com>', null, null, 'spam']);
+  });
+
+  // M12: a letter the move did not take (gone meanwhile, or its folder held) writes no verdict,
+  // no training row and no journal entry.
+  it('answers 404 for a letter gone meanwhile and 409 for one that cannot move now', async () => {
+    imapManager.moveQueue.enqueue.mockResolvedValueOnce([]);
+    query.mockImplementationOnce(async () => ({ rows: [rows[UNREAD_ID]] })); // the spam lookup
+    const base = query.getMockImplementation();
+    query.mockImplementation(async (sql, params) => (sql.startsWith('SELECT 1 FROM messages WHERE id = $1') ? { rows: [] } : base(sql, params)));
+    try {
+      const gone = await call('POST', `/messages/${UNREAD_ID}/spam`);
+      expect(gone.status).toBe(404);
+    } finally {
+      query.mockImplementation(base);
+    }
+    imapManager.moveQueue.enqueue.mockResolvedValueOnce([]);
+    const known = query.getMockImplementation();
+    query.mockImplementation(async (sql, params) => (sql.startsWith('SELECT 1 FROM messages WHERE id = $1') ? { rows: [{ '?column?': 1 }] } : known(sql, params)));
+    const held = await call('DELETE', `/messages/${UNREAD_ID}`);
+    expect(held.status).toBe(409);
+    expect(held.body.code).toBe('move_pending');
+    expect(query.mock.calls.some(([sql]) => sql.includes('INSERT INTO spam_training_log'))).toBe(false);
+    expect(query.mock.calls.some(([sql]) => sql.includes('INSERT INTO mailbox_audit_log'))).toBe(false);
   });
 });
 

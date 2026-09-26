@@ -9,7 +9,7 @@ import { threadingDiagnostics } from '../services/threadingDiagnostics.js';
 import { requireAuth } from '../middleware/auth.js';
 import { imapManager } from '../index.js';
 import { isConnectionRefusal, isMailboxBusyError } from '../services/imapManager.js';
-import { MAILBOX_BUSY_CODE, mailboxBusyBody, sendMailboxBusy, sendMovePending, MOVE_PENDING_CODE } from '../utils/mailboxBusy.js';
+import { MAILBOX_BUSY_CODE, mailboxBusyBody, sendMailboxBusy, sendMovePending, movePendingBody, MOVE_PENDING_CODE } from '../utils/mailboxBusy.js';
 import { isPendingUid } from '../services/moveQueue.js';
 import { sanitizeEmail, stripEmailHead, hasRemoteImages, blockRemoteImages, rewriteEbayImageserUrls, rewriteAnchorHrefs } from '../services/emailSanitizer.js';
 import { snippetFromBody, decodeMimeWords, parseRawHeaders, buildHeadersFromMessage } from '../services/messageParser.js';
@@ -1969,7 +1969,11 @@ router.delete('/messages/:id', async (req, res) => {
 
   if (strategy.action === 'move') {
     // DB-first: the row is in Trash at once and the server MOVE is queued (queueMove).
-    await queueMove(message.account_id, [message], trashPath, { movedBy: req.session.userId });
+    const moved = await queueMove(message.account_id, [message], trashPath, { movedBy: req.session.userId });
+    if (!moved.length) {
+      const answer = await notMovedAnswer(id);
+      return res.status(answer.status).json({ error: answer.error, ...(answer.code ? { code: answer.code } : {}) });
+    }
     imapManager.broadcast({ type: 'folder_updated', folder: trashPath, accountId: message.account_id });
   } else {
     // strategy.action === 'expunge': message is already in Trash — permanently delete. That stays
@@ -2003,6 +2007,24 @@ router.delete('/messages/:id', async (req, res) => {
 //
 // No automatic classification runs here — that ships in v0.2 (ML) and v0.3 (SA).
 
+// Where the training log records a letter: where the server has it (its folder and uid, or the
+// source of its queued move). A letter whose MOVE is on its way has no known place: the uid and
+// folder are left empty rather than recording a placeholder uid (moveQueue.js) or the folder it
+// is only on its way to; message_id_header stays the key.
+async function trainingLocation(message) {
+  const loc = await imapManager.moveQueue.serverLocation(message);
+  return loc ? { uid: loc.uid, folder: loc.folder } : { uid: null, folder: null };
+}
+
+// A single-letter move that moved nothing: the row is gone (404), or it could not move now (its
+// folder is being emptied, renamed or deleted: 409 move_pending).
+async function notMovedAnswer(messageId) {
+  const { rows } = await query('SELECT 1 FROM messages WHERE id = $1', [messageId]);
+  return rows.length
+    ? { ok: false, status: 409, ...movePendingBody() }
+    : { ok: false, status: 404, error: 'Message not found' };
+}
+
 // Helper: move a single message to a destination folder, update DB, log to
 // training_log, and broadcast folder_updated. Shared between /spam and /ham.
 async function moveForSpamLabel(messageId, userId, destinationFolder, label) {
@@ -2019,11 +2041,12 @@ async function moveForSpamLabel(messageId, userId, destinationFolder, label) {
   if (message.folder === destinationFolder) {
     // Still record the training label so the user's intent is captured
     // (e.g. re-confirming a verdict), but skip the IMAP move.
+    const at = await trainingLocation(message);
     await query(
       `INSERT INTO spam_training_log
          (trained_by, account_id, message_id_header, message_uid, folder, label)
        VALUES ($1, $2, $3, $4, $5, $6)`,
-      [userId, message.account_id, message.message_id, message.uid, message.folder, label]
+      [userId, message.account_id, message.message_id, at.uid, at.folder, label]
     );
     await query(
       `UPDATE messages SET spam_user_override = $1, spam_verdict = $1, spam_analyzed_at = NOW() WHERE id = $2`,
@@ -2035,21 +2058,24 @@ async function moveForSpamLabel(messageId, userId, destinationFolder, label) {
   const accountResult = await query('SELECT * FROM email_accounts WHERE id = $1', [message.account_id]);
   const account = accountResult.rows[0];
 
+  // Where the server has the letter, before the move changes the row.
+  const at = await trainingLocation(message);
   // DB-first: the row is in the destination at once and the server MOVE is queued (queueMove).
-  await queueMove(account.id, [message], destinationFolder, { movedBy: userId });
+  const moved = await queueMove(account.id, [message], destinationFolder, { movedBy: userId });
+  if (!moved.length) return notMovedAnswer(messageId);
   await query(
     `UPDATE messages SET spam_user_override = $1, spam_verdict = $1, spam_analyzed_at = NOW() WHERE id = $2`,
     [label, messageId]
   );
 
   // Training log: capture the decision for future model training. The destination uid is not
-  // known until the queued MOVE runs, so the letter is recorded where the user acted on it (its
-  // folder and uid before the move); message_id_header is the stable key.
+  // known until the queued MOVE runs, so the letter is recorded where the server had it when the
+  // user acted (trainingLocation); message_id_header is the stable key.
   await query(
     `INSERT INTO spam_training_log
        (trained_by, account_id, message_id_header, message_uid, folder, label, source)
      VALUES ($1, $2, $3, $4, $5, $6, 'manual')`,
-    [userId, account.id, message.message_id, message.uid, message.folder, label]
+    [userId, account.id, message.message_id, at.uid, at.folder, label]
   );
 
   // If folder_mappings.spam is not yet configured, learn from the discovered folder.
@@ -2090,7 +2116,7 @@ router.post('/messages/:id/spam', async (req, res) => {
   if (!spamFolder) return res.status(422).json({ error: 'No spam folder configured for this account' });
 
   const result = await moveForSpamLabel(id, req.session.userId, spamFolder, 'spam');
-  if (!result.ok) return res.status(result.status).json({ error: result.error, ...(result.code ? { code: result.code, busy: true } : {}) });
+  if (!result.ok) return res.status(result.status).json({ error: result.error, ...(result.code ? { code: result.code } : {}) });
   res.json(result.body);
 });
 
@@ -2245,7 +2271,7 @@ router.post('/messages/:id/ham', async (req, res) => {
   // Same pattern as folder_mappings.sent / .drafts in send.js and draft.js.
   const inboxFolder = lookup.rows[0].folder_mappings?.inbox || 'INBOX';
   const result = await moveForSpamLabel(id, req.session.userId, inboxFolder, 'ham');
-  if (!result.ok) return res.status(result.status).json({ error: result.error, ...(result.code ? { code: result.code, busy: true } : {}) });
+  if (!result.ok) return res.status(result.status).json({ error: result.error, ...(result.code ? { code: result.code } : {}) });
   res.json(result.body);
 });
 

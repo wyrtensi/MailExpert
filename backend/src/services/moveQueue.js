@@ -205,22 +205,27 @@ export class MoveQueue {
 
   // Move `rows` (message rows of one account, as the route read them) to `dest` in the database
   // and queue the server MOVE. dropRow: the destination is not synced (Gmail All Mail), so the
-  // row is deleted once the server has moved the letter. Returns the ids of the rows now in
-  // `dest` as far as the panel is concerned (a row already there counts).
+  // row is deleted once the server has moved the letter. Returns one { id, from, isRead } per row
+  // now in `dest` as far as the panel is concerned: `from` and `isRead` are the row's folder and
+  // read state as the statement that moved it saw them under its lock, for the folder counts
+  // (from === dest: it was there already, nothing to count). A route's own read of the row may be
+  // stale: another request can have moved it in between.
   async enqueue(accountId, rows, dest, { dropRow = false } = {}) {
-    const moved = new Set(rows.filter(r => r.folder === dest).map(r => r.id));
+    // The route's read of a row may be stale, so even a row it saw in `dest` goes through the
+    // locked statements below; they tell a row that is really there already from one that is not.
+    const moved = new Map();
     // Nothing moves out of a held folder, nor into one being renamed or deleted (holdFolder).
     const destHold = this._heldBy(accountId, dest);
-    if (destHold && destHold.kind !== 'empty') return [...moved];
+    if (destHold && destHold.kind !== 'empty') return [];
     rows = rows.filter(r => !this._heldBy(accountId, r.folder));
-    const fresh = rows.filter(r => r.folder !== dest && !isPendingUid(r.uid));
-    let retry = rows.filter(r => r.folder !== dest && isPendingUid(r.uid)).map(r => r.id);
+    const fresh = rows.filter(r => !isPendingUid(r.uid));
+    let retry = rows.filter(r => isPendingUid(r.uid)).map(r => r.id);
     const created = [];
 
     if (fresh.length) {
       const { rows: ops } = await query(
         `WITH src AS (
-           SELECT id, account_id, folder, uid, message_id FROM messages
+           SELECT id, account_id, folder, uid, message_id, is_read FROM messages
             WHERE id = ANY($1::uuid[]) AND account_id = $2 AND uid > 0 AND folder <> $3
             FOR UPDATE
          ), ins AS (
@@ -229,33 +234,38 @@ export class MoveQueue {
            RETURNING *
          )
          UPDATE messages m SET folder = $3, uid = -ins.id
-           FROM ins WHERE m.id = ins.message_row_id
-         RETURNING ins.*`,
+           FROM ins JOIN src ON src.id = ins.message_row_id
+          WHERE m.id = ins.message_row_id
+         RETURNING ins.*, src.is_read AS from_is_read`,
         [fresh.map(r => r.id), accountId, dest, dropRow]
       );
-      for (const op of ops) { created.push(op); moved.add(op.message_row_id); }
+      for (const op of ops) {
+        created.push(op);
+        moved.set(op.message_row_id, { id: op.message_row_id, from: op.src_folder, isRead: !!op.from_is_read });
+      }
       // A row another request moved in the meantime is pending now: take the path below.
       retry = retry.concat(fresh.filter(r => !moved.has(r.id)).map(r => r.id));
     }
 
     for (const rowId of retry) {
       const outcome = await this._enqueuePending(accountId, rowId, dest, dropRow);
-      if (outcome) moved.add(rowId);
+      if (outcome?.moved) moved.set(rowId, outcome.moved);
       if (outcome?.op) created.push(outcome.op);
     }
 
     for (const op of created) this._guard(op);
     if (created.length) {
-      await this._absorbFlagPushes(accountId, [...moved]);
+      await this._absorbFlagPushes(accountId, [...moved.keys()]);
       this.kick(accountId);
     }
-    return [...moved];
+    return [...moved.values()];
   }
 
-  // A row whose move is still pending is moved again. Returns { op } for a move queued or
-  // changed, { cancelled } when the letter goes back to where the server has it, null when the
-  // row is gone. Each statement locks the message row first, as the worker's settle does, so a
-  // settle and this never interleave.
+  // A row whose move is still pending is moved again. Returns { moved, op } for a move queued or
+  // changed, { moved, cancelled } when the letter goes back to where the server has it, null when
+  // the row did not move (gone, or moved by another request this very moment). `moved` is the
+  // { id, from, isRead } of enqueue. Each statement locks the message row first, as the worker's
+  // settle does, so a settle and this never interleave.
   async _enqueuePending(accountId, rowId, dest, dropRow) {
     // The latest move is still queued and its source is the new destination: drop it, and the row
     // goes back to the letter's server location (or to its predecessor's placeholder). A read/star
@@ -263,7 +273,7 @@ export class MoveQueue {
     // after its own MOVE (the newer value wins), in the same statement so that move cannot settle
     // in between; or, when the letter is back where the server has it, to the flag-push queue.
     const cancelled = await query(
-      `WITH m AS (SELECT id, uid FROM messages WHERE id = $1 AND account_id = $2 AND uid < 0 FOR UPDATE),
+      `WITH m AS (SELECT id, uid, folder, is_read FROM messages WHERE id = $1 AND account_id = $2 AND uid < 0 FOR UPDATE),
        op AS (
          DELETE FROM message_moves mv USING m
           WHERE mv.id = -m.uid AND mv.message_row_id = m.id AND mv.state = 'queued' AND mv.src_folder = $3
@@ -275,8 +285,8 @@ export class MoveQueue {
          RETURNING p.id
        )
        UPDATE messages x SET folder = op.src_folder, uid = COALESCE(op.src_uid, -op.predecessor_id)
-         FROM op WHERE x.id = op.message_row_id
-       RETURNING op.*`,
+         FROM op, m WHERE x.id = op.message_row_id
+       RETURNING op.*, m.folder AS from_folder, m.is_read AS from_is_read`,
       [rowId, accountId, dest]
     );
     const gone = cancelled.rows[0];
@@ -286,24 +296,25 @@ export class MoveQueue {
         if (gone.set_seen != null) this.mgr._enqueueFlagPush(accountId, rowId, '\\Seen', gone.set_seen);
         if (gone.set_flagged != null) this.mgr._enqueueFlagPush(accountId, rowId, '\\Flagged', gone.set_flagged);
       }
-      return { cancelled: gone };
+      return { cancelled: gone, moved: { id: rowId, from: gone.from_folder, isRead: !!gone.from_is_read } };
     }
     // Still queued: it takes the new destination.
     const changed = await query(
-      `WITH m AS (SELECT id, uid FROM messages WHERE id = $1 AND account_id = $2 AND uid < 0 AND folder <> $3 FOR UPDATE),
+      `WITH m AS (SELECT id, uid, folder, is_read FROM messages WHERE id = $1 AND account_id = $2 AND uid < 0 AND folder <> $3 FOR UPDATE),
        op AS (
          UPDATE message_moves mv SET dest_folder = $3, drop_row = $4, updated_at = now() FROM m
           WHERE mv.id = -m.uid AND mv.message_row_id = m.id AND mv.state = 'queued'
          RETURNING mv.*
        )
-       UPDATE messages x SET folder = $3 FROM op WHERE x.id = op.message_row_id
-       RETURNING op.*`,
+       UPDATE messages x SET folder = $3 FROM op, m WHERE x.id = op.message_row_id
+       RETURNING op.*, m.folder AS from_folder, m.is_read AS from_is_read`,
       [rowId, accountId, dest, dropRow]
     );
-    if (changed.rows[0]) return { op: changed.rows[0] };
+    const retargeted = changed.rows[0];
+    if (retargeted) return { op: retargeted, moved: { id: rowId, from: retargeted.from_folder, isRead: !!retargeted.from_is_read } };
     // In flight: a second move follows it; its source uid comes when the first one settles.
     const next = await query(
-      `WITH m AS (SELECT id, uid FROM messages WHERE id = $1 AND account_id = $2 AND uid < 0 AND folder <> $3 FOR UPDATE),
+      `WITH m AS (SELECT id, uid, folder, is_read FROM messages WHERE id = $1 AND account_id = $2 AND uid < 0 AND folder <> $3 FOR UPDATE),
        prev AS (
          SELECT mv.* FROM message_moves mv, m
           WHERE mv.id = -m.uid AND mv.message_row_id = m.id AND mv.state <> 'queued'
@@ -312,18 +323,19 @@ export class MoveQueue {
          SELECT account_id, message_row_id, message_id_header, dest_folder, NULL, $3, $4, id FROM prev
          RETURNING *
        )
-       UPDATE messages x SET folder = $3, uid = -ins.id FROM ins WHERE x.id = ins.message_row_id
-       RETURNING ins.*`,
+       UPDATE messages x SET folder = $3, uid = -ins.id FROM ins, m WHERE x.id = ins.message_row_id
+       RETURNING ins.*, m.folder AS from_folder, m.is_read AS from_is_read`,
       [rowId, accountId, dest, dropRow]
     );
-    if (next.rows[0]) return { op: next.rows[0] };
+    const following = next.rows[0];
+    if (following) return { op: following, moved: { id: rowId, from: following.from_folder, isRead: !!following.from_is_read } };
     // The move settled in between (the row has a server uid again) or the row is gone.
-    const { rows: [row] } = await query('SELECT id, uid, folder FROM messages WHERE id = $1 AND account_id = $2', [rowId, accountId]);
+    const { rows: [row] } = await query('SELECT id, uid, folder, is_read FROM messages WHERE id = $1 AND account_id = $2', [rowId, accountId]);
     if (!row) return null;
-    if (row.folder === dest) return {};
+    if (row.folder === dest) return { moved: { id: rowId, from: dest, isRead: !!row.is_read } };
     if (isPendingUid(row.uid)) return null; // moved by another request at this very moment
-    const again = await this.enqueue(accountId, [row], dest, { dropRow });
-    return again.includes(rowId) ? {} : null;
+    const [again] = await this.enqueue(accountId, [row], dest, { dropRow });
+    return again ? { moved: again } : null;
   }
 
   // A read/star push that failed before the move was queued now belongs to the move: stored at the

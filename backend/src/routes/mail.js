@@ -453,20 +453,33 @@ function bulkBusyTracker() {
 // the row goes once the server has moved the letter. Returns the rows that moved (a row already in
 // `dest` counts).
 async function queueMove(accountId, rows, dest, { allMail = false } = {}) {
-  const movedIds = new Set(await imapManager.moveQueue.enqueue(accountId, rows, dest, { dropRow: allMail }));
+  const results = await imapManager.moveQueue.enqueue(accountId, rows, dest, { dropRow: allMail });
+  const movedIds = new Set(results.map(r => r.id));
   const moved = rows.filter(m => movedIds.has(m.id));
+  // Counted from the folder and read state the move saw under its lock, not from the route's own
+  // read: another request may have moved the row in between. Gmail's All Mail keeps no counts.
+  const counted = results.filter(r => r.from !== dest);
+  const untracked = new Set(allMail ? [dest] : []);
+  const froms = [...new Set(counted.map(r => r.from))];
+  if (froms.length) {
+    const { rows: virtual } = await query(
+      `SELECT path FROM folders WHERE account_id = $1 AND path = ANY($2::text[]) AND special_use = '\\All'`,
+      [accountId, froms]
+    );
+    for (const { path } of virtual) untracked.add(path);
+  }
   const deltas = new Map();
   const add = (path, total, unread) => {
+    if (untracked.has(path)) return;
     const d = deltas.get(path) || { total: 0, unread: 0 };
     d.total += total;
     d.unread += unread;
     deltas.set(path, d);
   };
-  for (const m of moved) {
-    if (m.folder === dest) continue;
-    const unread = m.is_read ? 0 : 1;
-    add(m.folder, -1, -unread);
-    if (!allMail) add(dest, 1, unread);
+  for (const r of counted) {
+    const unread = r.isRead ? 0 : 1;
+    add(r.from, -1, -unread);
+    add(dest, 1, unread);
   }
   for (const [path, { total, unread }] of deltas) adjustFolderCounts(accountId, path, total, unread);
   return moved;

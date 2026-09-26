@@ -28,7 +28,7 @@ vi.mock('../index.js', () => ({
     scheduleCountRefresh: vi.fn(),
     moveQueue: {
       // Every row moves in the database; the MOVE is queued for the worker.
-      enqueue: vi.fn(async (_accountId, rows) => rows.map(r => r.id)),
+      enqueue: vi.fn(async (_accountId, rows) => rows.map(r => ({ id: r.id, from: r.folder, isRead: !!r.is_read }))),
       serverLocation: async (m) => ({ folder: m.folder, uid: Number(m.uid) }),
       holdFolder: vi.fn(() => () => {}),
       reguardAccount: vi.fn(async () => {}),

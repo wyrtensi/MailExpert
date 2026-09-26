@@ -19,7 +19,7 @@ vi.mock('../index.js', () => ({
     _resolveFlagPush: vi.fn(),
     scheduleCountRefresh: vi.fn(),
     moveQueue: {
-      enqueue: vi.fn(async (_accountId, rows) => rows.map(r => r.id)),
+      enqueue: vi.fn(async (_accountId, rows) => rows.map(r => ({ id: r.id, from: r.folder, isRead: !!r.is_read }))),
       deferFlags: vi.fn(),
       serverLocation: vi.fn(),
     },
@@ -111,11 +111,21 @@ describe('a move changes the database at once', () => {
   });
 
   it('counts only the rows the queue moved', async () => {
-    imapManager.moveQueue.enqueue.mockResolvedValueOnce([READ_ID]);
+    imapManager.moveQueue.enqueue.mockResolvedValueOnce([{ id: READ_ID, from: 'INBOX', isRead: true }]);
     const res = await call('POST', '/messages/bulk-move', { ids: [UNREAD_ID, READ_ID], folder: 'Projects' });
     expect(res.body.moved).toEqual([READ_ID]);
     expect(adjustFolderCounts).toHaveBeenCalledWith(ACCOUNT_ID, 'INBOX', -1, 0);
     expect(adjustFolderCounts).toHaveBeenCalledWith(ACCOUNT_ID, 'Projects', 1, 0);
+  });
+
+  // Another request moved the unread letter to Archive between this route's read and its move:
+  // the counts follow what the move saw under its lock, not the route's stale INBOX.
+  it('counts from the folder and read state the move saw, not from the route read', async () => {
+    imapManager.moveQueue.enqueue.mockResolvedValueOnce([{ id: UNREAD_ID, from: 'Archive', isRead: false }]);
+    await call('POST', '/messages/bulk-move', { ids: [UNREAD_ID], folder: 'Projects' });
+    expect(adjustFolderCounts).toHaveBeenCalledTimes(2);
+    expect(adjustFolderCounts).toHaveBeenCalledWith(ACCOUNT_ID, 'Archive', -1, -1);
+    expect(adjustFolderCounts).toHaveBeenCalledWith(ACCOUNT_ID, 'Projects', 1, 1);
   });
 
   it('archives to Gmail All Mail: the row goes once moved, All Mail counts are not kept', async () => {

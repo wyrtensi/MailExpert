@@ -15,7 +15,7 @@ vi.mock('../index.js', () => ({
     _scheduleProviderIdBackfill: vi.fn(),
     scheduleCountRefresh: vi.fn(),
     // Moves to Trash are DB-first: the row moves now and the MOVE is queued (moveQueue.js).
-    moveQueue: { enqueue: vi.fn(async (_accountId, rows) => rows.map(r => r.id)) },
+    moveQueue: { enqueue: vi.fn(async (_accountId, rows) => rows.map(r => ({ id: r.id, from: r.folder, isRead: !!r.is_read }))) },
   },
 }));
 vi.mock('../plugins/registry.js', () => ({ pluginRegistry: { runHook: vi.fn(async () => {}), collectHook: vi.fn(async () => []) } }));

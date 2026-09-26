@@ -103,7 +103,8 @@ const serverMoves = (base = 900) => {
 describe('enqueue: the database moves at once', () => {
   it('puts the row in the destination with a placeholder uid and queues the server move', async () => {
     const moved = await queue.enqueue(ACCOUNT, await rowsOf([A, B]), 'Archive');
-    expect(moved.sort()).toEqual([A, B].sort());
+    expect(moved.map(r => r.id).sort()).toEqual([A, B].sort());
+    expect(moved.find(r => r.id === A)).toEqual({ id: A, from: 'INBOX', isRead: false });
     const ops = await moves();
     expect(ops).toHaveLength(2);
     for (const op of ops) {
@@ -118,8 +119,17 @@ describe('enqueue: the database moves at once', () => {
   });
 
   it('counts a row already in the destination as moved and queues nothing for it', async () => {
-    expect(await queue.enqueue(ACCOUNT, await rowsOf([C]), 'Projects')).toEqual([C]);
+    expect(await queue.enqueue(ACCOUNT, await rowsOf([C]), 'Projects')).toEqual([{ id: C, from: 'Projects', isRead: true }]);
     expect(await moves()).toEqual([]);
+  });
+
+  // M3: two requests act on the same letter, both from their own read of it in INBOX.
+  it('reports the folder the row was really in when a second request moves it again', async () => {
+    const stale = await rowsOf([A]);
+    await queue.enqueue(ACCOUNT, stale, 'Archive');
+    expect(await queue.enqueue(ACCOUNT, stale, 'Trash')).toEqual([{ id: A, from: 'Archive', isRead: false }]);
+    expect(await queue.enqueue(ACCOUNT, stale, 'Trash')).toEqual([{ id: A, from: 'Trash', isRead: false }]);
+    expect(await queue.enqueue(ACCOUNT, stale, 'INBOX')).toEqual([{ id: A, from: 'Trash', isRead: false }]);
   });
 
   it('moves a queued row again by changing its move, and cancels it when the row goes back', async () => {
@@ -178,7 +188,7 @@ describe('a held folder', () => {
   it('while Trash is emptied: letters may be moved in, their MOVE waits, nothing is moved out', async () => {
     serverMoves();
     const release = queue.holdFolder(ACCOUNT, 'Trash', { kind: 'empty' });
-    expect(await queue.enqueue(ACCOUNT, await rowsOf([A]), 'Trash')).toEqual([A]);
+    expect((await queue.enqueue(ACCOUNT, await rowsOf([A]), 'Trash')).map(r => r.id)).toEqual([A]);
     await queue.runAccount(ACCOUNT);
     expect(mgr.bulkMoveMessages).not.toHaveBeenCalled();
     expect(await moves()).toMatchObject([{ state: 'queued', attempts: 0 }]);
@@ -198,7 +208,7 @@ describe('a held folder', () => {
     const release = queue.holdFolder(ACCOUNT, 'Projects', { kind: 'rename', delimiter: '/' });
     expect(await queue.enqueue(ACCOUNT, await rowsOf([A]), 'Projects/2026')).toEqual([]);
     expect(await queue.enqueue(ACCOUNT, await rowsOf([A]), 'Projects')).toEqual([]);
-    expect(await queue.enqueue(ACCOUNT, await rowsOf([A]), 'Archive')).toEqual([A]);
+    expect((await queue.enqueue(ACCOUNT, await rowsOf([A]), 'Archive')).map(r => r.id)).toEqual([A]);
     release();
   });
 

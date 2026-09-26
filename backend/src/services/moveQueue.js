@@ -135,6 +135,13 @@ export class MoveQueue {
   // letter the user just moved to INBOX).
   async claimArrival(accountId, folder, messageId, uid) {
     if (!this.expectsArrival(accountId, folder, messageId)) return false;
+    // A uid that already has a row is a letter we know, not an arrival: a full scan or a backfill
+    // re-reading an older copy with the same Message-ID must not hand it to the moved row.
+    const { rows: known } = await query(
+      'SELECT 1 FROM messages WHERE account_id = $1 AND folder = $2 AND uid = $3',
+      [accountId, folder, Number(uid)]
+    );
+    if (known.length) return false;
     const { rows: [op] } = await query(
       `SELECT * FROM message_moves
         WHERE account_id = $1 AND dest_folder = $2 AND message_id_header = $3 AND state IN ('moving', 'awaiting_uid')
@@ -367,7 +374,7 @@ export class MoveQueue {
     if (!col) throw new Error(`deferFlags: unknown flag ${flag}`);
     // col is one of two fixed literals above, never input.
     const { rows: done } = await query(
-      `UPDATE message_moves mv SET ${col} = $2, updated_at = now()
+      `UPDATE message_moves mv SET ${col} = $2
          FROM messages m
         WHERE m.id = ANY($1::uuid[]) AND mv.id = -m.uid AND mv.message_row_id = m.id
         RETURNING m.id`,
@@ -421,6 +428,7 @@ export class MoveQueue {
   async resume() {
     await query(
       `UPDATE message_moves SET state = CASE WHEN sent_at IS NULL THEN 'queued' ELSE 'awaiting_uid' END,
+              awaiting_since = CASE WHEN sent_at IS NULL THEN NULL ELSE now() END,
               next_attempt_at = now(), updated_at = now()
         WHERE state = 'moving'`
     );
@@ -463,6 +471,7 @@ export class MoveQueue {
   async sweep() {
     const { rows } = await query(
       `UPDATE message_moves SET state = CASE WHEN sent_at IS NULL THEN 'queued' ELSE 'awaiting_uid' END,
+              awaiting_since = CASE WHEN sent_at IS NULL THEN NULL ELSE now() END,
               next_attempt_at = now(), updated_at = now()
         WHERE state = 'moving'
           AND (claimed_at IS NULL OR claimed_at < now() - ($1::int * interval '1 millisecond')
@@ -753,7 +762,7 @@ export class MoveQueue {
           if (isMailboxBusyError(err)) return true;
           console.warn(`Move queue: looking up moved letter failed: ${err.message}`);
           // A lookup that keeps failing (a folder gone, say) ends like one that finds nothing.
-          if (Date.now() - new Date(op.updated_at).getTime() > MOVE_AWAITING_UID_MAX_MS) await this._drop(op);
+          if (Date.now() - new Date(op.awaiting_since ?? op.updated_at).getTime() > MOVE_AWAITING_UID_MAX_MS) await this._drop(op);
           else await this._lookAgainLater(op);
         }
       }
@@ -770,7 +779,8 @@ export class MoveQueue {
 
   async _markAwaiting(op) {
     await query(
-      `UPDATE message_moves SET state = 'awaiting_uid', next_attempt_at = now() + ($2::int * interval '1 millisecond'), updated_at = now()
+      `UPDATE message_moves SET state = 'awaiting_uid', awaiting_since = now(),
+              next_attempt_at = now() + ($2::int * interval '1 millisecond'), updated_at = now()
         WHERE id = $1 AND state = 'moving'`,
       [op.id, MOVE_AWAITING_RETRY_MS]
     );
@@ -780,6 +790,7 @@ export class MoveQueue {
   async _recover(ops) {
     const { rows } = await query(
       `UPDATE message_moves SET state = CASE WHEN sent_at IS NULL THEN 'queued' ELSE 'awaiting_uid' END,
+              awaiting_since = CASE WHEN sent_at IS NULL THEN NULL ELSE now() END,
               next_attempt_at = now() + ($2::int * interval '1 millisecond'), updated_at = now()
         WHERE id = ANY($1::bigint[]) AND state = 'moving'
        RETURNING *`,
@@ -810,6 +821,7 @@ export class MoveQueue {
     }
     await query(
       `UPDATE message_moves SET state = $5, attempts = $2, last_error = $3,
+              awaiting_since = CASE WHEN $5 = 'awaiting_uid' THEN now() ELSE NULL END,
               next_attempt_at = now() + ($4::int * interval '1 millisecond'), updated_at = now()
         WHERE id = $1 AND state = 'moving'`,
       [op.id, attempts, String(error).slice(0, 500), moveRetryDelayMs(attempts), unclear ? 'awaiting_uid' : 'queued']

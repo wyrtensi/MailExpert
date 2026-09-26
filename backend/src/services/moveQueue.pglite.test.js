@@ -412,6 +412,25 @@ describe('the destination sync', () => {
     expect(queue.expectsArrival(ACCOUNT, 'Archive', '<a@example.com>')).toBe(false);
   });
 
+  // M8: a full scan re-reads letters the panel already has; an older copy with the same
+  // Message-ID is not an arrival and keeps its row.
+  it('does not claim a letter that already has a row in the destination', async () => {
+    const COPY = '41000000-0000-4000-8000-000000000009';
+    await db.query("INSERT INTO messages (id, account_id, uid, folder, message_id) VALUES ($1, $2, 77, 'Archive', '<a@example.com>')", [COPY, ACCOUNT]);
+    let answer;
+    mgr.bulkMoveMessages.mockImplementation(() => new Promise((resolve) => { answer = resolve; }));
+    await queue.enqueue(ACCOUNT, await rowsOf([A]), 'Archive');
+    const run = queue.runAccount(ACCOUNT);
+    await vi.waitFor(() => expect(mgr.bulkMoveMessages).toHaveBeenCalled());
+    expect(await queue.claimArrival(ACCOUNT, 'Archive', '<a@example.com>', 77)).toBe(false);
+    expect(await row(COPY)).toMatchObject({ uid: 77, folder: 'Archive' });
+    expect((await row(A)).uid).toBeLessThan(0);
+    answer({ uidMap: new Map([[11, 900]]), succeeded: [11], failed: [] });
+    await run;
+    expect(await row(A)).toMatchObject({ uid: 900, folder: 'Archive' });
+    expect(await row(COPY)).toMatchObject({ uid: 77, folder: 'Archive' });
+  });
+
   it('does not claim a same Message-ID letter before the MOVE was sent: that is a separate copy', async () => {
     await queue.enqueue(ACCOUNT, await rowsOf([A]), 'Archive');
     expect(queue.expectsArrival(ACCOUNT, 'Archive', '<a@example.com>')).toBe(false);
@@ -423,6 +442,7 @@ describe('the destination sync', () => {
     await queue.enqueue(ACCOUNT, await rowsOf([A]), 'Archive');
     await queue.runAccount(ACCOUNT);
     expect(await moves()).toMatchObject([{ state: 'awaiting_uid' }]);
+    expect((await moves())[0].awaiting_since).not.toBeNull(); // the give-up clock starts
     expect(mgr.syncFolderOnDemand).toHaveBeenCalledWith(expect.objectContaining({ id: ACCOUNT }), 'Archive', { background: true });
 
     mgr.findMessageIdInFolders.mockResolvedValue([{ folder: 'Archive', uids: [905] }]);
@@ -638,7 +658,7 @@ describe('a move whose new uid cannot be found', () => {
     mgr.bulkMoveMessages.mockResolvedValue({ uidMap: new Map(), succeeded: [11], failed: [] });
     await queue.enqueue(ACCOUNT, await rowsOf([A]), 'Archive');
     await queue.runAccount(ACCOUNT);
-    await db.query("UPDATE message_moves SET updated_at = now() - interval '1 hour', next_attempt_at = now()");
+    await db.query("UPDATE message_moves SET awaiting_since = now() - interval '1 hour', next_attempt_at = now()");
   }
 
   it('reverts a letter that is nowhere: gone from the source and in no folder', async () => {
@@ -653,12 +673,23 @@ describe('a move whose new uid cannot be found', () => {
     await awaitingTooLong();
     await queue.enqueue(ACCOUNT, await rowsOf([A]), 'Trash');
     expect(await moves()).toHaveLength(2);
-    await db.query("UPDATE message_moves SET updated_at = now() - interval '1 hour', next_attempt_at = now() WHERE state = 'awaiting_uid'");
+    await db.query("UPDATE message_moves SET awaiting_since = now() - interval '1 hour', next_attempt_at = now() WHERE state = 'awaiting_uid'");
     mgr.findMessageIdInFolders.mockRejectedValue(new Error('Mailbox does not exist'));
     await queue.runAccount(ACCOUNT);
     expect(await moves()).toEqual([]);
     expect(await row(A)).toBeUndefined();
     expect([...mgr._pendingMoveUids.keys()].some(k => k.includes(':-'))).toBe(false);
+  });
+
+  // M9: read/star clicks on the letter must not keep pushing the give-up forward.
+  it('gives up on time even when flags were changed on the letter meanwhile', async () => {
+    await awaitingTooLong();
+    expect((await moves())[0].awaiting_since).not.toBeNull();
+    await queue.deferFlags(await rowsOf([A]), '\\Seen', true);
+    await queue.deferFlags(await rowsOf([A]), '\\Flagged', true);
+    mgr.findMessageIdInFolders.mockRejectedValue(new Error('Mailbox does not exist'));
+    await queue.runAccount(ACCOUNT);
+    expect(await moves()).toEqual([]);
   });
 
   it('stops looking when the lookup keeps failing', async () => {

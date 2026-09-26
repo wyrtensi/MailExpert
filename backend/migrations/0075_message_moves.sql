@@ -15,6 +15,8 @@
 -- awaiting_uid (moved, but the server did not name the new uid; it is looked up).
 -- claimed_at: when the worker claimed the move, renewed right before its MOVE: a lease. A move
 -- left 'moving' by a run that failed is swept back once the lease runs out.
+-- awaiting_since: when the move last became awaiting_uid; the clock of the give-up
+-- (MOVE_AWAITING_UID_MAX_MS), which nothing else touches (a flag change on the move does not).
 -- sent_at: set right before the MOVE is sent. A move swept back or recovered without it is queued
 -- again (the MOVE never went out); with it, it is looked up like a move whose answer was lost.
 CREATE TABLE IF NOT EXISTS message_moves (
@@ -35,6 +37,7 @@ CREATE TABLE IF NOT EXISTS message_moves (
   next_attempt_at timestamptz NOT NULL DEFAULT now(),
   claimed_at timestamptz,
   sent_at timestamptz,
+  awaiting_since timestamptz,
   last_error text,
   created_at timestamptz NOT NULL DEFAULT now(),
   updated_at timestamptz NOT NULL DEFAULT now()

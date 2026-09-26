@@ -629,6 +629,9 @@ describe('a letter gone from its source', () => {
     mgr.findMessageIdInFolders.mockResolvedValue([{ folder: 'Archive', uids: [900] }]);
     await queue.runAccount(ACCOUNT);
     expect(await row(A)).toMatchObject({ uid: 900, folder: 'Archive' });
+    // Found in the destination: the other folders are not searched (one SEARCH, not one per folder).
+    expect(mgr.findMessageIdInFolders).toHaveBeenCalledOnce();
+    expect(mgr.findMessageIdInFolders).toHaveBeenCalledWith(expect.anything(), ['Archive'], '<a@example.com>', expect.anything());
     expect(mgr.broadcast).not.toHaveBeenCalledWith(expect.objectContaining({ type: 'move_reverted' }));
   });
 
@@ -641,7 +644,8 @@ describe('a letter gone from its source', () => {
     mgr.findMessageIdInFolders.mockResolvedValue([{ folder: 'Projects', uids: [55] }]);
     await queue.runAccount(ACCOUNT);
 
-    expect(mgr.findMessageIdInFolders).toHaveBeenCalledWith(expect.anything(), ['Archive', 'Projects', 'Trash'], '<a@example.com>', expect.anything());
+    // The destination alone first; not there, the other folders (All Mail skipped).
+    expect(mgr.findMessageIdInFolders.mock.calls.map(c => c[1])).toEqual([['Archive'], ['Projects', 'Trash']]);
     expect(await row(A)).toMatchObject({ uid: 55, folder: 'Projects' });
     expect(await row(COPY)).toBeUndefined();
     expect(await moves()).toEqual([]);

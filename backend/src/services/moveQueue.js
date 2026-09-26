@@ -696,6 +696,13 @@ export class MoveQueue {
   // row is another copy of the letter and is left alone. Throws on an IMAP failure.
   async _locate(account, op) {
     if (!op.message_id_header) return null;
+    const opts = this._poolOpts(account.id);
+    // The destination first, alone: where a MOVE whose answer was lost put the letter. Only when
+    // it is not there are the other folders searched, one SEARCH per folder (50 to 100 on a Gmail
+    // mailbox with labels), which only the rare "moved elsewhere or deleted" case pays for.
+    const inDest = await this.mgr.findMessageIdInFolders(account, [op.dest_folder], op.message_id_header, opts);
+    const atDest = await this._pickLocated(account, op, inDest, [op.dest_folder]);
+    if (atDest) return atDest;
     const { rows: others } = await query(
       `SELECT path FROM folders
         WHERE account_id = $1 AND path <> ALL($2::text[])
@@ -703,8 +710,15 @@ export class MoveQueue {
         ORDER BY path`,
       [account.id, [op.src_folder, op.dest_folder], VIRTUAL_FOLDER_USES]
     );
-    const folders = [op.dest_folder, ...others.map(r => r.path)];
-    const found = await this.mgr.findMessageIdInFolders(account, folders, op.message_id_header, this._poolOpts(account.id));
+    if (!others.length) return null;
+    const folders = others.map(r => r.path);
+    const found = await this.mgr.findMessageIdInFolders(account, folders, op.message_id_header, opts);
+    return this._pickLocated(account, op, found, folders);
+  }
+
+  // From SEARCH results ({ folder, uids }), in `folders` order: a uid no row holds, or one whose
+  // row was inserted after the move was queued; null when there is none.
+  async _pickLocated(account, op, found, folders) {
     const byFolder = new Map(found.map(f => [f.folder, f.uids]));
     for (const folder of folders) {
       const uids = byFolder.get(folder);

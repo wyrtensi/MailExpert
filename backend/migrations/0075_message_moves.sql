@@ -11,6 +11,10 @@
 -- drop_row: the destination is not synced (Gmail All Mail), so the row is deleted once moved.
 -- state: queued (waiting for its turn or a retry), moving (claimed by the worker, MOVE on its way),
 -- awaiting_uid (moved, but the server did not name the new uid; it is looked up).
+-- claimed_at: when the worker claimed the move, renewed right before its MOVE: a lease. A move
+-- left 'moving' by a run that failed is swept back once the lease runs out.
+-- sent_at: set right before the MOVE is sent. A move swept back or recovered without it is queued
+-- again (the MOVE never went out); with it, it is looked up like a move whose answer was lost.
 CREATE TABLE IF NOT EXISTS message_moves (
   id bigserial PRIMARY KEY,
   account_id uuid NOT NULL REFERENCES email_accounts(id) ON DELETE CASCADE,
@@ -26,6 +30,8 @@ CREATE TABLE IF NOT EXISTS message_moves (
   state text NOT NULL DEFAULT 'queued' CHECK (state IN ('queued', 'moving', 'awaiting_uid')),
   attempts integer NOT NULL DEFAULT 0,
   next_attempt_at timestamptz NOT NULL DEFAULT now(),
+  claimed_at timestamptz,
+  sent_at timestamptz,
   last_error text,
   created_at timestamptz NOT NULL DEFAULT now(),
   updated_at timestamptz NOT NULL DEFAULT now()

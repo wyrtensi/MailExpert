@@ -318,6 +318,103 @@ describe('the destination sync', () => {
   });
 });
 
+// C1: a database error during a run must not strand claimed moves in 'moving'.
+describe('a database error during a run', () => {
+  const states = async () => (await moves()).map(o => `${o.src_folder}->${o.dest_folder}:${o.state}`).sort();
+
+  it('puts the failing group back, keeps running the other groups, and the next run moves it', async () => {
+    serverMoves();
+    await queue.enqueue(ACCOUNT, await rowsOf([A, C]), 'Archive'); // INBOX->Archive, Projects->Archive
+    const realSettle = queue._settle.bind(queue);
+    let calls = 0;
+    queue._settle = async (...args) => {
+      if (calls++ === 0) throw new Error('Connection terminated unexpectedly');
+      return realSettle(...args);
+    };
+    vi.spyOn(console, 'error').mockImplementation(() => {});
+    await queue.runAccount(ACCOUNT);
+    // The other group settled; the failing one went back. Its MOVE was sent, so it is looked up.
+    expect(await states()).toEqual(['INBOX->Archive:awaiting_uid']);
+    expect(await row(C)).toMatchObject({ folder: 'Archive', uid: 901 });
+
+    // Next run: the source is checked first; the letter left it, and the destination has it.
+    queue._settle = realSettle;
+    await db.query('UPDATE message_moves SET next_attempt_at = now()');
+    mgr.searchUids.mockResolvedValue([]);
+    mgr.findUidByMessageId.mockResolvedValue(900);
+    await queue.runAccount(ACCOUNT);
+    expect(await moves()).toEqual([]);
+    expect(await row(A)).toMatchObject({ folder: 'Archive', uid: 900 });
+  });
+
+  it('queues a group again when the error came before its MOVE was sent', async () => {
+    serverMoves();
+    await queue.enqueue(ACCOUNT, await rowsOf([A, C]), 'Archive');
+    const realQuery = dbState.db.query.bind(dbState.db);
+    let failed = false;
+    dbState.db.query = async (sql, params) => {
+      if (!failed && sql.includes('SELECT 1 FROM folders')) { failed = true; throw new Error('canceling statement due to statement timeout'); }
+      if (!failed && sql.includes('SET claimed_at = now(), sent_at = now()')) { failed = true; throw new Error('canceling statement due to statement timeout'); }
+      return realQuery(sql, params);
+    };
+    vi.spyOn(console, 'error').mockImplementation(() => {});
+    try {
+      await queue.runAccount(ACCOUNT);
+    } finally {
+      dbState.db.query = realQuery;
+    }
+    // The first group failed before its MOVE: queued again, nothing sent; the second one moved.
+    expect(mgr.bulkMoveMessages).toHaveBeenCalledOnce();
+    expect(await states()).toEqual(['INBOX->Archive:queued']);
+    expect(queue.expectsArrival(ACCOUNT, 'Archive', '<a@example.com>')).toBe(false);
+    await db.query('UPDATE message_moves SET next_attempt_at = now()');
+    await queue.runAccount(ACCOUNT);
+    expect(await moves()).toEqual([]);
+    expect((await row(A)).folder).toBe('Archive');
+  });
+
+  it('still runs the queued moves when looking up the awaiting ones fails', async () => {
+    serverMoves();
+    await queue.enqueue(ACCOUNT, await rowsOf([A]), 'Archive');
+    const realQuery = dbState.db.query.bind(dbState.db);
+    dbState.db.query = async (sql, params) => {
+      if (sql.includes("state = 'awaiting_uid' AND next_attempt_at <= now()")) throw new Error('Connection terminated unexpectedly');
+      return realQuery(sql, params);
+    };
+    vi.spyOn(console, 'error').mockImplementation(() => {});
+    try {
+      await queue.runAccount(ACCOUNT);
+    } finally {
+      dbState.db.query = realQuery;
+    }
+    expect(await row(A)).toMatchObject({ folder: 'Archive', uid: 900 });
+  });
+
+  it('is swept back by the tick when even the recovery failed', async () => {
+    await queue.enqueue(ACCOUNT, await rowsOf([A]), 'Archive');
+    // Claimed and sent by a run that died without putting it back; no run is in progress.
+    await db.query("UPDATE message_moves SET state = 'moving', claimed_at = now(), sent_at = now()");
+    expect(await queue.sweep()).toBe(1);
+    expect(await states()).toEqual(['INBOX->Archive:awaiting_uid']);
+
+    // Claimed, never sent: queued again.
+    await db.query("UPDATE message_moves SET state = 'moving', claimed_at = now(), sent_at = NULL");
+    await queue.tick();
+    expect(await states()).toEqual(['INBOX->Archive:queued']);
+    expect(queue.kick).toHaveBeenCalledWith(ACCOUNT);
+  });
+
+  it('leaves the claims of a run in progress alone until their lease runs out', async () => {
+    await queue.enqueue(ACCOUNT, await rowsOf([A]), 'Archive');
+    await db.query("UPDATE message_moves SET state = 'moving', claimed_at = now(), sent_at = now()");
+    queue._running.add(ACCOUNT);
+    expect(await queue.sweep()).toBe(0);
+    await db.query("UPDATE message_moves SET claimed_at = now() - interval '1 hour'");
+    expect(await queue.sweep()).toBe(1);
+    queue._running.delete(ACCOUNT);
+  });
+});
+
 describe('a move whose new uid cannot be found', () => {
   // The MOVE went through without a uid, and nothing finds the letter for MOVE_AWAITING_UID_MAX_MS.
   async function awaitingTooLong() {
@@ -425,7 +522,8 @@ describe('a restart', () => {
 
   it('looks up a move that was in flight: moved already, the row takes its uid', async () => {
     await queue.enqueue(ACCOUNT, await rowsOf([A]), 'Archive');
-    await db.query("UPDATE message_moves SET state = 'moving'");
+    // Claimed and sent when the process stopped.
+    await db.query("UPDATE message_moves SET state = 'moving', claimed_at = now(), sent_at = now()");
     mgr = fakeManager();
     queue = newQueue();
     queue.start = vi.fn();
@@ -441,7 +539,8 @@ describe('a restart', () => {
 
   it('looks up a move that was in flight: still at the source, it is queued again', async () => {
     await queue.enqueue(ACCOUNT, await rowsOf([A]), 'Archive');
-    await db.query("UPDATE message_moves SET state = 'moving'");
+    // Claimed and sent when the process stopped.
+    await db.query("UPDATE message_moves SET state = 'moving', claimed_at = now(), sent_at = now()");
     mgr = fakeManager();
     queue = newQueue();
     queue.start = vi.fn();
@@ -456,6 +555,19 @@ describe('a restart', () => {
     serverMoves();
     await queue.runAccount(ACCOUNT);
     expect(await row(A)).toMatchObject({ uid: 900, folder: 'Archive' });
+  });
+});
+
+describe('a restart with a claimed move whose MOVE was never sent', () => {
+  it('queues it again without looking anything up', async () => {
+    await queue.enqueue(ACCOUNT, await rowsOf([A]), 'Archive');
+    await db.query("UPDATE message_moves SET state = 'moving', claimed_at = now()");
+    mgr = fakeManager();
+    queue = newQueue();
+    queue.start = vi.fn();
+    await queue.resume();
+    expect(await moves()).toMatchObject([{ state: 'queued' }]);
+    expect(queue.expectsArrival(ACCOUNT, 'Archive', '<a@example.com>')).toBe(false);
   });
 });
 

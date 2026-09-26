@@ -44,6 +44,11 @@ export const MOVE_SOURCE_GUARD_LINGER_MS = 10 * 1000;
 // How often a move awaiting its new uid is looked up again, and for how long.
 export const MOVE_AWAITING_RETRY_MS = 15 * 1000;
 export const MOVE_AWAITING_UID_MAX_MS = 10 * 60 * 1000;
+// The lease of a claimed move: a run renews it right before each MOVE. A 'moving' move whose lease
+// ran out, or whose mailbox has no run in progress, was left behind by a run that failed (a
+// database error mid-run) and is swept back by the tick. Longer than the longest bounded MOVE
+// (STATUS, MOVE and the reconciling searches, each under the pooled-operation timeout).
+export const MOVE_LEASE_MS = 15 * 60 * 1000;
 
 export function moveRetryDelayMs(attempts) {
   return Math.min(MOVE_RETRY_MAX_MS, MOVE_RETRY_BASE_MS * 2 ** Math.max(0, attempts - 1));
@@ -319,7 +324,11 @@ export class MoveQueue {
   // expected arrivals are rebuilt before any sync runs (index.js calls this right after the
   // migrations, before the mailboxes connect).
   async resume() {
-    await query(`UPDATE message_moves SET state = 'awaiting_uid', next_attempt_at = now(), updated_at = now() WHERE state = 'moving'`);
+    await query(
+      `UPDATE message_moves SET state = CASE WHEN sent_at IS NULL THEN 'queued' ELSE 'awaiting_uid' END,
+              next_attempt_at = now(), updated_at = now()
+        WHERE state = 'moving'`
+    );
     const { rows } = await query('SELECT * FROM message_moves ORDER BY id');
     for (const op of rows) {
       this._guard(op);
@@ -344,12 +353,33 @@ export class MoveQueue {
   }
 
   async tick() {
+    await this.sweep();
     const { rows } = await query(
       `SELECT DISTINCT account_id FROM message_moves
         WHERE next_attempt_at <= now()
           AND ((state = 'queued' AND src_uid IS NOT NULL) OR state = 'awaiting_uid')`
     );
     for (const { account_id: accountId } of rows) this.kick(accountId);
+  }
+
+  // Moves left 'moving' by a run that failed go back: to 'queued' when their MOVE never went out,
+  // else to 'awaiting_uid', which checks the source before anything else. A mailbox with a run in
+  // progress keeps its claims until their lease runs out.
+  async sweep() {
+    const { rows } = await query(
+      `UPDATE message_moves SET state = CASE WHEN sent_at IS NULL THEN 'queued' ELSE 'awaiting_uid' END,
+              next_attempt_at = now(), updated_at = now()
+        WHERE state = 'moving'
+          AND (claimed_at IS NULL OR claimed_at < now() - ($1::int * interval '1 millisecond')
+               OR NOT (account_id = ANY($2::uuid[])))
+       RETURNING *`,
+      [MOVE_LEASE_MS, [...this._running]]
+    );
+    for (const op of rows) {
+      if (op.state === 'queued') this._unexpect(op);
+      else this._expect(op);
+    }
+    return rows.length;
   }
 
   kick(accountId) {
@@ -390,9 +420,17 @@ export class MoveQueue {
     if (!account) return;
     const reverted = [];
     try {
-      if (await this._resolveAwaiting(account)) return;
+      // A database error while looking up awaiting moves leaves them awaiting (nothing is claimed
+      // there) and must not keep the queued moves from running.
+      let busy = false;
+      try {
+        busy = await this._resolveAwaiting(account);
+      } catch (err) {
+        console.error(`Move queue: looking up moved letters failed: ${err.message}`);
+      }
+      if (busy) return;
       const { rows: claimed } = await query(
-        `UPDATE message_moves SET state = 'moving', updated_at = now()
+        `UPDATE message_moves SET state = 'moving', claimed_at = now(), sent_at = NULL, updated_at = now()
           WHERE id IN (
             SELECT id FROM message_moves
              WHERE account_id = $1 AND state = 'queued' AND src_uid IS NOT NULL AND next_attempt_at <= now()
@@ -414,7 +452,15 @@ export class MoveQueue {
       let stopped = false;
       for (const ops of groups.values()) {
         if (stopped || !this._gateOpen(accountId)) { await this._release(ops); stopped = true; continue; }
-        stopped = await this._runGroup(account, ops, reverted);
+        try {
+          stopped = await this._runGroup(account, ops, reverted);
+        } catch (err) {
+          // A database error mid-group (a dropped connection, a timeout, a deadlock) must not leave
+          // the group's moves claimed for good, nor stop the other groups. What is still 'moving'
+          // goes back; the sweep in tick() catches it if the database is down for this too.
+          console.error(`Move queue: group ${ops[0].src_folder} -> ${ops[0].dest_folder} failed: ${err.message}`);
+          await this._recover(ops).catch(e => console.error(`Move queue: recovering claimed moves failed: ${e.message}`));
+        }
       }
     } finally {
       this._notifyReverted(accountId, reverted);
@@ -431,6 +477,12 @@ export class MoveQueue {
     const byUid = new Map(ops.map(o => [Number(o.src_uid), o]));
     // Flag stores already called on these letters reach the server first, at their source uid.
     await mgr.flagStoresSettled(account.id, src, uids);
+    // The MOVE goes out now: renew the lease and mark it sent, so a run that fails from here on
+    // leaves moves that are looked up before anything is sent again.
+    await query(
+      `UPDATE message_moves SET claimed_at = now(), sent_at = now() WHERE id = ANY($1::bigint[]) AND state = 'moving'`,
+      [ops.map(o => o.id)]
+    );
 
     let outcome;
     try {
@@ -546,6 +598,18 @@ export class MoveQueue {
         WHERE id = $1 AND state = 'moving'`,
       [op.id, MOVE_AWAITING_RETRY_MS]
     );
+  }
+
+  // A group whose run failed: its moves still 'moving' go back as the sweep would send them.
+  async _recover(ops) {
+    const { rows } = await query(
+      `UPDATE message_moves SET state = CASE WHEN sent_at IS NULL THEN 'queued' ELSE 'awaiting_uid' END,
+              next_attempt_at = now() + ($2::int * interval '1 millisecond'), updated_at = now()
+        WHERE id = ANY($1::bigint[]) AND state = 'moving'
+       RETURNING *`,
+      [ops.map(o => o.id), MOVE_AWAITING_RETRY_MS]
+    );
+    for (const op of rows) if (op.state === 'queued') this._unexpect(op);
   }
 
   // Back to the queue without an attempt: the mailbox was busy or its logins are held back.

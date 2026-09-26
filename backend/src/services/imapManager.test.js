@@ -17,7 +17,7 @@ vi.mock('../utils/redact.js', () => ({ redactEmail: vi.fn() }));
 vi.mock('./hostValidation.js', () => ({ resolveForConnection: vi.fn(), createPinnedLookup: vi.fn() }));
 vi.mock('./connectionPolicy.js', () => ({ getConnectionPolicy: vi.fn() }));
 
-import { ImapManager, MIN_SYNC_INTERVAL_MS, AUTO_IDLE_DELAY_MS, countMissingInboxCopies, fetchBackfillBatch, providerProfile, makeClientCfg, relocateExemptGuard, insertCopiedSibling, deleteMessageCopyRow, emitSectionsChanged, ensureMailbox, createKeyedSemaphore, isConnectionRefusal, extractImapError, isImapAuthFailure, AUTH_FAILURE_COOLDOWN_MS, AUTH_FAILURE_COOLDOWN_MAX_MS, authCooldownMs, connectCooldownMs, effectiveSyncIntervalMs, folderSyncDue, planModseqSync, connectStaggerFor, walkStructure, planBodyParts, extractBodyFromMsg, bodyFallbackApplies, poolSizeFor, rerootThreadChildren, parsePersistentCap, resolvePersistentCap, persistentEligible, shouldRetryIPv4, classifyMoveBySearch, PERSISTENT_FLAG_STORE_TIMEOUT_MS, PERSISTENT_FLAG_LATE_STORE_WAIT_MS, PERSISTENT_FLAG_LOCK_WAIT_MS, FLAG_STORE_UID_CHUNK, FLAG_PUSH_MAX_ATTEMPTS, wrapImapError, acquirePooledClient, releasePooledClient, evictPool, ACQUIRE_TIMEOUT_MS, BACKGROUND_ACQUIRE_TIMEOUT_MS, PREFETCH_MAX_CONSECUTIVE_ERRORS, PREFETCH_STOP_PAUSE_MS } from './imapManager.js';
+import { ImapManager, MIN_SYNC_INTERVAL_MS, AUTO_IDLE_DELAY_MS, countMissingInboxCopies, fetchBackfillBatch, providerProfile, makeClientCfg, relocateExemptGuard, insertCopiedSibling, deleteMessageCopyRow, emitSectionsChanged, ensureMailbox, createKeyedSemaphore, isConnectionRefusal, extractImapError, isImapAuthFailure, AUTH_FAILURE_COOLDOWN_MS, AUTH_FAILURE_COOLDOWN_MAX_MS, authCooldownMs, connectCooldownMs, effectiveSyncIntervalMs, folderSyncDue, planModseqSync, connectStaggerFor, walkStructure, planBodyParts, extractBodyFromMsg, bodyFallbackApplies, poolSizeFor, backgroundPoolCap, rerootThreadChildren, parsePersistentCap, resolvePersistentCap, persistentEligible, shouldRetryIPv4, classifyMoveBySearch, PERSISTENT_FLAG_STORE_TIMEOUT_MS, PERSISTENT_FLAG_LATE_STORE_WAIT_MS, PERSISTENT_FLAG_LOCK_WAIT_MS, FLAG_STORE_UID_CHUNK, FLAG_PUSH_MAX_ATTEMPTS, wrapImapError, acquirePooledClient, releasePooledClient, evictPool, ACQUIRE_TIMEOUT_MS, BACKGROUND_ACQUIRE_TIMEOUT_MS, PREFETCH_MAX_CONSECUTIVE_ERRORS, PREFETCH_STOP_PAUSE_MS, PREFETCH_MAX_BUSY_WAITS, newBodyPrefetchCount, newBodyQueueMax, NODE_NEW_BODY_PREFETCH_MAX, NODE_PREFETCH_PER_HOST } from './imapManager.js';
 import { pluginRegistry } from '../plugins/registry.js';
 import { EventEmitter } from 'node:events';
 import { ImapFlow } from 'imapflow';
@@ -27,6 +27,7 @@ import { resolveForConnection } from './hostValidation.js';
 import { getConnectionPolicy } from './connectionPolicy.js';
 import { invalidateGtdConfigCache } from '../plugins/gtd/gtdConfig.js';
 import { parseMessage } from './messageParser.js';
+import { sendPushToActiveUsers } from './pushNotifications.js';
 import { getImapSnapshot, _resetImapMetrics } from './imapMetrics.js';
 import { GMAIL_KEY_PREFIX } from './threading/threadId.js';
 
@@ -4113,14 +4114,15 @@ describe('Gmail profile for many accounts on one server', () => {
         const mgr = managerFor(acct);
         let finish;
         const hold = new Promise(resolve => { finish = resolve; });
-        const holders = Array.from({ length: poolSizeFor(acct) }, () => mgr._withCountClient(acct, () => hold));
+        // Background work fills its share of the pool; the last session stays for user actions.
+        const holders = Array.from({ length: backgroundPoolCap(acct) }, () => mgr._withCountClient(acct, () => hold));
         await vi.advanceTimersByTimeAsync(0);
-        expect(ImapFlow).toHaveBeenCalledTimes(poolSizeFor(acct));
+        expect(ImapFlow).toHaveBeenCalledTimes(backgroundPoolCap(acct));
         _resetImapMetrics();
         const busy = expect(mgr._withCountClient(acct, async () => {})).rejects.toThrow('IMAP pool busy');
         await vi.advanceTimersByTimeAsync(10000);
         await busy;
-        expect(ImapFlow).toHaveBeenCalledTimes(poolSizeFor(acct));
+        expect(ImapFlow).toHaveBeenCalledTimes(backgroundPoolCap(acct));
         expect(getImapSnapshot(host => host).events).toEqual([expect.objectContaining({ event: 'pool_busy', total: 1 })]);
         finish();
         await Promise.all(holders);
@@ -4965,6 +4967,15 @@ const ladderManager = () => {
   return mgr;
 };
 
+// The prefetch loop reads each letter's live row before it fetches the body (the query selects
+// "AS cached"). Tests register the letters their mailbox holds; an unregistered id reads as gone.
+const liveLetters = new Map(); // id -> { uid, folder, cached }
+const holdLetters = rows => { for (const r of rows) liveLetters.set(r.id, { uid: r.uid, folder: r.folder || 'INBOX', cached: false }); };
+const liveLetterAnswer = params => {
+  const row = liveLetters.get(params[0]);
+  return { rows: row ? [{ ...row }] : [] };
+};
+
 describe('prefetchFolderBodies stops instead of hammering a refusing server', () => {
   // A generic host: the mail node's profile, where snippetIndex (and so folder prefetch) is on.
   const acct = { id: 'prefetch-acct', user_id: 'u1', enabled: true, imap_host: 'mail.example.com', imap_port: 993, imap_tls: true };
@@ -4972,10 +4983,13 @@ describe('prefetchFolderBodies stops instead of hammering a refusing server', ()
 
   beforeEach(() => {
     vi.clearAllMocks();
+    liveLetters.clear();
+    holdLetters(ids.map((id, i) => ({ id, uid: i + 1, folder: 'INBOX' })));
     query.mockReset();
-    query.mockImplementation(async (sql) => {
+    query.mockImplementation(async (sql, params) => {
       if (sql.startsWith('SELECT * FROM email_accounts')) return { rows: [acct] };
       if (sql.includes('body_html IS NULL AND body_text IS NULL')) return { rows: ids.map((id, i) => ({ id, uid: i + 1, folder: 'INBOX' })) };
+      if (sql.includes('AS cached')) return liveLetterAnswer(params);
       return { rows: [] };
     });
     vi.spyOn(console, 'warn').mockImplementation(() => {});
@@ -5067,9 +5081,13 @@ describe('body prefetch and a rejected password', () => {
     getConnectionPolicy.mockResolvedValue({ allowPrivateHosts: true, allowInsecureTls: true });
     resolveForConnection.mockResolvedValue({ host: '127.0.0.1', addresses: ['127.0.0.1'], servername: null });
     query.mockReset();
-    query.mockImplementation(async (sql) => {
+    liveLetters.clear();
+    holdLetters(ids.map((id, i) => ({ id, uid: i + 1, folder: 'INBOX' })));
+    holdLetters([1, 2, 3, 9].map(uid => ({ id: `n${uid}`, uid, folder: 'INBOX' }))); // new mail of a sync
+    query.mockImplementation(async (sql, params) => {
       if (sql.startsWith('SELECT * FROM email_accounts')) return { rows: [acct] };
       if (sql.includes('body_html IS NULL AND body_text IS NULL')) return { rows: ids.map((id, i) => ({ id, uid: i + 1, folder: 'INBOX' })) };
+      if (sql.includes('AS cached')) return liveLetterAnswer(params);
       return { rows: [], rowCount: 1 };
     });
     vi.spyOn(console, 'warn').mockImplementation(() => {});
@@ -5143,10 +5161,13 @@ describe('body prefetch runs one at a time and pauses after a stop', () => {
 
   beforeEach(() => {
     vi.clearAllMocks();
+    liveLetters.clear();
+    holdLetters(ids.map((id, i) => ({ id, uid: i + 1, folder: 'INBOX' })));
     query.mockReset();
-    query.mockImplementation(async (sql) => {
+    query.mockImplementation(async (sql, params) => {
       if (sql.startsWith('SELECT * FROM email_accounts')) return { rows: [acct] };
       if (sql.includes('body_html IS NULL AND body_text IS NULL')) return { rows: ids.map((id, i) => ({ id, uid: i + 1, folder: 'INBOX' })) };
+      if (sql.includes('AS cached')) return liveLetterAnswer(params);
       return { rows: [] };
     });
     vi.spyOn(console, 'warn').mockImplementation(() => {});
@@ -5181,12 +5202,494 @@ describe('body prefetch runs one at a time and pauses after a stop', () => {
     expect(mgr.fetchMessageBody).toHaveBeenCalledTimes(2 * PREFETCH_MAX_CONSECUTIVE_ERRORS);
   });
 
+  // The pool's own "busy" (the background share stayed taken for the whole acquire wait; no login
+  // was tried) is not a failure of the server or of the letter.
+  const busy = () => Object.assign(new Error('IMAP pool busy, please retry'), { poolExhausted: true });
+  const ok = { html: null, text: 'ok', attachments: [] };
+
+  it.each([
+    ['the folder view', (mgr) => mgr.prefetchFolderBodies(acct.id, ids)],
+    ['new mail', (mgr) => mgr.prefetchNewMessageBodies(acct, ids.map((id, i) => ({ id, uid: i + 1, folder: 'INBOX' })).reverse())],
+  ])('waits out a busy pool instead of stopping (%s)', async (_lane, run) => {
+    const mgr = ladderManager();
+    mgr.fetchMessageBody = vi.fn();
+    for (let i = 0; i < PREFETCH_MAX_CONSECUTIVE_ERRORS + 1; i++) mgr.fetchMessageBody.mockRejectedValueOnce(busy());
+    mgr.fetchMessageBody.mockResolvedValue(ok);
+    await run(mgr);
+    const uids = mgr.fetchMessageBody.mock.calls.map(c => c[1]);
+    // The first letter is tried again until the pool has room, then the rest follow.
+    expect(uids).toEqual([...Array(PREFETCH_MAX_CONSECUTIVE_ERRORS + 2).fill(uids[0]), ...uids.slice(PREFETCH_MAX_CONSECUTIVE_ERRORS + 2)]);
+    expect(new Set(uids).size).toBe(ids.length);
+    expect(mgr._prefetchPausedUntil.has(acct.id)).toBe(false);
+  });
+
+  it('counts busy answers over the whole run, not per letter', async () => {
+    // Every letter waiting out almost the whole allowance would otherwise hold the run (and the
+    // folder-view one-run guard) for hours.
+    const mgr = ladderManager();
+    mgr.fetchMessageBody = vi.fn();
+    for (let n = 0; n < ids.length; n++) {
+      for (let i = 0; i < PREFETCH_MAX_BUSY_WAITS - 1; i++) mgr.fetchMessageBody.mockRejectedValueOnce(busy());
+      mgr.fetchMessageBody.mockResolvedValueOnce(ok);
+    }
+    await mgr.prefetchFolderBodies(acct.id, ids);
+    // The first letter after 29 busy answers, then the 30th busy answer ends the run.
+    expect(mgr.fetchMessageBody).toHaveBeenCalledTimes(PREFETCH_MAX_BUSY_WAITS + 1);
+    expect(mgr._prefetchPausedUntil.has(acct.id)).toBe(false);
+  });
+
+  it('counts busy answers over every batch of a new-mail run', async () => {
+    const mgr = ladderManager();
+    let release;
+    const gate = new Promise(resolve => { release = resolve; });
+    const rows = ids.map((id, i) => ({ id, uid: i + 1, folder: 'INBOX' }));
+    let calls = 0;
+    mgr.fetchMessageBody = vi.fn(async () => {
+      calls++;
+      if (calls === 1) await gate;
+      if (calls <= PREFETCH_MAX_BUSY_WAITS - 1) throw busy();
+      if (calls === PREFETCH_MAX_BUSY_WAITS) return ok;
+      throw busy();
+    });
+    const first = mgr.prefetchNewMessageBodies(acct, rows.slice(0, 1));
+    await vi.waitFor(() => expect(calls).toBe(1));
+    await mgr.prefetchNewMessageBodies(acct, rows.slice(1, 2)); // the next sync's batch
+    release();
+    await first;
+    // 29 busy answers and a success in the first batch; the next batch's first busy answer ends it.
+    expect(calls).toBe(PREFETCH_MAX_BUSY_WAITS + 1);
+  });
+
+  it('ends the run without the pause when the pool stays busy as long as any pooled operation may run', async () => {
+    const mgr = ladderManager();
+    // Each answer after a macrotask, as the real acquire wait is: an unbounded wait then fails on
+    // the test timeout instead of spinning forever on microtasks.
+    mgr.fetchMessageBody = vi.fn(() => new Promise((_, reject) => setImmediate(() => reject(busy()))));
+    await mgr.prefetchFolderBodies(acct.id, ids);
+    expect(mgr.fetchMessageBody).toHaveBeenCalledTimes(PREFETCH_MAX_BUSY_WAITS);
+    expect(mgr._prefetchPausedUntil.has(acct.id)).toBe(false);
+    // The next folder view tries again.
+    mgr.fetchMessageBody.mockResolvedValue(ok);
+    await mgr.prefetchFolderBodies(acct.id, ids);
+    expect(mgr.fetchMessageBody).toHaveBeenCalledTimes(PREFETCH_MAX_BUSY_WAITS + ids.length);
+  });
+
+  it('still stops on a held-back pool answer (providerRefusing), as before', async () => {
+    const mgr = ladderManager();
+    mgr.fetchMessageBody = vi.fn().mockRejectedValue(Object.assign(new Error('Mail server is not accepting new connections for this account right now'), { providerRefusing: true }));
+    await mgr.prefetchFolderBodies(acct.id, ids);
+    expect(mgr.fetchMessageBody).toHaveBeenCalledTimes(PREFETCH_MAX_CONSECUTIVE_ERRORS);
+    expect(mgr._prefetchPausedUntil.has(acct.id)).toBe(true);
+  });
+
   it('does not pause after a run that went through', async () => {
     const mgr = ladderManager();
     mgr.fetchMessageBody = vi.fn().mockResolvedValue({ html: null, text: 'ok', attachments: [] });
     await mgr.prefetchFolderBodies(acct.id, ids);
     await mgr.prefetchFolderBodies(acct.id, ids);
     expect(mgr.fetchMessageBody).toHaveBeenCalledTimes(2 * ids.length);
+  });
+});
+
+describe('newBodyPrefetchCount', () => {
+  const node = { imap_host: 'mail.example.com', mail_node: true };
+  const generic = { imap_host: 'mail.example.com' };
+
+  it('fetches every new letter of a node mailbox, up to the per-sync bound', () => {
+    expect(newBodyPrefetchCount(node, 0, 'INBOX')).toBe(0);
+    expect(newBodyPrefetchCount(node, 1, 'INBOX')).toBe(1);
+    expect(newBodyPrefetchCount(node, 12, 'INBOX')).toBe(12);
+    expect(newBodyPrefetchCount(node, NODE_NEW_BODY_PREFETCH_MAX, 'INBOX')).toBe(NODE_NEW_BODY_PREFETCH_MAX);
+    expect(newBodyPrefetchCount(node, 500, 'INBOX')).toBe(NODE_NEW_BODY_PREFETCH_MAX);
+    expect(NODE_NEW_BODY_PREFETCH_MAX).toBe(50);
+  });
+
+  it('lets as many letters wait for the lane as one sync of the mailbox may fetch', () => {
+    expect(newBodyQueueMax(node)).toBe(NODE_NEW_BODY_PREFETCH_MAX);
+    expect(newBodyQueueMax(generic)).toBe(5);
+    expect(newBodyQueueMax({ imap_host: 'imap.gmail.com', oauth_provider: 'google' })).toBe(5);
+    expect(newBodyQueueMax({ imap_host: 'imap.purelymail.com' })).toBe(1);
+  });
+
+  it('gives the node budget to the INBOX only; Junk and label folders keep the small-batch rule', () => {
+    expect(newBodyPrefetchCount(node, 12, 'Junk')).toBe(0);
+    expect(newBodyPrefetchCount(node, 12, 'Todo')).toBe(0);
+    expect(newBodyPrefetchCount(node, 3, 'Junk')).toBe(3);
+  });
+
+  it('keeps the small-batch rule everywhere else', () => {
+    expect(newBodyPrefetchCount(generic, 5, 'INBOX')).toBe(5);
+    expect(newBodyPrefetchCount(generic, 6, 'INBOX')).toBe(0);
+    // Gmail: up to 5, every one of them.
+    expect(newBodyPrefetchCount({ imap_host: 'imap.gmail.com', oauth_provider: 'google' }, 3, 'INBOX')).toBe(3);
+    expect(newBodyPrefetchCount({ imap_host: 'imap.gmail.com', oauth_provider: 'google' }, 6, 'INBOX')).toBe(0);
+    // PurelyMail warms only the newest arrival.
+    expect(newBodyPrefetchCount({ imap_host: 'imap.purelymail.com' }, 3, 'INBOX')).toBe(1);
+  });
+});
+
+describe('a sync stores the bodies of a node mailbox\'s new letters', () => {
+  // The panel's own mail node is close and cheap: every letter a sync brings in is fetched right
+  // away on a background pooled session, so opening it reads the database, not the server.
+  const mailbox = (id, extra = {}) => ({
+    id, user_id: 'u1', enabled: true, email_address: 'team@example.com', gtd_enabled: false,
+    categorization_enabled: false, imap_host: 'mail.example.com', imap_port: 993, imap_tls: true,
+    auth_user: 'team@example.com', auth_pass: 'enc', mail_node: true, ...extra,
+  });
+  const WATERMARK = 100;
+  let bodies, bodyFetchOrder, pooledLogins, goneUids, rowFolder;
+
+  beforeEach(() => {
+    vi.clearAllMocks();
+    rowFolder = new Map();
+    goneUids = new Set(); // letters the server no longer has where the sync saw them
+    bodies = new Map();
+    bodyFetchOrder = [];
+    pooledLogins = 0;
+    getConnectionPolicy.mockResolvedValue({ allowPrivateHosts: true, allowInsecureTls: true });
+    resolveForConnection.mockResolvedValue({ host: '127.0.0.1', addresses: ['127.0.0.1'], servername: null });
+    sendPushToActiveUsers.mockResolvedValue();
+    // Pooled sessions: a single text/plain part per letter.
+    ImapFlow.mockImplementation(function () {
+      pooledLogins++;
+      return Object.assign(new EventEmitter(), {
+        connect: vi.fn().mockResolvedValue(),
+        close: vi.fn(),
+        logout: vi.fn().mockResolvedValue(),
+        getMailboxLock: vi.fn(async () => ({ release: vi.fn() })),
+        fetch: vi.fn(async function* (uidStr, fetchQuery) {
+          if (fetchQuery.bodyStructure) bodyFetchOrder.push(Number(uidStr));
+          if (goneUids.has(Number(uidStr))) return; // UID FETCH answers nothing
+          yield {
+            uid: Number(uidStr),
+            bodyStructure: { part: '1', type: 'text/plain', encoding: '7bit', parameters: { charset: 'utf-8' } },
+            bodyParts: new Map([['1', Buffer.from(`Body of ${uidStr}`)]]),
+          };
+        }),
+      });
+    });
+    // The messages table, as far as sync and prefetch touch it: one row per UID, and its body.
+    query.mockReset();
+    query.mockImplementation(async (sql, params = []) => {
+      if (sql.includes('SELECT uid_validity, highest_modseq FROM folders')) return { rows: [{ uid_validity: 100, highest_modseq: '500' }] };
+      if (sql.includes('COALESCE(MAX(uid), 0)')) return { rows: [{ max_uid: WATERMARK }] };
+      if (sql.includes('COUNT(*) FILTER (WHERE is_read = false)')) return { rows: [{ n: 0 }] };
+      if (sql.includes('INSERT INTO messages')) { rowFolder.set(`row-${params[1]}`, params[2]); return { rows: [{ id: `row-${params[1]}`, is_new: true }] }; }
+      // Every row-<uid> is a live letter, in the folder the sync stored it in (INBOX by default).
+      if (sql.includes('AS cached')) return { rows: [{ uid: Number(String(params[0]).slice(4)), folder: rowFolder.get(params[0]) || 'INBOX', cached: bodies.has(params[0]) }] };
+      if (sql.includes('SET body_html = $1, body_text = $2')) { bodies.set(params[3], params[1]); return { rows: [], rowCount: 1 }; }
+      return { rows: [], rowCount: 0 };
+    });
+    parseMessage.mockImplementation(async msg => ({
+      uid: msg.uid, messageId: `<letter-${msg.uid}@example.org>`, subject: `Letter ${msg.uid}`,
+      fromName: 'Client', fromEmail: 'client@example.org', to: [], cc: [], replyTo: [], inReplyTo: null,
+      references: null, date: new Date('2026-09-26T10:00:00Z'), snippet: '', isRead: false, isStarred: false,
+      hasAttachments: false, flags: [], isBulk: false, parsedHeaders: {},
+    }));
+    vi.spyOn(console, 'warn').mockImplementation(() => {});
+    vi.spyOn(console, 'log').mockImplementation(() => {});
+  });
+  afterEach(() => { vi.restoreAllMocks(); });
+
+  // The persistent session: `count` letters above the watermark.
+  const syncClient = count => ({
+    getMailboxLock: vi.fn().mockResolvedValue({ release: vi.fn() }),
+    mailbox: { exists: WATERMARK + count, uidValidity: 100, highestModseq: 500n },
+    fetch: vi.fn(async function* (range) {
+      if (range !== `${WATERMARK + 1}:*`) return;
+      for (let uid = WATERMARK + 1; uid <= WATERMARK + count; uid++) yield { uid };
+    }),
+  });
+  const settleBackground = () => new Promise(resolve => setImmediate(resolve));
+
+  it('has every one of N new letters\' bodies in the database after the sync', async () => {
+    const acct = mailbox('node-bodies-12');
+    const mgr = ladderManager();
+    try {
+      await mgr.syncMessages(acct, syncClient(12), 'INBOX', 20, false, true);
+      await vi.waitFor(() => expect(bodies.size).toBe(12));
+      for (let uid = WATERMARK + 1; uid <= WATERMARK + 12; uid++) expect(bodies.get(`row-${uid}`)).toBe(`Body of ${uid}`);
+      // Newest first: the letter most likely to be opened is warm first.
+      expect(bodyFetchOrder).toEqual(Array.from({ length: 12 }, (_, i) => WATERMARK + 12 - i));
+      // One pooled session did it all, as background work.
+      expect(pooledLogins).toBe(1);
+    } finally { evictPool(acct.id); }
+  });
+
+  it('fetches them while a folder-view prefetch of the same mailbox is running', async () => {
+    const acct = mailbox('node-bodies-folder-run');
+    const mgr = ladderManager();
+    // A folder-view run pauses between letters while the reader clicks, so it can last long.
+    mgr._prefetchRunning.add(acct.id);
+    try {
+      await mgr.syncMessages(acct, syncClient(3), 'INBOX', 20, false, true);
+      await vi.waitFor(() => expect(bodies.size).toBe(3));
+    } finally { evictPool(acct.id); }
+  });
+
+  const newRows = (from, to) => Array.from({ length: to - from + 1 }, (_, i) => ({ id: `row-${from + i}`, uid: from + i, folder: 'INBOX' }));
+
+  it('queues the letters of a sync that arrive while the previous ones are being fetched', async () => {
+    const acct = mailbox('node-bodies-queue');
+    const mgr = ladderManager();
+    let release;
+    const gate = new Promise(resolve => { release = resolve; });
+    mgr.fetchMessageBody = vi.fn(async (_a, uid) => {
+      if (uid === 103) await gate;
+      return { html: null, text: `Body of ${uid}`, attachments: [] };
+    });
+    const first = mgr.prefetchNewMessageBodies(acct, newRows(101, 103));
+    await vi.waitFor(() => expect(mgr.fetchMessageBody).toHaveBeenCalledTimes(1));
+    await mgr.prefetchNewMessageBodies(acct, newRows(104, 105)); // the next sync, mid-run
+    release();
+    await first;
+    expect(mgr.fetchMessageBody.mock.calls.map(c => c[1])).toEqual([103, 102, 101, 105, 104]);
+    expect([...bodies.keys()].sort()).toEqual(['row-101', 'row-102', 'row-103', 'row-104', 'row-105']);
+    // The lane is free again for the sync after that.
+    await mgr.prefetchNewMessageBodies(acct, newRows(106, 106));
+    expect(bodies.has('row-106')).toBe(true);
+  });
+
+  it('drops the letters queued behind a run that stopped; they are fetched on open', async () => {
+    vi.useFakeTimers({ toFake: ['Date'] });
+    try {
+      const acct = mailbox('node-bodies-stop-queue');
+      const mgr = ladderManager();
+      let release;
+      const gate = new Promise(resolve => { release = resolve; });
+      mgr.fetchMessageBody = vi.fn(async (_a, uid) => {
+        if (uid === 103) await gate;
+        if (uid <= 103) throw new Error('Pooled IMAP operation timeout (30000ms)');
+        return { html: null, text: `Body of ${uid}`, attachments: [] };
+      });
+      const first = mgr.prefetchNewMessageBodies(acct, newRows(101, 103));
+      await vi.waitFor(() => expect(mgr.fetchMessageBody).toHaveBeenCalledTimes(1));
+      await mgr.prefetchNewMessageBodies(acct, newRows(104, 104));
+      release();
+      await first;
+      expect(mgr.fetchMessageBody).toHaveBeenCalledTimes(PREFETCH_MAX_CONSECUTIVE_ERRORS);
+      vi.setSystemTime(Date.now() + PREFETCH_STOP_PAUSE_MS + 1);
+      await mgr.prefetchNewMessageBodies(acct, newRows(105, 105));
+      expect(mgr.fetchMessageBody.mock.calls.slice(PREFETCH_MAX_CONSECUTIVE_ERRORS).map(c => c[1])).toEqual([105]);
+    } finally { vi.useRealTimers(); }
+  });
+
+  it('spends no fresh login on letters the server no longer has, and stops after three', async () => {
+    // Moved or expunged by another client before the database knew: UID FETCH answers nothing.
+    const acct = mailbox('node-bodies-gone');
+    const mgr = ladderManager();
+    for (let uid = 101; uid <= 105; uid++) goneUids.add(uid);
+    try {
+      await mgr.prefetchNewMessageBodies(acct, newRows(101, 105));
+      // One pooled login per letter (each empty answer evicts its session), no fresh-login retry,
+      // and the three in a row stop the run.
+      expect(pooledLogins).toBe(PREFETCH_MAX_CONSECUTIVE_ERRORS);
+      expect(bodyFetchOrder).toEqual([105, 104, 103]);
+      expect(bodies.size).toBe(0);
+      expect(mgr._prefetchPausedUntil.has(acct.id)).toBe(true);
+    } finally { evictPool(acct.id); }
+  });
+
+  it('reports an empty answer to background work as the letter being gone', async () => {
+    const acct = mailbox('node-bodies-gone-flag');
+    const mgr = ladderManager();
+    goneUids.add(101);
+    try {
+      await expect(mgr.fetchMessageBody(acct, 101, 'INBOX', { background: true }))
+        .rejects.toMatchObject({ messageGone: true });
+      expect(pooledLogins).toBe(1);
+    } finally { evictPool(acct.id); }
+  });
+
+  it('still retries a user\'s empty fetch through a fresh login', async () => {
+    const acct = mailbox('node-bodies-gone-user');
+    const mgr = ladderManager();
+    goneUids.add(101);
+    vi.spyOn(console, 'warn').mockImplementation(() => {});
+    try {
+      await expect(mgr.fetchMessageBody(acct, 101, 'INBOX')).resolves.toMatchObject({ html: null, text: null });
+      expect(pooledLogins).toBe(2);
+    } finally { evictPool(acct.id); }
+  });
+
+  it('ends a new-mail run and drops its queue when the mailbox is disconnected', async () => {
+    // DELETE /accounts/:id, a disable or a settings change: the next letter must not open a login.
+    const acct = mailbox('node-bodies-disconnect');
+    const mgr = ladderManager();
+    let release;
+    const gate = new Promise(resolve => { release = resolve; });
+    mgr.fetchMessageBody = vi.fn(async (_a, uid) => {
+      if (uid === 103) await gate;
+      return { html: null, text: `Body of ${uid}`, attachments: [] };
+    });
+    const first = mgr.prefetchNewMessageBodies(acct, newRows(101, 103));
+    await vi.waitFor(() => expect(mgr.fetchMessageBody).toHaveBeenCalledTimes(1));
+    await mgr.prefetchNewMessageBodies(acct, newRows(104, 105)); // queued behind the run
+    await mgr.disconnectAccount(acct.id);
+    release();
+    await first;
+    expect(mgr.fetchMessageBody.mock.calls.map(c => c[1])).toEqual([103]);
+    // A reconnected mailbox prefetches again.
+    await mgr.prefetchNewMessageBodies(acct, newRows(106, 106));
+    expect(mgr.fetchMessageBody.mock.calls.map(c => c[1])).toEqual([103, 106]);
+  });
+
+  it('ends a folder-view run when the mailbox is disconnected', async () => {
+    const acct = mailbox('node-bodies-disconnect-folder');
+    const mgr = ladderManager();
+    let release;
+    const gate = new Promise(resolve => { release = resolve; });
+    mgr.fetchMessageBody = vi.fn(async (_a, uid) => {
+      if (uid === 101) await gate;
+      return { html: null, text: `Body of ${uid}`, attachments: [] };
+    });
+    const running = mgr._prefetchBodyRun(acct, newRows(101, 103), { waitForQuiet: false });
+    await vi.waitFor(() => expect(mgr.fetchMessageBody).toHaveBeenCalledTimes(1));
+    await mgr.disconnectAccount(acct.id);
+    release();
+    await running;
+    expect(mgr.fetchMessageBody).toHaveBeenCalledTimes(1);
+  });
+
+  it('keeps only the newest letters waiting, up to the per-sync bound', async () => {
+    const acct = mailbox('node-bodies-queue-bound');
+    const mgr = ladderManager();
+    mgr.fetchMessageBody = vi.fn(async (_a, uid) => ({ html: null, text: `Body of ${uid}`, attachments: [] }));
+    await mgr.prefetchNewMessageBodies(acct, newRows(101, 100 + NODE_NEW_BODY_PREFETCH_MAX + 10));
+    expect(mgr.fetchMessageBody).toHaveBeenCalledTimes(NODE_NEW_BODY_PREFETCH_MAX);
+    expect(bodies.has(`row-${100 + NODE_NEW_BODY_PREFETCH_MAX + 10}`)).toBe(true);
+    expect(bodies.has('row-110')).toBe(false);
+  });
+
+  it.each([
+    ['Gmail: five', { mail_node: false, imap_host: 'imap.gmail.com', oauth_provider: 'google' }, 5],
+    ['PurelyMail: one', { mail_node: false, imap_host: 'imap.purelymail.com' }, 1],
+  ])('keeps no more waiting than one sync\'s budget of the mailbox (%s)', async (_name, extra, budget) => {
+    // Ticks keep bringing letters while the lane waits on its first one: they must not add up.
+    const acct = mailbox(`queue-budget-${budget}`, extra);
+    const mgr = ladderManager();
+    let release;
+    const gate = new Promise(resolve => { release = resolve; });
+    mgr.fetchMessageBody = vi.fn(async (_a, uid) => {
+      if (uid === 100 + budget) await gate;
+      return { html: null, text: `Body of ${uid}`, attachments: [] };
+    });
+    const first = mgr.prefetchNewMessageBodies(acct, newRows(101, 100 + budget));
+    await vi.waitFor(() => expect(mgr.fetchMessageBody).toHaveBeenCalledTimes(1));
+    for (let tick = 1; tick <= 3; tick++) {
+      const from = 100 + tick * budget + 1;
+      await mgr.prefetchNewMessageBodies(acct, newRows(from, from + budget - 1));
+    }
+    release();
+    await first;
+    // The first sync's letters, then only the newest budget of the three later ones.
+    const uids = mgr.fetchMessageBody.mock.calls.map(c => c[1]);
+    expect(uids).toHaveLength(2 * budget);
+    expect(Math.min(...uids.slice(budget))).toBe(100 + 3 * budget + 1);
+  });
+
+  // A mailing to many node mailboxes: every mailbox's lane runs at once, all on one node host.
+  const lanesOnOneHost = async (extra, fetchImpl) => {
+    const mgr = ladderManager();
+    let inFlight = 0, peak = 0;
+    const gates = [];
+    mgr.fetchMessageBody = vi.fn(async (a, uid) => {
+      inFlight++; peak = Math.max(peak, inFlight);
+      try { return await fetchImpl(uid, gates); } finally { inFlight--; }
+    });
+    const lanes = Array.from({ length: 12 }, (_, n) =>
+      mgr.prefetchNewMessageBodies(mailbox(`host-lane-${n}`, extra), newRows(100 + 2 * n + 1, 100 + 2 * n + 2)));
+    return { mgr, lanes, gates, peak: () => peak, inFlight: () => inFlight };
+  };
+
+  it('holds the node mailboxes of one host to NODE_PREFETCH_PER_HOST letters in flight', async () => {
+    const run = await lanesOnOneHost({}, (uid, gates) => new Promise(resolve => gates.push(() => resolve({ html: null, text: `Body of ${uid}`, attachments: [] }))));
+    await vi.waitFor(() => expect(run.inFlight()).toBe(NODE_PREFETCH_PER_HOST));
+    await settleBackground();
+    expect(run.inFlight()).toBe(NODE_PREFETCH_PER_HOST);
+    // Each finished letter lets the next one in, until all 24 are stored.
+    while (bodies.size < 24) {
+      while (run.gates.length) run.gates.shift()();
+      await settleBackground();
+    }
+    await Promise.all(run.lanes);
+    expect(run.peak()).toBe(NODE_PREFETCH_PER_HOST);
+    expect(bodies.size).toBe(24);
+  });
+
+  it('gives the slot back when a letter fails', async () => {
+    const run = await lanesOnOneHost({}, async () => { throw new Error('Unexpected server response'); });
+    await Promise.all(run.lanes);
+    expect(run.mgr.fetchMessageBody).toHaveBeenCalledTimes(24);
+  });
+
+  it('does not hold mailboxes off the node to the node host limit', async () => {
+    const run = await lanesOnOneHost({ mail_node: false }, (uid, gates) => new Promise(resolve => gates.push(() => resolve({ html: null, text: `Body of ${uid}`, attachments: [] }))));
+    await vi.waitFor(() => expect(run.inFlight()).toBe(12));
+    while (run.gates.length || run.inFlight()) {
+      while (run.gates.length) run.gates.shift()();
+      await settleBackground();
+    }
+    await Promise.all(run.lanes);
+  });
+
+  it('pauses the new-mail lane after a run stopped on failures', async () => {
+    const acct = mailbox('node-bodies-pause');
+    const mgr = ladderManager();
+    mgr.fetchMessageBody = vi.fn().mockRejectedValue(new Error('Pooled IMAP operation timeout (30000ms)'));
+    await mgr.prefetchNewMessageBodies(acct, newRows(101, 105));
+    expect(mgr.fetchMessageBody).toHaveBeenCalledTimes(PREFETCH_MAX_CONSECUTIVE_ERRORS);
+    await mgr.prefetchNewMessageBodies(acct, newRows(106, 106));
+    expect(mgr.fetchMessageBody).toHaveBeenCalledTimes(PREFETCH_MAX_CONSECUTIVE_ERRORS);
+  });
+
+  it('leaves a spam wave in Junk alone: the node budget is for the INBOX', async () => {
+    const acct = mailbox('node-bodies-junk');
+    const mgr = ladderManager();
+    try {
+      await mgr.syncMessages(acct, syncClient(12), 'Junk', 50, false, true);
+      await settleBackground();
+      await settleBackground();
+      expect(bodyFetchOrder).toEqual([]);
+      expect(pooledLogins).toBe(0);
+    } finally { evictPool(acct.id); }
+  });
+
+  it('fetches only the newest letters of a flood, up to the per-sync bound', async () => {
+    const acct = mailbox('node-bodies-flood');
+    const mgr = ladderManager();
+    const count = NODE_NEW_BODY_PREFETCH_MAX + 10;
+    try {
+      await mgr.syncMessages(acct, syncClient(count), 'INBOX', 20, false, true);
+      await vi.waitFor(() => expect(bodies.size).toBe(NODE_NEW_BODY_PREFETCH_MAX));
+      await settleBackground();
+      expect(bodies.size).toBe(NODE_NEW_BODY_PREFETCH_MAX);
+      expect(bodies.has(`row-${WATERMARK + count}`)).toBe(true);
+      expect(bodies.has(`row-${WATERMARK + 10}`)).toBe(false);
+    } finally { evictPool(acct.id); }
+  });
+
+  it('still warms only the newest arrival of a PurelyMail mailbox', async () => {
+    const acct = mailbox('purelymail-bodies-3', { mail_node: false, imap_host: 'imap.purelymail.com' });
+    const mgr = ladderManager();
+    try {
+      await mgr.syncMessages(acct, syncClient(3), 'INBOX', 20, false, true);
+      await vi.waitFor(() => expect(bodies.size).toBe(1));
+      await settleBackground();
+      expect([...bodies.keys()]).toEqual([`row-${WATERMARK + 3}`]);
+    } finally { evictPool(acct.id); }
+  });
+
+  it('leaves a batch of more than five alone on a mailbox off the node, as before', async () => {
+    const acct = mailbox('generic-bodies-12', { mail_node: false });
+    const mgr = ladderManager();
+    try {
+      await mgr.syncMessages(acct, syncClient(12), 'INBOX', 20, false, true);
+      await settleBackground();
+      await settleBackground();
+      expect(bodyFetchOrder).toEqual([]);
+      expect(pooledLogins).toBe(0);
+    } finally { evictPool(acct.id); }
   });
 });
 
@@ -6257,8 +6760,9 @@ describe('every background login waits out a rejected password', () => {
     // runs only for a freshInboxSync profile, and no shipped profile sets it), row 11 (provider id
     // backfill: imapManager.providerIds.test.js, 'costs at most one rejected login per auth window').
     const snoozeRow = (acct) => ({ snooze_id: 's1', account_id: acct.id, message_id_header: '<s1@example.com>', original_folder: 'INBOX', snoozed_folder: 'Snoozed', uid: 5, is_read: true });
-    const walkQuery = (acct) => async (sql) => {
+    const walkQuery = (acct) => async (sql, params) => {
       if (sql.startsWith('SELECT * FROM email_accounts')) return { rows: [acct], rowCount: 1 };
+      if (sql.includes('AS cached')) return { rows: [{ uid: params[0] === 'p1' ? 1 : 2, folder: 'INBOX', cached: false }] };
       if (sql.startsWith('SELECT count(*)')) return { rows: [{ count: '5' }] };
       if (sql.includes('is_bulk IS NULL')) return { rows: [{ id: 'x1', uid: 1, folder: 'INBOX' }, { id: 'x2', uid: 2, folder: 'Sent' }] };
       if (sql.includes('body_html IS NULL AND body_text IS NULL')) return { rows: [{ id: 'p1', uid: 1, folder: 'INBOX' }, { id: 'p2', uid: 2, folder: 'INBOX' }] };

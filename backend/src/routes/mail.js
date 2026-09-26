@@ -1459,7 +1459,7 @@ router.post('/messages/bulk-delete', async (req, res) => {
         const acct = accountsById[acctId];
         if (!acct) continue;
         for (const tp of paths) {
-          imapManager.syncFolderOnDemand(acct, tp)
+          imapManager.syncFolderOnDemand(acct, tp, { background: true })
             .catch(err => console.warn('post-trash destination sync failed:', err.message));
         }
       }
@@ -1709,7 +1709,7 @@ router.post('/messages/bulk-move', async (req, res) => {
       // Messages moved on a non-UIDPLUS server were deleted with no reinsert; pull the
       // destination folder now so they reappear promptly instead of waiting for IDLE.
       for (const acct of resyncAccounts) {
-        imapManager.syncFolderOnDemand(acct, folder)
+        imapManager.syncFolderOnDemand(acct, folder, { background: true })
           .catch(err => console.warn('post-move destination sync failed:', err.message));
       }
       // Adjust cached counts: decrement source folders, increment the destination.
@@ -1870,7 +1870,7 @@ router.post('/messages/bulk-archive', async (req, res) => {
       const acct = accountsById[acctId];
       if (!acct) continue;
       for (const fp of paths) {
-        imapManager.syncFolderOnDemand(acct, fp)
+        imapManager.syncFolderOnDemand(acct, fp, { background: true })
           .catch(err => console.warn('post-archive destination sync failed:', err.message));
       }
     }

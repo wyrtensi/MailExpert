@@ -104,8 +104,8 @@ describe('runGtdTransitions', () => {
     ] });
     const mgr = fakeManager();
     await runGtdTransitions(mgr, account, ['t1']);
-    expect(mgr.removeMessageCopy).toHaveBeenCalledWith('acct-1', 11, 'Todo');
-    expect(mgr.removeMessageCopy).toHaveBeenCalledWith('acct-1', 12, 'Someday');
+    expect(mgr.removeMessageCopy).toHaveBeenCalledWith('acct-1', 11, 'Todo', { background: true });
+    expect(mgr.removeMessageCopy).toHaveBeenCalledWith('acct-1', 12, 'Someday', { background: true });
     expect(mgr.removeMessageCopy).not.toHaveBeenCalledWith('acct-1', 13, 'Watch');
     expect(mgr.removeMessageCopy).not.toHaveBeenCalledWith('acct-1', 14, 'Delegated');
     expect(mgr.broadcast).toHaveBeenCalledWith({ type: 'gtd_sections_updated', accountId: 'acct-1' });
@@ -135,7 +135,7 @@ describe('runGtdTransitions', () => {
     });
     const mgr = fakeManager();
     await runGtdTransitions(mgr, account, ['t1']);
-    expect(mgr.removeMessageCopy).toHaveBeenCalledWith('acct-1', 31, 'Todo');
+    expect(mgr.removeMessageCopy).toHaveBeenCalledWith('acct-1', 31, 'Todo', { background: true });
   });
 
   it('keeps Watch when the newest message is from a configured Fastmail masked alias', async () => {
@@ -258,7 +258,7 @@ describe('runGtdTransitions', () => {
     const mgr = fakeManager();
     mgr.removeMessageCopy.mockRejectedValue(new Error('NO [TRYCREATE] no such UID'));
     await expect(runGtdTransitions(mgr, account, ['t1'])).resolves.toBeUndefined();
-    expect(mgr.removeMessageCopy).toHaveBeenCalledWith('acct-1', 71, 'Todo');
+    expect(mgr.removeMessageCopy).toHaveBeenCalledWith('acct-1', 71, 'Todo', { background: true });
     expect(mgr.broadcast).toHaveBeenCalledTimes(1);
   });
 });
@@ -302,8 +302,8 @@ describe('runTransitionsForSentMessage', () => {
 
     const midCall = query.mock.calls.find(([sql]) => sql.includes('message_id = ANY'));
     expect(midCall[1]).toEqual(['acct-1', ['abc@example.com', '<abc@example.com>']]);
-    expect(mgr.removeMessageCopy).toHaveBeenCalledWith('acct-1', 81, 'Todo');
-    expect(mgr.removeMessageCopy).toHaveBeenCalledWith('acct-1', 82, 'Someday');
+    expect(mgr.removeMessageCopy).toHaveBeenCalledWith('acct-1', 81, 'Todo', { background: true });
+    expect(mgr.removeMessageCopy).toHaveBeenCalledWith('acct-1', 82, 'Someday', { background: true });
     expect(mgr.removeMessageCopy).not.toHaveBeenCalledWith('acct-1', 83, 'Watch');
     expect(mgr.removeMessageCopy).not.toHaveBeenCalledWith('acct-1', 84, 'Delegated');
     expect(mgr.broadcast).toHaveBeenCalledWith({ type: 'gtd_sections_updated', accountId: 'acct-1' });

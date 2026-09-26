@@ -274,6 +274,54 @@ export const PREFETCH_MAX_CONSECUTIVE_ERRORS = 3;
 // How long an account's body prefetch stays paused after a run stopped on failures.
 export const PREFETCH_STOP_PAUSE_MS = 60 * 1000;
 
+// Busy pool answers (each after the 10 s background acquire wait) a prefetch run waits out, in
+// all, before it ends: 5 minutes, the bound of the longest pooled operation
+// (LONG_POOLED_OPERATION_TIMEOUT_MS). Counted over the whole run, not per letter: 50 letters each
+// waiting 29 times would hold the run, and the folder-view one-run-per-account guard with it,
+// for hours.
+export const PREFETCH_MAX_BUSY_WAITS = 30;
+
+// Letters of one sync whose bodies a mailbox on our own mail node (account.mail_node) fetches
+// right after it, newest first. The node is close: a body is one speculative FETCH round trip
+// of a few milliseconds on one background pooled session, so a usual tick (a handful of letters)
+// is warm before anyone clicks. The bound only matters for a flood (a mass mailing, the first
+// sync after an outage): the newest 50 are fetched, the rest on open. Attachments never are.
+export const NODE_NEW_BODY_PREFETCH_MAX = 50;
+
+// Body prefetch letters of node mailboxes in flight at once on one node host, across every
+// mailbox and both lanes. Each letter is one read, one FETCH and one write, and a lane has at
+// most one statement in flight, so this also bounds the prefetch's share of the database pool
+// (pg max 20, shared with every user request): 8 leaves 12 for users, sync and the other
+// background jobs. The node serves 8 small FETCHes at once easily, and at some 20-50 ms a letter
+// that is 160-400 letters a second: a mailing of 10 letters to 500 mailboxes is warm within about
+// 15-30 s. A letter holds its slot while it waits for its mailbox's pool too (up to 10 s when
+// the background share is taken), which only slows the others down.
+export const NODE_PREFETCH_PER_HOST = 8;
+
+// How many of the `newCount` unread letters a sync of `folder` just stored get their bodies
+// fetched right away (the newest ones). A node mailbox's INBOX: all of them up to
+// NODE_NEW_BODY_PREFETCH_MAX. Every other folder (Junk from the spam poll, the GTD label copies,
+// a folder the status monitor synced) and every other mailbox keeps the rule it had: only a small
+// batch (5 or fewer, so not an initial or bulk sync), capped by the profile's
+// prefetchNewBodiesLimit (PurelyMail: 1), and none where the profile sets prefetchNewBodies:
+// false. A spam wave on every node mailbox would otherwise store 50 spam bodies each.
+export function newBodyPrefetchCount(account, newCount, folder) {
+  if (!(newCount > 0)) return 0;
+  if (account.mail_node && folder === 'INBOX') return Math.min(newCount, NODE_NEW_BODY_PREFETCH_MAX);
+  const profile = providerProfile(account);
+  if (newCount > 5 || profile.prefetchNewBodies === false) return 0;
+  return Math.min(newCount, Math.max(1, Number(profile.prefetchNewBodiesLimit) || newCount));
+}
+
+// How many new letters may wait for the account's new-mail prefetch lane (the newest are kept):
+// the account's own budget of one sync, so letters piling up over several ticks while the lane
+// waits cannot add up past it. A node mailbox: NODE_NEW_BODY_PREFETCH_MAX. Any other: 5, or the
+// profile's prefetchNewBodiesLimit (PurelyMail: 1, each body there is a fresh login).
+export function newBodyQueueMax(account) {
+  if (account.mail_node) return NODE_NEW_BODY_PREFETCH_MAX;
+  return Math.min(5, Math.max(1, Number(providerProfile(account).prefetchNewBodiesLimit) || 5));
+}
+
 // True when an IMAP error looks like a connection-limit / throttle / temporary refusal —
 // the class of failure that should back off rather than retry hard. Deliberately broad on
 // the safe side: a false positive only means a ~30s backoff, never data loss.
@@ -1032,8 +1080,9 @@ const PROVIDERS = {
     //   statusOnPool:true — the folder status monitor (every minute) and integrity sync run on
     //     a pooled session instead of a fresh login each; only a real UID gap still opens a
     //     backfill login.
-    //   poolSize:3 — integrity sync can hold one pooled session for up to a minute, so user
-    //     actions keep two. Sessions open lazily, well under Gmail's 15 per account.
+    //   poolSize:3 — integrity sync can hold one pooled session for up to a minute; background
+    //     work holds at most two (backgroundPoolCap), so user actions always keep one. Sessions
+    //     open lazily, well under Gmail's 15 per account.
     stalenessProbe: false,
     autoBackfillExistingOnConnect: false,
     maxBackgroundConnections: 6,
@@ -1392,6 +1441,21 @@ export function poolSizeFor(account) {
   return providerProfile(account).poolSize ?? POOL_SIZE;
 }
 
+// How many of an account's pooled sessions background callers (sync of other folders, flag sync,
+// delete reconcile, the spam poll, body prefetch, the folder status monitor on Gmail) may hold at
+// once, counting sessions being opened for them. One session stays for user actions, so a click,
+// a move or an attachment never waits behind background work: 3 of 4 by default, 2 of Gmail's 3.
+//
+// A pool of 1 (Yahoo) keeps its one session open to background work, as before: a cap of 0 would
+// cut the GTD folder sync, flag sync, the spam poll and body prefetch off the pool entirely, and
+// Yahoo's three-session limit leaves no room for a second pooled session. There a user action
+// still goes ahead of every queued background caller, and body prefetch takes the session one
+// letter at a time, so a click waits for at most one background operation.
+export function backgroundPoolCap(account) {
+  const size = poolSizeFor(account);
+  return size > 1 ? size - 1 : size;
+}
+
 // Background connection limit for a provider host (see _bgConnSem).
 function backgroundConnectionLimit(host) {
   return providerProfile({ imap_host: host }).maxBackgroundConnections ?? BACKGROUND_CONN_MAX_PER_HOST;
@@ -1659,6 +1723,27 @@ export function disarmPoolIdleClose(pool, client) {
   pool.idleTimers.delete(client);
 }
 
+// Hand an open pooled session to a caller. pool.bgInUse marks the sessions background callers
+// hold, for backgroundPoolCap.
+function handOutPooled(pool, client, background) {
+  disarmPoolIdleClose(pool, client);
+  pool.inUse.add(client);
+  if (background) pool.bgInUse.add(client);
+  return client;
+}
+
+// A session its holder gave back, or one that left the pool (an error, the server closed it).
+// Called before any drainWaiters, so the queue sees the background count without it.
+function markPooledFree(pool, client) {
+  pool.inUse.delete(client);
+  pool.bgInUse.delete(client);
+}
+
+// True while background callers hold (or are opening) every session backgroundPoolCap allows them.
+function backgroundPoolFull(pool, account) {
+  return pool.bgInUse.size + pool.bgConnecting >= backgroundPoolCap(account);
+}
+
 // Hand freed capacity to the head of the queue, in order. An idle client goes to the head
 // waiter; when there is none but the pool is below its size (a session was evicted after an
 // error or closed by the server), the head waiter is woken to open a connection itself. Before
@@ -1669,18 +1754,21 @@ export function disarmPoolIdleClose(pool, client) {
 // A head waiter a backoff holds back (noNewLogin, loginHeldBack) never grows the pool: it waits
 // for a session to be released, and the grow goes to the first waiter behind it that may log in.
 // With no session open or being opened, the held head fails at once with providerRefusing.
+// A background head gets nothing while background callers hold their share of the pool
+// (backgroundPoolCap): the rest is kept for user actions.
 function drainWaiters(pool) {
   while (pool.waiters.length > 0) {
+    const head = pool.waiters[0];
+    // Interactive waiters are always queued ahead of background ones, so behind a background head
+    // only background work waits, and none of it may take the session kept for user actions.
+    if (head.background && backgroundPoolFull(pool, head.account)) break;
     const free = pool.clients.find(c => !pool.inUse.has(c));
     if (free) {
-      const entry = pool.waiters.shift();
-      clearTimeout(entry.timer);
-      disarmPoolIdleClose(pool, free);
-      pool.inUse.add(free);
-      entry.resolve(free);
+      pool.waiters.shift();
+      clearTimeout(head.timer);
+      head.resolve(handOutPooled(pool, free, head.background));
       continue;
     }
-    const head = pool.waiters[0];
     if (pool.clients.length + (pool.connecting || 0) >= poolSizeFor(head.account)) break;
     // While a backoff holds its logins back (noNewLogin, loginHeldBack), a waiter never grows the pool:
     // it keeps waiting for an open session to be released, and fails at once only when none is
@@ -1692,11 +1780,12 @@ function drainWaiters(pool) {
         // The held head waits for a released session (freed sessions still go to the head, above).
         // A waiter behind it that may log in (a move while the server only refuses extra
         // connections, say) must not wait behind it for a slot it can fill now.
-        const i = pool.waiters.findIndex(w => !w.noNewLogin && !loginHeldBack(w.account, { background: w.background }));
+        const i = pool.waiters.findIndex(w => !w.noNewLogin && !loginHeldBack(w.account, { background: w.background })
+          && !(w.background && backgroundPoolFull(pool, w.account)));
         if (i === -1) break;
         const [entry] = pool.waiters.splice(i, 1);
         clearTimeout(entry.timer);
-        growPool(pool, entry.account).then(entry.resolve, entry.reject);
+        growPool(pool, entry.account, { background: entry.background }).then(entry.resolve, entry.reject);
         continue;
       }
       pool.waiters.shift();
@@ -1706,7 +1795,7 @@ function drainWaiters(pool) {
     }
     pool.waiters.shift();
     clearTimeout(head.timer);
-    growPool(pool, head.account).then(head.resolve, head.reject);
+    growPool(pool, head.account, { background: head.background }).then(head.resolve, head.reject);
   }
 }
 
@@ -1714,11 +1803,17 @@ function drainWaiters(pool) {
 // (pool.connecting) before the first await: otherwise every caller in a burst passes the size
 // check while the first connect is still running, and the pool opens one login per request.
 // This counter is what makes the pool size a ceiling under concurrency (upstream measured 12
-// sockets on a pool of 4 without it); it is released on success and on failure alike.
-async function growPool(pool, account) {
+// sockets on a pool of 4 without it); it is released on success and on failure alike. A grow for a
+// background caller reserves its share the same way (pool.bgConnecting, see backgroundPoolCap).
+async function growPool(pool, account, { background = false } = {}) {
   const id = account.id;
   let client;
   pool.connecting = (pool.connecting || 0) + 1;
+  if (background) pool.bgConnecting++;
+  const unreserve = () => {
+    pool.connecting--;
+    if (background) pool.bgConnecting--;
+  };
   try {
     const freshAccount = await ensureFreshToken(account);
     const { resolved, policy } = await resolveAccountHost(freshAccount);
@@ -1726,13 +1821,13 @@ async function growPool(pool, account) {
     // listener and recovers from a stalled IPv6 handshake by retrying IPv4-only.
     client = await connectImapClient(freshAccount, resolved, { policy }, 30000, 'IMAP pool connect');
   } catch (err) {
-    pool.connecting--;
+    unreserve();
     await applyHelperOAuthFailure(account, err);
     await applyHelperAuthFailure(account, err, 'Pooled');
     throw err;
   }
   noteHelperLoginAccepted(account);
-  pool.connecting--;
+  unreserve();
   // Remove from pool immediately when the server closes the socket, then give the freed slot
   // to the queue (an idle client, or a grow for the head waiter).
   client.on('close', () => {
@@ -1740,13 +1835,12 @@ async function growPool(pool, account) {
     if (p) {
       disarmPoolIdleClose(p, client);
       p.clients = p.clients.filter(c => c !== client);
-      p.inUse.delete(client);
+      markPooledFree(p, client);
       drainWaiters(p);
     }
   });
   pool.clients.push(client);
-  pool.inUse.add(client);
-  return client;
+  return handOutPooled(pool, client, background);
 }
 
 // A full pool never opens another connection: the caller queues, and past the acquire timeout
@@ -1770,35 +1864,36 @@ async function growPool(pool, account) {
 // IDLE session when a few held-back stores and moves each wait out the queue; but a healthy
 // mailbox's rule move must not lose the interactive queue and its 15 s wait, since a rule that
 // gives up is not retried.
+//
+// Background callers together hold at most backgroundPoolCap sessions (all but one), so one is
+// always there for a user action. Past that share a background caller queues as usual, behind
+// every user action, and gives up after BACKGROUND_ACQUIRE_TIMEOUT_MS; held back, it fails at once.
 export async function acquirePooledClient(account, { background = false, noNewLogin = false, failFastWhenHeld = false } = {}) {
   const id = account.id;
   if (!connectionPools.has(id)) {
-    connectionPools.set(id, { clients: [], inUse: new Set(), waiters: [], connecting: 0, idleTimers: new Map() });
+    connectionPools.set(id, {
+      clients: [], inUse: new Set(), bgInUse: new Set(), bgConnecting: 0,
+      waiters: [], connecting: 0, idleTimers: new Map(),
+    });
   }
   const pool = connectionPools.get(id);
   const authHeld = loginHeldBack(account, { background });
   const loginHeld = noNewLogin || authHeld;
+  // The session kept for user actions is never handed to background work, open and idle or not.
+  const backgroundFull = background && backgroundPoolFull(pool, account);
 
   if (loginHeld && (background || failFastWhenHeld)) {
-    const idle = pool.waiters.length === 0 && pool.clients.find(c => !pool.inUse.has(c));
-    if (idle) {
-      disarmPoolIdleClose(pool, idle);
-      pool.inUse.add(idle);
-      return idle;
-    }
+    const idle = !backgroundFull && pool.waiters.length === 0 && pool.clients.find(c => !pool.inUse.has(c));
+    if (idle) return handOutPooled(pool, idle, background);
     throw providerRefusingError({ authRejected: authHeld });
   }
 
   // Nobody queued: take an idle client, or grow the pool if it is under its size.
-  if (pool.waiters.length === 0) {
+  if (pool.waiters.length === 0 && !backgroundFull) {
     const idle = pool.clients.find(c => !pool.inUse.has(c));
-    if (idle) {
-      disarmPoolIdleClose(pool, idle);
-      pool.inUse.add(idle);
-      return idle;
-    }
+    if (idle) return handOutPooled(pool, idle, background);
     if (!loginHeld && pool.clients.length + (pool.connecting || 0) < poolSizeFor(account)) {
-      return growPool(pool, account);
+      return growPool(pool, account, { background });
     }
   }
 
@@ -1837,7 +1932,7 @@ export function releasePooledClient(account, client) {
   // per-account limit the whole time. A client outside the pool was evicted after an error, or
   // was still in use when evictPool dropped its pool.
   if (!pool) { try { client.close(); } catch { /* already closed */ } return; }
-  pool.inUse.delete(client);
+  markPooledFree(pool, client);
   if (!pool.clients.includes(client)) {
     try { client.close(); } catch { /* already closed */ }
   } else {
@@ -1882,7 +1977,7 @@ async function withFreshClient(account, fn, poolOpts = {}) {
     // client, or a grow) rather than waiting for the next release.
     const pool = connectionPools.get(account.id);
     if (pool) {
-      pool.inUse.delete(client);
+      markPooledFree(pool, client);
       pool.clients = pool.clients.filter(c => c !== client);
       drainWaiters(pool);
     }
@@ -2123,7 +2218,12 @@ export class ImapManager {
     // after every window, each time with one more rejected login.
     this._nodePasswordRestoring = new Set();
     this._nodePasswordRestored = new Set();
-    this._prefetchRunning = new Set(); // accountIds with a body-prefetch run in progress
+    this._prefetchRunning = new Set(); // accountIds with a folder-view body-prefetch run in progress
+    this._prefetchNewRunning = new Set(); // accountIds with a new-mail body-prefetch run in progress
+    this._prefetchNewPending = new Map(); // accountId -> Map(id -> row) of new letters that run takes next
+    // Body prefetch letters of node mailboxes in flight at once, per node host (NODE_PREFETCH_PER_HOST).
+    this._nodePrefetchSem = createKeyedSemaphore(NODE_PREFETCH_PER_HOST);
+    this._prefetchGeneration = new Map(); // accountId -> bumped by disconnectAccount; a prefetch run of an older one stops
     this._prefetchPausedUntil = new Map(); // accountId -> ms; body prefetch paused after a run stopped on failures
     // accountId -> the value last persisted to email_accounts.sync_error: a string (error is
     // showing), null (known clear), or absent (unknown — e.g. just after a restart, where the
@@ -2893,7 +2993,16 @@ export class ImapManager {
     if (flagTimer) { clearTimeout(flagTimer); this._flagDebounceTimers.delete(accountId); }
     const expungeTimer = this._expungeDebounceTimers.get(accountId);
     if (expungeTimer) { clearTimeout(expungeTimer); this._expungeDebounceTimers.delete(accountId); }
+    // Stop the account's body prefetch runs before their next letter; the letters queued for the
+    // new-mail lane end the same way. Without this a run went on after the mailbox was disabled
+    // or deleted: each next letter opened a new pooled login, which on a node mailbox deleted
+    // meanwhile is a rejected login, one more strike toward fail2ban.
+    this._prefetchGeneration.set(accountId, this._prefetchGenerationOf(accountId) + 1);
     evictPool(accountId);
+  }
+
+  _prefetchGenerationOf(accountId) {
+    return this._prefetchGeneration.get(accountId) || 0;
   }
 
   // Effective per-host persistent-connection cap for an account: the tighter of the env default and
@@ -4755,13 +4864,13 @@ export class ImapManager {
             });
           }
           // Pre-warm the body cache for newly arrived messages so clicking one
-          // immediately after receipt doesn't require a live IMAP fetch.
-          // Only do this for small batches (periodic new mail, not initial bulk sync),
-          // and let provider profiles cap or disable the work when BODY[] is sensitive.
-          const prefetchProfile = providerProfile(account);
-          if (newMessages.length <= 5 && prefetchProfile.prefetchNewBodies !== false) {
-            const warmLimit = Math.max(1, Number(prefetchProfile.prefetchNewBodiesLimit) || newMessages.length);
-            const msgsToCache = newMessages.slice(-warmLimit);
+          // immediately after receipt doesn't require a live IMAP fetch. How many is
+          // newBodyPrefetchCount's call: all of a node mailbox's (bounded), a small batch
+          // elsewhere. newMessages is what the rules left in this folder, so a letter a rule
+          // moved away is not fetched under its old UID.
+          const prefetchCount = newBodyPrefetchCount(account, newMessages.length, folder);
+          if (prefetchCount > 0) {
+            const msgsToCache = newMessages.slice(-prefetchCount);
             setImmediate(() => {
               this.prefetchNewMessageBodies(account, msgsToCache)
                 .catch(err => console.warn(`Body prefetch error for ${logAccount(account)}:`, err.message));
@@ -6242,7 +6351,10 @@ export class ImapManager {
   // Syncs the most recent messages in a specific folder on demand.
   // Called when the user navigates to a folder that has no local messages yet.
   // Uses a pooled connection — does NOT touch the main sync connection.
-  async syncFolderOnDemand(account, folder) {
+  // background: a follow-up sync nobody waits on (after a send, a move, a GTD copy): it may not
+  // take the pooled session kept for user actions (backgroundPoolCap). A folder the reader opens
+  // keeps the interactive default.
+  async syncFolderOnDemand(account, folder, { background = false } = {}) {
     const key = `${account.id}:${folder}`;
     if (this.onDemandSyncing.has(key)) {
       console.log(`syncFolderOnDemand skipped (already running): ${logAccount(account)}/${folder}`);
@@ -6253,7 +6365,7 @@ export class ImapManager {
     try {
       await withFreshClient(account, async (client) => {
         await this.syncMessages(account, client, folder, 100, false, true);
-      });
+      }, { background });
       console.log(`syncFolderOnDemand done: ${logAccount(account)}/${folder}`);
       // sync_complete fires mailexpert:refresh in the frontend, reloading the message list
       this.broadcast({ type: 'sync_complete', accountId: account.id });
@@ -6306,9 +6418,40 @@ export class ImapManager {
   // Called in the background (via setImmediate) so it doesn't block the sync path.
   // By the time the user clicks the email (typically 2–10s later), the body is already
   // in the DB and the click returns instantly without a live IMAP round-trip.
+  //
+  // A lane of its own, apart from the folder-view prefetch: that run pauses between letters
+  // while the reader clicks and starts on every folder view, and new mail that arrived meanwhile
+  // used to be dropped rather than wait for it. Letters of a sync that arrive while this lane is
+  // running are queued, and the running lane takes them next (the newest newBodyQueueMax are
+  // kept). Newest first: the letter most likely
+  // to be clicked is warm first. Both lanes stop the same way (_prefetchBodyLoop) and share the
+  // pause after a stop, and each takes one background pooled session at a time.
   async prefetchNewMessageBodies(account, messages) {
     if (!messages.length) return;
-    await this._prefetchBodyRun(account, messages.map(m => ({ ...m, folder: m.folder || 'INBOX' })), { waitForQuiet: false });
+    let pending = this._prefetchNewPending.get(account.id);
+    if (!pending) this._prefetchNewPending.set(account.id, pending = new Map());
+    for (const m of messages) pending.set(m.id, { id: m.id, uid: m.uid, folder: m.folder || 'INBOX' });
+    const queueMax = newBodyQueueMax(account);
+    while (pending.size > queueMax) pending.delete(pending.keys().next().value);
+    if (this._prefetchNewRunning.has(account.id)) return; // the running lane takes them next
+    this._prefetchNewRunning.add(account.id);
+    // disconnectAccount (a disabled, deleted or reconfigured mailbox) ends this lane: see there.
+    const generation = this._prefetchGenerationOf(account.id);
+    const busy = { waits: 0 }; // busy pool answers of this whole run (see _prefetchBodyLoop)
+    try {
+      while (pending.size > 0) {
+        if (Date.now() < (this._prefetchPausedUntil.get(account.id) || 0)) return;
+        const rows = [...pending.values()].reverse();
+        pending.clear();
+        if (await this._prefetchBodyLoop(account, rows, { waitForQuiet: false, generation, busy }) === 'stopped') {
+          this._prefetchPausedUntil.set(account.id, Date.now() + PREFETCH_STOP_PAUSE_MS);
+          return;
+        }
+      }
+    } finally {
+      this._prefetchNewRunning.delete(account.id);
+      this._prefetchNewPending.delete(account.id);
+    }
   }
 
   // Background body prefetch for messages currently visible in a folder.
@@ -6334,9 +6477,10 @@ export class ImapManager {
     await this._prefetchBodyRun(account, uncachedResult.rows, { waitForQuiet: true });
   }
 
-  // One best-effort body-prefetch run over `rows` ({ id, uid, folder }). Shared by the folder-view
-  // prefetch and the new-mail prefetch after a sync, so both stop the same way. waitForQuiet pauses
-  // between messages while the user is clicking, so live fetches stay snappy.
+  // One best-effort folder-view body-prefetch run over `rows` ({ id, uid, folder }). The new-mail
+  // prefetch after a sync runs the same loop in a lane of its own (prefetchNewMessageBodies), so
+  // both stop the same way. waitForQuiet pauses between messages while the user is clicking, so
+  // live fetches stay snappy.
   //
   // Each message draws its own connection (a pooled session, or a fresh login on retry), so against
   // a server that is refusing us or rejecting the password, walking the rest of the list turns one
@@ -6344,7 +6488,7 @@ export class ImapManager {
   // view; on the shared mail node every extra login counts against the per-user+IP limit, and every
   // rejected one counts toward fail2ban, whose ban cuts off every mailbox on the node.
   //
-  // At most one run per account at a time: switching folders quickly used to start parallel runs,
+  // At most one folder-view run per account at a time: switching folders quickly used to start parallel runs,
   // each paying for its own failure. After a run stops on a failure, the account's prefetch also
   // pauses for PREFETCH_STOP_PAUSE_MS, so the next folder views do not start over at once. A
   // refusal or a rejected login arms a longer backoff besides; the pause is what holds back a
@@ -6363,9 +6507,30 @@ export class ImapManager {
   }
 
   // The run itself. Returns 'stopped' when a failure ended it early.
-  async _prefetchBodyLoop(account, rows, { waitForQuiet }) {
+  //
+  // A busy pool (poolExhausted: the background share stayed taken for the whole acquire wait, and
+  // no login was tried) is not a failure: the run waits for it by trying the same letter again,
+  // and counts no error toward the stop. The acquire wait itself spaces the tries. After
+  // PREFETCH_MAX_BUSY_WAITS busy answers in all (busy.waits, shared by every batch of a new-mail
+  // lane run) the run ends, without the pause; the letters left are fetched on open.
+  //
+  // generation: the account's prefetch generation when the run began. disconnectAccount bumps it,
+  // and the run ends before its next letter.
+  async _prefetchBodyLoop(account, rows, { waitForQuiet, generation = this._prefetchGenerationOf(account.id), busy = { waits: 0 } }) {
     let consecutiveErrors = 0;
-    for (const msg of rows) {
+    for (let i = 0; i < rows.length; i++) {
+      const msg = rows[i];
+      if (waitForQuiet) {
+        const quietFor = Date.now() - (this.lastUserActivity.get(account.id) || 0);
+        if (quietFor < QUIET_WINDOW_MS) {
+          await new Promise(r => setTimeout(r, QUIET_WINDOW_MS - quietFor));
+        }
+      }
+      // The mailbox was disconnected (disabled, deleted, reconfigured) since the run began.
+      if (this._prefetchGenerationOf(account.id) !== generation) {
+        logger.debug(`Body prefetch ended for ${logAccount(account)}: the mailbox was disconnected`);
+        return;
+      }
       // Checked before every message, not only at entry: a backoff armed meanwhile (by the status
       // client, or by this run's own previous failure) must stop a run already in progress. Covers
       // the live-sync cooldown, the secondary refusal backoff and a rejected secondary login.
@@ -6374,20 +6539,23 @@ export class ImapManager {
         logger.debug(`Body prefetch skipped for ${logAccount(account)}: backing off ${Math.round((blocked.until - Date.now()) / 1000)}s`);
         return;
       }
-      if (waitForQuiet) {
-        const quietFor = Date.now() - (this.lastUserActivity.get(account.id) || 0);
-        if (quietFor < QUIET_WINDOW_MS) {
-          await new Promise(r => setTimeout(r, QUIET_WINDOW_MS - quietFor));
-        }
-      }
 
+      // A node mailbox's letter takes one of the host's NODE_PREFETCH_PER_HOST slots for its read,
+      // FETCH and write (see there). Released on every way out of the letter, the finally below.
+      const hostSlot = account.mail_node ? (account.imap_host || '').toLowerCase() : null;
+      if (hostSlot) await this._nodePrefetchSem.acquire(hostSlot);
       try {
-        // Skip if body already cached (a concurrent click may have fetched it).
-        const existing = await query(
-          'SELECT id FROM messages WHERE id = $1 AND (body_html IS NOT NULL OR body_text IS NOT NULL)',
+        // The letter as the database has it now. No row: the letter is gone (deleted, expunged),
+        // or its mailbox was disabled or deleted (a login there could only be rejected). Another
+        // UID or folder: it was moved since the sync queued it, and a FETCH at the old place
+        // would find nothing. Cached: a click fetched it. Each is skipped; it opens on a click.
+        const { rows: [live] } = await query(
+          `SELECT m.uid, m.folder, (m.body_html IS NOT NULL OR m.body_text IS NOT NULL) AS cached
+             FROM messages m JOIN email_accounts a ON a.id = m.account_id AND a.enabled
+            WHERE m.id = $1 AND NOT m.is_deleted`,
           [msg.id]
         );
-        if (existing.rows.length) continue;
+        if (!live || live.cached || Number(live.uid) !== Number(msg.uid) || live.folder !== msg.folder) continue;
 
         const { html, text, attachments } = await this.fetchMessageBody(account, msg.uid, msg.folder, { background: true });
         const safeHtml = html ? sanitizeEmail(html) : null;
@@ -6402,8 +6570,19 @@ export class ImapManager {
           );
         }
       } catch (err) {
+        if (err?.poolExhausted) {
+          if (++busy.waits >= PREFETCH_MAX_BUSY_WAITS) {
+            console.log(`Body prefetch ending for ${logAccount(account)}: the pool stayed busy`);
+            return;
+          }
+          i--; // the same letter again, once the pool has room
+          continue;
+        }
         const detail = extractImapError(err);
-        console.warn(`Body prefetch failed for uid ${msg.uid}:`, detail);
+        // A letter the server no longer has where the database said (messageGone) counts like any
+        // other failure below: each one cost the pooled session it evicted, so three in a row stop
+        // the run rather than log in once more per letter.
+        console.warn(`Body prefetch failed for uid ${msg.uid}:`, err?.messageGone ? 'letter gone from the server' : detail);
 
         // Three guards, each stopping the run:
         //  - a rejected login stops at the first one. The pool (or withFreshLogin) has already put
@@ -6433,6 +6612,8 @@ export class ImapManager {
           return 'stopped';
         }
         continue;
+      } finally {
+        if (hostSlot) this._nodePrefetchSem.release(hostSlot);
       }
       consecutiveErrors = 0;
     }
@@ -6512,8 +6693,9 @@ export class ImapManager {
         if (!structure) {
           // Throw a transient error so the outer retry logic gets a fresh connection
           // before giving up — an empty UID FETCH response often means a stale or
-          // half-open pool connection, not a missing message.
-          throw new Error('Command failed');
+          // half-open pool connection, not a missing message. Marked, so background work can
+          // tell it from other failures (see the retry below).
+          throw Object.assign(new Error('Command failed'), { emptyFetch: true });
         }
 
         const results = planBodyParts(structure);
@@ -6648,6 +6830,16 @@ export class ImapManager {
           // A rejected password says so (routes answer mailbox_auth_rejected); see loginHeldBack.
           if (loginHeldBack(account, { background })) held.authRejected = true;
           throw held;
+        }
+        // Background work (body prefetch) never retries through a fresh login: nobody waits for
+        // the letter, it opens on a click. For a letter that moved away or was expunged before
+        // the prefetch reached it, the retry was a second login per letter, and its empty answer
+        // passed as a success. An empty FETCH is reported as the letter being gone (messageGone),
+        // which the prefetch counts as a failure.
+        if (background) {
+          const failed = wrapImapError(firstErr, detail);
+          if (firstErr?.emptyFetch) failed.messageGone = true;
+          throw failed;
         }
         try {
           return await doFetch(withFreshLogin);
@@ -7202,7 +7394,8 @@ export class ImapManager {
     return newUid;
   }
 
-  async permanentDeleteMessage(account, uid, folder) {
+  // background: see syncFolderOnDemand (a GTD transition strip).
+  async permanentDeleteMessage(account, uid, folder, { background = false } = {}) {
     await withFreshClient(account, async (client) => {
       const lock = await client.getMailboxLock(folder);
       try {
@@ -7211,7 +7404,7 @@ export class ImapManager {
       } finally {
         lock.release();
       }
-    });
+    }, { background });
   }
 
   // Apply a label = COPY the message into the label folder, keeping the source copy.
@@ -7269,12 +7462,14 @@ export class ImapManager {
   // If the IMAP delete throws, the DB row is left in place so the two never silently diverge.
   // Post-remove notification is a plugin concern (generic `afterLabelRemove` hook), so this
   // stays label-feature-agnostic.
-  async removeMessageCopy(accountId, uid, folder) {
+  // background: a GTD transition strip (the GTD tick, inbox ingest, a sent reply), which nobody
+  // waits on; a user removing a label keeps the interactive default.
+  async removeMessageCopy(accountId, uid, folder, { background = false } = {}) {
     const accountResult = await query('SELECT * FROM email_accounts WHERE id = $1', [accountId]);
     const account = accountResult.rows[0];
     if (!account) throw new Error(`removeMessageCopy: account ${accountId} not found`);
 
-    await this.permanentDeleteMessage(account, uid, folder);
+    await this.permanentDeleteMessage(account, uid, folder, { background });
     const result = await deleteMessageCopyRow(accountId, uid, folder);
     // Removing a label copy changes label-feed data — let plugins broadcast their refresh.
     await pluginRegistry.runHook('afterLabelRemove', { mgr: this.pluginFacade, account, folder, uid });
@@ -7354,7 +7549,7 @@ export class ImapManager {
         // periodic sync — the same on-demand resync the routes already do for non-UIDPLUS moves.
         // Fire-and-forget; syncFolderOnDemand de-dups concurrent runs for the same folder.
         if (toFolder !== fromFolder) {
-          this.syncFolderOnDemand(account, toFolder)
+          this.syncFolderOnDemand(account, toFolder, { background: true })
             .catch(err => console.warn(`bulkMoveMessages: post-stale destination resync failed (${err.message})`));
         }
       }

@@ -83,4 +83,13 @@ describe.each([
     expect((await post(route, body)).status).toBe(200);
     expect(imapManager._scheduleProviderIdBackfill).not.toHaveBeenCalled();
   });
+
+  it('pulls the destination as background work, off the pooled session kept for user actions', async () => {
+    imapManager.bulkMoveMessages.mockResolvedValue({ uidMap: new Map(), succeeded: [11], failed: [] });
+    expect((await post(route, body)).status).toBe(200);
+    await vi.waitFor(() => expect(imapManager.syncFolderOnDemand).toHaveBeenCalled());
+    for (const call of imapManager.syncFolderOnDemand.mock.calls) {
+      expect(call).toEqual([ACCOUNT, expect.any(String), { background: true }]);
+    }
+  });
 });

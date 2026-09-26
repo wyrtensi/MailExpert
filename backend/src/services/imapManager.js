@@ -7678,6 +7678,30 @@ export class ImapManager {
     }, poolOpts);
   }
 
+  // Every uid of a letter (by Message-ID) in each of `folders`, in one pooled session: an array of
+  // { folder, uids } for the folders that hold it. A folder that cannot be opened is skipped. The
+  // move queue looks for a letter that left its source this way before calling it gone.
+  async findMessageIdInFolders(account, folders, messageId, poolOpts = {}) {
+    const mid = String(messageId || '').replace(/[<>]/g, '').trim();
+    if (!mid || !folders.length) return [];
+    return withFreshClient(account, async (client) => {
+      const found = [];
+      for (const folder of folders) {
+        let uids;
+        try {
+          const lock = await client.getMailboxLock(folder);
+          try { uids = await client.search({ header: ['Message-ID', mid] }, { uid: true }); }
+          finally { lock.release(); }
+        } catch (err) {
+          console.warn(`findMessageIdInFolders: could not search ${folder}: ${extractImapError(err)}`);
+          continue;
+        }
+        if (Array.isArray(uids) && uids.length) found.push({ folder, uids: uids.map(Number) });
+      }
+      return found;
+    }, { timeoutMs: LONG_POOLED_OPERATION_TIMEOUT_MS, ...poolOpts });
+  }
+
   // Permanently delete a batch of UIDs already in the given folder (two-step:
   // flag \Deleted + expunge) in a single IMAP command sequence.
   // Returns { succeeded, failed } — subsets of the input uids array.

@@ -47,7 +47,7 @@ function fakeManager() {
     flagStoresSettled: vi.fn(async () => {}),
     bulkMoveMessages: vi.fn(),
     searchUids: vi.fn(async () => []),
-    findUidByMessageId: vi.fn(async () => null),
+    findMessageIdInFolders: vi.fn(async () => []),
     setFlags: vi.fn(async () => {}),
     syncFolderOnDemand: vi.fn(async () => {}),
     _pendingFlagPush: new Map(),
@@ -73,9 +73,10 @@ beforeEach(async () => {
   await db.exec('DELETE FROM message_moves; DELETE FROM messages; DELETE FROM folders; DELETE FROM email_accounts; DELETE FROM users;');
   await db.query("INSERT INTO users (id, username) VALUES ($1, 'anna')", [USER]);
   await db.query("INSERT INTO email_accounts (id, name, email_address) VALUES ($1, 'Office', 'office@example.com')", [ACCOUNT]);
-  for (const path of ['INBOX', 'Archive', 'Trash', 'Projects', '[Gmail]/All Mail']) {
+  for (const path of ['INBOX', 'Archive', 'Trash', 'Projects']) {
     await db.query('INSERT INTO folders (account_id, path, name) VALUES ($1, $2, $2)', [ACCOUNT, path]);
   }
+  await db.query("INSERT INTO folders (account_id, path, name, special_use) VALUES ($1, '[Gmail]/All Mail', 'All Mail', '\\All')", [ACCOUNT]);
   await db.query(
     `INSERT INTO messages (id, account_id, uid, folder, message_id, is_read) VALUES
        ($1, $4, 11, 'INBOX', '<a@example.com>', false),
@@ -309,10 +310,10 @@ describe('the destination sync', () => {
     expect(await moves()).toMatchObject([{ state: 'awaiting_uid' }]);
     expect(mgr.syncFolderOnDemand).toHaveBeenCalledWith(expect.objectContaining({ id: ACCOUNT }), 'Archive');
 
-    mgr.findUidByMessageId.mockResolvedValue(905);
+    mgr.findMessageIdInFolders.mockResolvedValue([{ folder: 'Archive', uids: [905] }]);
     await db.query('UPDATE message_moves SET next_attempt_at = now()');
     await queue.runAccount(ACCOUNT);
-    expect(mgr.findUidByMessageId).toHaveBeenCalledWith(expect.objectContaining({ id: ACCOUNT }), 'Archive', '<a@example.com>', expect.objectContaining({ background: true }));
+    expect(mgr.findMessageIdInFolders).toHaveBeenCalledWith(expect.objectContaining({ id: ACCOUNT }), expect.arrayContaining(['Archive']), '<a@example.com>', expect.objectContaining({ background: true }));
     expect(await row(A)).toMatchObject({ uid: 905, folder: 'Archive' });
     expect(await moves()).toEqual([]);
   });
@@ -341,7 +342,7 @@ describe('a database error during a run', () => {
     queue._settle = realSettle;
     await db.query('UPDATE message_moves SET next_attempt_at = now()');
     mgr.searchUids.mockResolvedValue([]);
-    mgr.findUidByMessageId.mockResolvedValue(900);
+    mgr.findMessageIdInFolders.mockResolvedValue([{ folder: 'Archive', uids: [900] }]);
     await queue.runAccount(ACCOUNT);
     expect(await moves()).toEqual([]);
     expect(await row(A)).toMatchObject({ folder: 'Archive', uid: 900 });
@@ -415,6 +416,97 @@ describe('a database error during a run', () => {
   });
 });
 
+// I2, M14, M7: a letter gone from its source is looked for before anything is reverted.
+describe('a letter gone from its source', () => {
+  const COPY = '41000000-0000-4000-8000-000000000009';
+
+  it('a MOVE that landed but whose answer and source check were lost is found, not reverted', async () => {
+    await queue.enqueue(ACCOUNT, await rowsOf([A]), 'Archive');
+    // Attempt 1: the connection drops; the reconciling search and the source check fail too.
+    mgr.bulkMoveMessages.mockResolvedValueOnce({ uidMap: new Map(), succeeded: [], failed: [11] });
+    mgr.searchUids.mockRejectedValueOnce(new Error('Connection closed'));
+    await queue.runAccount(ACCOUNT);
+    // No clear answer: looked up before anything is sent again.
+    expect(await moves()).toMatchObject([{ state: 'awaiting_uid', attempts: 1 }]);
+
+    await db.query('UPDATE message_moves SET next_attempt_at = now()');
+    mgr.searchUids.mockResolvedValueOnce([]); // gone from INBOX: it is in Archive as 900
+    mgr.findMessageIdInFolders.mockResolvedValue([{ folder: 'Archive', uids: [900] }]);
+    await queue.runAccount(ACCOUNT);
+    expect(await row(A)).toMatchObject({ uid: 900, folder: 'Archive' });
+    expect(await moves()).toEqual([]);
+    expect(mgr.bulkMoveMessages).toHaveBeenCalledOnce();
+    expect(mgr.broadcast).not.toHaveBeenCalledWith(expect.objectContaining({ type: 'move_reverted' }));
+  });
+
+  it('a MOVE the server reports failed for a letter already in the destination settles there', async () => {
+    await queue.enqueue(ACCOUNT, await rowsOf([A]), 'Archive');
+    mgr.bulkMoveMessages.mockResolvedValue({ uidMap: new Map(), succeeded: [], failed: [11] });
+    mgr.searchUids.mockResolvedValue([]);
+    mgr.findMessageIdInFolders.mockResolvedValue([{ folder: 'Archive', uids: [900] }]);
+    await queue.runAccount(ACCOUNT);
+    expect(await row(A)).toMatchObject({ uid: 900, folder: 'Archive' });
+    expect(mgr.broadcast).not.toHaveBeenCalledWith(expect.objectContaining({ type: 'move_reverted' }));
+  });
+
+  it('moved by another client into another folder: the row follows it, keeps its id, no toast', async () => {
+    await queue.enqueue(ACCOUNT, await rowsOf([A]), 'Archive');
+    // Outlook moved it to Projects meanwhile; the Projects sync inserted it as a new row.
+    await db.query("INSERT INTO messages (id, account_id, uid, folder, message_id) VALUES ($1, $2, 55, 'Projects', '<a@example.com>')", [COPY, ACCOUNT]);
+    mgr.bulkMoveMessages.mockResolvedValue({ uidMap: new Map(), succeeded: [], failed: [11] });
+    mgr.searchUids.mockResolvedValue([]);
+    mgr.findMessageIdInFolders.mockResolvedValue([{ folder: 'Projects', uids: [55] }]);
+    await queue.runAccount(ACCOUNT);
+
+    expect(mgr.findMessageIdInFolders).toHaveBeenCalledWith(expect.anything(), ['Archive', 'Projects', 'Trash'], '<a@example.com>', expect.anything());
+    expect(await row(A)).toMatchObject({ uid: 55, folder: 'Projects' });
+    expect(await row(COPY)).toBeUndefined();
+    expect(await moves()).toEqual([]);
+    expect(adjustFolderCounts).toHaveBeenCalledWith(ACCOUNT, 'Archive', -1, -1);
+    expect(adjustFolderCounts).toHaveBeenCalledWith(ACCOUNT, 'Projects', 1, 1);
+    expect(mgr.broadcast).toHaveBeenCalledWith({ type: 'folder_updated', folder: 'Projects', accountId: ACCOUNT });
+    expect(mgr.broadcast).not.toHaveBeenCalledWith(expect.objectContaining({ type: 'move_reverted' }));
+  });
+
+  it('an older copy of the letter elsewhere is not taken for it: reverted as gone', async () => {
+    await db.query("INSERT INTO messages (id, account_id, uid, folder, message_id, synced_at) VALUES ($1, $2, 55, 'Projects', '<a@example.com>', now() - interval '1 day')", [COPY, ACCOUNT]);
+    await queue.enqueue(ACCOUNT, await rowsOf([A]), 'Archive');
+    mgr.bulkMoveMessages.mockResolvedValue({ uidMap: new Map(), succeeded: [], failed: [11] });
+    mgr.searchUids.mockResolvedValue([]);
+    mgr.findMessageIdInFolders.mockResolvedValue([{ folder: 'Projects', uids: [55] }]);
+    await queue.runAccount(ACCOUNT);
+    expect(await row(COPY)).toMatchObject({ uid: 55, folder: 'Projects' });
+    expect(await row(A)).toMatchObject({ uid: 11, folder: 'INBOX' });
+    expect(mgr.broadcast).toHaveBeenCalledWith(expect.objectContaining({ type: 'move_reverted', reason: 'gone' }));
+  });
+
+  it('a thrown MOVE is looked up before it is sent again, and never reverted from there', async () => {
+    await queue.enqueue(ACCOUNT, await rowsOf([A]), 'Archive');
+    mgr.bulkMoveMessages.mockRejectedValue(new Error('Socket closed'));
+    await db.query('UPDATE message_moves SET attempts = $1', [MOVE_MAX_ATTEMPTS + 2]);
+    await queue.runAccount(ACCOUNT);
+    expect(await moves()).toMatchObject([{ state: 'awaiting_uid' }]);
+    expect(mgr.broadcast).not.toHaveBeenCalledWith(expect.objectContaining({ type: 'move_reverted' }));
+
+    // Still at the source after every attempt: now it is reverted.
+    await db.query('UPDATE message_moves SET next_attempt_at = now()');
+    mgr.searchUids.mockResolvedValue([11]);
+    await queue.runAccount(ACCOUNT);
+    expect(await row(A)).toMatchObject({ uid: 11, folder: 'INBOX' });
+    expect(mgr.broadcast).toHaveBeenCalledWith(expect.objectContaining({ type: 'move_reverted', reason: 'gave_up' }));
+  });
+
+  it('a letter without a Message-ID whose MOVE named no uid drops its row at once for the sync', async () => {
+    await db.query('UPDATE messages SET message_id = NULL WHERE id = $1', [A]);
+    await queue.enqueue(ACCOUNT, await rowsOf([A]), 'Archive');
+    mgr.bulkMoveMessages.mockResolvedValue({ uidMap: new Map(), succeeded: [11], failed: [] });
+    await queue.runAccount(ACCOUNT);
+    expect(await row(A)).toBeUndefined();
+    expect(await moves()).toEqual([]);
+    expect(mgr.syncFolderOnDemand).toHaveBeenCalledWith(expect.objectContaining({ id: ACCOUNT }), 'Archive');
+  });
+});
+
 describe('a move whose new uid cannot be found', () => {
   // The MOVE went through without a uid, and nothing finds the letter for MOVE_AWAITING_UID_MAX_MS.
   async function awaitingTooLong() {
@@ -424,11 +516,20 @@ describe('a move whose new uid cannot be found', () => {
     await db.query("UPDATE message_moves SET updated_at = now() - interval '1 hour', next_attempt_at = now()");
   }
 
-  it('drops the row, and a move that followed it, for the syncs to insert the letter afresh', async () => {
+  it('reverts a letter that is nowhere: gone from the source and in no folder', async () => {
+    await awaitingTooLong();
+    await queue.runAccount(ACCOUNT);
+    expect(await moves()).toEqual([]);
+    expect(await row(A)).toMatchObject({ uid: 11, folder: 'INBOX' });
+    expect(mgr.broadcast).toHaveBeenCalledWith(expect.objectContaining({ type: 'move_reverted', reason: 'gone', ids: [A] }));
+  });
+
+  it('drops the row, and a move that followed it, when the lookup keeps failing', async () => {
     await awaitingTooLong();
     await queue.enqueue(ACCOUNT, await rowsOf([A]), 'Trash');
     expect(await moves()).toHaveLength(2);
     await db.query("UPDATE message_moves SET updated_at = now() - interval '1 hour', next_attempt_at = now() WHERE state = 'awaiting_uid'");
+    mgr.findMessageIdInFolders.mockRejectedValue(new Error('Mailbox does not exist'));
     await queue.runAccount(ACCOUNT);
     expect(await moves()).toEqual([]);
     expect(await row(A)).toBeUndefined();
@@ -437,7 +538,7 @@ describe('a move whose new uid cannot be found', () => {
 
   it('stops looking when the lookup keeps failing', async () => {
     await awaitingTooLong();
-    mgr.findUidByMessageId.mockRejectedValue(new Error('Mailbox does not exist'));
+    mgr.findMessageIdInFolders.mockRejectedValue(new Error('Mailbox does not exist'));
     await queue.runAccount(ACCOUNT);
     expect(await moves()).toEqual([]);
     expect(await row(A)).toBeUndefined();
@@ -531,7 +632,7 @@ describe('a restart', () => {
     expect(await moves()).toMatchObject([{ state: 'awaiting_uid' }]);
     expect(queue.expectsArrival(ACCOUNT, 'Archive', '<a@example.com>')).toBe(true);
 
-    mgr.findUidByMessageId.mockResolvedValue(907);
+    mgr.findMessageIdInFolders.mockResolvedValue([{ folder: 'Archive', uids: [907] }]);
     await queue.runAccount(ACCOUNT);
     expect(mgr.bulkMoveMessages).not.toHaveBeenCalled();
     expect(await row(A)).toMatchObject({ uid: 907, folder: 'Archive' });
@@ -573,11 +674,11 @@ describe('a restart with a move whose answer was lost, the letter still at its s
 
   it('Gmail archive: All Mail holds every letter, so it proves nothing; the MOVE is sent again', async () => {
     await restartWithSentMove('[Gmail]/All Mail', { dropRow: true });
-    mgr.findUidByMessageId.mockResolvedValue(5000);
+    mgr.findMessageIdInFolders.mockResolvedValue([{ folder: 'Archive', uids: [5000] }]);
     serverMoves(6000);
     await queue.runAccount(ACCOUNT);
     // Queued again and sent in the same run; nothing was taken from All Mail.
-    expect(mgr.findUidByMessageId).not.toHaveBeenCalled();
+    expect(mgr.findMessageIdInFolders).not.toHaveBeenCalled();
     expect(mgr.bulkMoveMessages).toHaveBeenCalledWith(expect.anything(), [11], 'INBOX', '[Gmail]/All Mail', expect.anything());
     expect(await row(A)).toBeUndefined();
     expect(await moves()).toEqual([]);
@@ -587,10 +688,10 @@ describe('a restart with a move whose answer was lost, the letter still at its s
     const COPY = '41000000-0000-4000-8000-000000000009';
     await db.query("INSERT INTO messages (id, account_id, uid, folder, message_id) VALUES ($1, $2, 77, 'Archive', '<a@example.com>')", [COPY, ACCOUNT]);
     await restartWithSentMove('Archive');
-    mgr.findUidByMessageId.mockResolvedValue(77);
+    mgr.findMessageIdInFolders.mockResolvedValue([{ folder: 'Archive', uids: [77] }]);
     serverMoves(900);
     await queue.runAccount(ACCOUNT);
-    expect(mgr.findUidByMessageId).not.toHaveBeenCalled();
+    expect(mgr.findMessageIdInFolders).not.toHaveBeenCalled();
     expect(mgr.bulkMoveMessages).toHaveBeenCalledWith(expect.anything(), [11], 'INBOX', 'Archive', expect.anything());
     expect(await row(A)).toMatchObject({ uid: 900, folder: 'Archive' });
     expect(await row(COPY)).toMatchObject({ uid: 77, folder: 'Archive' });

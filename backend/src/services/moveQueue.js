@@ -57,6 +57,10 @@ export function moveRetryDelayMs(attempts) {
 export const placeholderUid = (moveId) => -Number(moveId);
 export const isPendingUid = (uid) => Number(uid) < 0;
 
+// special_use of Gmail's virtual folders: they list letters that live in other folders, so a
+// letter found there proves nothing about where it went.
+const VIRTUAL_FOLDER_USES = ['\\All', '\\Flagged', '\\Important'];
+
 const FLAG_COLUMNS = { '\\Seen': 'set_seen', '\\Flagged': 'set_flagged' };
 
 export class MoveQueue {
@@ -424,7 +428,7 @@ export class MoveQueue {
       // there) and must not keep the queued moves from running.
       let busy = false;
       try {
-        busy = await this._resolveAwaiting(account);
+        busy = await this._resolveAwaiting(account, reverted);
       } catch (err) {
         console.error(`Move queue: looking up moved letters failed: ${err.message}`);
       }
@@ -489,7 +493,9 @@ export class MoveQueue {
       outcome = await mgr.bulkMoveMessages(account, uids, src, dest, this._poolOpts(account.id));
     } catch (err) {
       if (isMailboxBusyError(err)) { await this._release(ops); return true; }
-      for (const op of ops) await this._retryLater(op, err.message, reverted);
+      // Nobody knows whether the MOVE went out: the moves are looked up (source first) before
+      // anything is sent again.
+      for (const op of ops) await this._retryLater(op, err.message, reverted, { unclear: true });
       return false;
     }
 
@@ -502,15 +508,23 @@ export class MoveQueue {
       if (newUid) {
         const s = await this._settle(op, Number(newUid));
         if (s?.row) settled.push(s);
+      } else if (!op.message_id_header) {
+        // Moved, and nothing can find it by Message-ID: the placeholder goes now rather than
+        // showing next to the copy the destination sync is about to insert.
+        await this._drop(op);
+        awaiting = true;
       } else {
         await this._markAwaiting(op);
         awaiting = true;
       }
     }
 
+    let busy = false;
     if (outcome.failed.length) {
       // The server did not move these. Still at the source: it may pass, retry. Gone from the
-      // source (deleted elsewhere, Gmail's web UI included): permanent.
+      // source: looked for by Message-ID in the destination and the other folders (a MOVE whose
+      // answer was lost, another client that moved it); found, the row takes that place. Only a
+      // letter that is nowhere (deleted elsewhere, Gmail's web UI included) is reverted.
       let present = null;
       try {
         present = new Set((await mgr.searchUids(account, src, outcome.failed.map(Number), this._poolOpts(account.id))).map(Number));
@@ -525,9 +539,17 @@ export class MoveQueue {
       for (const uid of outcome.failed) {
         const op = byUid.get(Number(uid));
         if (!op) continue;
-        if (present === null) await this._retryLater(op, 'source check failed', reverted);
-        else if (!present.has(Number(uid))) await this._revertInto(reverted, op, 'gone');
-        else if (!destRows.length) await this._revertInto(reverted, op, 'destination_gone');
+        if (busy) { await this._release([op]); continue; }
+        if (present === null) await this._retryLater(op, 'source check failed', reverted, { unclear: true });
+        else if (!present.has(Number(uid))) {
+          try {
+            const s = await this._goneFromSource(account, op, reverted);
+            if (s?.row) settled.push(s);
+          } catch (err) {
+            if (isMailboxBusyError(err)) { busy = true; await this._release([op]); continue; }
+            await this._retryLater(op, `looking for the letter failed: ${err.message}`, reverted, { unclear: true });
+          }
+        } else if (!destRows.length) await this._revertInto(reverted, op, 'destination_gone');
         else await this._retryLater(op, 'the server did not move the letter', reverted);
       }
     }
@@ -538,7 +560,58 @@ export class MoveQueue {
       mgr.syncFolderOnDemand(account, dest)
         .catch(err => console.warn(`Move queue: destination sync of ${dest} failed: ${err.message}`));
     }
-    return false;
+    return busy;
+  }
+
+  // Where the letter of a move went, once it is gone from its source: { folder, uid }, or null.
+  // Looked for by Message-ID in the destination first, then in the account's other folders
+  // (Gmail's All Mail, Starred and Important list letters that live elsewhere, so they prove
+  // nothing and are skipped). A uid is taken when no row holds it, or when the row holding it was
+  // inserted after the move was queued (a sync that saw the letter arrive before we did). An older
+  // row is another copy of the letter and is left alone. Throws on an IMAP failure.
+  async _locate(account, op) {
+    if (!op.message_id_header) return null;
+    const { rows: others } = await query(
+      `SELECT path FROM folders
+        WHERE account_id = $1 AND path <> ALL($2::text[])
+          AND COALESCE(special_use, '') <> ALL($3::text[])
+        ORDER BY path`,
+      [account.id, [op.src_folder, op.dest_folder], VIRTUAL_FOLDER_USES]
+    );
+    const folders = [op.dest_folder, ...others.map(r => r.path)];
+    const found = await this.mgr.findMessageIdInFolders(account, folders, op.message_id_header, this._poolOpts(account.id));
+    const byFolder = new Map(found.map(f => [f.folder, f.uids]));
+    for (const folder of folders) {
+      const uids = byFolder.get(folder);
+      if (!uids?.length) continue;
+      const { rows } = await query(
+        'SELECT id, uid, synced_at FROM messages WHERE account_id = $1 AND folder = $2 AND uid = ANY($3::bigint[])',
+        [account.id, folder, uids]
+      );
+      const held = new Map(rows.map(r => [Number(r.uid), r]));
+      const free = uids.filter(u => !held.has(Number(u)));
+      if (free.length) return { folder, uid: Math.max(...free) };
+      const created = new Date(op.created_at).getTime();
+      const newer = rows.filter(r => r.id !== op.message_row_id && r.synced_at && new Date(r.synced_at).getTime() >= created);
+      if (newer.length) return { folder, uid: Math.max(...newer.map(r => Number(r.uid))) };
+    }
+    return null;
+  }
+
+  // The letter of a move is gone from its source. Found somewhere, the row takes that place
+  // (settle); not found, a move into a folder we do not keep (Gmail All Mail) or of a letter
+  // without a Message-ID drops its row for the syncs, and any other move is reverted as gone.
+  async _goneFromSource(account, op, reverted) {
+    const place = await this._locate(account, op);
+    if (place) return this._settle(op, place.uid, place.folder);
+    if (op.drop_row || !op.message_id_header) {
+      await this._drop(op);
+      this.mgr.syncFolderOnDemand(account, op.dest_folder)
+        .catch(err => console.warn(`Move queue: destination sync of ${op.dest_folder} failed: ${err.message}`));
+      return null;
+    }
+    await this._revertInto(reverted, op, 'gone');
+    return null;
   }
 
   // Moves whose MOVE may have gone out but whose new uid is unknown: no COPYUID, a restart or a
@@ -547,7 +620,7 @@ export class MoveQueue {
   // destination by its Message-ID. Looking in the destination first would "find" a letter that is
   // there anyway: on Gmail every letter is in All Mail, and on any server the destination may hold
   // another copy with the same Message-ID. Returns true when the mailbox gave no session.
-  async _resolveAwaiting(account) {
+  async _resolveAwaiting(account, reverted = []) {
     const mgr = this.mgr;
     const { rows } = await query(
       `SELECT * FROM message_moves
@@ -560,9 +633,13 @@ export class MoveQueue {
     try {
       for (const op of rows) {
         this._expect(op);
-        let uid = null;
         try {
           const present = await mgr.searchUids(account, op.src_folder, [Number(op.src_uid)], opts);
+          if (present.length && Number(op.attempts) >= MOVE_MAX_ATTEMPTS) {
+            // Still at the source after every attempt (the last ones ended without an answer).
+            await this._revertInto(reverted, op, 'gave_up');
+            continue;
+          }
           if (present.length) {
             // The MOVE never happened: queue it again (not an attempt: nothing failed here).
             await query(
@@ -574,27 +651,14 @@ export class MoveQueue {
             this._unexpect(op);
             continue;
           }
-          if (op.message_id_header) uid = await mgr.findUidByMessageId(account, op.dest_folder, op.message_id_header, opts);
+          const s = await this._goneFromSource(account, op, reverted);
+          if (s?.row) settled.push(s);
         } catch (err) {
           if (isMailboxBusyError(err)) return true;
           console.warn(`Move queue: looking up moved letter failed: ${err.message}`);
           // A lookup that keeps failing (a folder gone, say) ends like one that finds nothing.
           if (Date.now() - new Date(op.updated_at).getTime() > MOVE_AWAITING_UID_MAX_MS) await this._drop(op);
           else await this._lookAgainLater(op);
-          continue;
-        }
-        if (uid) {
-          const s = await this._settle(op, Number(uid));
-          if (s?.row) settled.push(s);
-        } else if (op.drop_row) {
-          // Gone from the source into a destination we do not keep (Gmail All Mail): the row goes.
-          await this._drop(op);
-        } else if (Date.now() - new Date(op.updated_at).getTime() > MOVE_AWAITING_UID_MAX_MS) {
-          // Gone from the source and not found in the destination: the row is dropped and the
-          // syncs insert the letter wherever the server has it.
-          await this._drop(op);
-        } else {
-          await this._lookAgainLater(op);
         }
       }
     } finally {
@@ -638,65 +702,72 @@ export class MoveQueue {
     for (const op of ops) this._unexpect(op);
   }
 
-  async _retryLater(op, error, reverted) {
+  // unclear: nobody knows whether the MOVE went out (it threw, or the source could not be checked).
+  // The move then waits as awaiting_uid, which checks the source before anything is sent again,
+  // and is never reverted from here: the letter may well have moved.
+  async _retryLater(op, error, reverted, { unclear = false } = {}) {
     const attempts = Number(op.attempts) + 1;
-    if (attempts >= MOVE_MAX_ATTEMPTS) {
+    if (!unclear && attempts >= MOVE_MAX_ATTEMPTS) {
       console.warn(`Move queue: giving up on move ${op.id} after ${attempts} attempts: ${error}`);
       await this._revertInto(reverted, op, 'gave_up');
       return;
     }
     await query(
-      `UPDATE message_moves SET state = 'queued', attempts = $2, last_error = $3,
+      `UPDATE message_moves SET state = $5, attempts = $2, last_error = $3,
               next_attempt_at = now() + ($4::int * interval '1 millisecond'), updated_at = now()
         WHERE id = $1 AND state = 'moving'`,
-      [op.id, attempts, String(error).slice(0, 500), moveRetryDelayMs(attempts)]
+      [op.id, attempts, String(error).slice(0, 500), moveRetryDelayMs(attempts), unclear ? 'awaiting_uid' : 'queued']
     );
-    this._unexpect(op);
+    if (!unclear) this._unexpect(op);
   }
 
   // The server moved the letter and named its new uid. The row takes it (or the move that
-  // follows it takes it as its source uid). Returns null when the move was already settled or
-  // reverted, else { op, row, uid, needsProviderIds } (row null when no row takes the uid).
-  async _settle(op, newUid) {
+  // follows it takes it as its source uid). `folder` is where the letter is: the destination, or
+  // another folder the letter was found in (_locate: another client moved it there); the row then
+  // follows it there, keeping its id, and the counts follow. Returns null when the move was already
+  // settled or reverted, else { op, row, uid, folder, needsProviderIds } (row null when no row
+  // takes the uid).
+  async _settle(op, newUid, folder = null) {
     const out = await withTransaction(async (tx) => {
       const { rows: [row] } = await tx.query(
-        'SELECT id, uid, folder, provider_message_id FROM messages WHERE id = $1 FOR UPDATE',
+        'SELECT id, uid, folder, is_read, provider_message_id FROM messages WHERE id = $1 FOR UPDATE',
         [op.message_row_id]
       );
       const { rows: [cur] } = await tx.query('SELECT * FROM message_moves WHERE id = $1 FOR UPDATE', [op.id]);
       if (!cur) return null;
+      const at = folder ?? cur.dest_folder;
       await tx.query('DELETE FROM message_moves WHERE id = $1', [cur.id]);
       const { rows: [next] } = await tx.query(
-        `UPDATE message_moves SET src_uid = $2, predecessor_id = NULL,
+        `UPDATE message_moves SET src_folder = $5, src_uid = $2, predecessor_id = NULL,
                 set_seen = COALESCE(set_seen, $3), set_flagged = COALESCE(set_flagged, $4), updated_at = now()
           WHERE predecessor_id = $1
          RETURNING *`,
-        [cur.id, newUid, cur.set_seen, cur.set_flagged]
+        [cur.id, newUid, cur.set_seen, cur.set_flagged, at]
       );
-      if (next) return { op: cur, next, row: null, uid: newUid };
-      if (!row || Number(row.uid) !== placeholderUid(cur.id)) return { op: cur, row: null, uid: newUid };
-      if (cur.drop_row) {
+      if (next) return { op: cur, next, row: null, uid: newUid, folder: at };
+      if (!row || Number(row.uid) !== placeholderUid(cur.id)) return { op: cur, row: null, uid: newUid, folder: at };
+      if (cur.drop_row && at === cur.dest_folder) {
         await tx.query('DELETE FROM messages WHERE id = $1', [row.id]);
-        return { op: cur, row: null, uid: newUid };
+        return { op: cur, row: null, uid: newUid, folder: at };
       }
       // The server may name a uid that already has a row: on Gmail, MOVE into a label the letter
-      // already carries answers with that label copy's uid. The moved row keeps its id (clients
-      // hold it) and the other row goes.
+      // already carries answers with that label copy's uid; a sync may have inserted the letter
+      // before we heard back. The moved row keeps its id (clients hold it) and the other row goes.
       await tx.query(
         'DELETE FROM messages WHERE account_id = $1 AND folder = $2 AND uid = $3 AND id <> $4',
-        [cur.account_id, cur.dest_folder, newUid, row.id]
+        [cur.account_id, at, newUid, row.id]
       );
       // synced_at keeps a reconcile that took its server snapshot before now from judging the new
       // uid. A flag set while the move was pending gets a fresh local-wins window: the letter
       // arrived with its old flags, and they are stored right after this.
       await tx.query(
-        `UPDATE messages SET uid = $2, synced_at = NOW(),
+        `UPDATE messages SET uid = $2, folder = $5, synced_at = NOW(),
                 read_changed_at = CASE WHEN $3::boolean IS NULL THEN read_changed_at ELSE NOW() END,
                 star_changed_at = CASE WHEN $4::boolean IS NULL THEN star_changed_at ELSE NOW() END
           WHERE id = $1`,
-        [row.id, newUid, cur.set_seen, cur.set_flagged]
+        [row.id, newUid, cur.set_seen, cur.set_flagged, at]
       );
-      return { op: cur, row, uid: newUid, needsProviderIds: !row.provider_message_id };
+      return { op: cur, row, uid: newUid, folder: at, needsProviderIds: !row.provider_message_id };
     });
     if (!out) return null;
     this._unguard(out.op.id, { lingerSource: true });
@@ -704,6 +775,14 @@ export class MoveQueue {
     if (out.next) {
       this._guard(out.next);
       this.kick(out.next.account_id);
+    }
+    if (out.row && out.folder !== out.op.dest_folder) {
+      // Found elsewhere: the counts and every client follow the letter, quietly (it moved).
+      const { op: cur, row, folder: at } = out;
+      const unread = row.is_read ? 0 : 1;
+      if (!cur.drop_row) adjustFolderCounts(cur.account_id, cur.dest_folder, -1, -unread);
+      adjustFolderCounts(cur.account_id, at, 1, unread);
+      for (const f of [cur.dest_folder, at]) this.mgr.broadcast({ type: 'folder_updated', folder: f, accountId: cur.account_id });
     }
     return out;
   }
@@ -792,8 +871,9 @@ export class MoveQueue {
         const items = settled.filter(s => s.row && s.op[col] === value);
         const byFolder = new Map();
         for (const s of items) {
-          if (!byFolder.has(s.op.dest_folder)) byFolder.set(s.op.dest_folder, []);
-          byFolder.get(s.op.dest_folder).push(s);
+          const at = s.folder ?? s.op.dest_folder;
+          if (!byFolder.has(at)) byFolder.set(at, []);
+          byFolder.get(at).push(s);
         }
         for (const [folder, list] of byFolder) {
           try {

@@ -8,7 +8,7 @@ const dbState = { query: null };
 vi.mock('./db.js', () => ({ query: (...args) => dbState.query(...args) }));
 vi.mock('imapflow', () => ({ ImapFlow: vi.fn() }));
 
-const { ImapManager } = await import('./imapManager.js');
+const { ImapManager, createKeyedSemaphore } = await import('./imapManager.js');
 
 const ACCOUNT = '30000000-0000-0000-0000-000000000001';
 const letter = n => `40000000-0000-0000-0000-00000000000${n}`;
@@ -50,6 +50,7 @@ const queued = [1, 2, 3].map(n => ({ id: letter(n), uid: 100 + n, folder: 'INBOX
 const manager = () => {
   const mgr = Object.create(ImapManager.prototype);
   mgr._prefetchGeneration = new Map();
+  mgr._nodePrefetchSem = createKeyedSemaphore(8);
   mgr.lastUserActivity = new Map();
   mgr._secondaryLoginBlocked = () => null;
   mgr.fetchMessageBody = vi.fn(async (_a, uid) => ({ html: null, text: `Body of ${uid}`, attachments: [] }));

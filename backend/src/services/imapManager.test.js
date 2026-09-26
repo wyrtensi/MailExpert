@@ -17,7 +17,7 @@ vi.mock('../utils/redact.js', () => ({ redactEmail: vi.fn() }));
 vi.mock('./hostValidation.js', () => ({ resolveForConnection: vi.fn(), createPinnedLookup: vi.fn() }));
 vi.mock('./connectionPolicy.js', () => ({ getConnectionPolicy: vi.fn() }));
 
-import { ImapManager, MIN_SYNC_INTERVAL_MS, AUTO_IDLE_DELAY_MS, countMissingInboxCopies, fetchBackfillBatch, providerProfile, makeClientCfg, relocateExemptGuard, insertCopiedSibling, deleteMessageCopyRow, emitSectionsChanged, ensureMailbox, createKeyedSemaphore, isConnectionRefusal, extractImapError, isImapAuthFailure, AUTH_FAILURE_COOLDOWN_MS, AUTH_FAILURE_COOLDOWN_MAX_MS, authCooldownMs, connectCooldownMs, effectiveSyncIntervalMs, folderSyncDue, planModseqSync, connectStaggerFor, walkStructure, planBodyParts, extractBodyFromMsg, bodyFallbackApplies, poolSizeFor, backgroundPoolCap, rerootThreadChildren, parsePersistentCap, resolvePersistentCap, persistentEligible, shouldRetryIPv4, classifyMoveBySearch, PERSISTENT_FLAG_STORE_TIMEOUT_MS, PERSISTENT_FLAG_LATE_STORE_WAIT_MS, PERSISTENT_FLAG_LOCK_WAIT_MS, FLAG_STORE_UID_CHUNK, FLAG_PUSH_MAX_ATTEMPTS, wrapImapError, acquirePooledClient, releasePooledClient, evictPool, ACQUIRE_TIMEOUT_MS, BACKGROUND_ACQUIRE_TIMEOUT_MS, PREFETCH_MAX_CONSECUTIVE_ERRORS, PREFETCH_STOP_PAUSE_MS, PREFETCH_MAX_BUSY_WAITS, newBodyPrefetchCount, newBodyQueueMax, NODE_NEW_BODY_PREFETCH_MAX } from './imapManager.js';
+import { ImapManager, MIN_SYNC_INTERVAL_MS, AUTO_IDLE_DELAY_MS, countMissingInboxCopies, fetchBackfillBatch, providerProfile, makeClientCfg, relocateExemptGuard, insertCopiedSibling, deleteMessageCopyRow, emitSectionsChanged, ensureMailbox, createKeyedSemaphore, isConnectionRefusal, extractImapError, isImapAuthFailure, AUTH_FAILURE_COOLDOWN_MS, AUTH_FAILURE_COOLDOWN_MAX_MS, authCooldownMs, connectCooldownMs, effectiveSyncIntervalMs, folderSyncDue, planModseqSync, connectStaggerFor, walkStructure, planBodyParts, extractBodyFromMsg, bodyFallbackApplies, poolSizeFor, backgroundPoolCap, rerootThreadChildren, parsePersistentCap, resolvePersistentCap, persistentEligible, shouldRetryIPv4, classifyMoveBySearch, PERSISTENT_FLAG_STORE_TIMEOUT_MS, PERSISTENT_FLAG_LATE_STORE_WAIT_MS, PERSISTENT_FLAG_LOCK_WAIT_MS, FLAG_STORE_UID_CHUNK, FLAG_PUSH_MAX_ATTEMPTS, wrapImapError, acquirePooledClient, releasePooledClient, evictPool, ACQUIRE_TIMEOUT_MS, BACKGROUND_ACQUIRE_TIMEOUT_MS, PREFETCH_MAX_CONSECUTIVE_ERRORS, PREFETCH_STOP_PAUSE_MS, PREFETCH_MAX_BUSY_WAITS, newBodyPrefetchCount, newBodyQueueMax, NODE_NEW_BODY_PREFETCH_MAX, NODE_PREFETCH_PER_HOST } from './imapManager.js';
 import { pluginRegistry } from '../plugins/registry.js';
 import { EventEmitter } from 'node:events';
 import { ImapFlow } from 'imapflow';
@@ -5560,6 +5560,51 @@ describe('a sync stores the bodies of a node mailbox\'s new letters', () => {
     const uids = mgr.fetchMessageBody.mock.calls.map(c => c[1]);
     expect(uids).toHaveLength(2 * budget);
     expect(Math.min(...uids.slice(budget))).toBe(100 + 3 * budget + 1);
+  });
+
+  // A mailing to many node mailboxes: every mailbox's lane runs at once, all on one node host.
+  const lanesOnOneHost = async (extra, fetchImpl) => {
+    const mgr = ladderManager();
+    let inFlight = 0, peak = 0;
+    const gates = [];
+    mgr.fetchMessageBody = vi.fn(async (a, uid) => {
+      inFlight++; peak = Math.max(peak, inFlight);
+      try { return await fetchImpl(uid, gates); } finally { inFlight--; }
+    });
+    const lanes = Array.from({ length: 12 }, (_, n) =>
+      mgr.prefetchNewMessageBodies(mailbox(`host-lane-${n}`, extra), newRows(100 + 2 * n + 1, 100 + 2 * n + 2)));
+    return { mgr, lanes, gates, peak: () => peak, inFlight: () => inFlight };
+  };
+
+  it('holds the node mailboxes of one host to NODE_PREFETCH_PER_HOST letters in flight', async () => {
+    const run = await lanesOnOneHost({}, (uid, gates) => new Promise(resolve => gates.push(() => resolve({ html: null, text: `Body of ${uid}`, attachments: [] }))));
+    await vi.waitFor(() => expect(run.inFlight()).toBe(NODE_PREFETCH_PER_HOST));
+    await settleBackground();
+    expect(run.inFlight()).toBe(NODE_PREFETCH_PER_HOST);
+    // Each finished letter lets the next one in, until all 24 are stored.
+    while (bodies.size < 24) {
+      while (run.gates.length) run.gates.shift()();
+      await settleBackground();
+    }
+    await Promise.all(run.lanes);
+    expect(run.peak()).toBe(NODE_PREFETCH_PER_HOST);
+    expect(bodies.size).toBe(24);
+  });
+
+  it('gives the slot back when a letter fails', async () => {
+    const run = await lanesOnOneHost({}, async () => { throw new Error('Unexpected server response'); });
+    await Promise.all(run.lanes);
+    expect(run.mgr.fetchMessageBody).toHaveBeenCalledTimes(24);
+  });
+
+  it('does not hold mailboxes off the node to the node host limit', async () => {
+    const run = await lanesOnOneHost({ mail_node: false }, (uid, gates) => new Promise(resolve => gates.push(() => resolve({ html: null, text: `Body of ${uid}`, attachments: [] }))));
+    await vi.waitFor(() => expect(run.inFlight()).toBe(12));
+    while (run.gates.length || run.inFlight()) {
+      while (run.gates.length) run.gates.shift()();
+      await settleBackground();
+    }
+    await Promise.all(run.lanes);
   });
 
   it('pauses the new-mail lane after a run stopped on failures', async () => {

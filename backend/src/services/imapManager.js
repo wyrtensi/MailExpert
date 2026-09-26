@@ -286,6 +286,16 @@ export const PREFETCH_MAX_BUSY_WAITS = 30;
 // sync after an outage): the newest 50 are fetched, the rest on open. Attachments never are.
 export const NODE_NEW_BODY_PREFETCH_MAX = 50;
 
+// Body prefetch letters of node mailboxes in flight at once on one node host, across every
+// mailbox and both lanes. Each letter is one read, one FETCH and one write, and a lane has at
+// most one statement in flight, so this also bounds the prefetch's share of the database pool
+// (pg max 20, shared with every user request): 8 leaves 12 for users, sync and the other
+// background jobs. The node serves 8 small FETCHes at once easily, and at some 20-50 ms a letter
+// that is 160-400 letters a second: a mailing of 10 letters to 500 mailboxes is warm within about
+// 15-30 s. A letter holds its slot while it waits for its mailbox's pool too (up to 10 s when
+// the background share is taken), which only slows the others down.
+export const NODE_PREFETCH_PER_HOST = 8;
+
 // How many of the `newCount` unread letters a sync of `folder` just stored get their bodies
 // fetched right away (the newest ones). A node mailbox's INBOX: all of them up to
 // NODE_NEW_BODY_PREFETCH_MAX. Every other folder (Junk from the spam poll, the GTD label copies,
@@ -2209,6 +2219,8 @@ export class ImapManager {
     this._prefetchRunning = new Set(); // accountIds with a folder-view body-prefetch run in progress
     this._prefetchNewRunning = new Set(); // accountIds with a new-mail body-prefetch run in progress
     this._prefetchNewPending = new Map(); // accountId -> Map(id -> row) of new letters that run takes next
+    // Body prefetch letters of node mailboxes in flight at once, per node host (NODE_PREFETCH_PER_HOST).
+    this._nodePrefetchSem = createKeyedSemaphore(NODE_PREFETCH_PER_HOST);
     this._prefetchGeneration = new Map(); // accountId -> bumped by disconnectAccount; a prefetch run of an older one stops
     this._prefetchPausedUntil = new Map(); // accountId -> ms; body prefetch paused after a run stopped on failures
     // accountId -> the value last persisted to email_accounts.sync_error: a string (error is
@@ -6526,6 +6538,10 @@ export class ImapManager {
         return;
       }
 
+      // A node mailbox's letter takes one of the host's NODE_PREFETCH_PER_HOST slots for its read,
+      // FETCH and write (see there). Released on every way out of the letter, the finally below.
+      const hostSlot = account.mail_node ? (account.imap_host || '').toLowerCase() : null;
+      if (hostSlot) await this._nodePrefetchSem.acquire(hostSlot);
       try {
         // The letter as the database has it now. No row: the letter is gone (deleted, expunged),
         // or its mailbox was disabled or deleted (a login there could only be rejected). Another
@@ -6594,6 +6610,8 @@ export class ImapManager {
           return 'stopped';
         }
         continue;
+      } finally {
+        if (hostSlot) this._nodePrefetchSem.release(hostSlot);
       }
       consecutiveErrors = 0;
       busyWaits = 0;

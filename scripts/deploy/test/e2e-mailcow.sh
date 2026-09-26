@@ -11,6 +11,8 @@
 #   scripts/deploy/test/e2e-mailcow.sh --image ... --scenario search --mailboxes 500 --node-tuning \
 #     --levels 1000,5000,10000,30000,50000,100000 [--gmail-mailboxes 125]
 #     [--server-cpuset 0-3 --server-cpus 2.8 --server-memory 8g --server-swap 2g]
+#   scripts/deploy/test/e2e-mailcow.sh --image ... --scenario work --mailboxes 90 --gmail-mailboxes 110 \
+#     --node-tuning --letters 300 --work-seconds 600 [--server-* ...]
 #
 # --gmail-mailboxes adds that many Gmail mailboxes next to the node's (load and search scenarios):
 # mailcow mailboxes the panel reaches as imap.gmail.com, see --kind gmail. They get as many letters
@@ -33,6 +35,11 @@
 # employees while the panel syncs the new letters, at rest (every letter opened, so body text is
 # searched too), while one letter goes to every mailbox, and while all mailboxes reconnect after a
 # backend restart; with memory and CPU peaks and the database size for the level.
+# The work scenario seeds --letters letters in every mailbox and lets ten employees work in the
+# shared mailboxes for --work-seconds (e2e-mailcow-load.mjs PHASE=work): moves, archive and Trash go
+# through the panel's move queue. One letter goes to every mailbox as they start, and the backend
+# restarts half way. Then it waits for the move queue to empty and checks every seeded letter in the
+# panel against the node's own list: none lost, none twice, each in the folder the panel shows.
 # The panel runs with the production limits of deploy/compose.prod.yml (memory caps, Node heap,
 # PostgreSQL shared_buffers).
 #
@@ -49,7 +56,7 @@ TEST_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 . "$TEST_DIR/../lib/common.sh"
 
 IMAGE='' SCENARIO=functional MAILBOXES=100 IMAP_PROCESS_LIMIT='' NODE_TUNING=0 KIND=node PANEL_ENV='' LEVELS=''
-GMAIL_MAILBOXES=0 SERVER_LIMITS=''
+GMAIL_MAILBOXES=0 SERVER_LIMITS='' LETTERS=300 WORK_SECONDS=600
 while [ $# -gt 0 ]; do
   case $1 in
     --image) IMAGE=$2 && shift 2 ;;
@@ -57,6 +64,8 @@ while [ $# -gt 0 ]; do
     --mailboxes) MAILBOXES=$2 && shift 2 ;;
     --gmail-mailboxes) GMAIL_MAILBOXES=$2 && shift 2 ;;
     --levels) LEVELS=$2 && shift 2 ;;
+    --letters) LETTERS=$2 && shift 2 ;;
+    --work-seconds) WORK_SECONDS=$2 && shift 2 ;;
     --server-cpuset)
       [[ $2 =~ ^[0-9]+([-,][0-9]+)*$ ]] || die "--server-cpuset must be a CPU list such as 0-3" 2
       SERVER_LIMITS="$SERVER_LIMITS --cpuset-cpus $2" && shift 2 ;;
@@ -79,7 +88,9 @@ while [ $# -gt 0 ]; do
   esac
 done
 [ -n "$IMAGE" ] || die "--image <backend image> is required" 2
-case $SCENARIO in functional | load | search) ;; *) die "--scenario must be functional, load or search" 2 ;; esac
+case $SCENARIO in functional | load | search | work) ;; *) die "--scenario must be functional, load, search or work" 2 ;; esac
+[[ $LETTERS =~ ^[1-9][0-9]{0,4}$ ]] || die "--letters must be a number from 1 to 99999" 2
+[[ $WORK_SECONDS =~ ^[1-9][0-9]{1,4}$ ]] || die "--work-seconds must be a number from 10 to 99999" 2
 [[ $MAILBOXES =~ ^[1-9][0-9]{0,3}$ ]] || die "--mailboxes must be a number from 1 to 9999" 2
 [[ $GMAIL_MAILBOXES =~ ^[0-9]{1,3}$ ]] || die "--gmail-mailboxes must be a number from 0 to 999" 2
 if [ -n "${SERVER_MEMORY:-}" ]; then
@@ -92,8 +103,10 @@ if [ "$GMAIL_MAILBOXES" != 0 ]; then
   [ "$KIND" = node ] || die "--gmail-mailboxes adds to node mailboxes; drop --kind gmail" 2
   [ "$SCENARIO" != functional ] || die "--gmail-mailboxes is for the load and search scenarios" 2
 fi
+if [ "$SCENARIO" = search ] || [ "$SCENARIO" = work ]; then
+  [ "$KIND" = node ] || die "--scenario $SCENARIO runs on node mailboxes (add Gmail ones with --gmail-mailboxes)" 2
+fi
 if [ "$SCENARIO" = search ]; then
-  [ "$KIND" = node ] || die "--scenario search runs on node mailboxes only" 2
   [[ $LEVELS =~ ^[1-9][0-9]*(,[1-9][0-9]*)*$ ]] || die "--levels must be a comma-separated list of letter counts" 2
   previous=0
   for level in ${LEVELS//,/ }; do
@@ -333,9 +346,36 @@ level_peaks() {
 }
 
 phase setup
-if [ "$SCENARIO" = search ]; then
+DOVECOT=mailcowdockerized-dovecot-mailcow-1
+if [ "$SCENARIO" = work ]; then
   phase users
-  DOVECOT=mailcowdockerized-dovecot-mailcow-1
+  all=$((MAILBOXES + GMAIL_MAILBOXES))
+  log "seeding $LETTERS letters in each of $all mailboxes"
+  inner 'rm -rf /opt/seed && mkdir -m 777 /opt/seed'
+  phase seed "-v /opt/seed:/seed -e SEED_FROM=0 -e SEED_COUNT=$LETTERS"
+  inner "docker cp /opt/seed/. $DOVECOT:/tmp/seed && rm -rf /opt/seed"
+  phase search "-e SEARCH_LABEL=sync -e SEARCH_UNTIL_ROWS=$((LETTERS * all))" &
+  search_pid=$!
+  inner "docker exec $DOVECOT sh -c 'chown -R vmail:vmail /tmp/seed \
+    && { ls /tmp/seed | xargs -P 8 -I{} doveadm import -u {}@$DOMAIN maildir:/tmp/seed/{} \"\" all >/tmp/import.log 2>&1 \
+         || { grep -v \": Info: \" /tmp/import.log | tail -20; exit 1; }; } && rm -rf /tmp/seed /tmp/import.log'"
+  wait "$search_pid"
+  work_started=$(date +%s)
+  inner 'rm -rf /opt/work && mkdir -m 777 /opt/work'
+  phase work "-v /opt/work:/seed -e WORK_SECONDS=$WORK_SECONDS" &
+  work_pid=$!
+  phase delivery
+  sleep $((WORK_SECONDS / 2))
+  restart_backend
+  wait "$work_pid"
+  phase drain
+  # Syncs the moves set off (destination folders, flags) settle before the node is listed.
+  sleep 60
+  inner "docker exec $DOVECOT doveadm -f tab fetch -A 'mailbox hdr.message-id' all > /opt/work/server.tsv"
+  phase verify "-v /opt/work:/seed"
+  level_peaks work "$work_started" "$(date +%s)"
+elif [ "$SCENARIO" = search ]; then
+  phase users
   have=0
   for level in ${LEVELS//,/ }; do
     per=$((level / MAILBOXES))

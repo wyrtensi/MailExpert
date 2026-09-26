@@ -282,7 +282,10 @@ router.post('/send', async (req, res) => {
         const fetched = await Promise.all(batch.map(async ({ msg, att }) => {
           const acct = acctById.get(msg.account_id);
           if (!acct) throw Object.assign(new Error('Account not found'), { status: 404 });
-          const buffer = await imapManager.fetchAttachment(acct, msg.uid, msg.folder, att.part);
+          // A letter whose move is pending is read at its source (moveQueue.serverLocation).
+          const loc = await imapManager.moveQueue.serverLocation(msg);
+          if (!loc) throw Object.assign(new Error('The forwarded letter is still being moved; try again in a few seconds'), { status: 409 });
+          const buffer = await imapManager.fetchAttachment(acct, loc.uid, loc.folder, att.part);
           if (!buffer) throw Object.assign(new Error(`Could not fetch attachment: ${att.filename}`), { status: 502 });
           return {
             filename: sanitizeHeaderValue(att.filename || 'attachment'),

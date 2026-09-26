@@ -14,6 +14,8 @@ vi.mock('../index.js', () => ({
     _unguardMoveUid: vi.fn(),
     _scheduleProviderIdBackfill: vi.fn(),
     scheduleCountRefresh: vi.fn(),
+    // Moves to Trash are DB-first: the row moves now and the MOVE is queued (moveQueue.js).
+    moveQueue: { enqueue: vi.fn(async (_accountId, rows) => rows.map(r => r.id)) },
   },
 }));
 vi.mock('../plugins/registry.js', () => ({ pluginRegistry: { runHook: vi.fn(async () => {}), collectHook: vi.fn(async () => []) } }));
@@ -91,15 +93,14 @@ describe('deleting messages is journaled', () => {
     expect(JSON.stringify(journaled())).not.toContain('Board minutes');
   });
 
-  it('records nothing when the server refuses the delete', async () => {
-    imapManager.moveMessage.mockRejectedValueOnce(new Error('NO'));
-    expect((await fetch(`${base}/api/mail/messages/${INBOX_ID}`, { method: 'DELETE' })).status).toBe(500);
+  it('records nothing when the server refuses a permanent delete', async () => {
+    imapManager.permanentDeleteMessage.mockRejectedValueOnce(new Error('NO'));
+    expect((await fetch(`${base}/api/mail/messages/${TRASH_ID}`, { method: 'DELETE' })).status).toBe(500);
     expect(journaled()).toEqual([]);
   });
 
   it('records one entry per message that bulk delete removed', async () => {
     imapManager.bulkPermanentDelete.mockResolvedValue({ succeeded: [22], failed: [] });
-    imapManager.bulkMoveMessages.mockResolvedValue({ uidMap: new Map([[11, 901]]), succeeded: [11], failed: [] });
     const res = await fetch(`${base}/api/mail/messages/bulk-delete`, {
       method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ ids: [INBOX_ID, TRASH_ID] }),
     });
@@ -114,7 +115,6 @@ describe('deleting messages is journaled', () => {
   it('skips messages the server failed to delete and keeps the delete successful when the journal fails', async () => {
     failJournal = true;
     imapManager.bulkPermanentDelete.mockResolvedValue({ succeeded: [], failed: [22] });
-    imapManager.bulkMoveMessages.mockResolvedValue({ uidMap: new Map([[11, 901]]), succeeded: [11], failed: [] });
     const res = await fetch(`${base}/api/mail/messages/bulk-delete`, {
       method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ ids: [INBOX_ID, TRASH_ID] }),
     });

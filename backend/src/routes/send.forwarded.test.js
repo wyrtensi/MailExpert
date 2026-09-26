@@ -8,7 +8,7 @@ vi.mock('../middleware/auth.js', () => ({
 vi.mock('../services/redis.js', () => ({
   redisClient: { get: vi.fn().mockResolvedValue(null), set: vi.fn().mockResolvedValue('OK'), del: vi.fn() },
 }));
-vi.mock('../index.js', () => ({ imapManager: { fetchAttachment: vi.fn() } }));
+vi.mock('../index.js', () => ({ imapManager: { fetchAttachment: vi.fn(), moveQueue: { serverLocation: vi.fn() } } }));
 vi.mock('../services/smtpTransport.js', () => ({ createAccountSmtpTransport: vi.fn() }));
 
 import express from 'express';
@@ -70,5 +70,37 @@ describe('POST /api/mail/send — forwarded attachment guards (#F2)', () => {
     expect((await res.json()).error).toMatch(/exceeds 25 MB/);
     // The whole point: no IMAP fetch happens when the declared size already blows the limit.
     expect(imapManager.fetchAttachment).not.toHaveBeenCalled();
+  });
+
+  // DB-first moves (moveQueue.js): a forwarded letter whose move is pending holds a placeholder
+  // uid. Its attachment is read at the letter's server location, and not at all while the MOVE is
+  // in flight.
+  describe('a forwarded letter whose move has not reached the server', () => {
+    const PENDING = { id: MSG_ID, uid: -3, folder: 'Archive', account_id: ACCOUNT_ID,
+      attachments: [{ part: '2', size: 10, filename: 'minutes.pdf', type: 'application/pdf' }] };
+    beforeEach(() => {
+      query.mockImplementation((sql) => {
+        if (sql.includes('FROM email_accounts WHERE id = $1')) return Promise.resolve({ rows: [ACCOUNT] });
+        if (sql.includes('FROM email_accounts WHERE id = ANY')) return Promise.resolve({ rows: [ACCOUNT] });
+        if (sql.includes('SELECT preferences FROM users')) return Promise.resolve({ rows: [{ preferences: {} }] });
+        if (sql.includes('FROM messages m') && sql.includes('m.id = ANY')) return Promise.resolve({ rows: [PENDING] });
+        return Promise.resolve({ rows: [] });
+      });
+    });
+    const forward = () => post({ accountId: ACCOUNT_ID, to: ['x@example.com'], forwardedAttachments: [{ messageId: MSG_ID, part: '2' }] });
+
+    it('reads the attachment at the source of the queued move', async () => {
+      imapManager.moveQueue.serverLocation.mockResolvedValue({ folder: 'INBOX', uid: 21 });
+      imapManager.fetchAttachment.mockResolvedValue(null); // stops the send right after the fetch
+      await forward();
+      expect(imapManager.fetchAttachment).toHaveBeenCalledWith(ACCOUNT, 21, 'INBOX', '2');
+    });
+
+    it('answers 409 while the MOVE is in flight, without a fetch', async () => {
+      imapManager.moveQueue.serverLocation.mockResolvedValue(null);
+      const res = await forward();
+      expect(res.status).toBe(409);
+      expect(imapManager.fetchAttachment).not.toHaveBeenCalled();
+    });
   });
 });

@@ -347,6 +347,35 @@ describe('the destination sync', () => {
   });
 });
 
+describe('a move whose new uid cannot be found', () => {
+  // The MOVE went through without a uid, and nothing finds the letter for MOVE_AWAITING_UID_MAX_MS.
+  async function awaitingTooLong() {
+    mgr.bulkMoveMessages.mockResolvedValue({ uidMap: new Map(), succeeded: [11], failed: [] });
+    await queue.enqueue(ACCOUNT, await rowsOf([A]), 'Archive');
+    await queue.runAccount(ACCOUNT);
+    await db.query("UPDATE message_moves SET updated_at = now() - interval '1 hour', next_attempt_at = now()");
+  }
+
+  it('drops the row, and a move that followed it, for the syncs to insert the letter afresh', async () => {
+    await awaitingTooLong();
+    await queue.enqueue(ACCOUNT, await rowsOf([A]), 'Trash');
+    expect(await moves()).toHaveLength(2);
+    await db.query("UPDATE message_moves SET updated_at = now() - interval '1 hour', next_attempt_at = now() WHERE state = 'awaiting_uid'");
+    await queue.runAccount(ACCOUNT);
+    expect(await moves()).toEqual([]);
+    expect(await row(A)).toBeUndefined();
+    expect([...mgr._pendingMoveUids.keys()].some(k => k.includes(':-'))).toBe(false);
+  });
+
+  it('stops looking when the lookup keeps failing', async () => {
+    await awaitingTooLong();
+    mgr.findUidByMessageId.mockRejectedValue(new Error('Mailbox does not exist'));
+    await queue.runAccount(ACCOUNT);
+    expect(await moves()).toEqual([]);
+    expect(await row(A)).toBeUndefined();
+  });
+});
+
 describe('a letter moved again while its first move is in flight', () => {
   it('gets a second move that starts from the uid the first one lands on', async () => {
     let answer;

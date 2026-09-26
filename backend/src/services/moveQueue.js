@@ -513,7 +513,9 @@ export class MoveQueue {
         } catch (err) {
           if (isMailboxBusyError(err)) return true;
           console.warn(`Move queue: looking up moved letter failed: ${err.message}`);
-          await query(`UPDATE message_moves SET next_attempt_at = now() + ($2::int * interval '1 millisecond') WHERE id = $1`, [op.id, MOVE_AWAITING_RETRY_MS]);
+          // A lookup that keeps failing (a folder gone, say) ends like one that finds nothing.
+          if (Date.now() - new Date(op.updated_at).getTime() > MOVE_AWAITING_UID_MAX_MS) await this._drop(op);
+          else await query(`UPDATE message_moves SET next_attempt_at = now() + ($2::int * interval '1 millisecond') WHERE id = $1`, [op.id, MOVE_AWAITING_RETRY_MS]);
           continue;
         }
         if (uid) {
@@ -681,18 +683,25 @@ export class MoveQueue {
   }
 
   // Neither place has the letter where we can find it: the move and its row go, and the syncs
-  // insert the letter wherever the server has it.
+  // insert the letter wherever the server has it. A move that follows this one (the letter was
+  // moved again meanwhile) waits for a source uid that will never come, so it goes too, with the
+  // row when the row is at its placeholder.
   async _drop(op) {
-    await withTransaction(async (tx) => {
+    const out = await withTransaction(async (tx) => {
       const { rows: [row] } = await tx.query('SELECT id, uid FROM messages WHERE id = $1 FOR UPDATE', [op.message_row_id]);
       const { rows: [cur] } = await tx.query('SELECT id FROM message_moves WHERE id = $1 FOR UPDATE', [op.id]);
-      if (!cur) return;
+      if (!cur) return null;
       await tx.query('DELETE FROM message_moves WHERE id = $1', [op.id]);
-      if (row && Number(row.uid) === placeholderUid(op.id)) await tx.query('DELETE FROM messages WHERE id = $1', [row.id]);
+      const { rows: next } = await tx.query('DELETE FROM message_moves WHERE predecessor_id = $1 RETURNING *', [op.id]);
+      const ids = [op.id, ...next.map(n => n.id)];
+      if (row && ids.some(id => Number(row.uid) === placeholderUid(id))) await tx.query('DELETE FROM messages WHERE id = $1', [row.id]);
+      return { next };
     });
+    if (!out) return;
     console.warn(`Move queue: move ${op.id} to ${op.dest_folder}: new uid not found, row dropped for the next sync`);
     this._unguard(op.id);
     this._unexpect(op);
+    for (const n of out.next) this._unguard(n.id);
   }
 
   // Read/star changes made while the moves were pending, now stored at the destination. A store

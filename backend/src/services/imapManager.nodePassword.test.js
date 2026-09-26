@@ -413,6 +413,26 @@ describe('a mail node mailbox whose password is rejected', () => {
     expect(mgr._nodePasswordRestored.has(acct.id)).toBe(false);
   });
 
+  it('a pooled login the node accepts proves the restored password too', async () => {
+    const acct = stored(nodeAccount({ auth_pass: `enc:${NEW_PASSWORD}` }));
+    nodePassword = NEW_PASSWORD;
+    const mgr = newManager();
+    mgr._nodePasswordRestored.add(acct.id);
+
+    const client = await acquirePooledClient(acct);
+    expect(logins).toEqual([{ pass: NEW_PASSWORD, ok: true }]);
+    expect(mgr._nodePasswordRestored.has(acct.id)).toBe(false);
+    releasePooledClient(acct, client);
+    evictPool(acct.id);
+
+    // A rejected pooled login keeps it.
+    nodePassword = 'changed-again';
+    mgr._nodePasswordRestored.add(acct.id);
+    await rejectPoolLogin(acct);
+    expect(mgr._nodePasswordRestored.has(acct.id)).toBe(true);
+    evictPool(acct.id);
+  });
+
   it('goes by the stored row: a mailbox disabled in MailExpert or no longer on the node is left alone', async () => {
     const mgr = newManager();
     for (const change of [{ enabled: false }, { mail_node: false }]) {

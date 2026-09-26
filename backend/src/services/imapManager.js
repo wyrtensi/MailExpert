@@ -1600,6 +1600,16 @@ async function applyHelperAuthFailure(account, err, what) {
   }
 }
 
+// A pooled login was accepted. Its password is the one every login of the account takes
+// (currentAuthPass), so a node password restored earlier is proven, as by the persistent login: a
+// later rejection may restore it again. Without this, a restore whose own reconnect was skipped (the
+// old IDLE session lived on) kept the mark while the pool logged in fine, and the next real password
+// loss got only the "rejected too" warning. (withFreshLogin serves only preferFreshBodyFetch
+// providers, never the mail node's profile, so it has no mark to clear.)
+function noteHelperLoginAccepted(account) {
+  helperManager?._nodePasswordRestored?.delete(account.id);
+}
+
 // True while a rejected password holds this account's new logins back (_authLoginBlocked): then no
 // pool grow and no fresh login, for background and user work alike. An open session can still
 // serve the work; without one it fails at once with providerRefusing, which routes answer with
@@ -1721,6 +1731,7 @@ async function growPool(pool, account) {
     await applyHelperAuthFailure(account, err, 'Pooled');
     throw err;
   }
+  noteHelperLoginAccepted(account);
   pool.connecting--;
   // Remove from pool immediately when the server closes the socket, then give the freed slot
   // to the queue (an idle client, or a grow for the head waiter).

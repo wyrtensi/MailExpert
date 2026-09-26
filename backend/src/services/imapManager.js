@@ -34,6 +34,7 @@ import { loadRecompute, recomputeState, recordRecomputeError } from './threading
 import { restoreNodeMailboxPassword } from './mailNode/passwordRestore.js';
 import { currentAuthPass, noteRestoredPassword } from './mailNode/currentPassword.js';
 import { recordAudit } from './auditLog.js';
+import { MoveQueue } from './moveQueue.js';
 import { randomUUID } from 'crypto';
 
 
@@ -2265,6 +2266,9 @@ export class ImapManager {
     // or if the server is non-UIDPLUS and the DB temporarily holds a stale UID.
     // Keys are "${accountId}:${folder}:${uid}" strings.
     this._pendingMoveUids = new Map(); // "acct:folder:uid" -> active guard count (ref-counted)
+    // DB-first moves (services/moveQueue.js): the durable queue of server MOVEs behind user moves.
+    // Its guards go through _guardMoveUid; its worker starts with moveQueue.resume() at startup.
+    this.moveQueue = new MoveQueue(this);
     this._stalenessCheckRunning = false; // re-entrancy guard for the staleness-probe cycle
 
     // Health check: every 90 seconds, find any enabled IMAP accounts that have no
@@ -2424,7 +2428,7 @@ export class ImapManager {
             probedAccount = account;
             // Our highest synced INBOX UID — the watermark for "have we seen the newest mail".
             const { rows: [w] } = await query(
-              "SELECT MAX(uid)::bigint AS maxuid FROM messages WHERE account_id = $1 AND folder = 'INBOX'",
+              "SELECT MAX(uid)::bigint AS maxuid FROM messages WHERE account_id = $1 AND folder = 'INBOX' AND uid > 0",
               [accountId]
             );
             const maxUid = w.maxuid ? Number(w.maxuid) : 0;
@@ -2682,6 +2686,15 @@ export class ImapManager {
         // key and leaves this one unmarked): don't re-assert/re-push a now-stale value over the
         // newer one. The queue holds the newer op, which a later pass pushes.
         if (op.resolved || ops.get(key) !== op) continue;
+        // The letter's move has not reached the server, so its uid is a placeholder with nothing
+        // to store at: the value goes onto the move, which stores it at the destination after the
+        // MOVE (moveQueue.js), durably. Not an attempt. A move that settled meanwhile leaves the op
+        // here for the next cycle, at the new location.
+        if (Number(msg.uid) < 0) {
+          const { deferred } = await this.moveQueue.deferFlags([{ id: op.messageId, uid: msg.uid }], op.flag, op.value);
+          if (deferred.has(op.messageId) && ops.get(key) === op) ops.delete(key);
+          continue;
+        }
         const marker = await this._reassertFlagPush(op);
         try {
           await this.setFlag(account, msg.uid, msg.folder, op.flag, op.value, { background: true });
@@ -4220,6 +4233,9 @@ export class ImapManager {
           const changed = await this._applyFlagUpdates(account, path, flags);
           const { rows } = await query('SELECT uid, synced_at FROM messages WHERE account_id=$1 AND folder=$2', [account.id, path]);
           const local = new Set(rows.map(r => Number(r.uid)));
+          // A guarded server UID is a letter whose move is pending: its row is elsewhere, so it
+          // is no gap (moveQueue.js), and backfill would skip it anyway.
+          for (const uid of server) if (this._isMoveUidGuarded(account.id, path, Number(uid))) local.add(Number(uid));
           // UIDs the server lists but has repeatedly refused to hand over do not count as a gap.
           // Without this the integrity check and the backfill loop on them for good: the check
           // finds them missing, the backfill asks and gets nothing, and the next check finds
@@ -4443,7 +4459,8 @@ export class ImapManager {
         // Highest UID we already have in DB for this account/folder — used as the
         // watermark for Phase 1 new-message detection.
         const { rows: [{ max_uid }] } = await query(
-          'SELECT COALESCE(MAX(uid), 0) as max_uid FROM messages WHERE account_id = $1 AND folder = $2',
+          // uid > 0: a moved row waiting for its MOVE holds a negative placeholder (moveQueue.js).
+          'SELECT COALESCE(MAX(uid), 0) as max_uid FROM messages WHERE account_id = $1 AND folder = $2 AND uid > 0',
           [account.id, folder]
         );
         const maxKnownUid = Number(max_uid);
@@ -4493,6 +4510,10 @@ export class ImapManager {
               atts = body.attachments;
             }
             const msgId = sanitizeStr(parsed.messageId);
+            // A letter whose move is pending lives in its moved row: at the source it is guarded
+            // and not inserted again, in the destination the moved row takes it (moveQueue.js).
+            if (this._isMoveUidGuarded(account.id, folder, Number(parsed.uid))) return;
+            if (await this.moveQueue.claimArrival(account.id, folder, msgId, parsed.uid)) return;
             const inReplyTo = sanitizeStr(parsed.inReplyTo);
             const refs = sanitizeStr(parsed.references);
             const providerIds = provider.gmailThreadIds ? gmailProviderIds(msg) : NO_PROVIDER_IDS;
@@ -5061,7 +5082,7 @@ export class ImapManager {
 
       // Progress is measured locally, but only the UID-set diff below proves membership.
       const dbSummaryResult = await query(
-        'SELECT COUNT(*) as count, COALESCE(MAX(uid), 0) as max_uid FROM messages WHERE account_id = $1 AND folder = $2 AND is_deleted = false',
+        'SELECT COUNT(*) as count, COALESCE(MAX(uid), 0) as max_uid FROM messages WHERE account_id = $1 AND folder = $2 AND is_deleted = false AND uid > 0',
         [account.id, folder]
       );
       const dbCount = parseInt(dbSummaryResult.rows[0].count);
@@ -5099,8 +5120,9 @@ export class ImapManager {
       const ghosts = bfUidValidity == null
         ? new Set()
         : await suppressedUids(account.id, folder, bfUidValidity);
+      // A guarded UID is a letter whose move is pending: its row lives elsewhere (moveQueue.js).
       const missingUids = serverUids
-        .filter(uid => !existingUids.has(uid) && !ghosts.has(Number(uid)))
+        .filter(uid => !existingUids.has(uid) && !ghosts.has(Number(uid)) && !this._isMoveUidGuarded(account.id, folder, Number(uid)))
         .sort((a, b) => b - a);
 
       if (missingUids.length === 0) {
@@ -5234,6 +5256,8 @@ export class ImapManager {
                 }
 
                 const bfMsgId    = sanitizeStr(parsed.messageId);
+                // A moved letter arriving in its destination belongs to the moved row (moveQueue.js).
+                if (await this.moveQueue.claimArrival(account.id, folder, bfMsgId, parsed.uid)) continue;
                 const bfReplyTo  = sanitizeStr(parsed.inReplyTo);
                 const bfRefs     = sanitizeStr(parsed.references);
                 const bfProviderIds = cfg.gmailThreadIds ? gmailProviderIds(msg) : NO_PROVIDER_IDS;
@@ -5508,7 +5532,7 @@ export class ImapManager {
   async refreshBulkFlags(account) {
     const nullResult = await query(
       `SELECT id, uid, folder FROM messages
-       WHERE account_id = $1 AND is_bulk IS NULL AND is_deleted = false
+       WHERE account_id = $1 AND is_bulk IS NULL AND is_deleted = false AND uid > 0
        ORDER BY folder, uid DESC
        LIMIT 5000`,
       [account.id]
@@ -5783,7 +5807,7 @@ export class ImapManager {
 
           const batchResult = await query(
             `SELECT uid FROM messages
-             WHERE account_id = $1 AND folder = $2 AND (snippet IS NULL OR snippet = '') AND snippet_attempted_at IS NULL
+             WHERE account_id = $1 AND folder = $2 AND (snippet IS NULL OR snippet = '') AND snippet_attempted_at IS NULL AND uid > 0
              ORDER BY date DESC LIMIT $3`,
             [account.id, folder, batchSize]
           );
@@ -6332,7 +6356,8 @@ export class ImapManager {
     this._scheduleProviderIdBackfill(account);
   }
 
-  async findUidByMessageId(account, folder, messageId) {
+  // poolOpts: see acquirePooledClient (the move queue looks up in the background).
+  async findUidByMessageId(account, folder, messageId, poolOpts = {}) {
     if (!messageId || !folder) return null;
     const mid = String(messageId).replace(/[<>]/g, '').trim();
     if (!mid) return null;
@@ -6345,7 +6370,7 @@ export class ImapManager {
       } finally {
         lock.release();
       }
-    });
+    }, poolOpts);
   }
 
   // Syncs the most recent messages in a specific folder on demand.
@@ -6469,7 +6494,7 @@ export class ImapManager {
 
     const uncachedResult = await query(
       `SELECT id, uid, folder FROM messages
-       WHERE id = ANY($1::uuid[]) AND body_html IS NULL AND body_text IS NULL`,
+       WHERE id = ANY($1::uuid[]) AND body_html IS NULL AND body_text IS NULL AND uid > 0`,
       [messageIds]
     );
     if (!uncachedResult.rows.length) return;
@@ -7116,6 +7141,14 @@ export class ImapManager {
     return this._runFlagStores(account, groups.length, units, flag, value, { background, failFastWhenHeld });
   }
 
+  // Resolves once every flag store already called on these letters (folder, uids) has settled,
+  // including a late persistent STORE (bounded, see _reserveFlagStores). The move queue waits for
+  // it before a MOVE, so a flag clicked before the move lands at the letter's old uid first.
+  async flagStoresSettled(accountId, folder, uids) {
+    const tails = uids.map(uid => this._flagStoreChains.get(`${accountId}\n${folder}\n${uid}`)).filter(Boolean);
+    await Promise.all(tails);
+  }
+
   // Reserve the per-message chains for a set of flag stores, synchronously, before any await:
   // groups is [{ folder, uids }], and every chunk of FLAG_STORE_UID_CHUNK UIDs of every group
   // becomes one unit. A unit reads the current tail of each of its letters (prevs) and installs
@@ -7486,8 +7519,10 @@ export class ImapManager {
   // On command failure, verifies via UID SEARCH and confirms destination arrival
   // before trusting the source-absence result.
   // background / failFastWhenHeld (a rule, the block list): see acquirePooledClient.
-  async bulkMoveMessages(account, uids, fromFolder, toFolder, { background = false, failFastWhenHeld = false } = {}) {
-    const poolOpts = { background, failFastWhenHeld };
+  // noNewLogin: the move queue's worker while a backoff holds background logins back (see
+  // _poolLoginOpts).
+  async bulkMoveMessages(account, uids, fromFolder, toFolder, { background = false, failFastWhenHeld = false, noNewLogin = false } = {}) {
+    const poolOpts = { background, failFastWhenHeld, noNewLogin };
     if (!uids.length) return { uidMap: new Map(), succeeded: [], failed: [] };
     let destUidNextBefore = null;
 
@@ -7624,6 +7659,23 @@ export class ImapManager {
       sortedSrc.forEach((uid, i) => uidMap.set(uid, sortedNew[i]));
     }
     return { uidMap, succeeded: c.succeeded, failed: c.failed, staleCount: c.staleCount };
+  }
+
+  // Which of `uids` the server still has in `folder` (UID SEARCH). Throws when the search gives no
+  // list, so a caller never reads "none of them" into a failed search. poolOpts: see
+  // acquirePooledClient.
+  async searchUids(account, folder, uids, poolOpts = {}) {
+    if (!uids.length) return [];
+    return withFreshClient(account, async (client) => {
+      const lock = await client.getMailboxLock(folder);
+      try {
+        const found = await client.search({ uid: uids.join(',') }, { uid: true });
+        if (!Array.isArray(found)) throw new Error(`UID SEARCH in ${folder} returned ${found}`);
+        return found;
+      } finally {
+        lock.release();
+      }
+    }, poolOpts);
   }
 
   // Permanently delete a batch of UIDs already in the given folder (two-step:
@@ -7969,8 +8021,9 @@ export class ImapManager {
     });
   }
 
-  // Guard a specific (accountId, folder, uid) triple so reconcileDeletes skips it.
-  // Ref-counted so overlapping guards on the same triple (e.g. a bulk move holding it
+  // Guard a specific (accountId, folder, uid) triple: a letter in motion. reconcileDeletes and the
+  // integrity pass do not delete its row, and sync and backfill do not insert it (its row is
+  // elsewhere, see moveQueue.js). Ref-counted so overlapping guards on the same triple (e.g. a bulk move holding it
   // for the whole batch while an inbox-rule move guards the same message) compose: an
   // unguard only frees the triple once the LAST holder releases it, so one operation
   // cannot strip another's in-flight protection.

@@ -43,7 +43,15 @@ const NO_BACKOFF = { _poolLoginOpts: () => ({ noNewLogin: false }) };
 // Only for paths with their own connectImapClient: the pool and withFreshLogin arm and consult the
 // most recently constructed ImapManager (helperManager), never this object, so a pool-driven test
 // on it would see another test's ladder state. Use ladderManager() for those.
+// syncMessages and backfillMessages first ask whether a fetched letter is in motion (moveQueue.js):
+// guarded at its source, or expected by a pending move in its destination. No moves here.
+const noMoves = () => ({
+  _pendingMoveUids: new Map(),
+  _isMoveUidGuarded: ImapManager.prototype._isMoveUidGuarded,
+  moveQueue: { claimArrival: vi.fn(async () => false) },
+});
 const backoffState = () => ({
+  ...noMoves(),
   connections: new Map(),
   _connectCooldown: new Map(),
   _secondaryCooldown: new Map(),
@@ -1152,7 +1160,7 @@ describe('syncMessages — empty local cache vs nonempty server (wiring)', () =>
       parsedHeaders: {},
     });
 
-    const result = await ImapManager.prototype.syncMessages.call({}, account, client, 'Watch', 50, false, true);
+    const result = await ImapManager.prototype.syncMessages.call(noMoves(), account, client, 'Watch', 50, false, true);
 
     expect(client.fetch).toHaveBeenCalledTimes(1);
     expect(client.fetch.mock.calls[0][0]).toBe('1:*');
@@ -1198,7 +1206,7 @@ describe('syncMessages — empty local cache vs nonempty server (wiring)', () =>
       return Promise.resolve({ rows: [] });
     });
 
-    await ImapManager.prototype.syncMessages.call({}, account, client, 'Watch', 50, false, true);
+    await ImapManager.prototype.syncMessages.call(noMoves(), account, client, 'Watch', 50, false, true);
 
     expect(client.fetch).toHaveBeenCalledTimes(1);
     expect(client.fetch).toHaveBeenCalledWith(
@@ -1207,6 +1215,11 @@ describe('syncMessages — empty local cache vs nonempty server (wiring)', () =>
       { uid: true }
     );
     expect(query.mock.calls.some(([sql]) => sql.includes('UPDATE folders SET highest_modseq'))).toBe(false);
+    // A moved row waiting for its MOVE holds a negative placeholder uid (moveQueue.js). In a
+    // folder holding only such rows the watermark would go negative and the new-mail phase would
+    // be skipped, so they stay out of it.
+    const watermark = query.mock.calls.find(([sql]) => sql.includes('COALESCE(MAX(uid), 0)'))[0];
+    expect(watermark).toMatch(/AND uid > 0/);
   });
 
   it('hands a newly-inserted INBOX row to the inboxIngest hook when a plugin is active', async () => {
@@ -1248,7 +1261,7 @@ describe('syncMessages — empty local cache vs nonempty server (wiring)', () =>
         snippet: 'hi', isRead: true, isStarred: false, hasAttachments: false, flags: ['\\Seen'], isBulk: false, parsedHeaders: {},
       });
 
-      const mgr = { pluginFacade: { __facade: true } };
+      const mgr = { ...noMoves(), pluginFacade: { __facade: true } };
       await ImapManager.prototype.syncMessages.call(mgr, account, client, 'INBOX', 50, false, true);
 
       expect(hasActive).toHaveBeenCalledWith('inboxIngest', { account });
@@ -1288,7 +1301,7 @@ describe('syncMessages — empty local cache vs nonempty server (wiring)', () =>
         snippet: 'hi', isRead: true, isStarred: false, hasAttachments: false, flags: ['\\Seen'], isBulk: false, parsedHeaders: {},
       });
 
-      await ImapManager.prototype.syncMessages.call({}, account, client, 'INBOX', 50, false, true);
+      await ImapManager.prototype.syncMessages.call(noMoves(), account, client, 'INBOX', 50, false, true);
       expect(runHook).not.toHaveBeenCalledWith('inboxIngest', expect.anything());
     } finally {
       hasActive.mockRestore();
@@ -1331,7 +1344,7 @@ describe('syncMessages — unread_count recompute ordering (folder badge fix)', 
         snippet: 'hi', isRead: true, isStarred: false, hasAttachments: false, flags: ['\\Seen'], isBulk: false, parsedHeaders: {},
       });
 
-      await ImapManager.prototype.syncMessages.call({ pluginFacade: {} }, account, client, 'Junk', 100, false, true);
+      await ImapManager.prototype.syncMessages.call({ ...noMoves(), pluginFacade: {} }, account, client, 'Junk', 100, false, true);
 
       const calls = query.mock.calls.map(c => c[0]);
       const insertIdx = calls.findIndex(sql => sql.includes('INSERT INTO messages'));
@@ -2221,7 +2234,7 @@ describe('syncMessages — empty mailbox still stamps last_sync', () => {
       getMailboxLock: vi.fn().mockResolvedValue({ release: vi.fn() }),
       mailbox: { exists: 0 },
     };
-    const result = await ImapManager.prototype.syncMessages.call({}, account, client, 'INBOX', 50, false, true);
+    const result = await ImapManager.prototype.syncMessages.call(noMoves(), account, client, 'INBOX', 50, false, true);
     expect(result).toEqual({ insertedCount: 0, broadcastedNewMessages: false });
     const stamps = query.mock.calls.filter(c => /UPDATE email_accounts SET last_sync/.test(c[0]));
     expect(stamps).toHaveLength(1);
@@ -2244,14 +2257,14 @@ describe('syncMessages — empty mailbox still stamps last_sync', () => {
   it('still releases the mailbox lock on the empty path', async () => {
     const release = vi.fn();
     const client = { getMailboxLock: vi.fn().mockResolvedValue({ release }), mailbox: { exists: 0 } };
-    await ImapManager.prototype.syncMessages.call({}, account, client, 'INBOX', 50, false, true);
+    await ImapManager.prototype.syncMessages.call(noMoves(), account, client, 'INBOX', 50, false, true);
     expect(release).toHaveBeenCalledTimes(1);
   });
 
   it('does NOT stamp when the mailbox object is missing — unknown state, not a confirmed sync', async () => {
     const client = { getMailboxLock: vi.fn().mockResolvedValue({ release: vi.fn() }), mailbox: null };
     await expect(
-      ImapManager.prototype.syncMessages.call({}, account, client, 'INBOX', 50, false, true)
+      ImapManager.prototype.syncMessages.call(noMoves(), account, client, 'INBOX', 50, false, true)
     ).resolves.toEqual({ insertedCount: 0, broadcastedNewMessages: false });
     expect(query.mock.calls.filter(c => /UPDATE email_accounts SET last_sync/.test(c[0]))).toHaveLength(0);
   });
@@ -2427,6 +2440,31 @@ describe('Gmail label memberships (#418)', () => {
     const pending = ImapManager.prototype.backfillMessages.call(mgr, acct, folder);
     await vi.runAllTimersAsync();
     await pending;
+  }
+  // DB-first moves (moveQueue.js): a letter whose move is pending lives in its moved row.
+  for (const mode of ['sync', 'backfill']) {
+    it(`${mode} does not insert a letter again at the source of its pending move`, async () => {
+      const mgr = manager();
+      ImapManager.prototype._guardMoveUid.call(mgr, acct.id, 'INBOX', 1);
+      await (mode === 'sync' ? sync : backfill)(mgr, 'INBOX');
+      expect(inserts).toEqual([]);
+      expect(rows).toEqual([]);
+    });
+
+    it(`${mode} hands a moved letter arriving in its destination to the moved row`, async () => {
+      const mgr = manager();
+      mgr.moveQueue.claimArrival.mockResolvedValue(true);
+      await (mode === 'sync' ? sync : backfill)(mgr, 'Projects');
+      expect(mgr.moveQueue.claimArrival).toHaveBeenCalledWith(acct.id, 'Projects', '<self@example.com>', 1);
+      expect(inserts).toEqual([]);
+    });
+
+    it(`${mode} inserts a letter no move is waiting for`, async () => {
+      const mgr = manager();
+      await (mode === 'sync' ? sync : backfill)(mgr, 'Projects');
+      expect(mgr.moveQueue.claimArrival).toHaveBeenCalledWith(acct.id, 'Projects', '<self@example.com>', 1);
+      expect(rows).toEqual([expect.objectContaining({ folder: 'Projects', uid: 1 })]);
+    });
   }
   for (const mode of ['sync', 'backfill']) {
     for (const order of [['INBOX', sent], [sent, 'INBOX'], ['INBOX', 'Projects']]) {
@@ -6446,6 +6484,27 @@ describe('every background login waits out a rejected password', () => {
       expect(mgr._pendingFlagPush.has(acct.id)).toBe(false);
     });
 
+    // A letter whose DB-first move has not reached the server holds a placeholder uid: storing
+    // there is impossible, and storing at its old uid would land after the MOVE. The queued value
+    // goes onto the move (moveQueue.deferFlags), which stores it at the new uid after the MOVE.
+    it('the flag-push reconciler hands a store for a letter being moved to its move', async () => {
+      const acct = account();
+      const mgr = ladderManager();
+      mgr._pollOnlyAccounts.add(acct.id);
+      query.mockImplementation(async (sql) => {
+        if (sql.startsWith('SELECT * FROM email_accounts')) return { rows: [acct] };
+        if (sql.startsWith('SELECT uid, folder FROM messages')) return { rows: [{ uid: '-4', folder: 'Archive' }] };
+        return { rows: [], rowCount: 1 };
+      });
+      mgr._enqueueFlagPush(acct.id, 'm-1', '\\Seen', true);
+      const setFlag = vi.spyOn(mgr, 'setFlag').mockResolvedValue();
+      const defer = vi.spyOn(mgr.moveQueue, 'deferFlags').mockResolvedValue({ deferred: new Set(['m-1']), located: new Map() });
+      await mgr._reconcileFlagPushes();
+      expect(defer).toHaveBeenCalledWith([{ id: 'm-1', uid: '-4' }], '\\Seen', true);
+      expect(setFlag).not.toHaveBeenCalled();
+      expect(mgr._pendingFlagPush.has(acct.id)).toBe(false);
+    });
+
     // The window above runs out while the password is still wrong. Nothing re-armed it, so the
     // reconciler's next cycle sent up to 30 queued stores to the pool, two rejected logins each:
     // one cycle is enough for fail2ban to ban the panel's IP.
@@ -7389,5 +7448,26 @@ describe('every background login waits out a rejected password', () => {
         expect(clients).toHaveLength(0);
       });
     });
+  });
+});
+
+// A moved row waiting for its MOVE holds a negative placeholder uid (moveQueue.js). A background
+// FETCH or STORE by that uid would be a BAD command that counts as a failure (and stops the body
+// prefetch), so the background jobs that pick rows by uid leave such rows alone.
+describe('background jobs skip rows whose move is pending', () => {
+  beforeEach(() => { query.mockReset(); });
+  const acct = { id: 'acct-bg', imap_host: 'imap.example.com', email_address: 'me@example.com' };
+
+  it('folder body prefetch', async () => {
+    query.mockImplementation(async (sql) => (sql.includes('FROM email_accounts') ? { rows: [acct] } : { rows: [] }));
+    await ImapManager.prototype.prefetchFolderBodies.call({ _prefetchBodyRun: vi.fn() }, acct.id, ['m-1']);
+    const pick = query.mock.calls.find(([sql]) => sql.includes('body_html IS NULL'))[0];
+    expect(pick).toMatch(/AND uid > 0/);
+  });
+
+  it('bulk flag refresh', async () => {
+    query.mockResolvedValue({ rows: [] });
+    await ImapManager.prototype.refreshBulkFlags.call({}, acct);
+    expect(query.mock.calls[0][0]).toMatch(/is_bulk IS NULL[\s\S]*AND uid > 0/);
   });
 });

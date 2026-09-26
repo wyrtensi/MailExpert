@@ -17,7 +17,7 @@ vi.mock('../utils/redact.js', () => ({ redactEmail: vi.fn() }));
 vi.mock('./hostValidation.js', () => ({ resolveForConnection: vi.fn(), createPinnedLookup: vi.fn() }));
 vi.mock('./connectionPolicy.js', () => ({ getConnectionPolicy: vi.fn() }));
 
-import { ImapManager, MIN_SYNC_INTERVAL_MS, AUTO_IDLE_DELAY_MS, countMissingInboxCopies, fetchBackfillBatch, providerProfile, makeClientCfg, relocateExemptGuard, insertCopiedSibling, deleteMessageCopyRow, emitSectionsChanged, ensureMailbox, createKeyedSemaphore, isConnectionRefusal, extractImapError, isImapAuthFailure, AUTH_FAILURE_COOLDOWN_MS, AUTH_FAILURE_COOLDOWN_MAX_MS, authCooldownMs, connectCooldownMs, effectiveSyncIntervalMs, folderSyncDue, planModseqSync, connectStaggerFor, walkStructure, planBodyParts, extractBodyFromMsg, bodyFallbackApplies, poolSizeFor, backgroundPoolCap, rerootThreadChildren, parsePersistentCap, resolvePersistentCap, persistentEligible, shouldRetryIPv4, classifyMoveBySearch, PERSISTENT_FLAG_STORE_TIMEOUT_MS, PERSISTENT_FLAG_LATE_STORE_WAIT_MS, PERSISTENT_FLAG_LOCK_WAIT_MS, FLAG_STORE_UID_CHUNK, FLAG_PUSH_MAX_ATTEMPTS, wrapImapError, acquirePooledClient, releasePooledClient, evictPool, ACQUIRE_TIMEOUT_MS, BACKGROUND_ACQUIRE_TIMEOUT_MS, PREFETCH_MAX_CONSECUTIVE_ERRORS, PREFETCH_STOP_PAUSE_MS, PREFETCH_MAX_BUSY_WAITS, newBodyPrefetchCount, NODE_NEW_BODY_PREFETCH_MAX } from './imapManager.js';
+import { ImapManager, MIN_SYNC_INTERVAL_MS, AUTO_IDLE_DELAY_MS, countMissingInboxCopies, fetchBackfillBatch, providerProfile, makeClientCfg, relocateExemptGuard, insertCopiedSibling, deleteMessageCopyRow, emitSectionsChanged, ensureMailbox, createKeyedSemaphore, isConnectionRefusal, extractImapError, isImapAuthFailure, AUTH_FAILURE_COOLDOWN_MS, AUTH_FAILURE_COOLDOWN_MAX_MS, authCooldownMs, connectCooldownMs, effectiveSyncIntervalMs, folderSyncDue, planModseqSync, connectStaggerFor, walkStructure, planBodyParts, extractBodyFromMsg, bodyFallbackApplies, poolSizeFor, backgroundPoolCap, rerootThreadChildren, parsePersistentCap, resolvePersistentCap, persistentEligible, shouldRetryIPv4, classifyMoveBySearch, PERSISTENT_FLAG_STORE_TIMEOUT_MS, PERSISTENT_FLAG_LATE_STORE_WAIT_MS, PERSISTENT_FLAG_LOCK_WAIT_MS, FLAG_STORE_UID_CHUNK, FLAG_PUSH_MAX_ATTEMPTS, wrapImapError, acquirePooledClient, releasePooledClient, evictPool, ACQUIRE_TIMEOUT_MS, BACKGROUND_ACQUIRE_TIMEOUT_MS, PREFETCH_MAX_CONSECUTIVE_ERRORS, PREFETCH_STOP_PAUSE_MS, PREFETCH_MAX_BUSY_WAITS, newBodyPrefetchCount, newBodyQueueMax, NODE_NEW_BODY_PREFETCH_MAX } from './imapManager.js';
 import { pluginRegistry } from '../plugins/registry.js';
 import { EventEmitter } from 'node:events';
 import { ImapFlow } from 'imapflow';
@@ -5278,6 +5278,13 @@ describe('newBodyPrefetchCount', () => {
     expect(NODE_NEW_BODY_PREFETCH_MAX).toBe(50);
   });
 
+  it('lets as many letters wait for the lane as one sync of the mailbox may fetch', () => {
+    expect(newBodyQueueMax(node)).toBe(NODE_NEW_BODY_PREFETCH_MAX);
+    expect(newBodyQueueMax(generic)).toBe(5);
+    expect(newBodyQueueMax({ imap_host: 'imap.gmail.com', oauth_provider: 'google' })).toBe(5);
+    expect(newBodyQueueMax({ imap_host: 'imap.purelymail.com' })).toBe(1);
+  });
+
   it('gives the node budget to the INBOX only; Junk and label folders keep the small-batch rule', () => {
     expect(newBodyPrefetchCount(node, 12, 'Junk')).toBe(0);
     expect(newBodyPrefetchCount(node, 12, 'Todo')).toBe(0);
@@ -5526,6 +5533,33 @@ describe('a sync stores the bodies of a node mailbox\'s new letters', () => {
     expect(mgr.fetchMessageBody).toHaveBeenCalledTimes(NODE_NEW_BODY_PREFETCH_MAX);
     expect(bodies.has(`row-${100 + NODE_NEW_BODY_PREFETCH_MAX + 10}`)).toBe(true);
     expect(bodies.has('row-110')).toBe(false);
+  });
+
+  it.each([
+    ['Gmail: five', { mail_node: false, imap_host: 'imap.gmail.com', oauth_provider: 'google' }, 5],
+    ['PurelyMail: one', { mail_node: false, imap_host: 'imap.purelymail.com' }, 1],
+  ])('keeps no more waiting than one sync\'s budget of the mailbox (%s)', async (_name, extra, budget) => {
+    // Ticks keep bringing letters while the lane waits on its first one: they must not add up.
+    const acct = mailbox(`queue-budget-${budget}`, extra);
+    const mgr = ladderManager();
+    let release;
+    const gate = new Promise(resolve => { release = resolve; });
+    mgr.fetchMessageBody = vi.fn(async (_a, uid) => {
+      if (uid === 100 + budget) await gate;
+      return { html: null, text: `Body of ${uid}`, attachments: [] };
+    });
+    const first = mgr.prefetchNewMessageBodies(acct, newRows(101, 100 + budget));
+    await vi.waitFor(() => expect(mgr.fetchMessageBody).toHaveBeenCalledTimes(1));
+    for (let tick = 1; tick <= 3; tick++) {
+      const from = 100 + tick * budget + 1;
+      await mgr.prefetchNewMessageBodies(acct, newRows(from, from + budget - 1));
+    }
+    release();
+    await first;
+    // The first sync's letters, then only the newest budget of the three later ones.
+    const uids = mgr.fetchMessageBody.mock.calls.map(c => c[1]);
+    expect(uids).toHaveLength(2 * budget);
+    expect(Math.min(...uids.slice(budget))).toBe(100 + 3 * budget + 1);
   });
 
   it('pauses the new-mail lane after a run stopped on failures', async () => {

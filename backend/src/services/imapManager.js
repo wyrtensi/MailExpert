@@ -301,6 +301,15 @@ export function newBodyPrefetchCount(account, newCount, folder) {
   return Math.min(newCount, Math.max(1, Number(profile.prefetchNewBodiesLimit) || newCount));
 }
 
+// How many new letters may wait for the account's new-mail prefetch lane (the newest are kept):
+// the account's own budget of one sync, so letters piling up over several ticks while the lane
+// waits cannot add up past it. A node mailbox: NODE_NEW_BODY_PREFETCH_MAX. Any other: 5, or the
+// profile's prefetchNewBodiesLimit (PurelyMail: 1, each body there is a fresh login).
+export function newBodyQueueMax(account) {
+  if (account.mail_node) return NODE_NEW_BODY_PREFETCH_MAX;
+  return Math.min(5, Math.max(1, Number(providerProfile(account).prefetchNewBodiesLimit) || 5));
+}
+
 // True when an IMAP error looks like a connection-limit / throttle / temporary refusal —
 // the class of failure that should back off rather than retry hard. Deliberately broad on
 // the safe side: a false positive only means a ~30s backoff, never data loss.
@@ -6399,8 +6408,8 @@ export class ImapManager {
   // A lane of its own, apart from the folder-view prefetch: that run pauses between letters
   // while the reader clicks and starts on every folder view, and new mail that arrived meanwhile
   // used to be dropped rather than wait for it. Letters of a sync that arrive while this lane is
-  // running are queued, and the running lane takes them next (the newest
-  // NODE_NEW_BODY_PREFETCH_MAX are kept); none is dropped. Newest first: the letter most likely
+  // running are queued, and the running lane takes them next (the newest newBodyQueueMax are
+  // kept). Newest first: the letter most likely
   // to be clicked is warm first. Both lanes stop the same way (_prefetchBodyLoop) and share the
   // pause after a stop, and each takes one background pooled session at a time.
   async prefetchNewMessageBodies(account, messages) {
@@ -6408,7 +6417,8 @@ export class ImapManager {
     let pending = this._prefetchNewPending.get(account.id);
     if (!pending) this._prefetchNewPending.set(account.id, pending = new Map());
     for (const m of messages) pending.set(m.id, { id: m.id, uid: m.uid, folder: m.folder || 'INBOX' });
-    while (pending.size > NODE_NEW_BODY_PREFETCH_MAX) pending.delete(pending.keys().next().value);
+    const queueMax = newBodyQueueMax(account);
+    while (pending.size > queueMax) pending.delete(pending.keys().next().value);
     if (this._prefetchNewRunning.has(account.id)) return; // the running lane takes them next
     this._prefetchNewRunning.add(account.id);
     // disconnectAccount (a disabled, deleted or reconfigured mailbox) ends this lane: see there.

@@ -5270,22 +5270,28 @@ describe('newBodyPrefetchCount', () => {
   const generic = { imap_host: 'mail.example.com' };
 
   it('fetches every new letter of a node mailbox, up to the per-sync bound', () => {
-    expect(newBodyPrefetchCount(node, 0)).toBe(0);
-    expect(newBodyPrefetchCount(node, 1)).toBe(1);
-    expect(newBodyPrefetchCount(node, 12)).toBe(12);
-    expect(newBodyPrefetchCount(node, NODE_NEW_BODY_PREFETCH_MAX)).toBe(NODE_NEW_BODY_PREFETCH_MAX);
-    expect(newBodyPrefetchCount(node, 500)).toBe(NODE_NEW_BODY_PREFETCH_MAX);
+    expect(newBodyPrefetchCount(node, 0, 'INBOX')).toBe(0);
+    expect(newBodyPrefetchCount(node, 1, 'INBOX')).toBe(1);
+    expect(newBodyPrefetchCount(node, 12, 'INBOX')).toBe(12);
+    expect(newBodyPrefetchCount(node, NODE_NEW_BODY_PREFETCH_MAX, 'INBOX')).toBe(NODE_NEW_BODY_PREFETCH_MAX);
+    expect(newBodyPrefetchCount(node, 500, 'INBOX')).toBe(NODE_NEW_BODY_PREFETCH_MAX);
     expect(NODE_NEW_BODY_PREFETCH_MAX).toBe(50);
   });
 
+  it('gives the node budget to the INBOX only; Junk and label folders keep the small-batch rule', () => {
+    expect(newBodyPrefetchCount(node, 12, 'Junk')).toBe(0);
+    expect(newBodyPrefetchCount(node, 12, 'Todo')).toBe(0);
+    expect(newBodyPrefetchCount(node, 3, 'Junk')).toBe(3);
+  });
+
   it('keeps the small-batch rule everywhere else', () => {
-    expect(newBodyPrefetchCount(generic, 5)).toBe(5);
-    expect(newBodyPrefetchCount(generic, 6)).toBe(0);
+    expect(newBodyPrefetchCount(generic, 5, 'INBOX')).toBe(5);
+    expect(newBodyPrefetchCount(generic, 6, 'INBOX')).toBe(0);
     // Gmail: up to 5, every one of them.
-    expect(newBodyPrefetchCount({ imap_host: 'imap.gmail.com', oauth_provider: 'google' }, 3)).toBe(3);
-    expect(newBodyPrefetchCount({ imap_host: 'imap.gmail.com', oauth_provider: 'google' }, 6)).toBe(0);
+    expect(newBodyPrefetchCount({ imap_host: 'imap.gmail.com', oauth_provider: 'google' }, 3, 'INBOX')).toBe(3);
+    expect(newBodyPrefetchCount({ imap_host: 'imap.gmail.com', oauth_provider: 'google' }, 6, 'INBOX')).toBe(0);
     // PurelyMail warms only the newest arrival.
-    expect(newBodyPrefetchCount({ imap_host: 'imap.purelymail.com' }, 3)).toBe(1);
+    expect(newBodyPrefetchCount({ imap_host: 'imap.purelymail.com' }, 3, 'INBOX')).toBe(1);
   });
 });
 
@@ -5298,10 +5304,11 @@ describe('a sync stores the bodies of a node mailbox\'s new letters', () => {
     auth_user: 'team@example.com', auth_pass: 'enc', mail_node: true, ...extra,
   });
   const WATERMARK = 100;
-  let bodies, bodyFetchOrder, pooledLogins, goneUids;
+  let bodies, bodyFetchOrder, pooledLogins, goneUids, rowFolder;
 
   beforeEach(() => {
     vi.clearAllMocks();
+    rowFolder = new Map();
     goneUids = new Set(); // letters the server no longer has where the sync saw them
     bodies = new Map();
     bodyFetchOrder = [];
@@ -5334,9 +5341,9 @@ describe('a sync stores the bodies of a node mailbox\'s new letters', () => {
       if (sql.includes('SELECT uid_validity, highest_modseq FROM folders')) return { rows: [{ uid_validity: 100, highest_modseq: '500' }] };
       if (sql.includes('COALESCE(MAX(uid), 0)')) return { rows: [{ max_uid: WATERMARK }] };
       if (sql.includes('COUNT(*) FILTER (WHERE is_read = false)')) return { rows: [{ n: 0 }] };
-      if (sql.includes('INSERT INTO messages')) return { rows: [{ id: `row-${params[1]}`, is_new: true }] };
-      // Every row-<uid> the sync stored is a live INBOX letter.
-      if (sql.includes('AS cached')) return { rows: [{ uid: Number(String(params[0]).slice(4)), folder: 'INBOX', cached: bodies.has(params[0]) }] };
+      if (sql.includes('INSERT INTO messages')) { rowFolder.set(`row-${params[1]}`, params[2]); return { rows: [{ id: `row-${params[1]}`, is_new: true }] }; }
+      // Every row-<uid> is a live letter, in the folder the sync stored it in (INBOX by default).
+      if (sql.includes('AS cached')) return { rows: [{ uid: Number(String(params[0]).slice(4)), folder: rowFolder.get(params[0]) || 'INBOX', cached: bodies.has(params[0]) }] };
       if (sql.includes('SET body_html = $1, body_text = $2')) { bodies.set(params[3], params[1]); return { rows: [], rowCount: 1 }; }
       return { rows: [], rowCount: 0 };
     });
@@ -5529,6 +5536,18 @@ describe('a sync stores the bodies of a node mailbox\'s new letters', () => {
     expect(mgr.fetchMessageBody).toHaveBeenCalledTimes(PREFETCH_MAX_CONSECUTIVE_ERRORS);
     await mgr.prefetchNewMessageBodies(acct, newRows(106, 106));
     expect(mgr.fetchMessageBody).toHaveBeenCalledTimes(PREFETCH_MAX_CONSECUTIVE_ERRORS);
+  });
+
+  it('leaves a spam wave in Junk alone: the node budget is for the INBOX', async () => {
+    const acct = mailbox('node-bodies-junk');
+    const mgr = ladderManager();
+    try {
+      await mgr.syncMessages(acct, syncClient(12), 'Junk', 50, false, true);
+      await settleBackground();
+      await settleBackground();
+      expect(bodyFetchOrder).toEqual([]);
+      expect(pooledLogins).toBe(0);
+    } finally { evictPool(acct.id); }
   });
 
   it('fetches only the newest letters of a flood, up to the per-sync bound', async () => {

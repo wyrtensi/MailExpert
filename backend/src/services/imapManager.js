@@ -286,14 +286,16 @@ export const PREFETCH_MAX_BUSY_WAITS = 30;
 // sync after an outage): the newest 50 are fetched, the rest on open. Attachments never are.
 export const NODE_NEW_BODY_PREFETCH_MAX = 50;
 
-// How many of the `newCount` unread letters a sync just stored get their bodies fetched right
-// away (the newest ones). A node mailbox: all of them up to NODE_NEW_BODY_PREFETCH_MAX. Any
-// other mailbox keeps the rule it had: only a small batch (5 or fewer, so not an initial or bulk
-// sync), capped by the profile's prefetchNewBodiesLimit (PurelyMail: 1), and none where the
-// profile sets prefetchNewBodies: false.
-export function newBodyPrefetchCount(account, newCount) {
+// How many of the `newCount` unread letters a sync of `folder` just stored get their bodies
+// fetched right away (the newest ones). A node mailbox's INBOX: all of them up to
+// NODE_NEW_BODY_PREFETCH_MAX. Every other folder (Junk from the spam poll, the GTD label copies,
+// a folder the status monitor synced) and every other mailbox keeps the rule it had: only a small
+// batch (5 or fewer, so not an initial or bulk sync), capped by the profile's
+// prefetchNewBodiesLimit (PurelyMail: 1), and none where the profile sets prefetchNewBodies:
+// false. A spam wave on every node mailbox would otherwise store 50 spam bodies each.
+export function newBodyPrefetchCount(account, newCount, folder) {
   if (!(newCount > 0)) return 0;
-  if (account.mail_node) return Math.min(newCount, NODE_NEW_BODY_PREFETCH_MAX);
+  if (account.mail_node && folder === 'INBOX') return Math.min(newCount, NODE_NEW_BODY_PREFETCH_MAX);
   const profile = providerProfile(account);
   if (newCount > 5 || profile.prefetchNewBodies === false) return 0;
   return Math.min(newCount, Math.max(1, Number(profile.prefetchNewBodiesLimit) || newCount));
@@ -4843,7 +4845,7 @@ export class ImapManager {
           // newBodyPrefetchCount's call: all of a node mailbox's (bounded), a small batch
           // elsewhere. newMessages is what the rules left in this folder, so a letter a rule
           // moved away is not fetched under its old UID.
-          const prefetchCount = newBodyPrefetchCount(account, newMessages.length);
+          const prefetchCount = newBodyPrefetchCount(account, newMessages.length, folder);
           if (prefetchCount > 0) {
             const msgsToCache = newMessages.slice(-prefetchCount);
             setImmediate(() => {

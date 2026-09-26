@@ -106,35 +106,40 @@ async function connectImapClientOnce(account, resolved, cfgOpts, timeoutMs, labe
   const host = (account.imap_host || '').toLowerCase();
   let sawRefusal = false; // a provider refusal ('Connection not available' etc.) fired mid-attempt
   const attempt = async (res, tag) => {
-    // The password this login sends (makeClientCfg reads the same).
-    const authPass = currentAuthPass(account);
-    const client = new ImapFlow(makeClientCfg(account, res, cfgOpts));
+    // Admission control (#384): cap concurrent connection establishment per host so a startup /
+    // backfill burst can't stampede the provider into refusals. Held only for the handshake and
+    // released the instant connect resolves, so it bounds the open RATE, not open connections.
+    await hostConnectSem.acquire(host);
+    let client = null;
+    let authPass;
     // Set immediately before we deliberately tear this client down, so the 'error' the
     // close itself emits is not reported as a failure. Abandoning a stalled attempt is the
     // recovery path (#382), not a fault: logging it as `IMAP error … Connection not
     // available` made routine IPv6→IPv4 failover look like an outage and inflated both the
     // log noise and the imap_error warning count that the diagnostics report surfaces.
     let abandoned = false;
-    // #360: an 'error' emitted during the handshake with no listener is unhandled and crashes the
-    // process. Attach one that outlives connect; a caller adding its own later just logs alongside.
-    client.on('error', (err) => {
-      // Refusal detection stays unconditional: it drives the caller's backoff decision and
-      // must observe a refusal that arrives while we are tearing the attempt down.
-      // extractImapError, as in every other refusal check: a bare 'Command failed' hides the
-      // [LIMIT] / too-many-connections text this needs to see.
-      if (isConnectionRefusal(extractImapError(err))) sawRefusal = true;
-      if (abandoned) return;
-      recordWarning('imap_error', account?.id);
-      console.error(`IMAP error for ${logAccount(account)}:`, err.message);
-    });
-    // Admission control (#384): cap concurrent connection establishment per host so a startup /
-    // backfill burst can't stampede the provider into refusals. Held only for the handshake and
-    // released the instant connect resolves, so it bounds the open RATE, not open connections.
-    await hostConnectSem.acquire(host);
     try {
+      // The config (and so the password) is built only now, holding the slot: a login that queued
+      // here while a node password restore landed sends the restored password, not the old one.
+      authPass = currentAuthPass(account);
+      client = new ImapFlow(makeClientCfg(account, res, cfgOpts));
+      // #360: an 'error' emitted during the handshake with no listener is unhandled and crashes the
+      // process. Attach one that outlives connect; a caller adding its own later just logs alongside.
+      client.on('error', (err) => {
+        // Refusal detection stays unconditional: it drives the caller's backoff decision and
+        // must observe a refusal that arrives while we are tearing the attempt down.
+        // extractImapError, as in every other refusal check: a bare 'Command failed' hides the
+        // [LIMIT] / too-many-connections text this needs to see.
+        if (isConnectionRefusal(extractImapError(err))) sawRefusal = true;
+        if (abandoned) return;
+        recordWarning('imap_error', account?.id);
+        console.error(`IMAP error for ${logAccount(account)}:`, err.message);
+      });
       await raceTimeout(client.connect(), timeoutMs, tag);
       recordImapLogin(host, tag);
     } catch (err) {
+      // The config was refused (plain-text IMAP not allowed): no login was tried.
+      if (!client) throw err;
       recordImapLogin(host, tag, { failed: true });
       // close() (not logout()): forcefully destroys the socket and aborts the still-pending
       // connect left running by the race timeout — a graceful logout could itself hang on a

@@ -644,6 +644,28 @@ describe('logins around a restored node password', () => {
     evictPool(acct.id);
   });
 
+  it('a login queued behind the per-host connect limit when the restore lands sends the new password', async () => {
+    const acct = stored(nodeAccount());
+    const mgr = newManager();
+    vi.spyOn(mgr, 'connectAccount').mockResolvedValue(true);
+    let release;
+    hold = { count: 3, promise: new Promise(resolve => { release = resolve; }) };
+
+    // Three logins hold the host's three connect slots; the fourth waits for one.
+    const outcomes = [1, 2, 3, 4].map(() => acquirePooledClient(acct).then(c => c, err => err));
+    await vi.waitFor(() => expect(logins).toHaveLength(3));
+    mgr._noteAuthFailure(acct);
+    await vi.waitFor(() => expect(recordAudit).toHaveBeenCalledTimes(1));
+
+    release();
+    const results = await Promise.all(outcomes);
+    expect(logins).toHaveLength(4);
+    expect(logins[3]).toEqual({ pass: NEW_PASSWORD, ok: true });
+    expect(results.filter(r => r instanceof Error).every(e => e.staleCredential)).toBe(true);
+    for (const r of results) if (!(r instanceof Error)) releasePooledClient(acct, r);
+    evictPool(acct.id);
+  });
+
   it('a connect still running with the old password is waited out, then the restore reconnects', async () => {
     const acct = stored(nodeAccount());
     const mgr = newManager();

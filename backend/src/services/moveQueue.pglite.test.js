@@ -138,6 +138,41 @@ describe('enqueue: the database moves at once', () => {
   });
 });
 
+// I3: moving a letter back while its move is queued must not lose a read/star change deferred
+// onto that move.
+describe('a move cancelled by moving the letter back', () => {
+  it('hands a deferred flag change to the flag-push queue at the source', async () => {
+    await queue.enqueue(ACCOUNT, await rowsOf([A]), 'Archive');
+    await queue.deferFlags(await rowsOf([A]), '\\Seen', true);
+    await queue.deferFlags(await rowsOf([A]), '\\Flagged', false);
+    expect((await moves())[0]).toMatchObject({ set_seen: true, set_flagged: false });
+
+    await queue.enqueue(ACCOUNT, await rowsOf([A]), 'INBOX');
+    expect(await moves()).toEqual([]);
+    expect(await row(A)).toMatchObject({ uid: 11, folder: 'INBOX' });
+    expect(mgr._enqueueFlagPush).toHaveBeenCalledWith(ACCOUNT, A, '\\Seen', true);
+    expect(mgr._enqueueFlagPush).toHaveBeenCalledWith(ACCOUNT, A, '\\Flagged', false);
+  });
+
+  it('hands it to the move in flight before it, which stores it after its MOVE', async () => {
+    let answer;
+    mgr.bulkMoveMessages.mockImplementationOnce(() => new Promise((resolve) => { answer = resolve; }));
+    await queue.enqueue(ACCOUNT, await rowsOf([A]), 'Archive');
+    const run = queue.runAccount(ACCOUNT);
+    await vi.waitFor(() => expect(mgr.bulkMoveMessages).toHaveBeenCalled());
+    await queue.enqueue(ACCOUNT, await rowsOf([A]), 'Trash'); // a second move follows the first
+    await queue.deferFlags(await rowsOf([A]), '\\Seen', true);
+    await queue.enqueue(ACCOUNT, await rowsOf([A]), 'Archive'); // back: the second move is dropped
+    expect(await moves()).toMatchObject([{ dest_folder: 'Archive', set_seen: true }]);
+    expect(mgr._enqueueFlagPush).not.toHaveBeenCalled();
+
+    answer({ uidMap: new Map([[11, 900]]), succeeded: [11], failed: [] });
+    await run;
+    expect(await row(A)).toMatchObject({ uid: 900, folder: 'Archive' });
+    expect(mgr.setFlags).toHaveBeenCalledWith(expect.anything(), 'Archive', [900], '\\Seen', true, { background: true });
+  });
+});
+
 describe('the worker', () => {
   it('sends one MOVE per (source, destination) group and the rows take the uids the server names', async () => {
     serverMoves();

@@ -207,22 +207,35 @@ export class MoveQueue {
   // settle and this never interleave.
   async _enqueuePending(accountId, rowId, dest, dropRow) {
     // The latest move is still queued and its source is the new destination: drop it, and the row
-    // goes back to the letter's server location (or to its predecessor's placeholder).
+    // goes back to the letter's server location (or to its predecessor's placeholder). A read/star
+    // change deferred onto the dropped move is kept: it goes to the predecessor, which stores it
+    // after its own MOVE (the newer value wins), in the same statement so that move cannot settle
+    // in between; or, when the letter is back where the server has it, to the flag-push queue.
     const cancelled = await query(
       `WITH m AS (SELECT id, uid FROM messages WHERE id = $1 AND account_id = $2 AND uid < 0 FOR UPDATE),
        op AS (
          DELETE FROM message_moves mv USING m
           WHERE mv.id = -m.uid AND mv.message_row_id = m.id AND mv.state = 'queued' AND mv.src_folder = $3
          RETURNING mv.*
+       ), pred AS (
+         UPDATE message_moves p SET set_seen = COALESCE(op.set_seen, p.set_seen),
+                set_flagged = COALESCE(op.set_flagged, p.set_flagged)
+           FROM op WHERE p.id = op.predecessor_id
+         RETURNING p.id
        )
        UPDATE messages x SET folder = op.src_folder, uid = COALESCE(op.src_uid, -op.predecessor_id)
          FROM op WHERE x.id = op.message_row_id
        RETURNING op.*`,
       [rowId, accountId, dest]
     );
-    if (cancelled.rows[0]) {
-      this._unguard(cancelled.rows[0].id);
-      return { cancelled: cancelled.rows[0] };
+    const gone = cancelled.rows[0];
+    if (gone) {
+      this._unguard(gone.id);
+      if (gone.src_uid != null) {
+        if (gone.set_seen != null) this.mgr._enqueueFlagPush(accountId, rowId, '\\Seen', gone.set_seen);
+        if (gone.set_flagged != null) this.mgr._enqueueFlagPush(accountId, rowId, '\\Flagged', gone.set_flagged);
+      }
+      return { cancelled: gone };
     }
     // Still queued: it takes the new destination.
     const changed = await query(

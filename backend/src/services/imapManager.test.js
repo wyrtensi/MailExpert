@@ -5392,6 +5392,17 @@ describe('a sync stores the bodies of a node mailbox\'s new letters', () => {
     } finally { evictPool(acct.id); }
   });
 
+  it('still warms only the newest arrival of a PurelyMail mailbox', async () => {
+    const acct = mailbox('purelymail-bodies-3', { mail_node: false, imap_host: 'imap.purelymail.com' });
+    const mgr = ladderManager();
+    try {
+      await mgr.syncMessages(acct, syncClient(3), 'INBOX', 20, false, true);
+      await vi.waitFor(() => expect(bodies.size).toBe(1));
+      await settleBackground();
+      expect([...bodies.keys()]).toEqual([`row-${WATERMARK + 3}`]);
+    } finally { evictPool(acct.id); }
+  });
+
   it('leaves a batch of more than five alone on a mailbox off the node, as before', async () => {
     const acct = mailbox('generic-bodies-12', { mail_node: false });
     const mgr = ladderManager();

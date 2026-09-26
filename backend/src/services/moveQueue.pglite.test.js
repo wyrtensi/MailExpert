@@ -14,7 +14,7 @@ vi.mock('./db.js', () => ({
 vi.mock('imapflow', () => ({ ImapFlow: vi.fn() }));
 vi.mock('../utils/mailUtils.js', async (importOriginal) => ({ ...(await importOriginal()), adjustFolderCounts: vi.fn() }));
 
-const { MoveQueue, MOVE_MAX_ATTEMPTS, placeholderUid } = await import('./moveQueue.js');
+const { MoveQueue, MOVE_MAX_ATTEMPTS, MOVE_RUN_CONCURRENCY, placeholderUid } = await import('./moveQueue.js');
 const { ImapManager } = await import('./imapManager.js');
 const { adjustFolderCounts } = await import('../utils/mailUtils.js');
 
@@ -231,6 +231,35 @@ describe('the user whose move it was', () => {
     await queue.enqueue(ACCOUNT, await rowsOf([A]), 'Trash', { movedBy: USER });
     await queue.enqueue(ACCOUNT, await rowsOf([A]), 'Archive', { movedBy: OTHER });
     expect((await moves())[0]).toMatchObject({ dest_folder: 'Archive', moved_by: OTHER });
+  });
+});
+
+// M13: after a restart every mailbox with due moves is kicked at once; only a few run together.
+describe('mailbox runs', () => {
+  it('run at most MOVE_RUN_CONCURRENCY at once, the rest wait their turn', async () => {
+    let active = 0;
+    let peak = 0;
+    const gates = [];
+    queue._runAccountOnce = async () => {
+      active++;
+      peak = Math.max(peak, active);
+      await new Promise((resolve) => gates.push(resolve));
+      active--;
+    };
+    const ids = Array.from({ length: MOVE_RUN_CONCURRENCY + 4 }, (_, i) => `acct-${i}`);
+    const runs = ids.map(id => queue.runAccount(id));
+    await vi.waitFor(() => expect(gates).toHaveLength(MOVE_RUN_CONCURRENCY));
+    expect(peak).toBe(MOVE_RUN_CONCURRENCY);
+    // Let every run finish, one freed slot after another.
+    let finished = false;
+    const all = Promise.all(runs).then(() => { finished = true; });
+    while (!finished) {
+      while (gates.length) gates.shift()();
+      await new Promise((resolve) => setTimeout(resolve, 0));
+    }
+    await all;
+    expect(peak).toBe(MOVE_RUN_CONCURRENCY);
+    expect(queue._running.size).toBe(0);
   });
 });
 

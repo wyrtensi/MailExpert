@@ -32,13 +32,17 @@
 import { query, withTransaction } from './db.js';
 import { adjustFolderCounts } from '../utils/mailUtils.js';
 import { recordAudit } from './auditLog.js';
-import { isMailboxBusyError } from './imapManager.js';
+import { isMailboxBusyError, createKeyedSemaphore } from './imapManager.js';
 
 export const MOVE_MAX_ATTEMPTS = 8;
 export const MOVE_RETRY_BASE_MS = 15 * 1000;
 export const MOVE_RETRY_MAX_MS = 10 * 60 * 1000;
 export const MOVE_QUEUE_TICK_MS = 5 * 1000;
 export const MOVE_CLAIM_LIMIT = 500;
+// Mailbox runs at once, across all mailboxes. After a restart or an outage every mailbox with due
+// moves is kicked together; each run is a STATUS, a MOVE and maybe searches on the pool, and ~600
+// mailboxes contending with the initial syncs for the host connect slots would crowd them out.
+export const MOVE_RUN_CONCURRENCY = 8;
 // A FETCH that started before the MOVE and is processed after it would insert the letter at its
 // source again, so the source guard outlives a settled move by this much.
 export const MOVE_SOURCE_GUARD_LINGER_MS = 10 * 1000;
@@ -71,6 +75,7 @@ export class MoveQueue {
     this._arrivals = new Map(); // `${accountId}\n${folder}` -> Map<message id header, Set<moveId>>
     this._running = new Set();  // accountId with a worker run in progress
     this._again = new Set();    // accountId kicked while its run was in progress
+    this._runSlots = createKeyedSemaphore(MOVE_RUN_CONCURRENCY);
     this._holds = new Map();    // accountId -> Set<{ path, prefix, kind }>: folders being emptied, renamed or deleted
     this._timer = null;
   }
@@ -506,10 +511,15 @@ export class MoveQueue {
     if (this._running.has(accountId)) { this._again.add(accountId); return; }
     this._running.add(accountId);
     try {
-      do {
-        this._again.delete(accountId);
-        await this._runAccountOnce(accountId);
-      } while (this._again.has(accountId));
+      await this._runSlots.acquire('runs');
+      try {
+        do {
+          this._again.delete(accountId);
+          await this._runAccountOnce(accountId);
+        } while (this._again.has(accountId));
+      } finally {
+        this._runSlots.release('runs');
+      }
     } finally {
       this._running.delete(accountId);
     }

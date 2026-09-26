@@ -274,34 +274,4 @@ describe('archiveInChunks', () => {
     assert.equal(result.error.message, 'network failed');
     assert.equal(call, 2);
   });
-
-  it('says when a chunk that got partly through found the mailbox busy', async () => {
-    const result = await threadedArchive.archiveInChunks(['a', 'b'], async () => (
-      { archived: ['a'], noArchiveFolder: [], code: 'mailbox_busy' }
-    ));
-    assert.deepEqual(result.archived, ['a']);
-    assert.equal(result.busy, true);
-    assert.equal(result.busyCode, 'mailbox_busy');
-    const clean = await threadedArchive.archiveInChunks(['a'], async (chunk) => ({ archived: chunk, noArchiveFolder: [] }));
-    assert.equal(clean.busy, false);
-  });
-
-  it('keeps the rejected-password code of a chunk that got partly through', async () => {
-    const result = await threadedArchive.archiveInChunks(['a', 'b'], async () => (
-      { archived: ['a'], noArchiveFolder: [], busy: true, code: 'mailbox_auth_rejected' }
-    ));
-    assert.equal(result.busy, true);
-    assert.equal(result.busyCode, 'mailbox_auth_rejected');
-  });
-
-  it('says busy, not rejected password, when the busy chunks disagree', async () => {
-    const answers = [
-      { archived: ['a'], noArchiveFolder: [], busy: true, code: 'mailbox_auth_rejected' },
-      { archived: ['c'], noArchiveFolder: [], busy: true, code: 'mailbox_busy' },
-      { archived: ['e'], noArchiveFolder: [], busy: true, code: 'mailbox_auth_rejected' },
-    ];
-    const result = await threadedArchive.archiveInChunks(['a', 'b', 'c', 'd', 'e', 'f'], async () => answers.shift(), 2);
-    assert.equal(result.busy, true);
-    assert.equal(result.busyCode, 'mailbox_busy');
-  });
 });

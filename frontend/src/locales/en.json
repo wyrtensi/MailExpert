@@ -23,7 +23,8 @@
     "loadMore": "Load more",
     "adminOnly": "Only an administrator can change this.",
     "mailboxBusy": "The mailbox is busy, try again in a few seconds",
-    "mailboxAuthRejected": "The mail server does not accept the sign-in to this mailbox. Ask an administrator to check the mailbox."
+    "mailboxAuthRejected": "The mail server does not accept the sign-in to this mailbox. Ask an administrator to check the mailbox.",
+    "movePending": "The letter is still being moved, try again in a few seconds"
   },
   "login": {
     "google": {
@@ -263,6 +264,12 @@
       "title": "Message moved",
       "failTitle": "Move failed",
       "failBody": "Could not move message."
+    },
+    "moveReverted": {
+      "title_one": "Could not move the letter",
+      "title_other": "Could not move {{count}} letters",
+      "body_one": "It was returned to {{folder}}.",
+      "body_other": "They were returned to {{folder}}."
     },
     "snoozed": {
       "title": "Message snoozed",

@@ -3,12 +3,8 @@ import { pickReplyAlias } from '../utils/replyAlias.js';
 import { useTranslation } from 'react-i18next';
 import { useStore, selectSelectedMessageIdentity, parseSelectedIdentity } from '../store/index.js';
 import { api } from '../utils/api.js';
-import { mailboxBusyOr, mailboxBusyText, isMailboxBusy, MAILBOX_BUSY_CODE } from '../utils/mailboxBusy.js';
+import { mailboxBusyOr, mailboxBusyText, isMailboxBusy } from '../utils/mailboxBusy.js';
 import { priorityFromHeaders } from '../utils/draftPriority.js';
-
-// What made an archive fall short: the request's error, or a busy mailbox reported by a chunk
-// that got partly through.
-const archiveFailure = (result) => result.error || (result.busy ? { code: result.busyCode || MAILBOX_BUSY_CODE } : null);
 import { LAYOUTS } from '../layouts.js';
 import { senderColor } from '../themes.js';
 import { useMobile } from '../hooks/useMobile.js';
@@ -1131,7 +1127,7 @@ export default function MessageList() {
 
     const performCall = (id) => {
       const fn = label === 'spam' ? api.markSpam : api.markHam;
-      return fn(id).catch(err => ({ __failed: true, id, message: err.message, err }));
+      return fn(id).catch(err => ({ __failed: true, id, message: err.message }));
     };
 
     timers.set('__call__', setTimeout(async () => {
@@ -1139,12 +1135,8 @@ export default function MessageList() {
       timers.delete('__call__');
       const results = await Promise.allSettled(ids.map(performCall));
       const failed = [];
-      let failure = null;
       results.forEach((r, i) => {
-        if (r.status === 'rejected' || r.value?.__failed) {
-          failed.push(ids[i]);
-          failure = failure || (r.status === 'rejected' ? r.reason : r.value.err);
-        }
+        if (r.status === 'rejected' || r.value?.__failed) failed.push(ids[i]);
       });
       if (failed.length) {
         const failedMsgs = messages.filter(m => failed.includes(m.id));
@@ -1156,7 +1148,7 @@ export default function MessageList() {
         addNotification({
           type: 'error',
           title: t(titleKey),
-          body: mailboxBusyOr(failure, t, isBulk ? t('spam.failBodyBulk', { count: failed.length }) : t(bodyKey)),
+          body: isBulk ? t('spam.failBodyBulk', { count: failed.length }) : t(bodyKey),
         });
       }
       // Safety net: after the IMAP move actually completes (or partially
@@ -1573,14 +1565,14 @@ export default function MessageList() {
         if (failedCount > 0) {
           const failedMsgs = msgs.filter(msg => !movedSet.has(msg.id));
           if (failedMsgs.length > 0) useStore.getState().restoreMessages(failedMsgs);
-          addNotification({ title: t('messageList.bulkMoved.failTitle'), body: mailboxBusyOr(result, t, t('messageList.bulkMoved.failBody', { count: failedCount })) });
+          addNotification({ title: t('messageList.bulkMoved.failTitle'), body: t('messageList.bulkMoved.failBody', { count: failedCount }) });
         } else if (msgs[0]?.account_id) {
           useStore.getState().recordRecentFolder({ accountId: msgs[0].account_id, path: folder });
         }
       } catch (err) {
         console.error('Bulk move failed:', err);
         useStore.getState().restoreMessages(msgs);
-        addNotification({ title: t('messageList.bulkMoved.failTitle'), body: mailboxBusyOr(err, t, t('messageList.bulkMoved.failBody', { count: moveIds.length })) });
+        addNotification({ title: t('messageList.bulkMoved.failTitle'), body: t('messageList.bulkMoved.failBody', { count: moveIds.length }) });
       }
     }, 4500);
     addNotification({
@@ -1713,7 +1705,7 @@ export default function MessageList() {
             if (!result.error && result.noArchiveFolder.length) {
               addNotification({ title: t('messageList.bulkArchived.noFolderTitle'), body: t('messageList.bulkArchived.noFolderBody') });
             } else {
-              addNotification({ title: t('messageList.bulkArchived.failTitle'), body: mailboxBusyOr(archiveFailure(result), t, t('messageList.bulkArchived.failBody', { count: failedTargets.length })) });
+              addNotification({ title: t('messageList.bulkArchived.failTitle'), body: t('messageList.bulkArchived.failBody', { count: failedTargets.length }) });
             }
           }
         } catch (err) {
@@ -1822,7 +1814,7 @@ export default function MessageList() {
         title: t(noArchiveFolder ? 'messageList.noArchiveFolder.title' : 'messageList.bulkArchived.failTitle'),
         body: noArchiveFolder
           ? t('messageList.noArchiveFolder.body')
-          : mailboxBusyOr(archiveFailure(result), t, t('messageList.bulkArchived.failBody', { count: failed.length })),
+          : t('messageList.bulkArchived.failBody', { count: failed.length }),
       });
     } catch (err) {
       [...initialGuards, ...ids].forEach(clearDeleteGuard);
@@ -2214,7 +2206,7 @@ export default function MessageList() {
                 useStore.getState().restoreMessages([moved]);
                 if (!moved.is_read) incrementUnread(moved.account_id);
               }
-              addNotification({ type: 'error', title: t('message.moved.failTitle'), body: mailboxBusyOr(result, t, t('messageList.bulkMoved.failBody', { count: failedCount })) });
+              addNotification({ type: 'error', title: t('message.moved.failTitle'), body: t('messageList.bulkMoved.failBody', { count: failedCount }) });
             } else {
               useStore.getState().recordRecentFolder({ accountId: moved.account_id, path: folder });
             }
@@ -2222,7 +2214,7 @@ export default function MessageList() {
             console.error('Move failed:', err.message);
             useStore.getState().restoreMessages([moved]);
             if (!moved.is_read) incrementUnread(moved.account_id);
-            addNotification({ title: t('message.moved.failTitle'), body: mailboxBusyOr(err, t, t('message.moved.failBody')) });
+            addNotification({ title: t('message.moved.failTitle'), body: t('message.moved.failBody') });
           }
         }, 4500);
         addNotification({

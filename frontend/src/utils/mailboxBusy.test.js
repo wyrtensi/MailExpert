@@ -1,7 +1,7 @@
 import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
-import { isMailboxBusy, mailboxBusyOr, mailboxBusyText, MAILBOX_BUSY_CODE, MAILBOX_AUTH_REJECTED_CODE } from './mailboxBusy.js';
+import { isMailboxBusy, mailboxBusyOr, mailboxBusyText, MAILBOX_BUSY_CODE, MAILBOX_AUTH_REJECTED_CODE, MOVE_PENDING_CODE } from './mailboxBusy.js';
 
 const locale = name => JSON.parse(readFileSync(new URL(`../locales/${name}.json`, import.meta.url), 'utf8'));
 
@@ -40,5 +40,16 @@ describe('mailbox busy errors', () => {
     // Neutral about where to fix it: a mail-node mailbox cannot change its password in its settings.
     assert.equal(locale('en').common.mailboxAuthRejected, 'The mail server does not accept the sign-in to this mailbox. Ask an administrator to check the mailbox.');
     assert.equal(locale('ru').common.mailboxAuthRejected, 'Почтовый сервер не принимает вход в этот ящик. Попросите администратора проверить ящик.');
+  });
+
+  // A letter whose DB-first move has not reached the server: a permanent delete, a snooze or an
+  // uncached body waits for it (409 move_pending). A partial bulk delete carries the code too.
+  it('says a letter is still being moved, which a retry in a few seconds fixes', () => {
+    const t = key => `t:${key}`;
+    const pending = Object.assign(new Error('x'), { code: MOVE_PENDING_CODE });
+    assert.equal(MOVE_PENDING_CODE, 'move_pending');
+    assert.equal(isMailboxBusy(pending), true);
+    assert.equal(mailboxBusyText(pending, t), 't:common.movePending');
+    assert.equal(mailboxBusyOr({ ok: true, deleted: ['a'], code: 'move_pending' }, t, 'fallback'), 't:common.movePending');
   });
 });

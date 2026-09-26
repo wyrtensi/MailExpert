@@ -280,6 +280,22 @@ export function useWebSocket(enabled = true) {
         break;
       }
 
+      case 'move_reverted': {
+        // Moves are DB-first: the letters showed in their new folder at once and the server MOVE
+        // ran later from a queue. It could not be done (the letter was deleted on the server, the
+        // folder is gone, or it kept failing), so the letters are back in `folder`. Say so, and
+        // refresh the view and counts like folder_updated (which also follows).
+        const count = Array.isArray(data.ids) ? data.ids.length : 1;
+        addNotification({
+          type: 'error',
+          title: t('message.moveReverted.title', { count }),
+          body: t('message.moveReverted.body', { count, folder: data.folder }),
+        });
+        window.dispatchEvent(new CustomEvent('mailexpert:refresh'));
+        api.getUnreadCounts().then(_applyServerCounts).catch(() => {});
+        break;
+      }
+
       case 'sync_complete': {
         window.dispatchEvent(new CustomEvent('mailexpert:refresh'));
         window.dispatchEvent(new CustomEvent('mailexpert:sync_done'));

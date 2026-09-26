@@ -5298,10 +5298,11 @@ describe('a sync stores the bodies of a node mailbox\'s new letters', () => {
     auth_user: 'team@example.com', auth_pass: 'enc', mail_node: true, ...extra,
   });
   const WATERMARK = 100;
-  let bodies, bodyFetchOrder, pooledLogins;
+  let bodies, bodyFetchOrder, pooledLogins, goneUids;
 
   beforeEach(() => {
     vi.clearAllMocks();
+    goneUids = new Set(); // letters the server no longer has where the sync saw them
     bodies = new Map();
     bodyFetchOrder = [];
     pooledLogins = 0;
@@ -5318,6 +5319,7 @@ describe('a sync stores the bodies of a node mailbox\'s new letters', () => {
         getMailboxLock: vi.fn(async () => ({ release: vi.fn() })),
         fetch: vi.fn(async function* (uidStr, fetchQuery) {
           if (fetchQuery.bodyStructure) bodyFetchOrder.push(Number(uidStr));
+          if (goneUids.has(Number(uidStr))) return; // UID FETCH answers nothing
           yield {
             uid: Number(uidStr),
             bodyStructure: { part: '1', type: 'text/plain', encoding: '7bit', parameters: { charset: 'utf-8' } },
@@ -5430,6 +5432,44 @@ describe('a sync stores the bodies of a node mailbox\'s new letters', () => {
       await mgr.prefetchNewMessageBodies(acct, newRows(105, 105));
       expect(mgr.fetchMessageBody.mock.calls.slice(PREFETCH_MAX_CONSECUTIVE_ERRORS).map(c => c[1])).toEqual([105]);
     } finally { vi.useRealTimers(); }
+  });
+
+  it('spends no fresh login on letters the server no longer has, and stops after three', async () => {
+    // Moved or expunged by another client before the database knew: UID FETCH answers nothing.
+    const acct = mailbox('node-bodies-gone');
+    const mgr = ladderManager();
+    for (let uid = 101; uid <= 105; uid++) goneUids.add(uid);
+    try {
+      await mgr.prefetchNewMessageBodies(acct, newRows(101, 105));
+      // One pooled login per letter (each empty answer evicts its session), no fresh-login retry,
+      // and the three in a row stop the run.
+      expect(pooledLogins).toBe(PREFETCH_MAX_CONSECUTIVE_ERRORS);
+      expect(bodyFetchOrder).toEqual([105, 104, 103]);
+      expect(bodies.size).toBe(0);
+      expect(mgr._prefetchPausedUntil.has(acct.id)).toBe(true);
+    } finally { evictPool(acct.id); }
+  });
+
+  it('reports an empty answer to background work as the letter being gone', async () => {
+    const acct = mailbox('node-bodies-gone-flag');
+    const mgr = ladderManager();
+    goneUids.add(101);
+    try {
+      await expect(mgr.fetchMessageBody(acct, 101, 'INBOX', { background: true }))
+        .rejects.toMatchObject({ messageGone: true });
+      expect(pooledLogins).toBe(1);
+    } finally { evictPool(acct.id); }
+  });
+
+  it('still retries a user\'s empty fetch through a fresh login', async () => {
+    const acct = mailbox('node-bodies-gone-user');
+    const mgr = ladderManager();
+    goneUids.add(101);
+    vi.spyOn(console, 'warn').mockImplementation(() => {});
+    try {
+      await expect(mgr.fetchMessageBody(acct, 101, 'INBOX')).resolves.toMatchObject({ html: null, text: null });
+      expect(pooledLogins).toBe(2);
+    } finally { evictPool(acct.id); }
   });
 
   it('ends a new-mail run and drops its queue when the mailbox is disconnected', async () => {

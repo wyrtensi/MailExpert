@@ -6512,15 +6512,17 @@ export class ImapManager {
       }
 
       try {
-        // The letter as the database has it now. No row: the letter is gone, or its mailbox was
-        // disabled or deleted (a login there could only be rejected). Cached: a click fetched it.
+        // The letter as the database has it now. No row: the letter is gone (deleted, expunged),
+        // or its mailbox was disabled or deleted (a login there could only be rejected). Another
+        // UID or folder: it was moved since the sync queued it, and a FETCH at the old place
+        // would find nothing. Cached: a click fetched it. Each is skipped; it opens on a click.
         const { rows: [live] } = await query(
-          `SELECT (m.body_html IS NOT NULL OR m.body_text IS NOT NULL) AS cached
+          `SELECT m.uid, m.folder, (m.body_html IS NOT NULL OR m.body_text IS NOT NULL) AS cached
              FROM messages m JOIN email_accounts a ON a.id = m.account_id AND a.enabled
-            WHERE m.id = $1`,
+            WHERE m.id = $1 AND NOT m.is_deleted`,
           [msg.id]
         );
-        if (!live || live.cached) continue;
+        if (!live || live.cached || Number(live.uid) !== Number(msg.uid) || live.folder !== msg.folder) continue;
 
         const { html, text, attachments } = await this.fetchMessageBody(account, msg.uid, msg.folder, { background: true });
         const safeHtml = html ? sanitizeEmail(html) : null;
@@ -6544,7 +6546,10 @@ export class ImapManager {
           continue;
         }
         const detail = extractImapError(err);
-        console.warn(`Body prefetch failed for uid ${msg.uid}:`, detail);
+        // A letter the server no longer has where the database said (messageGone) counts like any
+        // other failure below: each one cost the pooled session it evicted, so three in a row stop
+        // the run rather than log in once more per letter.
+        console.warn(`Body prefetch failed for uid ${msg.uid}:`, err?.messageGone ? 'letter gone from the server' : detail);
 
         // Three guards, each stopping the run:
         //  - a rejected login stops at the first one. The pool (or withFreshLogin) has already put
@@ -6654,8 +6659,9 @@ export class ImapManager {
         if (!structure) {
           // Throw a transient error so the outer retry logic gets a fresh connection
           // before giving up — an empty UID FETCH response often means a stale or
-          // half-open pool connection, not a missing message.
-          throw new Error('Command failed');
+          // half-open pool connection, not a missing message. Marked, so background work can
+          // tell it from other failures (see the retry below).
+          throw Object.assign(new Error('Command failed'), { emptyFetch: true });
         }
 
         const results = planBodyParts(structure);
@@ -6790,6 +6796,16 @@ export class ImapManager {
           // A rejected password says so (routes answer mailbox_auth_rejected); see loginHeldBack.
           if (loginHeldBack(account, { background })) held.authRejected = true;
           throw held;
+        }
+        // Background work (body prefetch) never retries through a fresh login: nobody waits for
+        // the letter, it opens on a click. For a letter that moved away or was expunged before
+        // the prefetch reached it, the retry was a second login per letter, and its empty answer
+        // passed as a success. An empty FETCH is reported as the letter being gone (messageGone),
+        // which the prefetch counts as a failure.
+        if (background) {
+          const failed = wrapImapError(firstErr, detail);
+          if (firstErr?.emptyFetch) failed.messageGone = true;
+          throw failed;
         }
         try {
           return await doFetch(withFreshLogin);

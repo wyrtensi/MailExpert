@@ -80,6 +80,29 @@ describe('body prefetch reads each letter before fetching it', () => {
     expect(mgr.fetchMessageBody).not.toHaveBeenCalled();
   });
 
+  it('skips a letter moved to another folder since the sync queued it', async () => {
+    // The same UID number in the other folder: only the folder tells the letters apart.
+    await pglite.query("UPDATE messages SET folder = 'Archive' WHERE id = $1", [letter(1)]);
+    const mgr = manager();
+    await run(mgr);
+    expect(mgr.fetchMessageBody.mock.calls.map(c => c[1])).toEqual([102, 103]);
+  });
+
+  it('skips a letter whose UID changed in the same folder', async () => {
+    await pglite.query('UPDATE messages SET uid = 900 WHERE id = $1', [letter(2)]);
+    const mgr = manager();
+    await run(mgr);
+    expect(mgr.fetchMessageBody.mock.calls.map(c => c[1])).toEqual([101, 103]);
+  });
+
+  it('skips a letter deleted since the sync queued it', async () => {
+    await pglite.query('UPDATE messages SET is_deleted = true WHERE id = $1', [letter(3)]);
+    await pglite.query('DELETE FROM messages WHERE id = $1', [letter(1)]);
+    const mgr = manager();
+    await run(mgr);
+    expect(mgr.fetchMessageBody.mock.calls.map(c => c[1])).toEqual([102]);
+  });
+
   it('skips a letter a click has already fetched', async () => {
     await pglite.query("UPDATE messages SET body_text = 'opened' WHERE id = $1", [letter(2)]);
     const mgr = manager();

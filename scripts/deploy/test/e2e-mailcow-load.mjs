@@ -16,8 +16,19 @@
 //   PHASE=search     the ten employees search, each every 2 seconds, for SEARCH_SECONDS or, with
 //                    SEARCH_UNTIL_ROWS, until the panel has that many seeded rows
 //
+// The work scenario (seeded mail as above, then):
+//
+//   PHASE=work       the ten employees work in the shared mailboxes for WORK_SECONDS: list, open,
+//                    mark read (one and in bulk), move to a folder and back, archive, delete to Trash,
+//                    mark spam, search. Twenty mailboxes are hot, so employees meet on the same letters.
+//                    Errors while the backend restarts count as 'down', not as failures of the action.
+//   PHASE=drain      time until the move queue (message_moves) is empty
+//   PHASE=verify     every seeded letter in the panel's database against /seed/server.tsv, the
+//                    node's own list (user, mailbox, Message-ID): no letter lost, none twice, each in
+//                    the folder the panel shows
+//
 // Each phase prints one `RESULT {json}` line. Env: PANEL, MAIL_HOST, API_KEY, MAILBOXES, DOMAIN;
-// the search scenario also PGHOST, PGUSER, PGPASSWORD, PGDATABASE for the panel's database.
+// the search and work scenarios also PGHOST, PGUSER, PGPASSWORD, PGDATABASE for the panel's database.
 //
 // LOAD_KIND=gmail runs the same phases with the mailboxes added the way a Gmail mailbox is: IMAP
 // imap.gmail.com:993 and SMTP smtp.gmail.com:587, names the script points at the mailcow node. The
@@ -501,4 +512,212 @@ if (PHASE === 'search') {
   });
   await client.end();
   if (untilRows) assert.ok(seeded.rows >= untilRows, `the panel holds ${seeded.rows} of ${untilRows} seeded letters`);
+}
+
+// ── Work scenario ───────────────────────────────────────────────────────────
+
+const WORK_FOLDER = 'Work';
+const HOT_MAILBOXES = 20;
+const bareId = (id) => String(id || '').replace(/^<|>$/g, '');
+
+if (PHASE === 'work') {
+  const employees = await Promise.all(Array.from({ length: EMPLOYEES }, (_, i) => new Session().login(employee(i))));
+  const accounts = await nodeAccounts(employees[0]);
+  // A folder of its own in every mailbox for the moves; the path is the server's (a prefix or another
+  // delimiter would show here).
+  const workPath = new Map();
+  for (const a of accounts) {
+    const r = await employees[0].call('POST', '/mail/folders', { accountId: a.id, name: WORK_FOLDER });
+    assert.equal(r.status, 200, `folder in ${a.email_address}: ${JSON.stringify(r.data)}`);
+    workPath.set(a.id, r.data.path);
+  }
+  const hot = accounts.slice(0, HOT_MAILBOXES);
+  const stats = new Map();
+  const note = (kind, status, ms) => {
+    if (!stats.has(kind)) stats.set(kind, { ms: [], status: {} });
+    const s = stats.get(kind);
+    if (status >= 200 && status < 300) s.ms.push(ms);
+    else s.status[status] = (s.status[status] || 0) + 1;
+  };
+  // What each seeded letter went through: its mailbox, how many actions touched it, and where the
+  // last one sent it (a folder, or the kind of destination the driver cannot name: trash, archive, spam).
+  const touched = new Map();
+  const touch = (m, accountId, expect) => {
+    const t = touched.get(m.message_id) || { accountId, actions: 0, expect: null };
+    t.actions += 1;
+    t.expect = expect;
+    touched.set(m.message_id, t);
+  };
+  const act = async (s, kind, method, path, body) => {
+    const t0 = Date.now();
+    const r = await s.call(method, path, body, { timeoutMs: 60000 }).catch((err) => ({
+      status: err.name === 'TimeoutError' ? 'timeout' : 'down', data: null,
+    }));
+    note(kind, r.status, Date.now() - t0);
+    return r;
+  };
+  const listOf = async (s, account, folder, limit) => {
+    const r = await act(s, folder === 'INBOX' ? 'list' : 'list work', 'GET',
+      `/mail/messages?accountId=${account.id}&folder=${encodeURIComponent(folder)}&limit=${limit}`);
+    return (r.data?.messages || []).filter((m) => m.message_id && m.message_id.includes(SEED_ID_DOMAIN));
+  };
+  let stop = false;
+  const started = Date.now();
+  const stopper = sleep(Number(process.env.WORK_SECONDS) * 1000).then(() => { stop = true; });
+  await Promise.all(employees.map(async (s, i) => {
+    const r = rng(9001 + i);
+    const pick = (list) => list[Math.floor(r() * list.length)];
+    // Up to n letters from the current list, taken out of it so this employee does not act on them twice.
+    const take = (cur, n) => cur.messages.splice(0, Math.max(1, Math.min(n, cur.messages.length)));
+    let cur = null;
+    while (!stop) {
+      const x = r();
+      if (!cur || !cur.messages.length || x < 0.28) {
+        const account = r() < 0.7 ? pick(hot) : pick(accounts);
+        cur = { account, messages: await listOf(s, account, 'INBOX', 50) };
+        cur.messages.sort(() => r() - 0.5);
+      } else if (x < 0.50) {
+        await act(s, 'open', 'GET', `/mail/messages/${cur.messages[0].id}/body`);
+        cur.messages.push(cur.messages.shift());
+      } else if (x < 0.62) {
+        const m = cur.messages[0];
+        await act(s, 'read', 'PATCH', `/mail/messages/${m.id}/read`, { read: !m.is_read });
+        m.is_read = !m.is_read;
+        cur.messages.push(cur.messages.shift());
+      } else if (x < 0.66) {
+        const ids = cur.messages.slice(0, 20).map((m) => m.id);
+        await act(s, 'bulk read', 'POST', '/mail/messages/bulk-read', { ids, read: r() < 0.7 });
+      } else if (x < 0.76) {
+        const ms = take(cur, 1 + Math.floor(r() * 5));
+        const folder = workPath.get(cur.account.id);
+        const res = await act(s, 'move', 'POST', '/mail/messages/bulk-move', { ids: ms.map((m) => m.id), folder });
+        if (res.status === 200) ms.forEach((m) => touch(m, cur.account.id, folder));
+      } else if (x < 0.80) {
+        const back = (await listOf(s, cur.account, workPath.get(cur.account.id), 20)).slice(0, 1 + Math.floor(r() * 3));
+        if (back.length) {
+          const res = await act(s, 'move back', 'POST', '/mail/messages/bulk-move', { ids: back.map((m) => m.id), folder: 'INBOX' });
+          if (res.status === 200) back.forEach((m) => touch(m, cur.account.id, 'INBOX'));
+        }
+      } else if (x < 0.85) {
+        const ms = take(cur, 1 + Math.floor(r() * 3));
+        const res = await act(s, 'archive', 'POST', '/mail/messages/bulk-archive', { ids: ms.map((m) => m.id) });
+        if (res.status === 200) ms.forEach((m) => touch(m, cur.account.id, 'archive'));
+      } else if (x < 0.90) {
+        const ms = take(cur, 1 + Math.floor(r() * 3));
+        const res = await act(s, 'delete', 'POST', '/mail/messages/bulk-delete', { ids: ms.map((m) => m.id) });
+        if (res.status === 200) ms.forEach((m) => touch(m, cur.account.id, 'trash'));
+      } else if (x < 0.92) {
+        const [m] = take(cur, 1);
+        const res = await act(s, 'spam', 'POST', `/mail/messages/${m.id}/spam`);
+        if (res.status === 200) touch(m, cur.account.id, 'spam');
+      } else {
+        await act(s, 'search', 'GET', `/search?q=${encodeURIComponent(pick(['накладная', 'претензия возврат', 'Воробьёв', 'invoice']))}&limit=50`);
+      }
+      await sleep(1000 + Math.floor(r() * 2000));
+    }
+  }));
+  await stopper;
+  const { writeFile } = await import('node:fs/promises');
+  await writeFile('/seed/touched.json', JSON.stringify([...touched]));
+  const byKind = Object.fromEntries([...stats].map(([kind, s]) => [kind, {
+    ok: s.ms.length, ...(s.ms.length ? percentiles(s.ms) : {}), ...(Object.keys(s.status).length ? { other: s.status } : {}),
+  }]));
+  result({
+    seconds: seconds(Date.now() - started),
+    actions: [...stats.values()].reduce((n, s) => n + s.ms.length + Object.values(s.status).reduce((a, b) => a + b, 0), 0),
+    lettersTouched: touched.size,
+    byKind,
+  });
+}
+
+if (PHASE === 'drain') {
+  const client = await panelDb();
+  const started = Date.now();
+  const pending = async () => (await client.query('SELECT state, count(*)::int AS n FROM message_moves GROUP BY state')).rows;
+  const atStart = await pending();
+  let left = atStart;
+  while (left.length && Date.now() - started < 1200000) {
+    await sleep(2000);
+    left = await pending();
+  }
+  const { rows: [audit] } = await client.query(
+    `SELECT count(*) FILTER (WHERE action = 'message.move_reverted')::int AS reverted FROM mailbox_audit_log`);
+  result({
+    seconds: seconds(Date.now() - started),
+    atStart: Object.fromEntries(atStart.map((x) => [x.state, x.n])),
+    left: Object.fromEntries(left.map((x) => [x.state, x.n])),
+    reverted: audit.reverted,
+  });
+  await client.end();
+  assert.equal(left.length, 0, `moves still queued after 20 minutes: ${JSON.stringify(left)}`);
+}
+
+if (PHASE === 'verify') {
+  const { readFile } = await import('node:fs/promises');
+  const client = await panelDb();
+  // user -> Message-ID -> folders, on the server and in the panel.
+  const index = () => new Map();
+  const add = (map, user, mid, value) => {
+    if (!map.has(user)) map.set(user, new Map());
+    const byMid = map.get(user);
+    if (!byMid.has(mid)) byMid.set(mid, []);
+    byMid.get(mid).push(value);
+  };
+  // doveadm -A puts the user first, as a column of its own ("Username"); the rest follow the header.
+  const server = index();
+  const [header, ...lines] = (await readFile('/seed/server.tsv', 'utf8')).split('\n');
+  const col = (name) => header.split('\t').indexOf(name);
+  const [cMailbox, cMid] = [col('mailbox'), col('hdr.message-id')];
+  assert.ok(cMailbox > 0 && cMid > 0, `unexpected doveadm header: ${header}`);
+  for (const line of lines) {
+    const cells = line.split('\t');
+    const mid = cells[cMid];
+    if (mid && mid.includes(SEED_ID_DOMAIN)) add(server, cells[0], bareId(mid.trim()), cells[cMailbox]);
+  }
+  const panel = index();
+  const { rows } = await client.query(`SELECT a.email_address, m.folder, m.message_id, m.uid::bigint AS uid
+    FROM messages m JOIN email_accounts a ON a.id = m.account_id
+    WHERE m.message_id LIKE $1 AND m.is_deleted = false`, [`%@${SEED_ID_DOMAIN}%`]);
+  let placeholders = 0;
+  for (const row of rows) {
+    if (Number(row.uid) < 0) placeholders += 1;
+    add(panel, row.email_address, bareId(row.message_id), row.folder);
+  }
+  const counts = { serverLetters: 0, panelLetters: rows.length, lost: 0, phantom: 0, twiceOnServer: 0, twiceInPanel: 0, otherFolder: 0 };
+  const samples = [];
+  const sample = (what, user, mid, s, p) => { if (samples.length < 10) samples.push({ what, user, mid, server: s, panel: p }); };
+  for (const [user, byMid] of server) {
+    for (const [mid, folders] of byMid) {
+      counts.serverLetters += folders.length;
+      const inPanel = panel.get(user)?.get(mid) || [];
+      if (folders.length > 1) { counts.twiceOnServer += 1; sample('twice on server', user, mid, folders, inPanel); }
+      if (!inPanel.length) { counts.lost += 1; sample('not in panel', user, mid, folders, inPanel); continue; }
+      if (inPanel.length > 1) { counts.twiceInPanel += 1; sample('twice in panel', user, mid, folders, inPanel); }
+      if (!inPanel.every((f) => folders.includes(f))) { counts.otherFolder += 1; sample('other folder', user, mid, folders, inPanel); }
+    }
+  }
+  for (const [user, byMid] of panel) {
+    for (const [mid, folders] of byMid) {
+      if (!server.get(user)?.has(mid)) { counts.phantom += 1; sample('not on server', user, mid, [], folders); }
+    }
+  }
+  // Letters one action touched: the panel must have them where that action sent them.
+  const touched = JSON.parse(await readFile('/seed/touched.json', 'utf8'));
+  const { rows: emails } = await client.query('SELECT id, email_address FROM email_accounts');
+  const emailOf = new Map(emails.map((e) => [e.id, e.email_address]));
+  let checked = 0;
+  let misplaced = 0;
+  for (const [mid, t] of touched) {
+    const folders = panel.get(emailOf.get(t.accountId))?.get(bareId(mid)) || [];
+    if (t.actions !== 1 || folders.length !== 1) continue;
+    checked += 1;
+    const [f] = folders;
+    const ok = ['archive', 'trash', 'spam'].includes(t.expect) ? f !== 'INBOX' : f === t.expect;
+    if (!ok) { misplaced += 1; sample(`expected ${t.expect}`, emailOf.get(t.accountId), mid, server.get(emailOf.get(t.accountId))?.get(bareId(mid)), folders); }
+  }
+  result({ ...counts, placeholders, touchedOnce: checked, misplaced, samples });
+  await client.end();
+  for (const key of ['lost', 'phantom', 'twiceOnServer', 'twiceInPanel', 'otherFolder']) assert.equal(counts[key], 0, `${key}: ${counts[key]}`);
+  assert.equal(placeholders, 0, `${placeholders} rows still carry a placeholder uid`);
+  assert.equal(misplaced, 0, `${misplaced} letters are not where their one action sent them`);
 }

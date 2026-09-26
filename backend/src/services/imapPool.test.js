@@ -33,7 +33,7 @@ vi.mock('./hostValidation.js', () => ({ resolveForConnection: vi.fn(), createPin
 vi.mock('./connectionPolicy.js', () => ({ getConnectionPolicy: vi.fn() }));
 
 import {
-  ImapManager, acquirePooledClient, releasePooledClient, evictPool, poolSizeFor,
+  ImapManager, acquirePooledClient, releasePooledClient, evictPool, poolSizeFor, backgroundPoolCap,
   POOL_SIZE, ACQUIRE_TIMEOUT_MS, BACKGROUND_ACQUIRE_TIMEOUT_MS, POOLED_OPERATION_TIMEOUT_MS, BODY_FETCH_POOL_TIMEOUT_MS,
   LONG_POOLED_OPERATION_TIMEOUT_MS,
 } from './imapManager.js';
@@ -240,6 +240,241 @@ describe('who gets a freed slot', () => {
     expect((await background).v).toBe(held[0]);
     releasePooledClient(ACCOUNT, held[0]);
     for (let i = 1; i < held.length; i++) releasePooledClient(ACCOUNT, held[i]);
+  });
+});
+
+describe('a session kept for user actions', () => {
+  // Background work (flag sync, delete reconcile, the GTD folder sync, the spam poll, body prefetch)
+  // shares the pool with the reader's clicks. It may hold every session but one, so a click never
+  // waits behind it for the 15 s acquire timeout and then answers "mailbox busy".
+  const background = { background: true };
+  const holdBackground = async (n, account = ACCOUNT) => {
+    const held = [];
+    for (let i = 0; i < n; i++) held.push(await acquirePooledClient(account, background));
+    return held;
+  };
+  const releaseAll = (clients, account = ACCOUNT) => { for (const c of clients) releasePooledClient(account, c); };
+
+  it('leaves one of the default four and one of Gmail\'s three; a pool of one stays open to background work', () => {
+    expect(backgroundPoolCap(ACCOUNT)).toBe(POOL_SIZE - 1);
+    expect(backgroundPoolCap({ imap_host: 'imap.gmail.com' })).toBe(2);
+    expect(backgroundPoolCap({ imap_host: 'imap.mail.yahoo.com' })).toBe(1);
+  });
+
+  it('serves a user action at once while background work holds every other session', async () => {
+    const held = await holdBackground(POOL_SIZE - 1);
+    expect(ImapFlow).toHaveBeenCalledTimes(POOL_SIZE - 1);
+    // More background work queues for its share instead of taking the last session.
+    const queuedBackground = settle(acquirePooledClient(ACCOUNT, background));
+    await vi.advanceTimersByTimeAsync(0);
+    expect(ImapFlow).toHaveBeenCalledTimes(POOL_SIZE - 1);
+
+    const askedAt = Date.now();
+    let servedAt = null;
+    const click = acquirePooledClient(ACCOUNT).then(c => { servedAt = Date.now(); return c; });
+    await vi.advanceTimersByTimeAsync(0);
+    expect(servedAt).toBe(askedAt);                        // no wait at all, not a 15 s one
+    expect(ImapFlow).toHaveBeenCalledTimes(POOL_SIZE);     // the pool grew into its last slot
+
+    // The queued background caller never got it and gives up as usual, still without a socket.
+    await vi.advanceTimersByTimeAsync(BACKGROUND_ACQUIRE_TIMEOUT_MS);
+    const { ok, e } = await queuedBackground;
+    expect(ok).toBe(false);
+    expect(e.poolExhausted).toBe(true);
+    expect(ImapFlow).toHaveBeenCalledTimes(POOL_SIZE);
+    releasePooledClient(ACCOUNT, await click);
+    releaseAll(held);
+  });
+
+  it('counts a session being opened for background work, so a burst cannot take the last one', async () => {
+    const burst = Array.from({ length: POOL_SIZE }, () => settle(acquirePooledClient(ACCOUNT, background)));
+    await vi.advanceTimersByTimeAsync(0);
+    expect(ImapFlow).toHaveBeenCalledTimes(POOL_SIZE - 1);
+    const click = await acquirePooledClient(ACCOUNT);
+    expect(ImapFlow).toHaveBeenCalledTimes(POOL_SIZE);
+    await vi.advanceTimersByTimeAsync(BACKGROUND_ACQUIRE_TIMEOUT_MS);
+    const results = await Promise.all(burst);
+    expect(results.filter(r => r.ok)).toHaveLength(POOL_SIZE - 1);
+    releasePooledClient(ACCOUNT, click);
+    releaseAll(results.filter(r => r.ok).map(r => r.v));
+  });
+
+  it('keeps an idle session for the next user action and hands background its own freed one', async () => {
+    const held = await holdBackground(POOL_SIZE - 1);
+    const spare = await acquirePooledClient(ACCOUNT);
+    releasePooledClient(ACCOUNT, spare);                   // open and idle now
+    const queuedBackground = settle(acquirePooledClient(ACCOUNT, background));
+    await vi.advanceTimersByTimeAsync(0);
+    // The idle session is not background's to take.
+    const click = await acquirePooledClient(ACCOUNT);
+    expect(click).toBe(spare);
+    // A background session coming back goes to the background waiter.
+    releasePooledClient(ACCOUNT, held[0]);
+    const { ok, v } = await queuedBackground;
+    expect(ok).toBe(true);
+    expect(v).toBe(held[0]);
+    expect(ImapFlow).toHaveBeenCalledTimes(POOL_SIZE);
+    // It counts as background's again: the session the click gives back stays for the next click.
+    releasePooledClient(ACCOUNT, click);
+    const lateBackground = settle(acquirePooledClient(ACCOUNT, background));
+    await vi.advanceTimersByTimeAsync(0);
+    expect(await acquirePooledClient(ACCOUNT)).toBe(spare);
+    releasePooledClient(ACCOUNT, spare);
+    releaseAll([v, ...held.slice(1)]);
+    expect((await lateBackground).ok).toBe(true);
+    releasePooledClient(ACCOUNT, (await lateBackground).v);
+  });
+
+  it('counts an idle session background work took as background\'s', async () => {
+    const held = await holdBackground(POOL_SIZE - 2);
+    const spare = await acquirePooledClient(ACCOUNT);
+    releasePooledClient(ACCOUNT, spare);
+    expect(await acquirePooledClient(ACCOUNT, background)).toBe(spare);
+    const lateBackground = settle(acquirePooledClient(ACCOUNT, background));
+    await vi.advanceTimersByTimeAsync(0);
+    expect(ImapFlow).toHaveBeenCalledTimes(POOL_SIZE - 1);
+    const click = await acquirePooledClient(ACCOUNT);
+    expect(ImapFlow).toHaveBeenCalledTimes(POOL_SIZE);
+    releasePooledClient(ACCOUNT, click);
+    releaseAll([spare, ...held]);
+    const late = await lateBackground;
+    if (late.ok) releasePooledClient(ACCOUNT, late.v);
+  });
+
+  it('fails a held-back background caller at once rather than hand it the idle session kept for users', async () => {
+    const held = await holdBackground(POOL_SIZE - 1);
+    const spare = await acquirePooledClient(ACCOUNT);
+    releasePooledClient(ACCOUNT, spare);
+    await expect(acquirePooledClient(ACCOUNT, { background: true, noNewLogin: true }))
+      .rejects.toMatchObject({ providerRefusing: true });
+    expect(await acquirePooledClient(ACCOUNT)).toBe(spare);
+    releasePooledClient(ACCOUNT, spare);
+    releaseAll(held);
+  });
+
+  it('does not open the kept session for background work queued behind a held user action', async () => {
+    const held = await holdBackground(POOL_SIZE - 1);
+    // A click while a backoff holds new logins back waits for an open session to be released.
+    const heldClick = settle(acquirePooledClient(ACCOUNT, { noNewLogin: true }));
+    const queuedBackground = settle(acquirePooledClient(ACCOUNT, background));
+    await vi.advanceTimersByTimeAsync(0);
+    expect(ImapFlow).toHaveBeenCalledTimes(POOL_SIZE - 1);
+    // The next released session goes to the click, as before. The click now holds a session, so
+    // background is below its share again and its waiter may open the last one.
+    releasePooledClient(ACCOUNT, held[0]);
+    expect((await heldClick).v).toBe(held[0]);
+    await vi.advanceTimersByTimeAsync(0);
+    const { ok, v } = await queuedBackground;
+    expect(ok).toBe(true);
+    expect(ImapFlow).toHaveBeenCalledTimes(POOL_SIZE);
+    releaseAll([v, ...held]);
+  });
+
+  it('counts a session opened for background work that queued behind a held user action', async () => {
+    const held = await holdBackground(POOL_SIZE - 2);
+    const userSession = await acquirePooledClient(ACCOUNT);
+    const heldClick = settle(acquirePooledClient(ACCOUNT, { noNewLogin: true }));
+    // Below its share, background may open the free slot past the held click.
+    const queuedBackground = settle(acquirePooledClient(ACCOUNT, background));
+    await vi.advanceTimersByTimeAsync(0);
+    const { ok, v } = await queuedBackground;
+    expect(ok).toBe(true);
+    expect(ImapFlow).toHaveBeenCalledTimes(POOL_SIZE);
+    // The user session goes to the held click, which gives it back: it stays for users.
+    releasePooledClient(ACCOUNT, userSession);
+    expect((await heldClick).v).toBe(userSession);
+    releasePooledClient(ACCOUNT, userSession);
+    const lateBackground = settle(acquirePooledClient(ACCOUNT, background));
+    await vi.advanceTimersByTimeAsync(0);
+    expect(await acquirePooledClient(ACCOUNT)).toBe(userSession);
+    releasePooledClient(ACCOUNT, userSession);
+    releaseAll([v, ...held]);
+    const late = await lateBackground;
+    if (late.ok) releasePooledClient(ACCOUNT, late.v);
+  });
+
+  it('frees the share of a background session the server closed', async () => {
+    const held = await holdBackground(POOL_SIZE - 1);
+    const queuedBackground = settle(acquirePooledClient(ACCOUNT, background));
+    await vi.advanceTimersByTimeAsync(0);
+    held[0].emit('close');
+    await vi.advanceTimersByTimeAsync(0);
+    const { ok, v } = await queuedBackground;
+    expect(ok).toBe(true);
+    expect(ImapFlow).toHaveBeenCalledTimes(POOL_SIZE);     // one replacement for the closed session
+    // The replacement counts as background's: the last slot is still there for a click.
+    const lateBackground = settle(acquirePooledClient(ACCOUNT, background));
+    await vi.advanceTimersByTimeAsync(0);
+    expect(ImapFlow).toHaveBeenCalledTimes(POOL_SIZE);
+    const click = await acquirePooledClient(ACCOUNT);
+    expect(ImapFlow).toHaveBeenCalledTimes(POOL_SIZE + 1);
+    releasePooledClient(ACCOUNT, click);
+    releaseAll([v, ...held.slice(1)]);
+    releasePooledClient(ACCOUNT, held[0]);
+    const late = await lateBackground;
+    if (late.ok) releasePooledClient(ACCOUNT, late.v);
+  });
+
+  it('frees the share of a background operation that failed, for background work already queued', async () => {
+    const held = await holdBackground(POOL_SIZE - 2);
+    let failLock;
+    ImapFlow.mockImplementationOnce(function () {
+      const client = new EventEmitter();
+      client.connect = vi.fn(() => Promise.resolve());
+      client.logout = vi.fn(() => Promise.resolve());
+      client.close = vi.fn();
+      client.getMailboxLock = vi.fn(() => new Promise((_, reject) => { failLock = reject; }));
+      sockets.push(client);
+      return client;
+    });
+    vi.spyOn(console, 'warn').mockImplementation(() => {});
+    const mgr = { syncingAccounts: new Set(), _pendingFlagSync: new Set(), _poolLoginOpts: () => ({ noNewLogin: false }) };
+    // The flag range sync is background work on the pool: it takes the last of background's share.
+    const flagSync = ImapManager.prototype._syncFlagsForRange.call(mgr, ACCOUNT);
+    await vi.advanceTimersByTimeAsync(0);
+    expect(ImapFlow).toHaveBeenCalledTimes(POOL_SIZE - 1);
+    const queuedBackground = settle(acquirePooledClient(ACCOUNT, background));
+    await vi.advanceTimersByTimeAsync(0);
+    failLock(new Error('Connection not available'));
+    await flagSync;
+    await vi.advanceTimersByTimeAsync(0);
+    // Served now, by a replacement for the evicted session, not after its 10 s timeout.
+    const { ok, v } = await queuedBackground;
+    expect(ok).toBe(true);
+    expect(sockets[POOL_SIZE - 2].close).toHaveBeenCalled();
+    releasePooledClient(ACCOUNT, v);
+    releaseAll(held);
+  });
+
+  it('keeps one of Gmail\'s three sessions for user actions', async () => {
+    const gmail = { ...ACCOUNT, id: 'acct-gmail-reserve', imap_host: 'imap.gmail.com' };
+    try {
+      const held = await holdBackground(2, gmail);
+      const queuedBackground = settle(acquirePooledClient(gmail, background));
+      await vi.advanceTimersByTimeAsync(0);
+      expect(ImapFlow).toHaveBeenCalledTimes(2);
+      const click = await acquirePooledClient(gmail);
+      expect(ImapFlow).toHaveBeenCalledTimes(3);
+      await vi.advanceTimersByTimeAsync(BACKGROUND_ACQUIRE_TIMEOUT_MS);
+      expect((await queuedBackground).ok).toBe(false);
+      releasePooledClient(gmail, click);
+      releaseAll(held, gmail);
+    } finally { evictPool(gmail.id); }
+  });
+
+  it('still lets background work use a pool of one (Yahoo), behind any user action', async () => {
+    const yahoo = { ...ACCOUNT, id: 'acct-yahoo-reserve', imap_host: 'imap.mail.yahoo.com' };
+    try {
+      const [bg] = await holdBackground(1, yahoo);
+      const queuedBackground = settle(acquirePooledClient(yahoo, background));
+      const click = acquirePooledClient(yahoo);
+      releasePooledClient(yahoo, bg);
+      expect(await click).toBe(bg);                         // the click goes first
+      releasePooledClient(yahoo, bg);
+      expect((await queuedBackground).v).toBe(bg);
+      expect(ImapFlow).toHaveBeenCalledTimes(1);
+      releasePooledClient(yahoo, bg);
+    } finally { evictPool(yahoo.id); }
   });
 });
 

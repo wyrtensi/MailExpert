@@ -274,6 +274,26 @@ export const PREFETCH_MAX_CONSECUTIVE_ERRORS = 3;
 // How long an account's body prefetch stays paused after a run stopped on failures.
 export const PREFETCH_STOP_PAUSE_MS = 60 * 1000;
 
+// Letters of one sync whose bodies a mailbox on our own mail node (account.mail_node) fetches
+// right after it, newest first. The node is close: a body is one speculative FETCH round trip
+// of a few milliseconds on one background pooled session, so a usual tick (a handful of letters)
+// is warm before anyone clicks. The bound only matters for a flood (a mass mailing, the first
+// sync after an outage): the newest 50 are fetched, the rest on open. Attachments never are.
+export const NODE_NEW_BODY_PREFETCH_MAX = 50;
+
+// How many of the `newCount` unread letters a sync just stored get their bodies fetched right
+// away (the newest ones). A node mailbox: all of them up to NODE_NEW_BODY_PREFETCH_MAX. Any
+// other mailbox keeps the rule it had: only a small batch (5 or fewer, so not an initial or bulk
+// sync), capped by the profile's prefetchNewBodiesLimit (PurelyMail: 1), and none where the
+// profile sets prefetchNewBodies: false.
+export function newBodyPrefetchCount(account, newCount) {
+  if (!(newCount > 0)) return 0;
+  if (account.mail_node) return Math.min(newCount, NODE_NEW_BODY_PREFETCH_MAX);
+  const profile = providerProfile(account);
+  if (newCount > 5 || profile.prefetchNewBodies === false) return 0;
+  return Math.min(newCount, Math.max(1, Number(profile.prefetchNewBodiesLimit) || newCount));
+}
+
 // True when an IMAP error looks like a connection-limit / throttle / temporary refusal —
 // the class of failure that should back off rather than retry hard. Deliberately broad on
 // the safe side: a false positive only means a ~30s backoff, never data loss.
@@ -4802,13 +4822,13 @@ export class ImapManager {
             });
           }
           // Pre-warm the body cache for newly arrived messages so clicking one
-          // immediately after receipt doesn't require a live IMAP fetch.
-          // Only do this for small batches (periodic new mail, not initial bulk sync),
-          // and let provider profiles cap or disable the work when BODY[] is sensitive.
-          const prefetchProfile = providerProfile(account);
-          if (newMessages.length <= 5 && prefetchProfile.prefetchNewBodies !== false) {
-            const warmLimit = Math.max(1, Number(prefetchProfile.prefetchNewBodiesLimit) || newMessages.length);
-            const msgsToCache = newMessages.slice(-warmLimit);
+          // immediately after receipt doesn't require a live IMAP fetch. How many is
+          // newBodyPrefetchCount's call: all of a node mailbox's (bounded), a small batch
+          // elsewhere. newMessages is what the rules left in this folder, so a letter a rule
+          // moved away is not fetched under its old UID.
+          const prefetchCount = newBodyPrefetchCount(account, newMessages.length);
+          if (prefetchCount > 0) {
+            const msgsToCache = newMessages.slice(-prefetchCount);
             setImmediate(() => {
               this.prefetchNewMessageBodies(account, msgsToCache)
                 .catch(err => console.warn(`Body prefetch error for ${logAccount(account)}:`, err.message));

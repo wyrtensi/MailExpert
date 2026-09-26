@@ -17,7 +17,7 @@ vi.mock('../utils/redact.js', () => ({ redactEmail: vi.fn() }));
 vi.mock('./hostValidation.js', () => ({ resolveForConnection: vi.fn(), createPinnedLookup: vi.fn() }));
 vi.mock('./connectionPolicy.js', () => ({ getConnectionPolicy: vi.fn() }));
 
-import { ImapManager, MIN_SYNC_INTERVAL_MS, AUTO_IDLE_DELAY_MS, countMissingInboxCopies, fetchBackfillBatch, providerProfile, makeClientCfg, relocateExemptGuard, insertCopiedSibling, deleteMessageCopyRow, emitSectionsChanged, ensureMailbox, createKeyedSemaphore, isConnectionRefusal, extractImapError, isImapAuthFailure, AUTH_FAILURE_COOLDOWN_MS, AUTH_FAILURE_COOLDOWN_MAX_MS, authCooldownMs, connectCooldownMs, effectiveSyncIntervalMs, folderSyncDue, planModseqSync, connectStaggerFor, walkStructure, planBodyParts, extractBodyFromMsg, bodyFallbackApplies, poolSizeFor, backgroundPoolCap, rerootThreadChildren, parsePersistentCap, resolvePersistentCap, persistentEligible, shouldRetryIPv4, classifyMoveBySearch, PERSISTENT_FLAG_STORE_TIMEOUT_MS, PERSISTENT_FLAG_LATE_STORE_WAIT_MS, PERSISTENT_FLAG_LOCK_WAIT_MS, FLAG_STORE_UID_CHUNK, FLAG_PUSH_MAX_ATTEMPTS, wrapImapError, acquirePooledClient, releasePooledClient, evictPool, ACQUIRE_TIMEOUT_MS, BACKGROUND_ACQUIRE_TIMEOUT_MS, PREFETCH_MAX_CONSECUTIVE_ERRORS, PREFETCH_STOP_PAUSE_MS } from './imapManager.js';
+import { ImapManager, MIN_SYNC_INTERVAL_MS, AUTO_IDLE_DELAY_MS, countMissingInboxCopies, fetchBackfillBatch, providerProfile, makeClientCfg, relocateExemptGuard, insertCopiedSibling, deleteMessageCopyRow, emitSectionsChanged, ensureMailbox, createKeyedSemaphore, isConnectionRefusal, extractImapError, isImapAuthFailure, AUTH_FAILURE_COOLDOWN_MS, AUTH_FAILURE_COOLDOWN_MAX_MS, authCooldownMs, connectCooldownMs, effectiveSyncIntervalMs, folderSyncDue, planModseqSync, connectStaggerFor, walkStructure, planBodyParts, extractBodyFromMsg, bodyFallbackApplies, poolSizeFor, backgroundPoolCap, rerootThreadChildren, parsePersistentCap, resolvePersistentCap, persistentEligible, shouldRetryIPv4, classifyMoveBySearch, PERSISTENT_FLAG_STORE_TIMEOUT_MS, PERSISTENT_FLAG_LATE_STORE_WAIT_MS, PERSISTENT_FLAG_LOCK_WAIT_MS, FLAG_STORE_UID_CHUNK, FLAG_PUSH_MAX_ATTEMPTS, wrapImapError, acquirePooledClient, releasePooledClient, evictPool, ACQUIRE_TIMEOUT_MS, BACKGROUND_ACQUIRE_TIMEOUT_MS, PREFETCH_MAX_CONSECUTIVE_ERRORS, PREFETCH_STOP_PAUSE_MS, newBodyPrefetchCount, NODE_NEW_BODY_PREFETCH_MAX } from './imapManager.js';
 import { pluginRegistry } from '../plugins/registry.js';
 import { EventEmitter } from 'node:events';
 import { ImapFlow } from 'imapflow';
@@ -27,6 +27,7 @@ import { resolveForConnection } from './hostValidation.js';
 import { getConnectionPolicy } from './connectionPolicy.js';
 import { invalidateGtdConfigCache } from '../plugins/gtd/gtdConfig.js';
 import { parseMessage } from './messageParser.js';
+import { sendPushToActiveUsers } from './pushNotifications.js';
 import { getImapSnapshot, _resetImapMetrics } from './imapMetrics.js';
 import { GMAIL_KEY_PREFIX } from './threading/threadId.js';
 
@@ -5188,6 +5189,139 @@ describe('body prefetch runs one at a time and pauses after a stop', () => {
     await mgr.prefetchFolderBodies(acct.id, ids);
     await mgr.prefetchFolderBodies(acct.id, ids);
     expect(mgr.fetchMessageBody).toHaveBeenCalledTimes(2 * ids.length);
+  });
+});
+
+describe('newBodyPrefetchCount', () => {
+  const node = { imap_host: 'mail.example.com', mail_node: true };
+  const generic = { imap_host: 'mail.example.com' };
+
+  it('fetches every new letter of a node mailbox, up to the per-sync bound', () => {
+    expect(newBodyPrefetchCount(node, 0)).toBe(0);
+    expect(newBodyPrefetchCount(node, 1)).toBe(1);
+    expect(newBodyPrefetchCount(node, 12)).toBe(12);
+    expect(newBodyPrefetchCount(node, NODE_NEW_BODY_PREFETCH_MAX)).toBe(NODE_NEW_BODY_PREFETCH_MAX);
+    expect(newBodyPrefetchCount(node, 500)).toBe(NODE_NEW_BODY_PREFETCH_MAX);
+    expect(NODE_NEW_BODY_PREFETCH_MAX).toBe(50);
+  });
+
+  it('keeps the small-batch rule everywhere else', () => {
+    expect(newBodyPrefetchCount(generic, 5)).toBe(5);
+    expect(newBodyPrefetchCount(generic, 6)).toBe(0);
+    // Gmail: up to 5, every one of them.
+    expect(newBodyPrefetchCount({ imap_host: 'imap.gmail.com', oauth_provider: 'google' }, 3)).toBe(3);
+    expect(newBodyPrefetchCount({ imap_host: 'imap.gmail.com', oauth_provider: 'google' }, 6)).toBe(0);
+    // PurelyMail warms only the newest arrival.
+    expect(newBodyPrefetchCount({ imap_host: 'imap.purelymail.com' }, 3)).toBe(1);
+  });
+});
+
+describe('a sync stores the bodies of a node mailbox\'s new letters', () => {
+  // The panel's own mail node is close and cheap: every letter a sync brings in is fetched right
+  // away on a background pooled session, so opening it reads the database, not the server.
+  const mailbox = (id, extra = {}) => ({
+    id, user_id: 'u1', enabled: true, email_address: 'team@example.com', gtd_enabled: false,
+    categorization_enabled: false, imap_host: 'mail.example.com', imap_port: 993, imap_tls: true,
+    auth_user: 'team@example.com', auth_pass: 'enc', mail_node: true, ...extra,
+  });
+  const WATERMARK = 100;
+  let bodies, bodyFetchOrder, pooledLogins;
+
+  beforeEach(() => {
+    vi.clearAllMocks();
+    bodies = new Map();
+    bodyFetchOrder = [];
+    pooledLogins = 0;
+    getConnectionPolicy.mockResolvedValue({ allowPrivateHosts: true, allowInsecureTls: true });
+    resolveForConnection.mockResolvedValue({ host: '127.0.0.1', addresses: ['127.0.0.1'], servername: null });
+    sendPushToActiveUsers.mockResolvedValue();
+    // Pooled sessions: a single text/plain part per letter.
+    ImapFlow.mockImplementation(function () {
+      pooledLogins++;
+      return Object.assign(new EventEmitter(), {
+        connect: vi.fn().mockResolvedValue(),
+        close: vi.fn(),
+        logout: vi.fn().mockResolvedValue(),
+        getMailboxLock: vi.fn(async () => ({ release: vi.fn() })),
+        fetch: vi.fn(async function* (uidStr, fetchQuery) {
+          if (fetchQuery.bodyStructure) bodyFetchOrder.push(Number(uidStr));
+          yield {
+            uid: Number(uidStr),
+            bodyStructure: { part: '1', type: 'text/plain', encoding: '7bit', parameters: { charset: 'utf-8' } },
+            bodyParts: new Map([['1', Buffer.from(`Body of ${uidStr}`)]]),
+          };
+        }),
+      });
+    });
+    // The messages table, as far as sync and prefetch touch it: one row per UID, and its body.
+    query.mockReset();
+    query.mockImplementation(async (sql, params = []) => {
+      if (sql.includes('SELECT uid_validity, highest_modseq FROM folders')) return { rows: [{ uid_validity: 100, highest_modseq: '500' }] };
+      if (sql.includes('COALESCE(MAX(uid), 0)')) return { rows: [{ max_uid: WATERMARK }] };
+      if (sql.includes('COUNT(*) FILTER (WHERE is_read = false)')) return { rows: [{ n: 0 }] };
+      if (sql.includes('INSERT INTO messages')) return { rows: [{ id: `row-${params[1]}`, is_new: true }] };
+      if (sql.includes('body_html IS NOT NULL OR body_text IS NOT NULL')) return { rows: bodies.has(params[0]) ? [{ id: params[0] }] : [] };
+      if (sql.includes('SET body_html = $1, body_text = $2')) { bodies.set(params[3], params[1]); return { rows: [], rowCount: 1 }; }
+      return { rows: [], rowCount: 0 };
+    });
+    parseMessage.mockImplementation(async msg => ({
+      uid: msg.uid, messageId: `<letter-${msg.uid}@example.org>`, subject: `Letter ${msg.uid}`,
+      fromName: 'Client', fromEmail: 'client@example.org', to: [], cc: [], replyTo: [], inReplyTo: null,
+      references: null, date: new Date('2026-09-26T10:00:00Z'), snippet: '', isRead: false, isStarred: false,
+      hasAttachments: false, flags: [], isBulk: false, parsedHeaders: {},
+    }));
+    vi.spyOn(console, 'warn').mockImplementation(() => {});
+    vi.spyOn(console, 'log').mockImplementation(() => {});
+  });
+  afterEach(() => { vi.restoreAllMocks(); });
+
+  // The persistent session: `count` letters above the watermark.
+  const syncClient = count => ({
+    getMailboxLock: vi.fn().mockResolvedValue({ release: vi.fn() }),
+    mailbox: { exists: WATERMARK + count, uidValidity: 100, highestModseq: 500n },
+    fetch: vi.fn(async function* (range) {
+      if (range !== `${WATERMARK + 1}:*`) return;
+      for (let uid = WATERMARK + 1; uid <= WATERMARK + count; uid++) yield { uid };
+    }),
+  });
+  const settleBackground = () => new Promise(resolve => setImmediate(resolve));
+
+  it('has every one of N new letters\' bodies in the database after the sync', async () => {
+    const acct = mailbox('node-bodies-12');
+    const mgr = ladderManager();
+    try {
+      await mgr.syncMessages(acct, syncClient(12), 'INBOX', 20, false, true);
+      await vi.waitFor(() => expect(bodies.size).toBe(12));
+      for (let uid = WATERMARK + 1; uid <= WATERMARK + 12; uid++) expect(bodies.get(`row-${uid}`)).toBe(`Body of ${uid}`);
+      // One pooled session did it all, as background work.
+      expect(pooledLogins).toBe(1);
+    } finally { evictPool(acct.id); }
+  });
+
+  it('fetches only the newest letters of a flood, up to the per-sync bound', async () => {
+    const acct = mailbox('node-bodies-flood');
+    const mgr = ladderManager();
+    const count = NODE_NEW_BODY_PREFETCH_MAX + 10;
+    try {
+      await mgr.syncMessages(acct, syncClient(count), 'INBOX', 20, false, true);
+      await vi.waitFor(() => expect(bodies.size).toBe(NODE_NEW_BODY_PREFETCH_MAX));
+      await settleBackground();
+      expect(bodies.size).toBe(NODE_NEW_BODY_PREFETCH_MAX);
+      expect(bodies.has(`row-${WATERMARK + count}`)).toBe(true);
+      expect(bodies.has(`row-${WATERMARK + 10}`)).toBe(false);
+    } finally { evictPool(acct.id); }
+  });
+
+  it('leaves a batch of more than five alone on a mailbox off the node, as before', async () => {
+    const acct = mailbox('generic-bodies-12', { mail_node: false });
+    const mgr = ladderManager();
+    try {
+      await mgr.syncMessages(acct, syncClient(12), 'INBOX', 20, false, true);
+      await settleBackground();
+      await settleBackground();
+      expect(bodyFetchOrder).toEqual([]);
+      expect(pooledLogins).toBe(0);
+    } finally { evictPool(acct.id); }
   });
 });
 

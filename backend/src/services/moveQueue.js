@@ -638,7 +638,7 @@ export class MoveQueue {
     await this._storeSettledFlags(account, settled);
     if (settled.some(s => s.needsProviderIds)) mgr._scheduleProviderIdBackfill(account);
     if (awaiting) {
-      mgr.syncFolderOnDemand(account, dest)
+      mgr.syncFolderOnDemand(account, dest, { background: true })
         .catch(err => console.warn(`Move queue: destination sync of ${dest} failed: ${err.message}`));
     }
     return busy;
@@ -687,7 +687,7 @@ export class MoveQueue {
     if (place) return this._settle(op, place.uid, place.folder);
     if (op.drop_row || !op.message_id_header) {
       await this._drop(op);
-      this.mgr.syncFolderOnDemand(account, op.dest_folder)
+      this.mgr.syncFolderOnDemand(account, op.dest_folder, { background: true })
         .catch(err => console.warn(`Move queue: destination sync of ${op.dest_folder} failed: ${err.message}`));
       return null;
     }

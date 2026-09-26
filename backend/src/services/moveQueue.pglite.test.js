@@ -423,7 +423,7 @@ describe('the destination sync', () => {
     await queue.enqueue(ACCOUNT, await rowsOf([A]), 'Archive');
     await queue.runAccount(ACCOUNT);
     expect(await moves()).toMatchObject([{ state: 'awaiting_uid' }]);
-    expect(mgr.syncFolderOnDemand).toHaveBeenCalledWith(expect.objectContaining({ id: ACCOUNT }), 'Archive');
+    expect(mgr.syncFolderOnDemand).toHaveBeenCalledWith(expect.objectContaining({ id: ACCOUNT }), 'Archive', { background: true });
 
     mgr.findMessageIdInFolders.mockResolvedValue([{ folder: 'Archive', uids: [905] }]);
     await db.query('UPDATE message_moves SET next_attempt_at = now()');
@@ -611,6 +611,16 @@ describe('a letter gone from its source', () => {
     expect(mgr.broadcast).toHaveBeenCalledWith(expect.objectContaining({ type: 'move_reverted', reason: 'gave_up' }));
   });
 
+  it('an archive to Gmail All Mail whose letter left the source is done: the row goes, the sync runs', async () => {
+    await queue.enqueue(ACCOUNT, await rowsOf([A]), '[Gmail]/All Mail', { dropRow: true });
+    await db.query("UPDATE message_moves SET state = 'awaiting_uid'");
+    mgr.searchUids.mockResolvedValue([]);
+    await queue.runAccount(ACCOUNT);
+    expect(await row(A)).toBeUndefined();
+    expect(await moves()).toEqual([]);
+    expect(mgr.syncFolderOnDemand).toHaveBeenCalledWith(expect.objectContaining({ id: ACCOUNT }), '[Gmail]/All Mail', { background: true });
+  });
+
   it('a letter without a Message-ID whose MOVE named no uid drops its row at once for the sync', async () => {
     await db.query('UPDATE messages SET message_id = NULL WHERE id = $1', [A]);
     await queue.enqueue(ACCOUNT, await rowsOf([A]), 'Archive');
@@ -618,7 +628,7 @@ describe('a letter gone from its source', () => {
     await queue.runAccount(ACCOUNT);
     expect(await row(A)).toBeUndefined();
     expect(await moves()).toEqual([]);
-    expect(mgr.syncFolderOnDemand).toHaveBeenCalledWith(expect.objectContaining({ id: ACCOUNT }), 'Archive');
+    expect(mgr.syncFolderOnDemand).toHaveBeenCalledWith(expect.objectContaining({ id: ACCOUNT }), 'Archive', { background: true });
   });
 });
 

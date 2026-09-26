@@ -104,6 +104,16 @@ describe('body prefetch reads each letter before fetching it', () => {
     expect(mgr.fetchMessageBody.mock.calls.map(c => c[1])).toEqual([102]);
   });
 
+  // DB-first moves (moveQueue.js): a letter moved since the sync queued it holds a negative
+  // placeholder uid until its MOVE runs; a FETCH at the old uid would find nothing.
+  // Moved out and back while the first MOVE was in flight, it can even be in its old folder.
+  it('skips a letter whose move is pending', async () => {
+    await pglite.query('UPDATE messages SET uid = -7 WHERE id = $1', [letter(2)]);
+    const mgr = manager();
+    await run(mgr);
+    expect(mgr.fetchMessageBody.mock.calls.map(c => c[1])).toEqual([101, 103]);
+  });
+
   it('skips a letter a click has already fetched', async () => {
     await pglite.query("UPDATE messages SET body_text = 'opened' WHERE id = $1", [letter(2)]);
     const mgr = manager();

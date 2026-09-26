@@ -31,6 +31,9 @@ import {
 } from './threading/providerIdBackfillStore.js';
 import { runRecompute, RECOMPUTE_BATCH_DELAY_MS } from './threading/recompute.js';
 import { loadRecompute, recomputeState, recordRecomputeError } from './threading/recomputeStore.js';
+import { restoreNodeMailboxPassword } from './mailNode/passwordRestore.js';
+import { currentAuthPass, noteRestoredPassword } from './mailNode/currentPassword.js';
+import { recordAudit } from './auditLog.js';
 import { randomUUID } from 'crypto';
 
 
@@ -103,39 +106,49 @@ async function connectImapClientOnce(account, resolved, cfgOpts, timeoutMs, labe
   const host = (account.imap_host || '').toLowerCase();
   let sawRefusal = false; // a provider refusal ('Connection not available' etc.) fired mid-attempt
   const attempt = async (res, tag) => {
-    const client = new ImapFlow(makeClientCfg(account, res, cfgOpts));
+    // Admission control (#384): cap concurrent connection establishment per host so a startup /
+    // backfill burst can't stampede the provider into refusals. Held only for the handshake and
+    // released the instant connect resolves, so it bounds the open RATE, not open connections.
+    await hostConnectSem.acquire(host);
+    let client = null;
+    let authPass;
     // Set immediately before we deliberately tear this client down, so the 'error' the
     // close itself emits is not reported as a failure. Abandoning a stalled attempt is the
     // recovery path (#382), not a fault: logging it as `IMAP error … Connection not
     // available` made routine IPv6→IPv4 failover look like an outage and inflated both the
     // log noise and the imap_error warning count that the diagnostics report surfaces.
     let abandoned = false;
-    // #360: an 'error' emitted during the handshake with no listener is unhandled and crashes the
-    // process. Attach one that outlives connect; a caller adding its own later just logs alongside.
-    client.on('error', (err) => {
-      // Refusal detection stays unconditional: it drives the caller's backoff decision and
-      // must observe a refusal that arrives while we are tearing the attempt down.
-      // extractImapError, as in every other refusal check: a bare 'Command failed' hides the
-      // [LIMIT] / too-many-connections text this needs to see.
-      if (isConnectionRefusal(extractImapError(err))) sawRefusal = true;
-      if (abandoned) return;
-      recordWarning('imap_error', account?.id);
-      console.error(`IMAP error for ${logAccount(account)}:`, err.message);
-    });
-    // Admission control (#384): cap concurrent connection establishment per host so a startup /
-    // backfill burst can't stampede the provider into refusals. Held only for the handshake and
-    // released the instant connect resolves, so it bounds the open RATE, not open connections.
-    await hostConnectSem.acquire(host);
     try {
+      // The config (and so the password) is built only now, holding the slot: a login that queued
+      // here while a node password restore landed sends the restored password, not the old one.
+      authPass = currentAuthPass(account);
+      client = new ImapFlow(makeClientCfg(account, res, cfgOpts));
+      // #360: an 'error' emitted during the handshake with no listener is unhandled and crashes the
+      // process. Attach one that outlives connect; a caller adding its own later just logs alongside.
+      client.on('error', (err) => {
+        // Refusal detection stays unconditional: it drives the caller's backoff decision and
+        // must observe a refusal that arrives while we are tearing the attempt down.
+        // extractImapError, as in every other refusal check: a bare 'Command failed' hides the
+        // [LIMIT] / too-many-connections text this needs to see.
+        if (isConnectionRefusal(extractImapError(err))) sawRefusal = true;
+        if (abandoned) return;
+        recordWarning('imap_error', account?.id);
+        console.error(`IMAP error for ${logAccount(account)}:`, err.message);
+      });
       await raceTimeout(client.connect(), timeoutMs, tag);
       recordImapLogin(host, tag);
     } catch (err) {
+      // The config was refused (plain-text IMAP not allowed): no login was tried.
+      if (!client) throw err;
       recordImapLogin(host, tag, { failed: true });
       // close() (not logout()): forcefully destroys the socket and aborts the still-pending
       // connect left running by the race timeout — a graceful logout could itself hang on a
       // wedged/half-open connection (the exact failure we're recovering from).
       abandoned = true;
       try { client.close(); } catch { /* already closed */ }
+      // The node password was restored while this login ran with the old one: its rejection
+      // must not arm a ladder the restore just cleared (see _staleCredentialFailure).
+      if (isImapAuthFailure(err) && authPass !== currentAuthPass(account)) err.staleCredential = true;
       throw err;
     } finally {
       hostConnectSem.release(host);
@@ -1455,9 +1468,47 @@ export function classifyOAuthRefreshError(err) {
   return null;
 }
 
+// Who the audit log names for a password MailExpert restored by itself.
+export const MAIL_NODE_ACTOR = 'MailExpert';
+// How long a node password restore waits for a connect of the same account to finish before its own
+// reconnect (connectAccount would skip it as a duplicate). Just over connectAccount's login timeout.
+const NODE_RESTORE_CONNECT_WAIT_MS = 35000;
+// Node password restores running at once across all mailboxes (see _restoreNodePassword).
+export const NODE_RESTORE_CONCURRENCY = 2;
+const NODE_RESTORE_SLOT = 'mail-node';
+const nodeRestoreSlots = createKeyedSemaphore(NODE_RESTORE_CONCURRENCY);
+
+// The account error for a rejected node password that was not restored (restoreNodeMailboxPassword).
+const NODE_RESTORE_DB_FAILED = 'Password rejected: storing the restored password failed; it is retried on the next attempt';
+const NODE_RESTORE_FAILURES = {
+  host_mismatch: 'Password rejected: the mailbox is not on the configured mail node',
+  rate_limited: 'Password rejected: MailExpert already restored it on the mail node in the last 6 hours, so it does not do so again yet',
+  disabled: 'Password rejected: the mailbox is disabled on the mail node',
+  missing: 'Password rejected: the mailbox is missing on the mail node',
+  receive_only: 'Password rejected: login is disabled for the mailbox on the mail node (receive only)',
+  foreign_authsource: 'Password rejected: the mailbox signs in through an external identity provider on the mail node',
+  no_imap_access: 'Password rejected: IMAP access is turned off for the mailbox on the mail node',
+  force_pw_update: 'Password rejected: the mail node asks for a password change at the next login',
+  domain_missing: 'Password rejected: the mailbox domain is missing on the mail node',
+  domain_inactive: 'Password rejected: the mailbox domain is disabled on the mail node',
+};
+
+function nodeRestoreFailureDetail({ outcome, code, stage }) {
+  if (NODE_RESTORE_FAILURES[outcome]) return NODE_RESTORE_FAILURES[outcome];
+  // The request may have reached the node: the stored pending password is sent again next time.
+  if (stage === 'set' && code === 'mail_node_unreachable') {
+    return 'Password rejected: the mail node did not answer the password change; the same password is sent again on the next attempt';
+  }
+  if (code === 'mail_node_unreachable') return 'Password rejected: the mail node API is unreachable';
+  if (code === 'mail_node_auth') return 'Password rejected: the mail node refused the API key';
+  return 'Password rejected: the mail node API failed';
+}
+
 // resolved comes from resolveForConnection(), which limits sockets to the validated
 // address set so DNS rebinding cannot change the target between validation and connect.
 // policy: result of getConnectionPolicy() — gates TLS verification override.
+// The password is currentAuthPass(account): the restored one for a row read before a node password
+// restore (services/mailNode/currentPassword.js).
 export function makeClientCfg(account, resolved, { enableIdle = false, policy = {}, idleKeepaliveMs } = {}) {
   if (!policy.allowInsecureTls && !account.imap_tls) {
     throw new Error('Plain-text IMAP is not allowed: admin must enable "Allow insecure TLS"');
@@ -1476,7 +1527,7 @@ export function makeClientCfg(account, resolved, { enableIdle = false, policy = 
     host: resolved.lookup && resolved.servername ? resolved.servername : resolved.host,
     port: account.imap_port,
     secure: account.imap_tls,
-    auth: { user: account.auth_user, pass: decrypt(account.auth_pass) },
+    auth: { user: account.auth_user, pass: decrypt(currentAuthPass(account)) },
     logger: false,
     tls: tlsOpts,
     // No commandTimeout: imapflow 2.0.x has no such option (it used to be set here and was
@@ -1547,6 +1598,16 @@ async function applyHelperAuthFailure(account, err, what) {
   } catch (noteErr) {
     console.error(`Arming the auth backoff for ${logAccount(account)} failed: ${noteErr?.message || 'unknown error'}`);
   }
+}
+
+// A pooled login was accepted. Its password is the one every login of the account takes
+// (currentAuthPass), so a node password restored earlier is proven, as by the persistent login: a
+// later rejection may restore it again. Without this, a restore whose own reconnect was skipped (the
+// old IDLE session lived on) kept the mark while the pool logged in fine, and the next real password
+// loss got only the "rejected too" warning. (withFreshLogin serves only preferFreshBodyFetch
+// providers, never the mail node's profile, so it has no mark to clear.)
+function noteHelperLoginAccepted(account) {
+  helperManager?._nodePasswordRestored?.delete(account.id);
 }
 
 // True while a rejected password holds this account's new logins back (_authLoginBlocked): then no
@@ -1670,6 +1731,7 @@ async function growPool(pool, account) {
     await applyHelperAuthFailure(account, err, 'Pooled');
     throw err;
   }
+  noteHelperLoginAccepted(account);
   pool.connecting--;
   // Remove from pool immediately when the server closes the socket, then give the freed slot
   // to the queue (an idle client, or a grow for the head waiter).
@@ -2054,6 +2116,13 @@ export class ImapManager {
     // extra connections are welcome, so only the folder status client's successful login (or
     // clearConnectCooldown) clears this.
     this._secondaryCooldown = new Map();
+    // Mail node mailboxes whose rejected password MailExpert restores through the mailcow API
+    // (_noteNodePasswordRejected): accountIds with a restore running, and accountIds whose restored
+    // password no login has accepted yet. While the second holds an account, a new rejection
+    // restores nothing: a password the node took and still rejects would otherwise be replaced
+    // after every window, each time with one more rejected login.
+    this._nodePasswordRestoring = new Set();
+    this._nodePasswordRestored = new Set();
     this._prefetchRunning = new Set(); // accountIds with a body-prefetch run in progress
     this._prefetchPausedUntil = new Map(); // accountId -> ms; body prefetch paused after a run stopped on failures
     // accountId -> the value last persisted to email_accounts.sync_error: a string (error is
@@ -2670,6 +2739,8 @@ export class ImapManager {
       // until the window ran out or someone pressed Reconnect. The account error itself clears
       // on the sync below, as ever.
       this._secondaryAuthCooldown.delete(account.id);
+      // A restored node password is proven: a later rejection may restore it again.
+      this._nodePasswordRestored.delete(account.id);
 
       // Remove from active connections the moment the server closes the socket.
       // Without this, a cleanly-closed connection lingers in this.connections and
@@ -2896,6 +2967,8 @@ export class ImapManager {
       const fresh = await ensureFreshToken(account);
       const { resolved, policy } = await raceTimeout(resolveAccountHost(fresh), 15000, 'Poll-only host resolve');
       client = await connectImapClient(fresh, resolved, { enableIdle: false, policy }, 30000, 'Poll-only connect');
+      // A poll-only mailbox has no persistent login: this one proves a restored node password.
+      this._nodePasswordRestored.delete(account.id);
 
       if (folderSyncDue(this.folderSyncIntervalMs, this.lastFolderSyncAt.get(account.id))) {
         this.lastFolderSyncAt.set(account.id, Date.now());
@@ -3008,6 +3081,7 @@ export class ImapManager {
     // authArmed: this window was set by a rejected password, not a refusal (see _authLoginBlocked).
     this._connectCooldown.set(account.id, { until: Date.now() + ms, failures, authFailures, authArmed: true });
     console.warn(`Authentication rejected for ${logAccount(account)} — not retrying for ${Math.round(ms / 60000)}m (attempt #${authFailures}) unless its credentials change or it is reconnected manually`);
+    this._noteNodePasswordRejected(account);
     return ms;
   }
 
@@ -3019,6 +3093,7 @@ export class ImapManager {
   // and the folder status client put a rejected password on the 30-second refusal ladder or on
   // none at all.
   _noteLoginFailure(account, err, detail = extractImapError(err)) {
+    if (this._staleCredentialFailure(account, err)) return null;
     if (isImapAuthFailure(err)) {
       this._noteAuthFailure(account);
       return 'auth';
@@ -3039,6 +3114,95 @@ export class ImapManager {
     // The secondary backoff too: otherwise folder counts and prefetch stay frozen for up to the
     // 15-minute cap after the user asked for a retry, and the button looks like a no-op.
     this._secondaryCooldown?.delete(accountId);
+    // A manual reconnect or a settings change lets a later rejection restore the node password again.
+    this._nodePasswordRestored?.delete(accountId);
+  }
+
+  // A login that failed with a password MailExpert has replaced since it started
+  // (err.staleCredential, set by connectImapClientOnce after a node password restore) says nothing
+  // about the stored password: it arms no ladder. A connect path may still record its text as the
+  // account error; the restore's own reconnect clears it once its sync succeeds.
+  _staleCredentialFailure(account, err) {
+    if (!err?.staleCredential) return false;
+    console.warn(`A login of ${logAccount(account)} used a password replaced while it ran; not counted as a rejection`);
+    return true;
+  }
+
+  // The password of a mail node mailbox was rejected and a new auth window was just armed (the
+  // account-wide one or the secondary one, whichever came first; both call this only when they open
+  // a window, so this runs at most once per window). MailExpert owns that password, so it sets a new
+  // one through the mailcow API rather than leaving the mailbox red until someone acts
+  // (_restoreNodePassword). Never for OAuth or ordinary IMAP mailboxes; one restore at a time per
+  // mailbox; and none while an earlier restored password has not been accepted by a login yet.
+  _noteNodePasswordRejected(account) {
+    if (!account?.mail_node || isOAuthAccount(account)) return;
+    const id = account.id;
+    // Checked first, so a rejection of the restore's own reconnect is logged, not skipped silently.
+    if (this._nodePasswordRestored.has(id)) {
+      console.warn(`The password restored on the mail node for ${logAccount(account)} is rejected too; not restoring it again until a login succeeds or the mailbox is reconnected`);
+      return;
+    }
+    if (this._nodePasswordRestoring.has(id)) return;
+    this._nodePasswordRestoring.add(id);
+    // Next turn, so the caller records the rejection first and the outcome below is what stays.
+    setImmediate(() => {
+      this._restoreNodePassword(account)
+        .catch(err => console.error(`Restoring the mail node password of ${logAccount(account)} failed: ${err?.code || err?.name || 'error'}`))
+        .finally(() => this._nodePasswordRestoring.delete(id));
+    });
+  }
+
+  // See _noteNodePasswordRejected. On success every ladder is cleared and the account reconnects with
+  // the new password; sessions opened with the old one keep working until they close, the pool is
+  // evicted so none is handed out again, and every later login of the account takes the new password
+  // even from a copy of the row read before (currentAuthPass). A mailbox disabled or missing on the
+  // node, or a node API failure, keeps the ladder and gets an account error saying why.
+  async _restoreNodePassword(account) {
+    const id = account.id;
+    // At most NODE_RESTORE_CONCURRENCY restores talk to the node at once, for all mailboxes: a node-wide
+    // cause (a domain disabled, say) rejects every mailbox of it in the same second, and each restore is
+    // a few API calls. The others wait their turn rather than lose their attempt.
+    await nodeRestoreSlots.acquire(NODE_RESTORE_SLOT);
+    let result;
+    try {
+      result = await restoreNodeMailboxPassword(id);
+    } catch (err) {
+      // The database failed, possibly after the node took the new password. That password is kept as
+      // pending (restoreNodeMailboxPassword), so the next attempt sends it again and stores it.
+      console.error(`Restoring the mail node password of ${logAccount(account)} failed in the database: ${err?.code || err?.name || 'error'}`);
+      await this._recordAccountError(account, NODE_RESTORE_DB_FAILED);
+      return;
+    } finally {
+      nodeRestoreSlots.release(NODE_RESTORE_SLOT);
+    }
+    if (result.outcome === 'skipped') return;
+    if (result.outcome !== 'restored') {
+      const detail = nodeRestoreFailureDetail(result);
+      console.warn(`Password of ${logAccount(account)} rejected and not restored: ${detail}`);
+      await this._recordAccountError(account, detail);
+      return;
+    }
+    noteRestoredPassword(id, result.replacedAuthPass, result.account.auth_pass);
+    evictPool(id);
+    this.clearConnectCooldown(id);
+    // After clearConnectCooldown, which drops it: set until a login accepts the new password.
+    this._nodePasswordRestored.add(id);
+    console.log(`Password of ${logAccount(account)} was rejected; set a new one through the mail node API, reconnecting`);
+    recordAudit({ actorEmail: MAIL_NODE_ACTOR, accountId: id, action: 'mailbox.password_restored', details: {} });
+    // The rejection may have come from a connectAccount still unwinding; its lock would make this
+    // reconnect a no-op. If it is still held after the wait, the health check reconnects.
+    const waitUntil = Date.now() + NODE_RESTORE_CONNECT_WAIT_MS;
+    while (this.connectingAccounts.has(id) && Date.now() < waitUntil) {
+      await new Promise(resolve => setTimeout(resolve, 100));
+    }
+    // Read again: a mailbox disabled or deleted in MailExpert while the restore ran must stay down
+    // (the new password is stored all the same, the node already has it).
+    const { rows } = await query(
+      "SELECT * FROM email_accounts WHERE id = $1 AND enabled = true AND protocol = 'imap'",
+      [id],
+    );
+    if (!rows.length) return;
+    await this.connectAccount(rows[0]);
   }
 
   // Arm the backoff for SECONDARY logins (any but the persistent one: the folder status client,
@@ -3140,6 +3304,7 @@ export class ImapManager {
   // _handleOAuthRefreshFailure turns into oauth_reconnect_required, and the account's own login
   // still arms the account-wide ladder if the rejection persists.
   async _noteSecondaryAuthFailure(account, err, what) {
+    if (this._staleCredentialFailure(account, err)) return;
     if (isOAuthAccount(account)) {
       console.warn(`${what} login rejected for ${logAccount(account)} after a token refresh; OAuth mailbox, so treated as transient`);
       this._noteSecondaryRefusal(account, 'Secondary login rejected (OAuth)');
@@ -3174,6 +3339,7 @@ export class ImapManager {
     const ms = authCooldownMs(failures);
     this._secondaryAuthCooldown.set(account.id, { until: Date.now() + ms, failures });
     console.warn(`${what} login rejected for ${logAccount(account)} while its persistent connection is up — new logins paused for ${Math.round(ms / 60000)}m (attempt #${failures}); sync continues on the persistent connection`);
+    this._noteNodePasswordRejected(account);
     return ms;
   }
 
@@ -3341,7 +3507,9 @@ export class ImapManager {
           pendingClient = await connectImapClient(setup.freshAccount, setup.resolved,
             { enableIdle: providerProfile(setup.freshAccount).usesIdle !== false, policy: setup.policy, idleKeepaliveMs: providerProfile(setup.freshAccount).idleKeepaliveMs },
             30000, 'Reconnect');
-          this._secondaryAuthCooldown.delete(account.id); // credentials accepted: see connectAccount
+          // Credentials accepted: see connectAccount.
+          this._secondaryAuthCooldown.delete(account.id);
+          this._nodePasswordRestored.delete(account.id);
           const reconnected = { client: pendingClient, account: setup.freshAccount };
           activeClient = reconnected.client;
           syncAccount = reconnected.account;

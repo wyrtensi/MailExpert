@@ -8,6 +8,7 @@ export const AUDIT_ACTION_LABEL_KEYS = Object.freeze({
   'mailbox.connection_changed': 'admin.audit.actionMailboxConnectionChanged',
   'mailbox.enabled': 'admin.audit.actionMailboxEnabled',
   'mailbox.disabled': 'admin.audit.actionMailboxDisabled',
+  'mailbox.password_restored': 'admin.audit.actionMailboxPasswordRestored',
   'message.sent': 'admin.audit.actionMessageSent',
   'message.deleted': 'admin.audit.actionMessageDeleted',
   'user.added': 'admin.audit.actionUserAdded',

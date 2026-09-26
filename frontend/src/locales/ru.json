@@ -1770,6 +1770,7 @@
       "actionMailboxConnectionChanged": "Изменены настройки подключения",
       "actionMailboxEnabled": "Ящик включён",
       "actionMailboxDisabled": "Ящик выключен",
+      "actionMailboxPasswordRestored": "Пароль ящика восстановлен на почтовом узле",
       "actionMessageSent": "Письмо отправлено",
       "actionMessageDeleted": "Письмо удалено",
       "actionUserAdded": "Пользователь добавлен",

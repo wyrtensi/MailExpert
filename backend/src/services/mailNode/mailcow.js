@@ -170,10 +170,26 @@ function mailboxInfo(m) {
   };
 }
 
+// One mailbox with what decides whether it may sign in, besides its password:
+// - state: mailcow's active, 1 (active), 0 (disabled) or 2 (receives mail, login disallowed);
+// - authsource: 'mailcow', or an external identity provider (then mailcow never changes the password);
+// - imapAccess and forcePwUpdate: from its attributes (mailcow sends them as "1" / "0");
+// - domain: the mailbox's domain, whose own active flag the mailbox listing does not carry.
+// A field an older mailcow does not send reads as the permissive default.
 export async function getMailbox(cfg, email) {
   const data = await request(cfg, 'GET', `get/mailbox/${encodeURIComponent(email)}`);
   const item = Array.isArray(data) ? data[0] : data;
-  return item && item.username ? mailboxInfo(item) : null;
+  if (!item || !item.username) return null;
+  const info = mailboxInfo(item);
+  const attributes = item.attributes && typeof item.attributes === 'object' ? item.attributes : {};
+  return {
+    ...info,
+    state: Number(item.active_int ?? item.active),
+    authsource: String(item.authsource ?? 'mailcow').toLowerCase(),
+    imapAccess: attributes.imap_access === undefined ? true : String(attributes.imap_access) === '1',
+    forcePwUpdate: String(attributes.force_pw_update ?? '0') === '1',
+    domain: String(item.domain ?? info.email.split('@')[1] ?? '').toLowerCase(),
+  };
 }
 
 export async function listMailboxes(cfg) {
@@ -199,6 +215,15 @@ export async function provisionMailbox(cfg, { localPart, domain, name }) {
     });
   }
   return { email, password, reused: !!existing };
+}
+
+// A new random password for a mailbox that already exists, and nothing else: the attributes sent
+// hold only the password, so mailcow keeps the mailbox's active state, quota and every other
+// setting (provisionMailbox would enable a mailbox an administrator disabled). Returns the password:
+// the one passed in (the restore stores it before asking the node), or a new random one.
+export async function setMailboxPassword(cfg, email, password = generateMailboxPassword()) {
+  await editMailbox(cfg, email, { password, password2: password });
+  return password;
 }
 
 // mailcow active 0: mail to it is refused as for an unknown recipient and nobody can sign in;

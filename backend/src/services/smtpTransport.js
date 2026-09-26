@@ -1,5 +1,6 @@
 import nodemailer from 'nodemailer';
 import { decrypt } from './encryption.js';
+import { currentAuthPass } from './mailNode/currentPassword.js';
 import { getConnectionPolicy } from './connectionPolicy.js';
 import { resolveForConnection } from './hostValidation.js';
 import { ensureFreshOAuthAccount } from './oauth/tokenManager.js';
@@ -135,7 +136,9 @@ export async function createAccountSmtpTransport(inputAccount) {
     // username/password, use them; otherwise fall back to the IMAP login. Each
     // side falls back independently, so a different-username/same-password (or the
     // reverse) config also works. Empty/NULL columns are falsy and fall through.
-    const pass = decrypt(account.smtp_auth_pass || account.auth_pass);
+    // The IMAP password comes from the same source as the IMAP login (currentAuthPass): a mail node
+    // row read before a password restore (a rule forward on the live sync's row) sends with the new one.
+    const pass = decrypt(account.smtp_auth_pass || currentAuthPass(account));
     if (!pass) {
       return {
         status: 502,

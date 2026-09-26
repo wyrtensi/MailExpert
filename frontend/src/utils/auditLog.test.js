@@ -6,11 +6,12 @@ describe('AUDIT_ACTIONS', () => {
   it('lists every action the server records, each with a label', () => {
     assert.deepEqual(AUDIT_ACTIONS, [
       'mailbox.added', 'mailbox.reconnected', 'mailbox.deleted', 'mailbox.connection_changed',
-      'mailbox.enabled', 'mailbox.disabled', 'message.sent', 'message.deleted',
+      'mailbox.enabled', 'mailbox.disabled', 'mailbox.password_restored', 'message.sent', 'message.deleted',
       'user.added', 'user.deleted', 'user.enabled', 'user.disabled', 'user.admin_changed',
       'access.sync_aborted',
     ]);
     assert.equal(auditActionLabelKey('message.sent'), 'admin.audit.actionMessageSent');
+    assert.equal(auditActionLabelKey('mailbox.password_restored'), 'admin.audit.actionMailboxPasswordRestored');
     assert.equal(auditActionLabelKey('user.admin_changed'), 'admin.audit.actionUserAdminChanged');
     assert.equal(auditActionLabelKey('access.sync_aborted'), 'admin.audit.actionAccessSyncAborted');
     assert.equal(auditActionLabelKey('message.read'), null);

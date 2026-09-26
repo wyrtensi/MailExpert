@@ -16,6 +16,7 @@ const {
   createSmtpTransport,
   isPreDeliveryConnectionError,
 } = await import('./smtpTransport.js');
+const { noteRestoredPassword } = await import('./mailNode/currentPassword.js');
 
 const resolved = {
   host: '203.0.113.10',
@@ -173,6 +174,26 @@ describe('createAccountSmtpTransport', () => {
       expect.objectContaining({
         auth: { user: 'relay-user', pass: 'imap-password' },
       })
+    );
+  });
+
+  it('sends a mail node mailbox with its restored password, even from a row read before the restore', async () => {
+    noteRestoredPassword('node-1', 'old-password', 'restored-password');
+    const result = await createAccountSmtpTransport({
+      id: 'node-1',
+      mail_node: true,
+      smtp_host: 'mail.example.com',
+      smtp_port: 587,
+      smtp_tls: 'STARTTLS',
+      auth_user: 'box@example.com',
+      auth_pass: 'old-password',
+      smtp_auth_pass: null,
+      imap_skip_tls_verify: false,
+    });
+    await result.transport.sendMail({ to: 'user@example.com' });
+
+    expect(nodemailer.createTransport).toHaveBeenCalledWith(
+      expect.objectContaining({ auth: { user: 'box@example.com', pass: 'restored-password' } })
     );
   });
 

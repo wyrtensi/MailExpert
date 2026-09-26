@@ -16,6 +16,7 @@ import {
   addDomain,
   disableMailbox,
   generateMailboxPassword,
+  getMailbox,
   getDiskStatus,
   getMailNodeConfig,
   listDomains,
@@ -25,6 +26,7 @@ import {
   parsePingUrl,
   provisionMailbox,
   saveMailNodeConfig,
+  setMailboxPassword,
   setMailboxQuota,
 } from './mailcow.js';
 
@@ -183,6 +185,47 @@ describe('API requests', () => {
       { items: ['info@example.com'], attr: { active: 0 } },
       { items: ['info@example.com'], attr: { quota: 10240 } },
     ]);
+  });
+
+  it('reads what besides the password decides whether a mailbox may sign in', async () => {
+    safeFetch.mockResolvedValueOnce(answer({
+      username: 'Info@example.com', domain: 'Example.com', active: '2', active_int: 2, authsource: 'keycloak',
+      quota: 5368709120, quota_used: 0, attributes: { imap_access: '0', force_pw_update: '1' },
+    }));
+    expect(await getMailbox(CFG, 'info@example.com')).toEqual({
+      email: 'info@example.com', active: false, quotaMb: 5120, usedBytes: 0,
+      state: 2, authsource: 'keycloak', imapAccess: false, forcePwUpdate: true, domain: 'example.com',
+    });
+    // An older mailcow without these fields: the permissive defaults.
+    safeFetch.mockResolvedValueOnce(answer({ username: 'info@example.com', active: '1', quota: 0 }));
+    expect(await getMailbox(CFG, 'info@example.com')).toMatchObject({
+      active: true, state: 1, authsource: 'mailcow', imapAccess: true, forcePwUpdate: false, domain: 'example.com',
+    });
+    safeFetch.mockResolvedValueOnce(answer({}));
+    expect(await getMailbox(CFG, 'gone@example.com')).toBeNull();
+  });
+
+  it('sets a new password on a mailbox and changes nothing else', async () => {
+    safeFetch.mockResolvedValue(answer(OK));
+    const password = await setMailboxPassword(CFG, 'info@example.com');
+    expect(password.length).toBeGreaterThanOrEqual(32);
+    expect(calls()).toHaveLength(1);
+    const [edit] = calls();
+    expect(edit.url).toBe('https://mail.example.com/api/v1/edit/mailbox');
+    expect(edit.method).toBe('POST');
+    // Only the password: no active flag (a disabled mailbox stays disabled), no other attribute.
+    expect(edit.body).toEqual({ items: ['info@example.com'], attr: { password, password2: password } });
+  });
+
+  it('sets the password it is given', async () => {
+    safeFetch.mockResolvedValue(answer(OK));
+    expect(await setMailboxPassword(CFG, 'info@example.com', 'given-password-1')).toBe('given-password-1');
+    expect(calls()[0].body.attr).toEqual({ password: 'given-password-1', password2: 'given-password-1' });
+  });
+
+  it('reports a refused password change as a mail node error', async () => {
+    safeFetch.mockResolvedValue(answer([{ type: 'danger', msg: ['password_complexity'] }]));
+    await expect(setMailboxPassword(CFG, 'info@example.com')).rejects.toMatchObject({ code: 'mail_node_refused' });
   });
 
   it('lists mailboxes with quota in MB and usage in bytes', async () => {

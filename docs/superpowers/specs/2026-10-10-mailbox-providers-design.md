@@ -211,13 +211,13 @@ name, senderName, signature и color. Запрос имеет CSRF защиту 
 Проверяющий сервис использует ImapFlow и существующие правила DNS/сетевых адресов:
 разрешён только выбранный публичный хост, все его адреса проверяются, подключение фиксируется
 на проверенном адресе, SNI сохраняет исходный хост. IMAP: connect, AUTH, LIST, logout.
-SMTP: существующий transport, обязательный TLS/STARTTLS, verify, закрытие соединения.
+SMTP: отдельный Node child с публичным Nodemailer `verify`, обязательный TLS/STARTTLS и `forceAuth:true`; credentials передаются private IPC. Успех/abort/deadline заканчиваются остановкой child и ожиданием exit: transport.close не отменяет closure-local verify socket. Семантика обычной отправки не меняется.
 Для обычного подключения отводится до 15 секунд на каждый протокол, общий бюджет 35 секунд.
 Ресурсы закрываются также при отмене, таймауте и отказе. SMTP verify не отправляет письмо.
 
 После обеих успешных проверок создаётся зашифрованная запись обычного ящика, запускается
 существующий IMAP manager и возвращается `safeAccount`. Уникальность адреса среди активных
-подключений проверяется в транзакции с блокировкой нормализованного адреса; повторная отправка
+подключений проверяется под общим bounded lock ключа `lower(btrim(email_address))`; повторная отправка
 идемпотентна. Если адрес уже подключён другим способом, возвращается `already_connected`.
 Неуспешная проверка не оставляет пустой ящик. Аудит фиксирует сотрудника, provider и результат
 без credentials и сырого текста исключения. Изменение пароля существующего ящика остаётся
@@ -313,6 +313,65 @@ Sent, Drafts, флаги, очередь и threading продолжают ис�
 На существующий указанный стенд изменения попадают через штатный rollout после готовности
 образов и отдельного согласования обновления с новой миграцией. Другие проекты Docker,
 production серверы, mailcow и текущие данные пользователя вне этой задачи не затрагиваются.
+
+## Уточнённые технические контракты после повторного изучения
+
+Эти уточнения не меняют согласованные плитки, минимальные формы, права создания и UX.
+Основания и границы выполненных проверок: [отчёт повторного изучения](../../audits/2026-10-10-mailbox-providers-restudy.md).
+
+- TLS-mode хранится отдельно: nullable `imap_tls_mode` со значениями `implicit|starttls`;
+  NULL сохраняет legacy. Новые employee accounts имеют explicit mode, starttls требует
+  `doSTARTTLS:true` и `rejectUnauthorized:true` во всех IMAP clients. Safe fields, GET explicit
+  SELECT, API, UI, persistence и runtime передают одно значение. Empty DNS answers для новых
+  проверенных accounts/probes — отказ; DNS bounded, late abort не создаёт клиента. Порты всегда
+  integer 1..65535, применение port allow-list зависит от policy. SMTP children ограничены 8.
+- Lock адреса общий для manual/provider/Proton/OAuth/node: OAuth использует существующий
+  transaction client, node matching session lock; нельзя вложить тот же lock на другом connection.
+  Нет открытой SQL transaction во время probe/native challenge. CLI сохраняет trusted-admin
+  legacy plaintext/skip, HTTP такой режим не получает. Failed precheck имеет зарегистрированное
+  audit action. Managed Proton connection fields immutable в PUT/CLI, metadata editable;
+  Google/Microsoft explicit reconnect и subject reset сохраняются.
+- `proton_connections` имеет unique actor/request UUID и durable reconnect intent/account ID;
+  `proton_users.creator_user_id` определяет safe reconnect capability вместе с admin role.
+  Duplicate всегда отказ, кроме явно разрешённого reconnect существующей managed связи
+  с тем же native user. UI начинает reconnect только по этой capability с account/email seed.
+- Native Login/Login2FA/Login2Passwords получают base64(UTF8) в bytes; BridgePass — готовый
+  текст без второго decode. Cancel/TTL не освобождает global native login slot до terminal
+  event и reconciliation attempt-owned users. Stuck native attempt восстанавливается controlled
+  process recovery с временной недоступностью Proton. RemoveUser acknowledgement не завершение:
+  persist removal-in-progress, удерживать lifecycle lock до removal event и GetUserList absence;
+  timeout оставляет retry и блокирует re-add. Quit требует process exit.
+- Проверенный SHA начинает в Combined mode. До probes контроллер выбирает SetUserSplitMode
+  и подтверждает split. Изменение режима уже linked user координируется с lifecycle/reconnect.
+  Fake multiple-address coverage отделено от реальной проверки нескольких адресов.
+- Snooze и labels используют возвращённый ensureFolder path в move/copy/storage/wakeup.
+  Дополнительный Sent append пропускается только по trusted managed Proton identity, поскольку
+  Bridge сохраняет Sent сам; метка provider из клиента этого права не даёт.
+- Snapshot admission gate закрывает новые sends и lifecycle work, ждёт backend SQL commit/
+  reconcile и native операции. Покрываются sendDelivery и ruleForwarder; send lease берётся до
+  markEffectStarted. Живые send leases не истекают по таймеру: stalled sender приводит к busy
+  snapshot через 60 s. Timeout не доказывает смерть backend. Orphan lease очищается только при
+  controlled backend/worker recreation после остановки старого backend. Отдельный fence-check
+  с TOCTOU не заменяет gate. После drain ждать Quit process exit, затем DB/state capture.
+  Restore/rollback исторического dump переводит все restored queued/running send_message jobs
+  в needs_attention, сохраняет accepted/uncertain evidence и требует решения человека; никаких
+  автоматических повторов. Fifth image определяется целевым commit также при historical promotion;
+  общий backend recreate сопровождается worker recreate и проверкой фактического namespace.
+- MessageList владеет mobile list header; shared shell action видим и в reading/contacts.
+  Modal первым получает shell shortcuts/Cmd+K/native Android Back. Escape сначала скрывает
+  suggestions со stopPropagation, затем закрывает modal. Portal наследует html theme и font-size
+  preference без двойного transform; sizing учитывает visualViewport по подходу ComposeModal.
+  Inert применяется только к app root с восстановлением исходного значения и scroll state.
+- Existing Gmail/Domain forms получают optional initialEmail/onEmailChange/signal/attemptId,
+  сохраняя foreign-alias contract. После await launch/created callback проверяется generation.
+  Completion — account result либо OAuth result, без выдуманного account. Opaque OAuth attempt
+  ID передаётся от start до callback/App event: late A не закрывает B, central refresh работает
+  после close. Electron external-browser return сверяет accounts bounded/generation-aware;
+  same-tab onboarding completion делает refresh/toast, сохраняя mail context. Только help links
+  получают noopener/noreferrer; OAuth opener сохраняется. Clipboard helper сохраняет dialog focus.
+- Managed Gmail/Proton/node metadata edits имеют metadata-only payload. Demo зеркалирует
+  employee Other create, PUT restrictions и reconnect capability. Brand translations используют
+  SAME_VALUE_ALLOWED без ослабления i18n coverage; store upsert сохраняет setAccounts semantics.
 
 ## Проверки и критерии готовности
 

@@ -63,7 +63,7 @@ Native evidence относится к `mnixry/proton-bridge` SHA `eabe5b282e4b07
 В [план](../superpowers/plans/2026-10-10-mailbox-providers.md) внесены owning files, interfaces
 и дополнительные RED/GREEN проверки. В [спецификацию](../superpowers/specs/2026-10-10-mailbox-providers-design.md)
 внесены технические условия совместимости. В ignored SDD ledger ни одна задача реализации
-не отмечена завершённой. Матрица 13 задач и всех 78 пар сохранена локально в
+не отмечена завершённой. Матрица 14 задач (0–13) и всех 91 пары сохранена локально в
 `.superpowers/sdd/2026-10-10-mailbox-providers/restudy-revision-report.md`.
 
 ## Дополнение: baseline после подготовки зависимостей
@@ -73,11 +73,11 @@ frontend npm ci exit 0 (598 packages, 8 existing moderate vulnerabilities); elec
 install script не разрешался. Dependency/lockfile changes не делались.
 Backend npm test: 334 suites passed, 1 failed; 5404 tests passed, 3 skipped. Failure — openssl ENOENT.
 С существующим Git OpenSSL в PATH команда `npx vitest run src/services/mailNode/dnsCheck.test.js`
-дала exit 0, 56 passed. Полный frontend npm test на момент отчёта НЕ ЗАВЕРШЁН.
+дала exit 0, 56 passed. После этого полный backend `npm test` с Git OpenSSL в PATH завершился exit 0: 335 files, 5406 passed, 1 skipped, 73.10 s. Полный frontend `npm test` также завершился exit 0: 5481 passed, 463 suites, 0 failed/skipped, 310708 ms. Процесс не завершали принудительно.
 
 Read-only источник причины: `frontend/src/locales/i18n.test.js` строки 318, 393, 411 используют
 `resolve(dir, '../..')`, то есть сканируют frontend root вместе с node_modules/build/native files.
 `loadSourceTranslationCalls` строка 541 уже использует source root `resolve(dir, '..')`.
-Прямое исправление остальных трёх roots на src отнесено к task 12 как baseline prerequisite;
+Прямое исправление остальных трёх roots на src отнесено к task 0 как baseline prerequisite; проблема — медленный и избыточно широкий scan, не failing test;
 coverage source, проверки unused/hardcoded строк и запрет ослабления тестов сохраняются.
 В этом документационном коммите тестовый код не меняется.

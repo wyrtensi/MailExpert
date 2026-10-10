@@ -315,7 +315,7 @@ function looksLikeUserText(str) {
 }
 
 function scanHardcodedStrings() {
-  const srcRoot = resolve(dir, '../..');
+  const srcRoot = resolve(dir, '..');
   const violations = [];
 
   function walk(d) {
@@ -390,7 +390,7 @@ function baseKey(key) {
 }
 
 function loadSourceText() {
-  const srcRoot = resolve(dir, '../..');
+  const srcRoot = resolve(dir, '..');
   const out = [];
   function walk(d) {
     for (const entry of readdirSync(d, { withFileTypes: true })) {
@@ -408,7 +408,7 @@ function loadSourceText() {
 }
 
 function loadLiteralSourceTranslationKeys(prefix) {
-  const srcRoot = resolve(dir, '../..');
+  const srcRoot = resolve(dir, '..');
   const keys = new Set();
   const literalTranslationCall = /(?<![\w$.])t\(\s*['"]([^'"]+)['"]/g;
 

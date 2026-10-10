@@ -37,6 +37,7 @@ export const SAFE_FIELDS = [
   'imap_host', 'imap_port', 'imap_skip_tls_verify',
   'smtp_host', 'smtp_port', 'smtp_tls',
   'auth_user', 'smtp_auth_user', 'oauth_provider', 'oauth_reconnect_required', 'enabled',
+  'mail_provider', 'connection_mode', 'imap_tls_mode', 'can_reconnect_proton',
   'include_in_unified_inbox', 'mail_node',
   'last_sync', 'sync_error', 'sort_order', 'folder_mappings',
   'signature', 'created_at', 'categorization_enabled', 'thread_mode',
@@ -52,6 +53,7 @@ export const SAFE_FIELDS = [
 
 export function safeAccount(row) {
   const obj = Object.fromEntries(SAFE_FIELDS.map((k) => [k, row[k]]));
+  obj.can_reconnect_proton = row.can_reconnect_proton === true;
   // Sanitize on read so legacy values stored before the write-time sanitizer are safe
   if (obj.signature) obj.signature = sanitizeSignature(obj.signature);
   return obj;

@@ -3,8 +3,8 @@ import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from 'vites
 vi.mock('../services/auditLog.js', () => ({ recordAudit: vi.fn(async () => {}) }));
 vi.mock('../services/db.js', () => ({ query: vi.fn() }));
 vi.mock('../middleware/auth.js', () => ({
-  isAdminRequest: async () => true,
-  requireAuth: (req, _res, next) => { req.session = { userId: 'user-2' }; next(); },
+  isAdminRequest: vi.fn(async () => true),
+  requireAuth: (req, _res, next) => { req.session = { userId: req.get('x-user-id') || 'user-2' }; next(); },
   requireAdmin: (_req, _res, next) => next(),
 }));
 vi.mock('../index.js', () => ({
@@ -27,6 +27,8 @@ import express from 'express';
 import accountRoutes from './accounts.js';
 import { query } from '../services/db.js';
 import { imapManager } from '../index.js';
+import { isAdminRequest } from '../middleware/auth.js';
+import { createRealSchemaDb } from '../services/testing/realSchema.js';
 
 const ID = '66666666-6666-4666-8666-666666666666';
 
@@ -45,6 +47,7 @@ describe('mailboxes are shared by every user', () => {
   afterAll(async () => { await new Promise((resolve) => server.close(resolve)); });
   beforeEach(() => {
     vi.clearAllMocks();
+    isAdminRequest.mockResolvedValue(true);
     query.mockReset().mockImplementation(async () => ({ rows: [{ id: ID, protocol: 'pop3' }] }));
   });
 
@@ -56,6 +59,57 @@ describe('mailboxes are shared by every user', () => {
     expect(query.mock.calls[0][0]).toMatch(/FROM email_accounts\s+ORDER BY sort_order, created_at/);
     expect(query.mock.calls[0][1]).toBeUndefined();
     expect(ownerFilters()).toEqual([]);
+  });
+
+  it('lists safe provider metadata without internal Proton identities or trust', async () => {
+    query.mockResolvedValue({ rows: [{
+      id: ID, protocol: 'imap', mail_provider: 'proton', connection_mode: 'managed', imap_tls_mode: 'implicit',
+      added_by: 'user-2', proton_managed_link: true,
+    }] });
+    const res = await fetch(`${base}/api/accounts`);
+    const [account] = await res.json();
+    expect(account).toMatchObject({ mail_provider: 'proton', connection_mode: 'managed', imap_tls_mode: 'implicit', can_reconnect_proton: true });
+    expect(account).not.toHaveProperty('proton_managed_link');
+    expect(account).not.toHaveProperty('added_by');
+    const sql = query.mock.calls[0][0];
+    expect(sql).not.toMatch(/SELECT\s+\*/);
+    expect(sql).not.toMatch(/certificate_pem|certificate_fingerprint|tls_servername|creator_user_id|auth_pass/);
+  });
+
+  it('allows every approved employee to reconnect real managed links and shares every mailbox', async () => {
+    const db = await createRealSchemaDb();
+    const creator = '10000000-0000-4000-8000-000000000001';
+    const adder = '10000000-0000-4000-8000-000000000002';
+    const employee = '10000000-0000-4000-8000-000000000003';
+    try {
+      await db.exec(`
+        INSERT INTO users (id, username, password_hash) VALUES
+          ('${creator}', 'creator', 'fixture'), ('${adder}', 'adder', 'fixture'), ('${employee}', 'employee', 'fixture');
+        INSERT INTO email_accounts (id, name, email_address, added_by, mail_provider, connection_mode, imap_tls_mode)
+          VALUES ('${ID}', 'Second address', 'second@example.com', '${adder}', 'proton', 'managed', 'implicit');
+        INSERT INTO email_accounts (name, email_address, added_by, mail_provider, connection_mode)
+          VALUES ('Unlinked', 'unlinked@example.com', '${adder}', 'proton', 'managed'),
+                 ('Legacy', 'legacy@example.com', '${adder}', NULL, 'manual');
+        INSERT INTO proton_users (user_id, creator_user_id) VALUES ('native-fixture', '${creator}');
+        INSERT INTO proton_mailbox_links (account_id, user_id, generation, certificate_pem, certificate_fingerprint, tls_servername)
+          SELECT '${ID}', user_id, generation, 'secret-sentinel', 'secret-sentinel', 'localhost' FROM proton_users;
+      `);
+      query.mockImplementation((sql, params) => db.query(sql, params));
+      for (const [actor, admin] of [[creator, false], [adder, false], [employee, false], [employee, true]]) {
+        isAdminRequest.mockResolvedValue(admin);
+        const res = await fetch(`${base}/api/accounts`, { headers: { 'x-user-id': actor } });
+        expect(res.status).toBe(200);
+        const accounts = await res.json();
+        expect(accounts).toHaveLength(3);
+        expect(accounts.find(account => account.id === ID).can_reconnect_proton).toBe(true);
+        expect(accounts.filter(account => account.id !== ID).every(account => account.can_reconnect_proton === false)).toBe(true);
+        expect(accounts.find(account => account.name === 'Legacy').imap_tls_mode).toBeNull();
+        expect(JSON.stringify(accounts)).not.toContain('secret-sentinel');
+        expect(JSON.stringify(accounts)).not.toContain('native-fixture');
+      }
+    } finally {
+      await db.close();
+    }
   });
 
   it('records who added a mailbox', async () => {

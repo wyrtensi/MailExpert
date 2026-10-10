@@ -47,6 +47,8 @@ router.get('/', async (req, res) => {
   const result = await query(
     `SELECT id, name, sender_name, email_address, color, protocol, imap_host, imap_port, imap_tls, imap_skip_tls_verify,
             smtp_host, smtp_port, smtp_tls, auth_user, smtp_auth_user, oauth_provider, oauth_reconnect_required, enabled,
+            mail_provider, connection_mode, imap_tls_mode,
+            EXISTS (SELECT 1 FROM proton_mailbox_links l WHERE l.account_id = email_accounts.id) AS proton_managed_link,
             include_in_unified_inbox,
             last_sync, sync_error, sort_order, folder_mappings, signature, created_at,
             categorization_enabled, thread_mode, mail_node,
@@ -59,6 +61,8 @@ router.get('/', async (req, res) => {
      FROM email_accounts
      ORDER BY sort_order, created_at`
   );
+
+  const isManagedProton = a => a.mail_provider === 'proton' && a.connection_mode === 'managed' && a.proton_managed_link === true;
 
   // Attach aliases to each account in one query
   const accountIds = result.rows.map(a => a.id);
@@ -88,9 +92,13 @@ router.get('/', async (req, res) => {
   // columns) so the client sees them as before. Each enrichAccount handler returns a field patch.
   const enriched = await Promise.all(result.rows.map(async (a) => {
     const patches = await pluginRegistry.collectHook('enrichAccount', { account: a });
+    const publicAccount = { ...a };
+    delete publicAccount.added_by;
+    delete publicAccount.proton_managed_link;
     return {
-      ...a,
+      ...publicAccount,
       ...Object.assign({}, ...patches),
+      can_reconnect_proton: isManagedProton(a),
       signature: a.signature ? sanitizeSignature(a.signature) : a.signature,
       // Stable code only (see services/accountHealth.js); sync_error stays the sole error text.
       health: computeAccountHealth(a, now),

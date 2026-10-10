@@ -332,7 +332,9 @@ production серверы, mailcow и текущие данные пользов
   audit action. Managed Proton connection fields immutable в PUT/CLI, metadata editable;
   Google/Microsoft explicit reconnect и subject reset сохраняются.
 - `proton_connections` имеет unique actor/request UUID и durable reconnect intent/account ID;
-  `proton_users.creator_user_id` определяет safe reconnect capability вместе с admin role.
+  Safe reconnect capability определяется `email_accounts.added_by` конкретного ящика
+  вместе с admin role; `proton_users.creator_user_id` остаётся внутренней записью создания
+  native session и не заменяет сотрудника, добавившего конкретный адрес.
   Duplicate всегда отказ, кроме явно разрешённого reconnect существующей managed связи
   с тем же native user. UI начинает reconnect только по этой capability с account/email seed.
 - Native Login/Login2FA/Login2Passwords получают base64(UTF8) в bytes; BridgePass — готовый

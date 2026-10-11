@@ -42,8 +42,16 @@ export function upsertAccountById(list, account) {
 // opaque attempt id the OAuth state carries; it holds no address, secret or time.
 const ATTEMPT_ID_PATTERN = /^[A-Za-z0-9_-]{16,64}$/;
 
+// crypto.randomUUID needs a secure context; plain-HTTP LAN installs only have getRandomValues, so
+// the v4 UUID is built from it (the server wants the UUID shape for the Idempotency-Key).
 export function newAttemptId() {
-  return globalThis.crypto.randomUUID();
+  const crypto = globalThis.crypto;
+  if (typeof crypto.randomUUID === 'function') return crypto.randomUUID();
+  const b = crypto.getRandomValues(new Uint8Array(16));
+  b[6] = (b[6] & 0x0f) | 0x40;
+  b[8] = (b[8] & 0x3f) | 0x80;
+  const h = Array.from(b, (x) => x.toString(16).padStart(2, '0')).join('');
+  return `${h.slice(0, 8)}-${h.slice(8, 12)}-${h.slice(12, 16)}-${h.slice(16, 20)}-${h.slice(20)}`;
 }
 
 export function isAttemptId(value) {

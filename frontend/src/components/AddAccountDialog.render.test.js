@@ -340,6 +340,48 @@ describe('AddAccountDialog Gmail attempts', () => {
     assert.equal(useStore.getState().notifications.length, 0, 'the toast of an OAuth result comes from the MailApp listener, not the dialog');
   });
 
+  test('escape_dismisses_suggestions_first (real Gmail form): the first Escape closes the list, the second the dialog', async () => {
+    await React.act(async () => { useStore.setState({ accounts: [{ id: 'x', email_address: 'me@example.com', oauth_provider: 'google', enabled: true, health: 'healthy' }] }); });
+    const input = dialog().querySelector('input[type="email"]');
+    await React.act(async () => {
+      const setter = Object.getOwnPropertyDescriptor(dom.window.HTMLInputElement.prototype, 'value').set;
+      setter.call(input, 'me@example.co');
+      input.dispatchEvent(new dom.window.Event('input', { bubbles: true }));
+    });
+    assert.ok(dialog().querySelector('[role="listbox"]'), 'the suggestion list is open');
+    await React.act(async () => { input.dispatchEvent(new dom.window.KeyboardEvent('keydown', { key: 'Escape', bubbles: true, cancelable: true })); });
+    assert.equal(dialog().querySelector('[role="listbox"]'), null, 'the list is closed');
+    assert.equal(closed, 0, 'the dialog stays');
+    await React.act(async () => { input.dispatchEvent(new dom.window.KeyboardEvent('keydown', { key: 'Escape', bubbles: true, cancelable: true })); });
+    assert.equal(closed, 1, 'the second Escape closes the dialog');
+  });
+
+  test('the panel height follows its overlay (the visual viewport), not dvh', () => {
+    const css = readFileSync(new URL('../index.css', import.meta.url), 'utf8');
+    const panel = css.slice(css.indexOf(".add-account-panel {"), css.indexOf("}", css.indexOf(".add-account-panel {")));
+    assert.ok(panel.includes("max-height: calc(100% / var(--add-account-scale))"));
+    assert.ok(!/dvh/.test(panel));
+  });
+
+  test('return from an external browser (window focus) reconciles the list, bounded, and finishes when the address is there', async () => {
+    failFirst = false;
+    let reads = 0;
+    api.getAccounts = () => { reads += 1; return Promise.resolve([]); };
+    await cont();
+    for (let i = 0; i < 7; i += 1) {
+      await React.act(async () => { window.dispatchEvent(new dom.window.Event('focus')); });
+      await settle();
+    }
+    assert.equal(reads, 5, 'at most five reads per start');
+    assert.equal(closed, 0, 'not connected yet: the form waits');
+    await cont();
+    api.getAccounts = () => Promise.resolve([{ id: 'g', email_address: 'ME@example.com' }]);
+    await React.act(async () => { window.dispatchEvent(new dom.window.Event('focus')); });
+    await settle();
+    assert.equal(closed, 1, 'the mailbox appeared: the form finishes');
+    assert.deepEqual(useStore.getState().accounts.map((a) => a.id), ['g']);
+  });
+
   test('a start that failed is retried with the same attempt id', async () => {
     failFirst = true;
     await cont();

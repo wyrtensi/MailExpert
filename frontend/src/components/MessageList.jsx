@@ -58,6 +58,7 @@ import { searchScopeKey } from '../utils/searchScope.js';
 import { unreadAfterHeadRead } from '../utils/threadUnread.js';
 import { snapshotFlag } from '../utils/flagSnapshot.js';
 import AddAccountButton from './addAccount/AddAccountButton.jsx';
+import { isModalOpen } from '../utils/modalGate.js';
 
 // Folder icon for move picker
 function FolderIcon({ specialUse, size = 13 }) {
@@ -370,7 +371,8 @@ export default function MessageList() {
   // Escape clears selection; click-outside closes folder picker
   useEffect(() => {
     const onKey = (e) => {
-      if (e.key === 'Escape') {
+      // The add-account dialog owns Escape while it is open; the list behind it keeps its state.
+      if (e.key === 'Escape' && !isModalOpen(useStore.getState())) {
         setShowFolderPicker(false);
         setShowLayoutPicker(false);
         setSelectedIds(new Set());
@@ -2827,8 +2829,10 @@ export default function MessageList() {
 
       {/* ── Mobile header ───────────────────────────────────────────────── */}
       {isMobile && (
-        <div style={{
-          display: 'flex', alignItems: 'center', gap: 4,
+        <div data-mobile-list-header style={{
+          // Wraps instead of squeezing: at 320 px the controls move to a second row and the title
+          // keeps its basis, so the folder name stays readable and no action is hidden.
+          display: 'flex', alignItems: 'center', gap: 4, flexWrap: 'wrap',
           paddingTop: 'calc(var(--sat) + 10px)',
           paddingBottom: 10, paddingLeft: 12, paddingRight: 12,
           borderBottom: '1px solid var(--border-subtle)',
@@ -2853,7 +2857,7 @@ export default function MessageList() {
           </button>
 
           {/* Folder / account title + unread count */}
-          <div style={{ flex: 1, minWidth: 0, display: 'flex', alignItems: 'center', gap: 8, overflow: 'hidden' }}>
+          <div data-mobile-list-title style={{ flex: '1 1 140px', minWidth: 140, display: 'flex', alignItems: 'center', gap: 8, overflow: 'hidden' }}>
             <h2 style={{
               margin: 0, fontSize: 16, fontWeight: 600,
               color: 'var(--text-primary)', overflow: 'hidden',

@@ -110,13 +110,40 @@ describe('MailApp with the add-account dialog', () => {
     await press('c');
     assert.equal(useStore.getState().composing, false, 'the compose shortcut is ignored under the dialog');
     await press('k', { ctrlKey: true });
-    assert.equal(document.querySelectorAll('[role="dialog"]').length, 1, 'the command palette does not open over the dialog');
+    assert.equal(document.querySelector('input[placeholder="commandPalette.placeholder"]'), null, 'the command palette does not open over the dialog');
 
     assert.equal(window.__mailexpertHandleAndroidBack(), true);
     assert.equal(useStore.getState().showAddAccountDialog, false, 'native Back closed the dialog');
     await settle();
     assert.equal(document.querySelector('.add-account-panel'), null);
     assert.equal(window.__mailexpertHandleAndroidBack(), false, 'the next Back is the app\'s');
+  });
+
+  test('escape under the dialog closes only the dialog: the selection mode of the list behind it stays', async () => {
+    await mount(500);
+    const selectButton = () => document.querySelector('[aria-label="messageList.selectMessages"]');
+    await React.act(async () => { selectButton().click(); });
+    assert.equal(selectButton(), null, 'control: selection mode is on');
+    await openDialog();
+    await React.act(async () => { document.activeElement.dispatchEvent(new dom.window.KeyboardEvent('keydown', { key: 'Escape', bubbles: true, cancelable: true })); });
+    assert.equal(useStore.getState().showAddAccountDialog, false, 'the dialog closed');
+    assert.equal(selectButton(), null, 'the list is still in selection mode');
+  });
+
+  test('the mobile list header wraps at 320 px so the folder title keeps room and no action is hidden', async () => {
+    await mount(320);
+    const header = document.querySelector('[data-mobile-list-header]');
+    const title = document.querySelector('[data-mobile-list-title]');
+    assert.equal(header.style.flexWrap, 'wrap');
+    assert.ok(parseInt(title.style.minWidth, 10) >= 120, 'the title keeps a readable minimum width');
+    assert.ok(header.querySelector('[data-add-account-trigger]'), 'the add action is still in the header');
+    assert.ok(header.querySelector('[aria-label="messageList.selectMessages"]'), 'and so are the other actions');
+  });
+
+  test('the command palette opens with Cmd+K when no dialog is open', async () => {
+    await mount();
+    await press('k', { ctrlKey: true });
+    assert.ok(document.querySelector('input[placeholder="commandPalette.placeholder"]'), 'control for the assertion above');
   });
 
   test('opening_does_not_change_current_mail_context: the dialog opens over the same view, settings and selection', async () => {

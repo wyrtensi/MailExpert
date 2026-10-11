@@ -93,3 +93,20 @@ describe('submitWithReplay', () => {
     assert.equal(calls, 2);
   });
 });
+
+describe('newAttemptId without crypto.randomUUID (plain-HTTP installs)', () => {
+  test('still returns a v4 UUID built from getRandomValues', () => {
+    const original = globalThis.crypto.randomUUID;
+    Object.defineProperty(globalThis.crypto, 'randomUUID', { value: undefined, configurable: true, writable: true });
+    try {
+      const ids = new Set(Array.from({ length: 50 }, () => newAttemptId()));
+      assert.equal(ids.size, 50);
+      for (const id of ids) {
+        assert.match(id, /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/);
+        assert.ok(isAttemptId(id));
+      }
+    } finally {
+      Object.defineProperty(globalThis.crypto, 'randomUUID', { value: original, configurable: true, writable: true });
+    }
+  });
+});

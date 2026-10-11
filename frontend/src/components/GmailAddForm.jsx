@@ -19,12 +19,15 @@ import {
 } from '../utils/addAccount.js';
 import { senderNamesPayload } from '../utils/mailNode.js';
 import { isAttemptId, newAttemptId } from '../utils/addAccountFlow.js';
+import { reconcileAccounts } from '../utils/accountsReconcile.js';
+import { useStore } from '../store/index.js';
 
 const inputStyle = {
   width: '100%', padding: '9px 12px', background: 'var(--bg-tertiary)', border: '1px solid var(--border)',
   borderRadius: 7, color: 'var(--text-primary)', fontSize: 13, outline: 'none', boxSizing: 'border-box',
 };
 const LIST_ID = 'gmail-add-suggestions';
+const RETURN_RECONCILE_LIMIT = 5;
 const labelStyle = { display: 'block', fontSize: 12, color: 'var(--text-secondary)', marginBottom: 5, marginTop: 14 };
 const hintStyle = { marginTop: 5, fontSize: 11, color: 'var(--text-tertiary)', lineHeight: 1.5 };
 
@@ -50,6 +53,7 @@ export default function GmailAddForm({
   const attemptRef = useRef(null);
   // A start that reached a Google tab hands its id over to the callback; the next start gets a new one.
   const attemptSentRef = useRef(false);
+  const returnReadsRef = useRef(0);
   const [known, setKnown] = useState([]);
   const [open, setOpen] = useState(false);
   const [highlight, setHighlight] = useState(-1);
@@ -97,6 +101,29 @@ export default function GmailAddForm({
     return () => window.removeEventListener('message', handleMessage);
   }, [onConnected, signal]);
 
+  // Electron (and any browser that opens Google outside this window) never posts a result back:
+  // when the window gets focus again while a start is waiting, read the mailbox list from the
+  // server (generation-checked, at most RETURN_RECONCILE_LIMIT times per start) and finish if the
+  // address is there now.
+  useEffect(() => {
+    if (!launchPath) return undefined;
+    const onReturn = () => {
+      if (signal?.aborted || returnReadsRef.current >= RETURN_RECONCILE_LIMIT) return;
+      returnReadsRef.current += 1;
+      reconcileAccounts().then(() => {
+        if (signal?.aborted) return;
+        const wanted = email.trim().toLowerCase();
+        const found = useStore.getState().accounts.some((a) => String(a?.email_address ?? '').trim().toLowerCase() === wanted);
+        if (found && attemptRef.current) {
+          setLaunchPath(null);
+          onConnected?.({ kind: 'oauth', attemptId: attemptRef.current });
+        }
+      });
+    };
+    window.addEventListener('focus', onReturn);
+    return () => window.removeEventListener('focus', onReturn);
+  }, [launchPath, email, signal, onConnected]);
+
   // The fallback link lives as long as the launch key behind it.
   useEffect(() => {
     if (!launchPath) return undefined;
@@ -130,6 +157,7 @@ export default function GmailAddForm({
     if (!attemptRef.current || attemptSentRef.current) {
       attemptRef.current = newAttemptId();
       attemptSentRef.current = false;
+      returnReadsRef.current = 0;
     }
     const attemptId = attemptRef.current;
     if (demo) {

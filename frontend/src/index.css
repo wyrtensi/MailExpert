@@ -784,7 +784,9 @@ body, #root {
   flex-direction: column;
   box-sizing: border-box;
   width: min(760px, calc((100vw - 32px) / var(--add-account-scale)));
-  max-height: calc((100dvh - 32px) / var(--add-account-scale));
+  /* The overlay is the visual viewport (AddAccountDialog fits it, keyboard included), so the panel
+     is limited by the overlay's content box, not by the layout viewport, which ignores the keyboard. */
+  max-height: calc(100% / var(--add-account-scale));
   transform: scale(var(--add-account-scale));
   transform-origin: center center;
   background: var(--bg-elevated);

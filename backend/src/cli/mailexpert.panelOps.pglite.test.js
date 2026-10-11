@@ -12,7 +12,7 @@ const dbState = vi.hoisted(() => {
 vi.mock('../services/db.js', () => ({
   query: (sql, params) => dbState.db.query(sql, params),
   withTransaction: (fn) => dbState.db.transaction((tx) => fn({ query: (sql, params) => tx.query(sql, params) })),
-  pool: { end: async () => {} },
+  pool: { end: async () => {}, connect: async () => ({query:(sql,params)=>dbState.db.query(sql,params),release(){}}) },
 }));
 const hostState = vi.hoisted(() => ({ refuse: new Set() }));
 vi.mock('../services/hostValidation.js', async (importOriginal) => ({
@@ -364,4 +364,14 @@ describe('mailexpert account', () => {
     expect((await account(id)).imap_host).toBe('imap.example.com');
     expect(await effectJobs()).toEqual([]);
   });
+});
+
+it('cli_keeps_trusted_legacy_mode while managed connections stay immutable',async()=>{
+ await policy({allow_private_hosts:true,allow_nonstandard_ports:true,allow_insecure_tls:true});
+ const result=await cli(['account','create','legacy@example.com','--imap-host','imap.example.com','--imap-port','1143','--smtp-host','smtp.example.com','--smtp-port','1025','--smtp-tls','none','--skip-tls-verify','--json'],{stdin:PASSWORD});
+ expect(result.code).toBe(0);
+ expect(await account(result.json().account.id)).toMatchObject({imap_tls_mode:null,imap_tls:false,imap_skip_tls_verify:true,smtp_tls:'none'});
+ const managed=await addAccount('managed@example.com',{mail_provider:'proton',connection_mode:'managed'});
+ expect(await cli(['account','set-connection',managed,'--imap-host','elsewhere.example.com'])).toMatchObject({code:1,err:expect.stringContaining('(managed_connection_locked)')});
+ expect((await account(managed)).imap_host).toBe('imap.example.com');
 });

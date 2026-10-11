@@ -160,3 +160,15 @@ describe('resetting the OAuth binding of a mailbox', () => {
     expect(recordAudit).not.toHaveBeenCalled();
   });
 });
+
+it('managed_connection_update_rejected even for an administrator',async()=>{
+ isAdmin=true;stored={...STORED,mail_provider:'proton',connection_mode:'managed'};
+ const res=await fetch(`${base}/api/accounts/${ID}`,{method:'PUT',headers:{'Content-Type':'application/json'},body:JSON.stringify({imap_host:'elsewhere.example.com'})});
+ expect(res.status).toBe(400);expect((await res.json()).code).toBe('managed_connection_locked');
+ expect(query.mock.calls.some(([sql])=>sql.startsWith('UPDATE'))).toBe(false);
+});
+it('managed mailbox metadata remains editable by an employee',async()=>{
+ stored={...STORED,mail_provider:'proton',connection_mode:'managed'};
+ const res=await fetch(`${base}/api/accounts/${ID}`,{method:'PUT',headers:{'Content-Type':'application/json'},body:JSON.stringify({name:'Team'})});
+ expect(res.status).toBe(200);expect(query.mock.calls.some(([sql])=>sql.startsWith('UPDATE'))).toBe(true);
+});

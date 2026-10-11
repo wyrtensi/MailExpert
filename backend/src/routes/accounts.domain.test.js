@@ -4,7 +4,7 @@ vi.mock('../services/auditLog.js', () => ({ recordAudit: vi.fn(async () => {}) }
 // The account row and its second sender name are written in one transaction on the same mock.
 vi.mock('../services/db.js', () => {
   const query = vi.fn();
-  return { query, withTransaction: vi.fn(async (fn) => fn({ query })) };
+  return { query, pool: {connect:async()=>({query:async(s,p)=> /pg_try_advisory_lock/.test(s) ? {rows:[{acquired:true}]} : /pg_advisory_unlock/.test(s) ? {rows:[]} : query(s,p),release(){}})}, withTransaction: vi.fn(async (fn) => fn({ query })) };
 });
 // Every request runs as an ordinary signed-in user: the domain mailbox is open to everyone.
 vi.mock('../middleware/auth.js', () => ({
@@ -107,7 +107,7 @@ describe('domain mailboxes in /api/accounts', () => {
     inserted = null;
     aliasInserted = null;
     query.mockReset().mockImplementation(async (sql, params) => {
-      if (sql.includes('lower(email_address)')) return { rows: [] };
+      if (sql.includes('lower(btrim(email_address))')) return { rows: [] };
       if (sql.includes('INSERT INTO email_accounts')) {
         inserted = { sql, params };
         return { rows: [{ id: ID, email_address: params[2], name: params[1], protocol: 'imap', mail_node: true, auth_pass: params[4], sender_name: params[5] }] };
@@ -256,7 +256,7 @@ describe('domain mailboxes in /api/accounts', () => {
     expect((await res.json()).code).toBe('domain_unknown');
     res = await post({ kind: 'domain', localPart: 'info', domain: 'off.example' });
     expect((await res.json()).code).toBe('domain_unknown');
-    query.mockImplementation(async (sql) => (sql.includes('lower(email_address)') ? { rows: [{ '?column?': 1 }] } : { rows: [] }));
+    query.mockImplementation(async (sql) => (sql.includes('lower(btrim(email_address))') ? { rows: [{ '?column?': 1 }] } : { rows: [] }));
     res = await post({ kind: 'domain', localPart: 'info', domain: 'example.com' });
     expect(res.status).toBe(409);
     expect((await res.json()).code).toBe('mailbox_exists');
@@ -426,7 +426,7 @@ describe('domain mailboxes in /api/accounts', () => {
 
     it('refuses to create the address again while its mailbox is pending deletion', async () => {
       query.mockImplementation(async (sql) => (
-        sql.includes('lower(email_address)') ? { rows: [{ delete_after: '2026-10-06T10:00:00.000Z' }] } : { rows: [] }
+        sql.includes('lower(btrim(email_address))') ? { rows: [{ delete_after: '2026-10-06T10:00:00.000Z' }] } : { rows: [] }
       ));
       const res = await post({ kind: 'domain', localPart: 'info', domain: 'example.com' });
       expect(res.status).toBe(409);

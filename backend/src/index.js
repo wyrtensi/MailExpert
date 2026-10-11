@@ -26,6 +26,7 @@ import integrationsRoutes, { loadIntegrationConfigs } from './routes/integration
 import oauthGoogleApiRoutes from './routes/oauthGoogleApi.js';
 import authRoutes, { destroyUserSessions } from './routes/auth.js';
 import accountRoutes from './routes/accounts.js';
+import accountProviderRoutes from './routes/accountProviders.js';
 import mailNodeRoutes from './routes/mailNode.js';
 import mailNodeQuarantineRoutes from './routes/mailNodeQuarantine.js';
 import mailNodeOutageRoutes from './routes/mailNodeOutages.js';
@@ -199,6 +200,7 @@ app.use('/oauth/login/google', authGoogleRoutes);
 app.use('/oauth', oauthRoutes);
 app.use('/api/integrations', integrationsRoutes);
 app.use('/api/oauth/google', oauthGoogleApiRoutes);
+app.use('/api/accounts/provider', accountProviderRoutes);
 app.use('/api/accounts', accountRoutes);
 app.use('/api/mail-node', mailNodeRoutes);
 app.use('/api/mail-node', mailNodeQuarantineRoutes);

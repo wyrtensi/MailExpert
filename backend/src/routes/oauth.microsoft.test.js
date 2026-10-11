@@ -74,12 +74,12 @@ function installDb() {
   const client = {
     query: vi.fn(async (sql, params) => {
       dbCalls.push([sql, params]);
-      if (/pg_advisory_xact_lock/.test(sql)) return { rows: [] };
+      if (/pg_try_advisory_xact_lock/.test(sql)) return { rows: [{ acquired: true }] };
       // Reconnect: the mailbox named by id. Add: any mailbox with the address.
       if (/^\s*SELECT id, email_address, oauth_provider, oauth_subject, mail_node FROM email_accounts WHERE id = \$1/.test(sql)) {
         return { rows: row && row.id === params[0] ? [row] : [] };
       }
-      if (/^\s*SELECT id, email_address, oauth_provider, oauth_subject, mail_node FROM email_accounts\s+WHERE lower\(email_address\)/.test(sql)) {
+      if (/^\s*SELECT id, email_address, oauth_provider, oauth_subject, mail_node FROM email_accounts\s+WHERE lower\(btrim\(email_address\)\)/.test(sql)) {
         return { rows: row && row.email_address === params[0] ? [row] : [] };
       }
       if (/^\s*UPDATE email_accounts/.test(sql)) return { rows: [], rowCount: 1 };
@@ -354,7 +354,7 @@ describe('reconnecting a Microsoft mailbox', () => {
     row = { ...MS_ROW, email_address: 'User@Contoso.com' };
     expect((await callback()).headers.get('location')).toBe('/?oauth_success=microsoft');
     expect(dbCalls.some(([sql, params]) => /WHERE id = \$1/.test(sql) && params[0] === ACCOUNT_ID)).toBe(true);
-    expect(dbCalls.some(([sql]) => /lower\(email_address\)/.test(sql))).toBe(false);
+    expect(dbCalls.some(([sql]) => /lower\(btrim\(email_address\)\)/.test(sql))).toBe(false);
   });
 
   it('refuses a mailbox that is gone', async () => {

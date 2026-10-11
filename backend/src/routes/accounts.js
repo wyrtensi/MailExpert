@@ -1,5 +1,7 @@
 import { publicFolderCounts } from '../services/folderStatus.js';
 import { Router } from 'express';
+import { handleAccountCreate } from './accountProviders.js';
+import { requireCsrfHeader } from '../middleware/csrf.js';
 import { query } from '../services/db.js';
 import { isAdminRequest, requireAuth, requireAdmin } from '../middleware/auth.js';
 import { imapManager } from '../index.js';
@@ -31,7 +33,7 @@ import {
   reconnectAccount, reconnectQueue, storedColumnValue,
 } from '../services/accounts/connection.js';
 import {
-  ACCOUNT_ERRORS, createManualAccount, resetOAuthSubject, safeAccount,
+  resetOAuthSubject, safeAccount,
 } from '../services/accounts/manualAccounts.js';
 
 const THREAD_MODES = new Set([THREAD_MODE_RFC, THREAD_MODE_GMAIL]);
@@ -115,7 +117,7 @@ router.get('/', async (req, res) => {
 
 // Server and credential settings (services/accounts/connection.js, CONNECTION_FIELDS): their
 // change is the audit log's (by name only) and an administrator's alone. Nothing else writes these
-// columns from a request: a new manual mailbox is admin-only (POST /), the OAuth callbacks set
+// columns from a request: new manual mailboxes are verified before creation; OAuth callbacks set
 // their provider's fixed servers, a node mailbox takes the node's.
 
 // A mailbox on the mail node, open to everyone signed in: the server picks the host, the ports and
@@ -140,29 +142,10 @@ function refuseMailbox(res, code) {
   return res.status(status).json({ error, code });
 }
 
-// Manual server setup is an admin task: an ordinary user adds Gmail through the Google flow or a
-// mailbox on the mail node (`kind: 'domain'`).
+// Verified manual creation is shared by all approved employees.
 router.post('/', (req, res, next) => (
   req.body?.kind === 'domain' ? createDomainMailbox(req, res) : next()
-), requireAdmin, async (req, res) => {
-  // services/accounts/manualAccounts.js holds the checks, shared with the panel CLI.
-  let result;
-  try {
-    result = await createManualAccount(req.body, routeActor(req));
-  } catch (err) {
-    console.error(err);
-    return res.status(500).json({ error: 'Failed to add account' });
-  }
-  if (result.error) {
-    return res.status(400).json({ error: result.message ?? ACCOUNT_ERRORS[result.error][1] });
-  }
-  const { account } = result;
-  // Immediately try to connect — needs full credentials from DB row
-  if (account.protocol === 'imap') {
-    imapManager.connectAccount(account).catch(console.error);
-  }
-  res.json(safeAccount(account));
-});
+), requireCsrfHeader, (req, res) => handleAccountCreate(req, res));
 
 router.put('/:id', async (req, res) => {
   const { id } = req.params;
@@ -176,6 +159,9 @@ router.put('/:id', async (req, res) => {
   // The server and the password of a mail node mailbox belong to the node settings: pointing it at
   // another host would hand the generated password to that host. The form resends unchanged
   // values, so only a real change is refused.
+  if (stored.mail_provider === 'proton' && stored.connection_mode === 'managed' && changedConnectionFields(stored, updates).length) {
+    return res.status(400).json({ error: 'Managed mailbox connection settings cannot be changed', code: 'managed_connection_locked' });
+  }
   if (stored.mail_node && changedConnectionFields(stored, updates).length) {
     return res.status(400).json({ error: 'The server settings of a mail node mailbox cannot be changed', code: 'mail_node_connection_locked' });
   }
@@ -298,6 +284,7 @@ router.put('/:id', async (req, res) => {
     'imap_host' in updates ||
     'imap_port' in updates ||
     'imap_tls' in updates ||
+    'imap_tls_mode' in updates ||
     'imap_skip_tls_verify' in updates ||
     pluginRequiresReconnect
   );

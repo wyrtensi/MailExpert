@@ -28,6 +28,8 @@ export function mountBodyParsers(app, { sessionMiddleware, identityGate, csrf })
     requireSignInBeforeParsing,
     saveSessionBeforeParsing,
   ];
+  app.post(['/api/accounts', '/api/accounts/provider', '/api/accounts/proton/connect', '/api/accounts/proton/connect/:id/continue'],
+    beforeParsing, express.json({ limit: '32kb' }), reloadSession);
   for (const [path, parser] of Object.entries(LARGE_BODY_PARSERS)) {
     app.use(path, beforeParsing, parser(), reloadSession);
   }

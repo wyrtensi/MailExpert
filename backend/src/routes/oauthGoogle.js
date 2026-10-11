@@ -1,3 +1,4 @@
+import { withAccountAddressLock } from '../services/accounts/connection.js';
 import { Router } from 'express';
 import { query, withTransaction } from '../services/db.js';
 import { imapManager } from '../index.js';
@@ -196,7 +197,7 @@ router.get('/callback', async (req, res) => {
 async function revokeRefusedGrant({ appId, tokens, email }) {
   try {
     const { rows } = await query(
-      'SELECT 1 FROM email_accounts WHERE lower(email_address) = lower($1) AND oauth_app_id = $2 LIMIT 1',
+      'SELECT 1 FROM email_accounts WHERE lower(btrim(email_address)) = lower(btrim($1)) AND oauth_app_id = $2 LIMIT 1',
       [email, appId],
     );
     if (rows.length) return;
@@ -211,12 +212,11 @@ async function revokeRefusedGrant({ appId, tokens, email }) {
 // Mailboxes are shared, so the address alone names one; userId only records who added it. The
 // account is bound to the app whose client issued the tokens.
 async function saveGoogleAccount(pending, identity, tokens, appId) {
-  const email = identity.email.toLowerCase();
+  const email = identity.email.trim().toLowerCase();
   const encryptedAccess = encrypt(tokens.accessToken);
   const encryptedRefresh = tokens.refreshToken ? encrypt(tokens.refreshToken) : null;
 
-  return withTransaction(async (client) => {
-    await client.query('SELECT pg_advisory_xact_lock(hashtext($1))', [`oauth-account:${email}`]);
+  return withTransaction(client => withAccountAddressLock(email, async () => {
 
     // The app may have been disabled or removed while the code was exchanged, and disabling flags
     // only the mailboxes bound to it at that moment. FOR SHARE makes a disable that comes later
@@ -226,7 +226,7 @@ async function saveGoogleAccount(pending, identity, tokens, appId) {
 
     const existing = await client.query(
       `SELECT id, oauth_provider, oauth_refresh_token, oauth_app_id, oauth_subject, oauth_reconnect_required FROM email_accounts
-       WHERE lower(email_address) = lower($1)
+       WHERE lower(btrim(email_address)) = lower(btrim($1))
        ORDER BY created_at LIMIT 1`,
       [email],
     );
@@ -255,6 +255,7 @@ async function saveGoogleAccount(pending, identity, tokens, appId) {
       result = 'updated';
       await client.query(`
         UPDATE email_accounts SET
+          mail_provider = 'gmail', connection_mode = 'managed', imap_tls_mode = 'implicit',
           oauth_access_token = $1,
           oauth_refresh_token = COALESCE($2, oauth_refresh_token),
           oauth_token_expiry = $3,
@@ -274,6 +275,7 @@ async function saveGoogleAccount(pending, identity, tokens, appId) {
       // 2026-09-21); switching one is the admin's threading action.
       const inserted = await client.query(`
         INSERT INTO email_accounts (
+          mail_provider, connection_mode, imap_tls_mode,
           added_by, name, email_address, color, protocol,
           imap_host, imap_port, imap_tls,
           smtp_host, smtp_port, smtp_tls,
@@ -281,7 +283,7 @@ async function saveGoogleAccount(pending, identity, tokens, appId) {
           oauth_provider, oauth_access_token, oauth_refresh_token, oauth_token_expiry,
           oauth_public_client, oauth_reconnect_required, include_in_unified_inbox,
           oauth_app_id, oauth_subject, thread_mode, sender_name
-        ) VALUES ($1, $2, $3, $4, 'imap',
+        ) VALUES ('gmail', 'managed', 'implicit', $1, $2, $3, $4, 'imap',
           'imap.gmail.com', 993, true,
           'smtp.gmail.com', 465, 'SSL',
           $3,
@@ -304,7 +306,7 @@ async function saveGoogleAccount(pending, identity, tokens, appId) {
     return {
       account: accountResult.rows[0], result, previousAppId, previousRefreshToken: row?.oauth_refresh_token ?? null, senderNameDropped,
     };
-  });
+  }, { client }));
 }
 
 // Journal the consent: a new mailbox is an addition, an existing one a reconnect, and moving the

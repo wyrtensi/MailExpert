@@ -25,7 +25,7 @@ export const AUDIT_ACTIONS = Object.freeze([
   'mailbox.enabled', 'mailbox.disabled', 'mailbox.threading_changed', 'mailbox.password_restored',
   'mailbox.quota_changed', 'mailbox.rate_limit_changed', 'mailbox.deletion_requested', 'mailbox.deletion_cancelled',
   'mailbox.deactivated', 'mailbox.activated',
-  'mailbox.oauth_subject_reset',
+  'mailbox.oauth_subject_reset', 'mailbox.connection_failed',
   'message.sent', 'message.deleted', 'message.move_reverted',
   'message.send_queued', 'message.send_cancelled', 'message.send_rescheduled', 'message.send_failed',
   'user.added', 'user.deleted', 'user.enabled', 'user.disabled', 'user.admin_changed',

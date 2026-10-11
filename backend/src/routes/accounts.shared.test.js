@@ -1,7 +1,9 @@
 import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 
 vi.mock('../services/auditLog.js', () => ({ recordAudit: vi.fn(async () => {}) }));
-vi.mock('../services/db.js', () => ({ query: vi.fn() }));
+vi.mock('../services/db.js', () => {const query=vi.fn();return {query,pool:{connect:async()=>({query,release(){}})}};});
+vi.mock('../services/accounts/connectionProbe.js',()=>({probeConnection:async c=>({imapLogin:c.auth_user,smtpLogin:c.smtp_auth_user})}));
+vi.mock('../services/redis.js',()=>({redisClient:{incr:async()=>1,pExpire:async()=>{}}}));
 vi.mock('../middleware/auth.js', () => ({
   isAdminRequest: vi.fn(async () => true),
   requireAuth: (req, _res, next) => { req.session = { userId: req.get('x-user-id') || 'user-2' }; next(); },
@@ -42,6 +44,8 @@ describe('mailboxes are shared by every user', () => {
     app.use(express.json());
     app.use('/api/accounts', accountRoutes);
     await new Promise((resolve) => { server = app.listen(0, resolve); });
+    // Schema setup can occupy this test worker longer than Node's default idle socket timeout.
+    server.keepAliveTimeout = 60000;
     base = `http://127.0.0.1:${server.address().port}`;
   });
   afterAll(async () => { await new Promise((resolve) => server.close(resolve)); });
@@ -113,15 +117,15 @@ describe('mailboxes are shared by every user', () => {
   });
 
   it('records who added a mailbox', async () => {
-    const res = await fetch(`${base}/api/accounts`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ name: 'Team', email_address: 'team@example.com', protocol: 'pop3' }),
-    });
-    expect(res.status).toBe(200);
-    const [sql, params] = query.mock.calls.find(([s]) => /INSERT INTO email_accounts/.test(s));
-    expect(sql).toMatch(/INSERT INTO email_accounts \(\s*added_by, name/);
-    expect(params[0]).toBe('user-2');
+    const db=await createRealSchemaDb();
+    const user='10000000-0000-4000-8000-000000000002';
+    try {
+      await db.query("INSERT INTO users (id,username) VALUES ($1,'employee')",[user]);
+      query.mockImplementation((sql,params)=>db.query(sql,params));
+      const res=await fetch(`${base}/api/accounts`,{method:'POST',headers:{'Content-Type':'application/json','X-Requested-With':'MailExpert','x-user-id':user,'Idempotency-Key':'10000000-0000-4000-8000-000000000099'},body:JSON.stringify({name:'Team',email_address:'team@example.com',imap_host:'imap.example.com',smtp_host:'smtp.example.com',auth_pass:'secret'})});
+      expect(res.status).toBe(200);
+      expect((await db.query('SELECT added_by FROM email_accounts')).rows).toEqual([{added_by:user}]);
+    } finally {await db.close();}
   });
 
   it('deletes a mailbox someone else added', async () => {

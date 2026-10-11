@@ -6,6 +6,7 @@ import { createRealSchemaDb } from '../testing/realSchema.js';
 
 const dbState = { db: null };
 vi.mock('../db.js', () => ({
+  pool: { connect: vi.fn(async () => ({query: vi.fn((sql, params) => dbState.db.query(sql, params)), release: vi.fn()})) },
   query: (sql, params) => dbState.db.query(sql, params),
   withTransaction: (fn) => dbState.db.transaction((tx) => fn({ query: (sql, params) => tx.query(sql, params) })),
 }));
@@ -40,6 +41,7 @@ const {
   activateNodeMailbox, cancelMailboxDeletion, createNodeMailbox, deactivateNodeMailbox, requestMailboxDeletion,
 } = await import('./mailboxActions.js');
 
+const { pool } = await import('../db.js');
 const USER = '70000000-0000-4000-8000-000000000001';
 const ACTOR = { userId: USER };
 let db;
@@ -62,6 +64,7 @@ beforeEach(async () => {
 describe('creation', () => {
   it('takes a seat, confirmed in the ledger with the mailbox id', async () => {
     const { account } = await create('a');
+    expect(account).toMatchObject({mail_provider:'domain',connection_mode:'managed',imap_tls_mode:'implicit'});
     const { rows } = await db.query('SELECT seat_no, account_id, email, pending_until FROM mail_node_seat_assignments');
     expect(rows).toEqual([{ seat_no: 1, account_id: account.id, email: 'a@example.com', pending_until: null }]);
   });
@@ -256,7 +259,8 @@ describe('the read-only filter on the node', () => {
     const seen = [];
     const original = db.transaction.bind(db);
     const spy = vi.spyOn(db, 'transaction').mockImplementation((fn) => original((tx) => fn({
-      query: (sql, params) => { seen.push(sql); return tx.query(sql, params); },
+      pool: { connect: vi.fn(async () => ({query: vi.fn((sql, params) => dbState.db.query(sql, params)), release: vi.fn()})) },
+  query: (sql, params) => { seen.push(sql); return tx.query(sql, params); },
     })));
     try {
       await deactivateNodeMailbox({ accountId: account.id, reason: 'r' }, ACTOR);
@@ -329,7 +333,8 @@ describe('the read-only filter on the node', () => {
     const impls = mocks.map((mock) => mock.getMockImplementation());
     const original = db.transaction.bind(db);
     const spy = vi.spyOn(db, 'transaction').mockImplementation((fn) => original((tx) => fn({
-      query: (sql, params) => { seen.push(`sql:${sql}`); return tx.query(sql, params); },
+      pool: { connect: vi.fn(async () => ({query: vi.fn((sql, params) => dbState.db.query(sql, params)), release: vi.fn()})) },
+  query: (sql, params) => { seen.push(`sql:${sql}`); return tx.query(sql, params); },
     })));
     try {
       mocks.forEach((mock, i) => mock.mockImplementation(async (...args) => { seen.push('node'); return impls[i]?.(...args); }));
@@ -386,4 +391,19 @@ describe('the read-only filter on the node', () => {
     await cancelMailboxDeletion({ accountId: account.id }, ACTOR);
     expect(deleteMailboxFilters).not.toHaveBeenCalled();
   });
+});
+
+it('node creation refuses a legacy address with casing and surrounding spaces before provisioning', async () => {
+  await db.query("INSERT INTO email_accounts (name, email_address) VALUES ('legacy', ' A@EXAMPLE.COM ')");
+  expect(await create('a')).toEqual({error:'mailbox_exists'});
+  expect(provisionMailbox).not.toHaveBeenCalled();
+  expect((await db.query('SELECT count(*)::int AS n FROM email_accounts')).rows[0].n).toBe(1);
+});
+
+it('all_writers_share_trimmed_address_lock: node uses the same reserved-session address key', async () => {
+  await create('A');
+  const client = await pool.connect.mock.results[0].value;
+  expect(client.query).toHaveBeenCalledWith('SELECT pg_try_advisory_lock(hashtext($1)) AS acquired', ['account-address:a@example.com']);
+  expect(client.query).toHaveBeenCalledWith('SELECT pg_advisory_unlock(hashtext($1))', ['account-address:a@example.com']);
+  expect(client.release).toHaveBeenCalledOnce();
 });

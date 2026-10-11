@@ -1,3 +1,4 @@
+import { withAccountAddressLock } from '../accounts/connection.js';
 import { query, withSessionLock, withTransaction } from '../db.js';
 import { encrypt } from '../encryption.js';
 import { recordAudit } from '../auditLog.js';
@@ -180,7 +181,7 @@ const domainCreateQueue = createKeyedSerializer();
 // an enabled mailbox it does not hold within 90 seconds). Answers { account, aliases, tenantPending }.
 export async function createNodeMailbox(input, actor, { onCreated = null } = {}) {
   const email = `${parseLocalPart(input?.localPart)}@${parseHostName(input?.domain)}`;
-  return domainCreateQueue(email, () => createNodeMailboxNow(input, actor, onCreated));
+  return domainCreateQueue(email, () => withAccountAddressLock(email, () => createNodeMailboxNow(input, actor, onCreated)));
 }
 
 async function createNodeMailboxNow(input, actor, onCreated) {
@@ -197,7 +198,7 @@ async function createNodeMailboxNow(input, actor, onCreated) {
   const cfg = await getMailNodeConfig();
   if (!cfg) return { error: 'mail_node_not_configured' };
 
-  const taken = await query('SELECT delete_after FROM email_accounts WHERE lower(email_address) = $1 LIMIT 1', [email]);
+  const taken = await query('SELECT delete_after FROM email_accounts WHERE lower(btrim(email_address)) = $1 LIMIT 1', [email]);
   if (taken.rows[0]?.delete_after) return { error: 'mailbox_pending_deletion' };
   if (taken.rows.length) return { error: 'mailbox_exists' };
   // Only a domain whose onboarding is done takes mailboxes; an unknown one (no row) never does. A
@@ -231,10 +232,11 @@ async function createNodeMailboxNow(input, actor, onCreated) {
     ({ account, secondName } = await withTransaction(async (client) => {
       const result = await client.query(`
         INSERT INTO email_accounts (
+          mail_provider, connection_mode, imap_tls_mode,
           added_by, name, email_address, protocol,
           imap_host, imap_port, imap_tls, imap_skip_tls_verify, smtp_host, smtp_port, smtp_tls,
           auth_user, auth_pass, mail_node, sender_name
-        ) VALUES ($1,$2,$3,'imap',$4,993,true,false,$4,587,'STARTTLS',$3,$5,true,$6)
+        ) VALUES ('domain','managed','implicit',$1,$2,$3,'imap',$4,993,true,false,$4,587,'STARTTLS',$3,$5,true,$6)
         RETURNING *
       `, [actor?.userId ?? null, name, email, cfg.mailHost, encrypt(created.password), names.senderName]);
       const row = result.rows[0];

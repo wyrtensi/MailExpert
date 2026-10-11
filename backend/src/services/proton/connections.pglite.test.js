@@ -244,6 +244,21 @@ describe('Proton connection operations', () => {
     expect(clearProtonLinkStatus.mock.calls).toEqual([[account.id]]);
   });
 
+  it('removal_timeout_blocks_readd: no link of a native user while its cleanup is outstanding', async () => {
+    const { account } = await seedLinkedAccount({ email: 'alias@proton.me' });
+    await seedLinkedAccount({ email: 'other@proton.me' });
+    // Deleted while the worker is offline: the cleanup of alias@ stays queued.
+    await deleteAccount(account, { actor: owner });
+    expect((await state.db.query(`SELECT status FROM jobs WHERE kind = 'proton_cleanup'`)).rows).toEqual([{ status: 'queued' }]);
+    const blocked = await connectFully({ email: 'alias@proton.me' }, owner, NATIVE);
+    expect(blocked).toMatchObject({ state: 'failed', errorCode: 'proton_unavailable' });
+    expect(await count('email_accounts', `email_address = 'alias@proton.me'`)).toBe(0);
+    expect(fake.paths('/commit')).toHaveLength(0);
+    // Once the cleanup finished, the address can be added again.
+    await state.db.query(`UPDATE jobs SET status = 'done', finished_at = now() WHERE kind = 'proton_cleanup'`);
+    expect(await connectFully({ email: 'alias@proton.me' }, owner, NATIVE)).toMatchObject({ state: 'connected' });
+  });
+
   it('reconnect needs a managed link and the same address', async () => {
     const { rows: [manual] } = await state.db.query(`INSERT INTO email_accounts (name, email_address, imap_host, smtp_host, mail_provider, connection_mode)
       VALUES ('Manual', 'box@proton.me', 'imap.example.com', 'smtp.example.com', 'proton', 'manual') RETURNING id`);
@@ -446,7 +461,12 @@ describe('Proton connection operations', () => {
     expect(deleteAccount).toHaveBeenCalledWith(expect.objectContaining({ id: committing.account_id, email_address: 'box@proton.me' }),
       expect.objectContaining({ actor: { userId: OWNER }, reason: 'proton_commit_abandoned', engine }));
     expect(engine.disconnectAccount).toHaveBeenCalledWith(committing.account_id);
-    expect((await state.db.query('SELECT status, error_code FROM jobs')).rows).toEqual([{ status: 'failed', error_code: 'account_missing' }]);
+    expect((await state.db.query(`SELECT status, error_code FROM jobs WHERE kind = 'send_message'`)).rows).toEqual([{ status: 'failed', error_code: 'account_missing' }]);
+    // Its link goes the durable way too: the worker drops it if it ever recorded it (lifecycle.js).
+    const { rows: [{ generation }] } = await state.db.query('SELECT generation FROM proton_users WHERE proton_user_id = $1', [NATIVE]);
+    expect((await state.db.query(`SELECT status, payload FROM jobs WHERE kind = 'proton_cleanup'`)).rows).toEqual([
+      { status: 'queued', payload: { userId: NATIVE, generation, email: 'box@proton.me' } },
+    ]);
     expect(recordAudit).toHaveBeenCalledWith({ actorUserId: OWNER, accountEmail: 'box@proton.me', action: 'mailbox.deleted', details: { mailNode: false, reason: 'proton_commit_abandoned' } });
   });
 });

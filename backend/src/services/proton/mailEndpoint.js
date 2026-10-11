@@ -97,7 +97,8 @@ function checkAbort(signal) {
 }
 
 // The account's own host/port are never read: only a database link of a managed Proton mailbox,
-// bound to the native user's current generation, yields the loopback endpoint.
+// bound to the native user's current generation, yields the loopback endpoint; never for a native
+// user whose removal is pending (services/proton/lifecycle.js).
 export async function resolveProtonEndpoint(accountId, protocol, { signal } = {}) {
   if (!Object.hasOwn(PROTON_PORTS, protocol)) throw new ProtonEndpointError('proton_endpoint_invalid');
   checkAbort(signal);
@@ -107,7 +108,8 @@ export async function resolveProtonEndpoint(accountId, protocol, { signal } = {}
        FROM proton_mailbox_links l
        JOIN proton_users u ON u.proton_user_id = l.proton_user_id AND u.generation = l.generation
        JOIN email_accounts a ON a.id = l.account_id
-      WHERE l.account_id = $1 AND a.mail_provider = 'proton' AND a.connection_mode = 'managed'`,
+      WHERE l.account_id = $1 AND a.mail_provider = 'proton' AND a.connection_mode = 'managed'
+        AND NOT u.cleanup_pending AND u.removal_state IS NULL`,
     [accountId],
   );
   checkAbort(signal);

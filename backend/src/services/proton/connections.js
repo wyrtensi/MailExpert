@@ -14,6 +14,7 @@ import { persistManualAccount, safeAccount } from '../accounts/manualAccounts.js
 import { callWorker } from './workerClient.js';
 import { isProtonApiReachable } from './apiReachability.js';
 import { clearProtonLinkStatus } from './reconcile.js';
+import { protonCleanupOutstanding, pruneOrphanProtonUsers } from './lifecycle.js';
 import {
   PROTON_LOOPBACK_HOST, PROTON_PORTS, ProtonEndpointError, probeManagedProtonConnection, trustedProtonEndpoint,
 } from './mailEndpoint.js';
@@ -359,8 +360,11 @@ async function writeMailbox(client, checking, logins, material) {
   const { rows: [nativeUser] } = await client.query(
     'SELECT generation, cleanup_pending, removal_state FROM proton_users WHERE proton_user_id = $1 FOR UPDATE', [nativeUserId],
   );
-  // A native user being cleaned up (Task 8) is not linked again until that has finished.
-  if (!nativeUser || nativeUser.cleanup_pending || nativeUser.removal_state) return { code: 'proton_unavailable' };
+  // A native user being cleaned up is not linked again until that has finished: neither while its
+  // removal is pending nor while a deleted address's cleanup job may still drop a link of it
+  // (lifecycle.js). The deletion takes the same row lock before it enqueues.
+  if (!nativeUser || nativeUser.cleanup_pending || nativeUser.removal_state
+    || await protonCleanupOutstanding(client, nativeUserId)) return { code: 'proton_unavailable' };
   const certificate = [material.certificatePem, material.certificateFingerprint, material.tlsServername];
   let accountId, previousGeneration = null;
   if (op.reconnect_intent) {
@@ -585,6 +589,8 @@ export async function sweepProtonConnections({ graceMs = CREATION_REQUEST_GRACE_
     [['connected', 'failed', 'cancelled', 'expired'], graceMs],
   );
   await pruneFinishedCreationRequests({ graceMs });
+  // Native user rows nothing links any more (a failed attempt's, a finished cleanup's).
+  await pruneOrphanProtonUsers();
 }
 
 export function startProtonConnectionSweeper({ intervalMs = 60000 } = {}) {

@@ -3,15 +3,20 @@ import { revokeGoogleToken } from '../oauth/googleOAuth.js';
 import { recordAudit } from '../auditLog.js';
 import { failJobsOfDeletedAccount } from '../jobQueue.js';
 import { redactEmail } from '../../utils/redact.js';
+import { deleteLinkedMailbox, hasProtonLink } from '../proton/lifecycle.js';
 
 // Removes an ordinary mailbox (not one on the mail node, whose deletion is asked for and waits):
 // DELETE /api/accounts/:id and a managed Proton attempt whose worker commit was lost
 // (services/proton/connections.js) both go through here. The caller has read the row
 // (at least { id, email_address }) and decided
 // that the actor may delete it; a Google mailbox's route reads its token to revoke from that row
-// (googleRevokeToken). The engine (imapManager) lets go of the mailbox afterwards.
-export async function deleteAccount(account, { actor = null, reason = null, googleRevokeToken = null, client = { query }, engine = null } = {}) {
+// (googleRevokeToken). The engine (imapManager) lets go of the mailbox afterwards. A managed
+// Proton mailbox is deleted together with the durable cleanup of its worker link, in one
+// transaction (services/proton/lifecycle.js). client: a dedicated connection the caller holds
+// (not in a transaction), else the pool.
+export async function deleteAccount(account, { actor = null, reason = null, googleRevokeToken = null, client = null, engine = null } = {}) {
   const { id } = account;
+  const db = client ?? { query };
   // Delete from DB first (cascades to messages and folders immediately).
   // Disconnect IMAP afterward — fire-and-forget so a slow server logout
   // doesn't block the response.
@@ -29,7 +34,8 @@ export async function deleteAccount(account, { actor = null, reason = null, goog
     const revoked = await revokeGoogleToken(googleRevokeToken).catch(() => false);
     console.log(`Google OAuth grant ${revoked ? 'revoked' : 'revoke failed'} for removed mailbox ${redactEmail(account.email_address)}`);
   }
-  await client.query('DELETE FROM email_accounts WHERE id = $1', [id]);
+  if (await hasProtonLink(id, db)) await deleteLinkedMailbox(account, { client });
+  else await db.query('DELETE FROM email_accounts WHERE id = $1', [id]);
   // The row is gone, so the entry names the mailbox by the address read above.
   recordAudit({
     actorUserId: actor?.userId ?? null,

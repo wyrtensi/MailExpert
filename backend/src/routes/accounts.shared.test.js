@@ -191,6 +191,8 @@ describe('mailboxes are shared by every user', () => {
   });
 
   it('deletes a mailbox someone else added', async () => {
+    // Not a managed Proton mailbox: no link, so the plain deletion (services/accounts/deleteAccount.js).
+    query.mockImplementation(async sql => ({ rows: /FROM proton_mailbox_links/.test(sql) ? [] : [{ id: ID, protocol: 'pop3' }] }));
     const res = await fetch(`${base}/api/accounts/${ID}`, { method: 'DELETE' });
     expect(res.status).toBe(200);
     expect(query).toHaveBeenCalledWith(

@@ -30,6 +30,7 @@ import accountProviderRoutes from './routes/accountProviders.js';
 import accountProtonRoutes from './routes/accountProton.js';
 import { reconcileProtonConnectionsAtStartup, setProtonMailEngine, startProtonConnectionSweeper } from './services/proton/connections.js';
 import { setProtonReconcileEngine, startProtonLinkReconciler } from './services/proton/reconcile.js';
+import { registerProtonJobKinds } from './services/proton/lifecycle.js';
 import mailNodeRoutes from './routes/mailNode.js';
 import mailNodeQuarantineRoutes from './routes/mailNodeQuarantine.js';
 import mailNodeOutageRoutes from './routes/mailNodeOutages.js';
@@ -295,6 +296,9 @@ registerAdminEffectsJob();
 // The node's checks the panel CLI asked for (DNS, alerts, the outage trace): run here, where each
 // joins the run going and the trace keeps its request budget (services/mailNode/nodeChecks.js).
 registerNodeCheckJobKind();
+// A deleted managed Proton mailbox's worker link (and its native user with the last link) is
+// cleaned up by a durable job, retried while the worker is away (services/proton/lifecycle.js).
+registerProtonJobKinds();
 startJobWorker();
 
 // A failed concurrent build (migration 0061) leaves an unusable index that no later migration repairs.

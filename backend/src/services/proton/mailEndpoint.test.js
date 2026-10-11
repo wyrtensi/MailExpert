@@ -79,6 +79,18 @@ describe('resolveProtonEndpoint', () => {
     await expect(resolveProtonEndpoint('20000000-0000-4000-8000-0000000000ff', 'smtp')).rejects.toMatchObject({ code: 'proton_link_missing' });
   });
 
+  it('no endpoint for a native user whose removal or cleanup is pending', async () => {
+    for (const flag of ['cleanup_pending = true', `removal_state = 'removing'`]) {
+      await holder.db.query(`UPDATE proton_users SET ${flag} WHERE proton_user_id = $1`, [NATIVE_USER]);
+      try {
+        await expect(resolveProtonEndpoint(LINKED, 'imap')).rejects.toMatchObject({ code: 'proton_link_missing' });
+      } finally {
+        await holder.db.query('UPDATE proton_users SET cleanup_pending = false, removal_state = NULL WHERE proton_user_id = $1', [NATIVE_USER]);
+      }
+    }
+    expect((await resolveProtonEndpoint(LINKED, 'imap')).port).toBe(1993);
+  });
+
   it('all_proton_clients_verify_certificate_and_hostname', async () => {
     const endpoint = await resolveProtonEndpoint(LINKED, 'imap');
     // An IP identity is verified against the connected host, never sent as SNI (RFC 6066).

@@ -619,6 +619,7 @@ class ControllerTests(unittest.TestCase):
     def test_live_attempt_inherits_cleanup_of_cancelled_creator(self):
         self.two_addresses()
         self.controller.cancel_connection('attempt-a')
+        self.assertEqual(self.native.removed_users, [])
         self.controller.cancel_connection('attempt-b')
         self.assertEqual(self.native.removed_users, ['user-a'])
 

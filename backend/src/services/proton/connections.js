@@ -590,7 +590,7 @@ export async function sweepProtonConnections({ graceMs = CREATION_REQUEST_GRACE_
   );
   await pruneFinishedCreationRequests({ graceMs });
   // Native user rows nothing links any more (a failed attempt's, a finished cleanup's).
-  await pruneOrphanProtonUsers();
+  await pruneOrphanProtonUsers().catch(err => console.error('Pruning orphan Proton users failed:', err.message));
 }
 
 export function startProtonConnectionSweeper({ intervalMs = 60000 } = {}) {

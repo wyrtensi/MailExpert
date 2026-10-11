@@ -27,6 +27,8 @@ import oauthGoogleApiRoutes from './routes/oauthGoogleApi.js';
 import authRoutes, { destroyUserSessions } from './routes/auth.js';
 import accountRoutes from './routes/accounts.js';
 import accountProviderRoutes from './routes/accountProviders.js';
+import accountProtonRoutes from './routes/accountProton.js';
+import { reconcileProtonConnectionsAtStartup, setProtonMailEngine, startProtonConnectionSweeper } from './services/proton/connections.js';
 import mailNodeRoutes from './routes/mailNode.js';
 import mailNodeQuarantineRoutes from './routes/mailNodeQuarantine.js';
 import mailNodeOutageRoutes from './routes/mailNodeOutages.js';
@@ -191,6 +193,8 @@ app.set('imapManager', imapManager);
 // Hand the mail engine to the plugin platform so plugin-api capabilities (labels, archive,
 // broadcast) can be bound to it without any plugin importing the mail engine or this entry file.
 setMailEngine(imapManager);
+// Managed Proton attempts connect the mailbox they commit through the same engine.
+setProtonMailEngine(imapManager);
 
 // Routes
 app.use('/api/auth', authRoutes);
@@ -201,6 +205,8 @@ app.use('/oauth', oauthRoutes);
 app.use('/api/integrations', integrationsRoutes);
 app.use('/api/oauth/google', oauthGoogleApiRoutes);
 app.use('/api/accounts/provider', accountProviderRoutes);
+// Before /api/accounts, whose /:id routes would refuse 'proton' as a malformed ID.
+app.use('/api/accounts/proton/connect', accountProtonRoutes);
 app.use('/api/accounts', accountRoutes);
 app.use('/api/mail-node', mailNodeRoutes);
 app.use('/api/mail-node', mailNodeQuarantineRoutes);
@@ -367,6 +373,15 @@ try {
 }
 imapManager.connectAllEnabled()
   .catch(err => console.error('Startup mailbox connection error:', err.message));
+
+// Managed Proton attempts this process can no longer follow fail safely, and commits interrupted
+// between the SQL commit and the worker's commit are completed (services/proton/connections.js).
+try {
+  await reconcileProtonConnectionsAtStartup();
+} catch (err) {
+  console.error('Proton connection reconciliation failed:', err.message);
+}
+startProtonConnectionSweeper();
 
 const PORT = process.env.PORT || 3000;
 httpServer.listen(PORT, () => {

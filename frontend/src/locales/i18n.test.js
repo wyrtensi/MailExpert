@@ -131,6 +131,10 @@ const SAME_VALUE_ALLOWED = {
   'admin.accounts.add.yahooTitle':           'any', // Yahoo — a tile of "Add account", a product name
   'admin.accounts.add.mailruTitle':          'any', // Mail.ru — a tile of "Add account", a product name
   'admin.accounts.add.icloudTitle':          'any', // iCloud — a tile of "Add account", a product name
+  'admin.accounts.add.addressPh':            'any', // name@example.com
+  'admin.accounts.add.protonAddressPh':      'any', // name@proton.me
+  'admin.accounts.add.securityImplicit':     'any', // SSL/TLS — protocol names
+  'admin.accounts.add.securityStarttls':     'any', // STARTTLS — protocol name
   'admin.accounts.presetIcloud':            'any', // iCloud
   'admin.accounts.presetYahoo':             'any', // Yahoo Mail
   'admin.accounts.smtpHostPh':              'any', // smtp.gmail.com
@@ -685,7 +689,7 @@ describe('i18n locale files', () => {
     it('every key used by the add-account dialog exists in every locale', () => {
       // Option, badge and error keys come from utils/addAccount.js and reach t() through a
       // variable, so every quoted literal of the dialog files is collected.
-      const source = ['../components/AddAccountDialog.jsx', '../components/addAccount/ProviderPicker.jsx', '../components/GmailAddForm.jsx', '../components/DomainMailboxAddForm.jsx', '../utils/addAccount.js']
+      const source = ['../components/AddAccountDialog.jsx', '../components/addAccount/ProviderPicker.jsx', '../components/GmailAddForm.jsx', '../components/DomainMailboxAddForm.jsx', '../utils/addAccount.js', '../utils/providerConnection.js', '../components/addAccount/ImapProviderAddForm.jsx', '../components/addAccount/ManualAccountAddForm.jsx', '../components/addAccount/ProtonAddForm.jsx', '../components/addAccount/AdvancedConnectionFields.jsx', '../components/addAccount/AppPasswordHelp.jsx']
         .map(file => readFileSync(resolve(dir, file), 'utf8')).join('\n');
       const keys = [...new Set([...source.matchAll(/'((?:admin\.accounts\.add|admin\.integrations\.google)\.[\w.]+)'/g)].map(m => m[1]))];
       assert.ok(keys.length >= 20, `expected the add-account keys, found ${keys.length}`);

@@ -23,6 +23,7 @@ import { senderNamesPayload } from '../utils/mailNode.js';
 import { isAttemptId, newAttemptId } from '../utils/addAccountFlow.js';
 import { reconcileAccounts } from '../utils/accountsReconcile.js';
 import { useStore } from '../store/index.js';
+import AdvancedConnectionFields from './addAccount/AdvancedConnectionFields.jsx';
 
 const inputStyle = {
   width: '100%', padding: '9px 12px', background: 'var(--bg-tertiary)', border: '1px solid var(--border)',
@@ -341,27 +342,29 @@ export default function GmailAddForm({
       )}
       {errorKey && <div style={{ fontSize: 12, color: 'var(--red)', marginTop: 8 }}>{t(errorKey)}</div>}
 
-      <label htmlFor="gmail-add-sender" style={labelStyle}>{t('admin.accounts.add.senderNameLabel')}</label>
-      <input
-        id="gmail-add-sender"
-        value={senderName}
-        maxLength={200}
-        placeholder={t('admin.accounts.add.senderNamePh')}
-        onChange={(e) => setSenderName(e.target.value)}
-        style={inputStyle}
-      />
-      <div style={hintStyle}>{t('admin.accounts.add.gmailSenderHint')}</div>
+      <AdvancedConnectionFields managed="gmail">
+        <label htmlFor="gmail-add-sender" style={labelStyle}>{t('admin.accounts.add.senderNameLabel')}</label>
+        <input
+          id="gmail-add-sender"
+          value={senderName}
+          maxLength={200}
+          placeholder={t('admin.accounts.add.senderNamePh')}
+          onChange={(e) => setSenderName(e.target.value)}
+          style={inputStyle}
+        />
+        <div style={hintStyle}>{t('admin.accounts.add.gmailSenderHint')}</div>
 
-      <label htmlFor="gmail-add-sender-alt" style={labelStyle}>{t('admin.accounts.add.senderNameAltLabel')}</label>
-      <input
-        id="gmail-add-sender-alt"
-        value={senderNameAlt}
-        maxLength={200}
-        placeholder={t('admin.accounts.add.senderNameAltPh')}
-        onChange={(e) => setSenderNameAlt(e.target.value)}
-        style={inputStyle}
-      />
-      <div style={hintStyle}>{t('admin.accounts.add.senderNameAltHint')}</div>
+        <label htmlFor="gmail-add-sender-alt" style={labelStyle}>{t('admin.accounts.add.senderNameAltLabel')}</label>
+        <input
+          id="gmail-add-sender-alt"
+          value={senderNameAlt}
+          maxLength={200}
+          placeholder={t('admin.accounts.add.senderNameAltPh')}
+          onChange={(e) => setSenderNameAlt(e.target.value)}
+          style={inputStyle}
+        />
+        <div style={hintStyle}>{t('admin.accounts.add.senderNameAltHint')}</div>
+      </AdvancedConnectionFields>
 
       <button
         type="button"

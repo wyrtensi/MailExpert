@@ -1,50 +1,28 @@
-import { lazy, Suspense, useCallback, useEffect, useId, useLayoutEffect, useMemo, useReducer, useRef, useState } from 'react';
+import { useCallback, useEffect, useId, useLayoutEffect, useMemo, useReducer, useRef, useState } from 'react';
 import { createPortal } from 'react-dom';
 import { useTranslation } from 'react-i18next';
 import { api } from '../utils/api.js';
 import { useStore } from '../store/index.js';
-import { addAccountOptions, manualCreatePayload } from '../utils/addAccount.js';
+import { addAccountOptions } from '../utils/addAccount.js';
 import {
   initialAddAccountFlow,
   newAttemptId,
-  submitWithReplay,
   transitionAddAccountFlow,
   upsertAccountById,
 } from '../utils/addAccountFlow.js';
 import { reconcileAccounts } from '../utils/accountsReconcile.js';
 import ProviderIcon from './addAccount/ProviderIcon.jsx';
 import ProviderPicker from './addAccount/ProviderPicker.jsx';
+import ImapProviderAddForm from './addAccount/ImapProviderAddForm.jsx';
+import ManualAccountAddForm from './addAccount/ManualAccountAddForm.jsx';
+import ProtonAddForm from './addAccount/ProtonAddForm.jsx';
 import GmailAddForm from './GmailAddForm.jsx';
 import DomainMailboxAddForm from './DomainMailboxAddForm.jsx';
 
-// The manual IMAP/SMTP form lives with the settings code; it is loaded on demand, only when
-// the "Other" tile is chosen.
-const ManualAccountForm = lazy(() => import('./AdminPanel.jsx').then((m) => ({ default: m.AccountForm })));
-
 const FOCUSABLE = 'button:not([disabled]), [href], input:not([disabled]), select:not([disabled]), textarea:not([disabled]), [tabindex]:not([tabindex="-1"])';
 
-// "Other": the manual form of the settings, wired to the creation API. A new attempt id per
-// submit (the Idempotency-Key); a lost answer is replayed with the same id. The result of a
-// cancelled form is dropped by the dialog (see AddAccountDialog.handleConnected).
-function OtherForm({ email, onEmailChange, signal, onAttemptStart, onConnected, onCancel }) {
-  const attemptRef = useRef(null);
-  const save = async (form) => {
-    attemptRef.current = newAttemptId();
-    const attemptId = attemptRef.current;
-    onAttemptStart?.();
-    const account = await submitWithReplay(
-      (id) => api.addAccount(manualCreatePayload(form), { idempotencyKey: id, signal }),
-      attemptId,
-      { signal },
-    );
-    onConnected({ kind: 'account', account, attemptId });
-  };
-  return (
-    <Suspense fallback={null}>
-      <ManualAccountForm onSave={save} onCancel={onCancel} initialEmail={email} onEmailChange={onEmailChange} />
-    </Suspense>
-  );
-}
+// What the manual form may assume before the status API answers (and when it cannot): nothing.
+const NO_MANUAL_POLICY = Object.freeze({ allowPrivateHosts: false, allowNonstandardPorts: false });
 
 function DomainForm({ email, onEmailChange, signal, onAttemptStart, onConnected, accounts }) {
   const attemptRef = useRef(null);
@@ -73,23 +51,22 @@ function GmailForm({ email, onEmailChange, signal, onAttemptStart, onConnected, 
   );
 }
 
-// Providers whose forms are built separately (Proton and the four app-password services) mount
-// here: replace the entry with the form component taking the same props. Until then the tile
-// opens a short, honest note and Back/Close still work.
-function PendingForm() {
-  const { t } = useTranslation();
-  return <p className="add-account-hint" role="status">{t('admin.accounts.add.formPending')}</p>;
-}
+// The four fixed IMAP providers share one form; it takes the provider's metadata from `catalog`.
+const imapForm = (provider) => function ImapForm(props) {
+  return <ImapProviderAddForm {...props} provider={provider} />;
+};
 
+// Every form takes the same props: email, onEmailChange, signal, accounts, catalog, manualPolicy,
+// proton, onAttemptStart, onConnected, onCancel.
 const FORMS = {
   domain: DomainForm,
   gmail: GmailForm,
-  proton: PendingForm,
-  yahoo: PendingForm,
-  yandex: PendingForm,
-  mailru: PendingForm,
-  icloud: PendingForm,
-  other: OtherForm,
+  proton: ProtonAddForm,
+  yahoo: imapForm('yahoo'),
+  yandex: imapForm('yandex'),
+  mailru: imapForm('mailru'),
+  icloud: imapForm('icloud'),
+  other: ManualAccountAddForm,
 };
 
 // `forms` is the kind -> form table; tests pass their own to drive the dialog without a backend.
@@ -101,6 +78,9 @@ export default function AddAccountDialog({ onClose, forms = FORMS }) {
   const [flow, dispatch] = useReducer(transitionAddAccountFlow, undefined, initialAddAccountFlow);
   const [googleStatus, setGoogleStatus] = useState(null);
   const [domainStatus, setDomainStatus] = useState(null);
+  // The safe, shared part of the status the provider forms need: the catalog of the four fixed
+  // providers, the manual policy booleans and the state of the managed Proton worker.
+  const [formStatus, setFormStatus] = useState({ catalog: null, manualPolicy: NO_MANUAL_POLICY, proton: null });
   // One controller per open form: Back and Close abort it, and every form drops what arrives late.
   const [session, setSession] = useState(null);
   const overlayRef = useRef(null);
@@ -124,6 +104,11 @@ export default function AddAccountDialog({ onClose, forms = FORMS }) {
         if (!live) return;
         setGoogleStatus(data?.google || { configured: false, available: false });
         setDomainStatus(data?.domainMail || { configured: false });
+        setFormStatus({
+          catalog: Array.isArray(data?.mailProviders) ? data.mailProviders : null,
+          manualPolicy: { ...NO_MANUAL_POLICY, ...(data?.manual || {}) },
+          proton: data?.proton || null,
+        });
       })
       .catch(() => {
         if (!live) return;
@@ -350,6 +335,9 @@ export default function AddAccountDialog({ onClose, forms = FORMS }) {
                     onEmailChange={(email) => dispatch({ type: 'email', email })}
                     signal={session?.signal}
                     accounts={accounts}
+                    catalog={formStatus.catalog}
+                    manualPolicy={formStatus.manualPolicy}
+                    proton={formStatus.proton}
                     onAttemptStart={() => { attemptedRef.current = true; }}
                     onConnected={handleConnected}
                     onCancel={back}

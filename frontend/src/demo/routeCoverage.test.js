@@ -148,6 +148,12 @@ const REJECTED_GET = {
       + 'has any; usePushNotifications already reads the rejection as "push unavailable"',
     match: /not configured/,
   },
+  '/accounts/proton/connect/:param': {
+    path: '/accounts/proton/connect/no-such-attempt',
+    reason: 'a Proton connection attempt exists only after POST /accounts/proton/connect; an unknown id is the '
+      + 'real API\'s 404 (the answers for a started attempt are exercised in the write sequence)',
+    match: /not_found/,
+  },
   '/gtd/pet/:param/meta': {
     path: '/gtd/pet/demo-pet/meta',
     reason: 'no pet is ever imported in the demo (GtdSettings’ import flow has nothing to '
@@ -408,6 +414,31 @@ test('manual IMAP mailbox add, edit, aliases and delete round-trip through ACCOU
   assert.equal(aliasedEdit.name, 'Alt Renamed');
   await answer('/accounts/:param/aliases/:param', 'DELETE', `/accounts/${id}/aliases/${alias.id}`);
   await answer('/accounts/:param', 'DELETE', `/accounts/${id}`);
+});
+
+test('provider and Proton connection writes answer and drop the secrets they receive', async () => {
+  const provider = await answer('/accounts/provider', 'POST', '/accounts/provider', {
+    provider: 'yahoo', email: 'coverage@yahoo.com', appPassword: 'secret-sentinel',
+  });
+  assert.equal(provider.mail_provider, 'yahoo');
+  assert.equal(provider.connection_mode, 'preset');
+  assert.equal(JSON.stringify(provider).includes('secret-sentinel'), false);
+  await answer('/accounts/:param', 'DELETE', `/accounts/${provider.id}`);
+
+  const started = await answer('/accounts/proton/connect', 'POST', '/accounts/proton/connect', {
+    email: 'coverage-2fa@proton.me', password: 'secret-sentinel', requestId: '0b9a7f0c-2d44-4c40-8f55-1d3b4d8a9e21',
+  });
+  assert.equal(JSON.stringify(started).includes('secret-sentinel'), false);
+  const first = await demoRequest('GET', `/accounts/proton/connect/${started.id}`);
+  assert.equal(first.state, 'needs_2fa');
+  const continued = await answer('/accounts/proton/connect/:param/continue', 'POST', `/accounts/proton/connect/${started.id}/continue`, { challenge: '2fa', secret: '123456' });
+  assert.equal(continued.state, 'checking');
+  const done = await demoRequest('GET', `/accounts/proton/connect/${started.id}`);
+  assert.equal(done.state, 'connected');
+  assert.equal(done.account.mail_provider, 'proton');
+  assert.equal(JSON.stringify(done).includes('secret-sentinel'), false);
+  await answer('/accounts/proton/connect/:param/cancel', 'POST', `/accounts/proton/connect/${started.id}/cancel`);
+  await answer('/accounts/:param', 'DELETE', `/accounts/${done.account.id}`);
 });
 
 test('mailbox and message-list actions answer with real ids', async () => {

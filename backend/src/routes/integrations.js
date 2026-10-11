@@ -9,6 +9,9 @@ import { importLegacyGoogleConfig, resolveGoogleConfig } from '../services/oauth
 import { googleHasCapacity } from '../services/oauth/googleAppSelection.js';
 import { MAIL_NODE_PROVIDER, getMailNodeConfig } from '../services/mailNode/mailcow.js';
 import { GOOGLE_CALLBACK_PATH } from '../services/oauth/constants.js';
+import { publicProviderCatalog } from '../services/accounts/providerCatalog.js';
+import { getConnectionPolicy } from '../services/connectionPolicy.js';
+import { getProtonStatus } from '../services/proton/workerStatus.js';
 
 const router = Router();
 
@@ -96,6 +99,27 @@ async function googleAvailable(configured) {
   }
 }
 
+// What the add-account form may know about the installation's connection policy: two booleans,
+// never the administrator's settings (the TLS bypass is not offered to employees at all). A failed
+// read answers the strict values.
+async function manualCapabilities() {
+  try {
+    const policy = await getConnectionPolicy();
+    return { allowPrivateHosts: policy.allowPrivateHosts === true, allowNonstandardPorts: policy.allowNonstandardPorts === true };
+  } catch {
+    return { allowPrivateHosts: false, allowNonstandardPorts: false };
+  }
+}
+
+async function protonCapabilities() {
+  try {
+    const status = await getProtonStatus();
+    return { configured: status.configured === true, available: status.available === true, code: status.available === true ? null : 'proton_unavailable' };
+  } catch {
+    return { configured: false, available: false, code: 'proton_unavailable' };
+  }
+}
+
 router.get('/status', async (req, res) => {
   const configured = !!(await resolveGoogleConfig());
   res.json({
@@ -113,6 +137,11 @@ router.get('/status', async (req, res) => {
     domainMail: {
       configured: !!(await getMailNodeConfig()),
     },
+    // The four fixed IMAP providers (hosts, ports, TLS, app-password page, public domains), the
+    // managed Proton worker, and the two policy booleans of the manual form.
+    mailProviders: publicProviderCatalog(),
+    proton: await protonCapabilities(),
+    manual: await manualCapabilities(),
   });
 });
 

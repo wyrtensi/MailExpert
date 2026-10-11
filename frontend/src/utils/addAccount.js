@@ -43,6 +43,9 @@ export const SUGGESTION_BADGE_KEYS = Object.freeze({
   known: 'admin.accounts.add.badgeKnown',
 });
 
+// Tile title keys by kind (the forms name another service in their hints).
+export const ADD_ACCOUNT_TITLE_KEYS = Object.freeze(Object.fromEntries(Object.entries(OPTION_KEYS).map(([kind, option]) => [kind, option.titleKey])));
+
 const START_ERROR_KEYS = {
   already_connected: 'admin.integrations.google.errorAlreadyConnected',
   no_app_capacity: 'admin.integrations.google.errorNoAppCapacity',

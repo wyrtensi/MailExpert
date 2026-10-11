@@ -2,6 +2,7 @@ import { useEffect, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import { api } from '../utils/api.js';
 import MailNodeSeats from './MailNodeSeats.jsx';
+import AdvancedConnectionFields from './addAccount/AdvancedConnectionFields.jsx';
 import {
   domainMailboxFormError,
   domainMailboxTaken,
@@ -233,25 +234,27 @@ export default function DomainMailboxAddForm({
       />
       <div style={hintStyle}>{t('admin.accounts.add.senderNameHint')}</div>
 
-      <label htmlFor="domain-add-sender-alt" style={{ ...labelStyle, marginTop: 14 }}>{t('admin.accounts.add.senderNameAltLabel')}</label>
-      <input
-        id="domain-add-sender-alt"
-        value={senderNameAlt}
-        maxLength={200}
-        placeholder={t('admin.accounts.add.senderNameAltPh')}
-        onChange={edit(setSenderNameAlt)}
-        style={inputStyle}
-      />
-      <div style={hintStyle}>{t('admin.accounts.add.senderNameAltHint')}</div>
+      <AdvancedConnectionFields managed="domain">
+        <label htmlFor="domain-add-sender-alt" style={{ ...labelStyle, marginTop: 14 }}>{t('admin.accounts.add.senderNameAltLabel')}</label>
+        <input
+          id="domain-add-sender-alt"
+          value={senderNameAlt}
+          maxLength={200}
+          placeholder={t('admin.accounts.add.senderNameAltPh')}
+          onChange={edit(setSenderNameAlt)}
+          style={inputStyle}
+        />
+        <div style={hintStyle}>{t('admin.accounts.add.senderNameAltHint')}</div>
 
-      <label htmlFor="domain-add-name" style={{ ...labelStyle, marginTop: 14 }}>{t('admin.accounts.add.domainNameLabel')}</label>
-      <input
-        id="domain-add-name"
-        value={name}
-        placeholder={t('admin.accounts.add.domainNamePh')}
-        onChange={edit(setName)}
-        style={inputStyle}
-      />
+        <label htmlFor="domain-add-name" style={{ ...labelStyle, marginTop: 14 }}>{t('admin.accounts.add.domainNameLabel')}</label>
+        <input
+          id="domain-add-name"
+          value={name}
+          placeholder={t('admin.accounts.add.domainNamePh')}
+          onChange={edit(setName)}
+          style={inputStyle}
+        />
+      </AdvancedConnectionFields>
 
       {seatsLine}
 

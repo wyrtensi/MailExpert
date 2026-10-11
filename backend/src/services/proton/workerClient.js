@@ -33,7 +33,10 @@ function workerPath(path) {
   return null;
 }
 
-export function createWorkerClient({ socketPath = '/run/mailexpert-proton/worker.sock' } = {}) {
+// The private socket the backend and the worker share (a dedicated runtime directory).
+export const PROTON_WORKER_SOCKET = '/run/mailexpert-proton/worker.sock';
+
+export function createWorkerClient({ socketPath = PROTON_WORKER_SOCKET } = {}) {
   return async function callWorker(method, path, body, { signal, timeoutMs = 15000 } = {}) {
     const requestPath = workerPath(path);
     if (!['GET', 'POST'].includes(method) || !requestPath || !Number.isFinite(timeoutMs) || timeoutMs <= 0) {

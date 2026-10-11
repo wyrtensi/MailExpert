@@ -83,8 +83,10 @@ STUB_EOF
 }
 
 # service_block <file> <service>: the lines of one top-level service in a compose file.
+# A checkout with core.autocrlf (Windows) has CRLF line ends: compared without the CR, like
+# install-id.bats does.
 service_block() {
-  awk -v s="  $2:" '$0 == s {on=1; print; next} on && /^  [a-z]/ {on=0} on && /^[a-z]/ {on=0} on {print}' "$1"
+  tr -d '\r' <"$1" | awk -v s="  $2:" '$0 == s {on=1; print; next} on && /^  [a-z]/ {on=0} on && /^[a-z]/ {on=0} on {print}'
 }
 
 @test "worker_ports_are_private: the compose service publishes nothing and shares only the backend's namespace" {
@@ -101,7 +103,7 @@ service_block() {
   service_block "$prod" proton-worker | grep -q 'mem_limit: 1g'
   # proton_state only in the worker, proton_runtime only in backend and worker.
   [ "$(grep -c 'proton_state:/var/lib/mailexpert-proton' "$base")" -eq 1 ]
-  [ "$(grep -c 'proton_runtime:/run/mailexpert-proton$' "$base")" -eq 2 ]
+  [ "$(tr -d '\r' <"$base" | grep -c 'proton_runtime:/run/mailexpert-proton$')" -eq 2 ]
   service_block "$base" backend | grep -q 'proton_runtime:/run/mailexpert-proton'
   if service_block "$base" backend | grep -q 'proton_state:'; then false; fi
   # No other service joins any namespace; the backend publishes no port either.

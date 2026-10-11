@@ -82,3 +82,31 @@ class SocketTests(unittest.TestCase):
                 server.shutdown()
                 server.server_close()
                 thread.join()
+
+    def test_degraded_health_is_not_200(self):
+        # I-2: a Bridge that should run but does not makes the Docker healthcheck fail.
+        self.assertIsNotNone(create_server, 'UNIX worker is not implemented')
+
+        class Controller:
+            def health(self):
+                return {'state': 'degraded'}
+
+        with tempfile.TemporaryDirectory() as directory:
+            pathname = Path(directory) / 'worker.sock'
+            server = create_server(Controller(), pathname)
+            thread = threading.Thread(target=server.serve_forever, daemon=True)
+            thread.start()
+            try:
+                client = socket.socket(socket.AF_UNIX)
+                client.connect(str(pathname))
+                connection = http.client.HTTPConnection('localhost')
+                connection.sock = client
+                connection.request('GET', '/healthz')
+                response = connection.getresponse()
+                self.assertEqual(response.status, 503)
+                self.assertEqual(json.loads(response.read()), {'state': 'degraded'})
+                connection.close()
+            finally:
+                server.shutdown()
+                server.server_close()
+                thread.join()

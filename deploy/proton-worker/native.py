@@ -131,7 +131,34 @@ class NativeBridge:
             self.callback = callback
             if self.process is not None and self.process.poll() is None:
                 return
+            if self.process is not None:
+                # The previous process died: drop its channel and stream first.
+                self.process.wait(timeout=STOP_TIMEOUT)
+                self._forget()
             self._launch()
+
+    def command(self):
+        # Error level keeps Info records such as HV request details (hvURL/hvToken) out of
+        # the log files; the logs directory itself lives on the per-container tmpfs.
+        return [self.binary, '--grpc', '--no-window', '--log-level', 'error']
+
+    def prepare_logs(self):
+        """Point Bridge's logs directory (XDG_DATA_HOME/.../logs) at the runtime tmpfs.
+
+        Gluon data shares XDG_DATA_HOME and must persist, so only the logs directory is
+        redirected with a symlink; any old persistent logs are deleted.
+        """
+        target = _private_dir(self.runtime_dir / 'logs')
+        logs = self.state_dir / 'data' / 'protonmail' / 'bridge-v3' / 'logs'
+        if logs.is_symlink() and os.path.realpath(logs) == os.path.realpath(target):
+            return
+        for parent in (self.state_dir, self.state_dir / 'data', logs.parent.parent, logs.parent):
+            _private_dir(parent)
+        if logs.is_symlink() or logs.is_file():
+            logs.unlink()
+        elif logs.exists():
+            shutil.rmtree(logs)
+        os.symlink(target, logs)
 
     def _launch(self):
         _private_dir(self.state_dir)
@@ -142,8 +169,9 @@ class NativeBridge:
             self.config_path.unlink()
         except FileNotFoundError:
             pass
+        self.prepare_logs()
         self.process = subprocess.Popen(
-            [self.binary, '--grpc', '--no-window'],
+            self.command(),
             env=self.environment(), cwd=str(self.state_dir), stdin=subprocess.DEVNULL,
             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, close_fds=True)
         try:
@@ -236,12 +264,20 @@ class NativeBridge:
                         _log('event_handler_failed', type(error).__name__)
         except Exception:  # noqa: BLE001 - stream ends on StopEventStream/cancel/exit
             pass
+        # An end we did not request (shutdown/recover bump the epoch first) means Bridge
+        # lost its stream and will quit; tell the controller.
+        if epoch == self.epoch and self.callback is not None:
+            try:
+                self.callback({'kind': 'stream_ended'})
+            except Exception as error:  # noqa: BLE001
+                _log('event_handler_failed', type(error).__name__)
 
     def shutdown(self):
         """StopEventStream, wait for the stream to end, then Quit and wait for exit."""
         with self.lock:
             if self.process is None:
                 return
+            self.epoch += 1
             if self.stub is not None:
                 from google.protobuf import empty_pb2
                 request = empty_pb2.Empty()

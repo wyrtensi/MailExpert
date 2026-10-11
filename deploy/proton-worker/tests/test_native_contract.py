@@ -1,3 +1,5 @@
+import os
+import stat
 import tempfile
 import unittest
 from pathlib import Path
@@ -43,3 +45,27 @@ class NativeContractTests(unittest.TestCase):
             bridge.stub = Stub()
             bridge.shutdown()
             self.assertTrue(process.waited)
+
+    def test_stream_end_is_reported_unless_requested(self):
+        # I-2: an unexpected end of the event stream reaches the controller.
+        with tempfile.TemporaryDirectory() as directory:
+            events = []
+            bridge = NativeBridge(Path(directory), Path(directory))
+            bridge.callback = events.append
+            bridge._pump(iter([]), bridge.epoch)
+            self.assertEqual(events, [{'kind': 'stream_ended'}])
+            bridge._pump(iter([]), bridge.epoch - 1)
+            self.assertEqual(events, [{'kind': 'stream_ended'}])
+
+    def test_native_logs_are_quiet_and_ephemeral(self):
+        # I-6: Bridge logs at error level into the per-container runtime tmpfs, not the state.
+        with tempfile.TemporaryDirectory() as state, tempfile.TemporaryDirectory() as runtime:
+            bridge = NativeBridge(Path(state), Path(runtime))
+            self.assertEqual(bridge.command()[1:], ['--grpc', '--no-window', '--log-level', 'error'])
+            bridge.prepare_logs()
+            logs = Path(state) / 'data' / 'protonmail' / 'bridge-v3' / 'logs'
+            self.assertTrue(logs.is_symlink())
+            self.assertEqual(os.path.realpath(logs), os.path.realpath(Path(runtime) / 'logs'))
+            self.assertEqual(stat.S_IMODE((Path(runtime) / 'logs').stat().st_mode), 0o700)
+            bridge.prepare_logs()
+            self.assertTrue(logs.is_symlink())

@@ -5,10 +5,11 @@ Routes (JSON, bodies <= 64 KiB):
   POST /connections                 {operationId, email, password}
   GET  /connections/:id
   POST /connections/:id/continue    {challenge: "2fa"|"second_password", secret}
-  POST /connections/:id/commit      {userId, generation}
+  POST /connections/:id/commit      {userId, generation, previousGeneration?}
   POST /connections/:id/cancel
-  POST /users/:id/credentials       {operationId} | {generation}
-  POST /users/:id/remove            {generation}
+  POST /users/:id/credentials       {operationId} | {generation, email}
+  POST /users/:id/remove            {generation, email}  (one (user, address) link)
+GET /healthz answers 503 when Bridge should run (links, removals) but does not.
 Request bodies and native details are never logged.
 """
 
@@ -50,14 +51,16 @@ def _routes(controller):
              i, body.get('challenge'), body.get('secret')))),
         ('POST', re.compile(r'^/connections/%s/commit$' % ID),
          lambda body, i: operation(controller.commit_connection(
-             i, body.get('userId'), body.get('generation')))),
+             i, body.get('userId'), body.get('generation'),
+             previous_generation=body.get('previousGeneration')))),
         ('POST', re.compile(r'^/connections/%s/cancel$' % ID),
          lambda body, i: operation(controller.cancel_connection(i))),
         ('POST', re.compile(r'^/users/%s/credentials$' % ID),
          lambda body, i: controller.credentials(
-             i, operation_id=body.get('operationId'), generation=body.get('generation'))),
+             i, operation_id=body.get('operationId'), generation=body.get('generation'),
+             email=body.get('email'))),
         ('POST', re.compile(r'^/users/%s/remove$' % ID),
-         lambda body, i: controller.remove_user(i, body.get('generation'))),
+         lambda body, i: controller.remove_user(i, body.get('generation'), body.get('email'))),
     ]
 
 
@@ -84,7 +87,9 @@ class Handler(BaseHTTPRequestHandler):
             for route_method, pattern, handler in self.server.routes:
                 match = pattern.match(self.path)
                 if match and route_method == method:
-                    self._send(200, handler(body, *match.groups()))
+                    result = handler(body, *match.groups())
+                    degraded = self.path == '/healthz' and result.get('state') == 'degraded'
+                    self._send(503 if degraded else 200, result)
                     return
             raise WorkerError('not_found')
         except WorkerError as error:

@@ -2,9 +2,14 @@
 
 One global login slot serialises the whole native challenge chain. The slot is held from
 Login until a terminal native event has been reconciled (attempt-owned users removed and
-confirmed absent) or the native process has been recovered; cancel and TTL only change the
-public state. Passwords and challenge secrets are passed straight to the native adapter and
-are never stored, persisted or logged.
+confirmed absent) or the native process has been recovered and the users it may have
+created have been reconciled against the snapshot taken before the attempt. Cancel and TTL
+only change the public state. Passwords and challenge secrets are passed straight to the
+native adapter and are never stored, persisted or logged.
+
+Committed state is one link per (native user ID, address): several addresses of one Proton
+account can be linked, each with its own generation. The native user is removed only when
+its last link is removed.
 """
 
 import json
@@ -16,6 +21,7 @@ from pathlib import Path
 
 LOGIN_TTL_SECONDS = 600
 REMOVAL_RETRY_SECONDS = 120
+MAX_REMOVAL_RECOVERIES = 2
 CONNECTED = 2
 ACTIVE_STATES = {'starting', 'authenticating', 'needs_2fa', 'needs_second_password', 'checking'}
 TERMINAL_STATES = {'connected', 'failed', 'cancelled', 'expired'}
@@ -46,6 +52,8 @@ class Operation:
         self.ended_at = None
         self.committed = False
         self.preexisting = set(preexisting)
+        self.reconcile = False
+        self.split_requested = False
 
     def to_dict(self):
         return {'id': self.id, 'state': self.state, 'userId': self.userId,
@@ -62,6 +70,12 @@ def _safe_id(value):
     return value
 
 
+def _safe_email(value):
+    if not isinstance(value, str) or '@' not in value or len(value) > 320:
+        raise WorkerError('worker_invalid_request')
+    return value
+
+
 class BridgeController:
     def __init__(self, native, state_dir, clock=time.monotonic, recovery_seconds=30,
                  ttl_seconds=LOGIN_TTL_SECONDS):
@@ -72,12 +86,15 @@ class BridgeController:
         self.ttl_seconds = ttl_seconds
         self.lock = threading.RLock()
         self.operations = {}
-        self.committed = {}
+        self.links = {}
         self.pending_removals = {}
         self.slot = None
         self.started = False
+        self.native_lost = False
         self.recovering = False
         self.closed = False
+        self.next_start_at = 0
+        self._journal_text = None
         self._load()
 
     # -- journal -----------------------------------------------------------------------
@@ -88,66 +105,98 @@ class BridgeController:
             return
         now = self.clock()
         for item in data.get('operations', []):
-            operation = Operation(item['id'], item.get('email', ''), now)
+            operation = Operation(item['id'], item.get('email', ''), now, item.get('preexisting', []))
             operation.state = item['state']
             operation.userId = item.get('userId')
             operation.createdByAttempt = bool(item.get('createdByAttempt'))
             operation.errorCode = item.get('errorCode')
             operation.committed = bool(item.get('committed'))
+            operation.reconcile = bool(item.get('reconcile'))
             if operation.state in ACTIVE_STATES:
+                # The worker stopped mid-attempt: reconcile users created since the snapshot.
                 operation.state, operation.errorCode = 'failed', 'worker_unavailable'
-                if operation.createdByAttempt and operation.userId:
-                    self.pending_removals[operation.userId] = {'reason': 'attempt', 'since': now}
+                operation.reconcile = True
+            if operation.state in TERMINAL_STATES:
+                operation.ended_at = now
             self.operations[operation.id] = operation
-        self.committed = dict(data.get('committed', {}))
+        for link in data.get('links', []):
+            self.links[(link['userId'], link['email'].lower())] = dict(link)
         for user_id, item in data.get('pendingRemovals', {}).items():
-            self.pending_removals[user_id] = {'reason': item.get('reason', 'remove'), 'since': now}
+            self.pending_removals[user_id] = self._removal(item.get('reason', 'remove'), now)
 
     def _persist(self):
         data = {
-            'operations': [dict(op.to_dict(), email=op.email, committed=op.committed)
+            'operations': [dict(op.to_dict(), email=op.email, committed=op.committed,
+                                preexisting=sorted(op.preexisting), reconcile=op.reconcile)
                            for op in self.operations.values()],
-            'committed': self.committed,
+            'links': sorted(self.links.values(), key=lambda link: (link['userId'], link['email'])),
             'pendingRemovals': {user_id: {'reason': item['reason']}
                                 for user_id, item in self.pending_removals.items()},
         }
+        text = json.dumps(data, sort_keys=True)
+        if text != self._journal_text:
+            self._write(text)
+            self._journal_text = text
+
+    def _write(self, text):
         self.state_dir.mkdir(mode=0o700, parents=True, exist_ok=True)
         target = self.state_dir / JOURNAL
         temporary = self.state_dir / (JOURNAL + '.tmp')
         descriptor = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
         with os.fdopen(descriptor, 'w') as handle:
-            json.dump(data, handle)
+            handle.write(text)
             handle.flush()
             os.fsync(handle.fileno())
         os.replace(temporary, target)
 
     # -- process -----------------------------------------------------------------------
+    def _needs_bridge(self):
+        return bool(self.links or self.pending_removals or
+                    any(op.reconcile for op in self.operations.values()))
+
+    def _alive(self):
+        running = getattr(self.native, 'running', None)
+        return self.started and not self.native_lost and (running is None or running())
+
     def boot(self):
-        """Start Bridge eagerly when committed users or pending removals exist."""
+        """Start Bridge eagerly when links, removals or crash reconciliation exist."""
         with self.lock:
-            if self.committed or self.pending_removals:
+            if self._needs_bridge():
                 self._ensure_started()
-                for user_id in list(self.pending_removals):
-                    self._retry_removal(user_id)
+                self._after_restart()
                 self._persist()
 
     def _ensure_started(self):
-        if self.started:
+        if self._alive():
             return
         try:
-            self.native.start(self._on_event)
+            if self.started:
+                # Bridge died or lost its stream: restart it instead of failing forever.
+                self.native.recover(self._on_event)
+            else:
+                self.native.start(self._on_event)
         except Exception as error:  # noqa: BLE001
+            self.started = False
             _log('native_start_failed ' + type(error).__name__)
             raise WorkerError('worker_unavailable') from None
-        self.started = True
+        was_started, self.started, self.native_lost = self.started, True, False
+        if was_started:
+            self._after_restart()
 
     def health(self):
-        with self.lock:
-            running = getattr(self.native, 'running', lambda: self.started)()
-            state = 'recovering' if self.recovering else ('running' if running else 'idle')
-            return {'state': state, 'loginBusy': self._busy(),
-                    'committedUsers': len(self.committed),
-                    'pendingRemovals': len(self.pending_removals)}
+        # Lock-free on purpose: plain attribute reads, never blocked by native calls.
+        if self.recovering:
+            state = 'recovering'
+        elif self._alive():
+            state = 'running'
+        elif self._needs_bridge():
+            state = 'degraded'
+        else:
+            state = 'idle'
+        return {'state': state, 'loginBusy': self._busy(), 'linkedAddresses': len(self.links),
+                'pendingRemovals': len(self.pending_removals),
+                'stuckRemovals': sum(1 for item in list(self.pending_removals.values())
+                                     if item.get('stuck'))}
 
     def shutdown(self):
         with self.lock:
@@ -162,12 +211,13 @@ class BridgeController:
     # -- login -------------------------------------------------------------------------
     def _busy(self):
         return (self.slot is not None or self.recovering or
-                any(item['reason'] == 'attempt' for item in self.pending_removals.values()))
+                any(item['reason'] == 'attempt' and not item.get('stuck')
+                    for item in list(self.pending_removals.values())))
 
     def start_connection(self, operation_id, email, password):
         _safe_id(operation_id)
-        if not isinstance(email, str) or '@' not in email or len(email) > 320 or \
-                not isinstance(password, str) or not password:
+        _safe_email(email)
+        if not isinstance(password, str) or not password:
             raise WorkerError('worker_invalid_request')
         with self.lock:
             if self.closed:
@@ -180,6 +230,8 @@ class BridgeController:
             if self._busy():
                 raise WorkerError('login_busy')
             self._ensure_started()
+            if self._busy():
+                raise WorkerError('login_busy')
             try:
                 preexisting = self.native.list_users()
             except Exception:  # noqa: BLE001
@@ -193,7 +245,8 @@ class BridgeController:
             except Exception as error:  # noqa: BLE001
                 # The RPC may have reached Bridge; keep the slot until recovery.
                 _log('native_login_failed ' + type(error).__name__)
-                self._fail(operation, 'worker_unavailable')
+                self._end(operation, 'failed', 'worker_unavailable')
+                self._persist()
             return operation
 
     def continue_connection(self, operation_id, challenge, secret):
@@ -209,7 +262,8 @@ class BridgeController:
                 self.native.continue_login(operation.email, challenge, secret)
             except Exception as error:  # noqa: BLE001
                 _log('native_continue_failed ' + type(error).__name__)
-                self._fail(operation, 'worker_unavailable')
+                self._end(operation, 'failed', 'worker_unavailable')
+            self._persist()
             return operation
 
     def cancel_connection(self, operation_id):
@@ -228,7 +282,7 @@ class BridgeController:
         with self.lock:
             return self._operation(operation_id)
 
-    def commit_connection(self, operation_id, user_id, generation):
+    def commit_connection(self, operation_id, user_id, generation, previous_generation=None):
         _safe_id(user_id)
         _safe_id(generation)
         with self.lock:
@@ -237,12 +291,19 @@ class BridgeController:
                 raise WorkerError('not_connected')
             if user_id in self.pending_removals:
                 raise WorkerError('operation_conflict')
-            operation.committed = True
-            self.committed[user_id] = {'generation': generation, 'email': operation.email}
+            key = (user_id, operation.email.lower())
+            existing = self.links.get(key)
+            if existing is not None and existing['generation'] != generation and \
+                    previous_generation != existing['generation']:
+                raise WorkerError('generation_mismatch')
+            self.links[key] = {'userId': user_id, 'email': operation.email, 'generation': generation}
+            if not operation.committed:
+                operation.committed = True
+                operation.ended_at = self.clock()
             self._persist()
             return operation
 
-    def credentials(self, user_id, operation_id=None, generation=None):
+    def credentials(self, user_id, operation_id=None, generation=None, email=None):
         _safe_id(user_id)
         with self.lock:
             if (operation_id is None) == (generation is None):
@@ -253,12 +314,12 @@ class BridgeController:
                     raise WorkerError('not_connected')
                 email = operation.email
             else:
-                entry = self.committed.get(user_id)
-                if entry is None:
+                link = self.links.get((user_id, _safe_email(email).lower()))
+                if link is None:
                     raise WorkerError('not_found')
-                if entry['generation'] != generation:
+                if link['generation'] != generation:
                     raise WorkerError('generation_mismatch')
-                email = entry['email']
+                email = link['email']
             if user_id in self.pending_removals:
                 raise WorkerError('not_connected')
             self._ensure_started()
@@ -280,17 +341,26 @@ class BridgeController:
                 raise WorkerError('address_mismatch')
             return result
 
-    def remove_user(self, user_id, generation):
+    def remove_user(self, user_id, generation, email):
+        """Remove one (user, address) link; the native user goes with its last link."""
         _safe_id(user_id)
         _safe_id(generation)
+        _safe_email(email)
         with self.lock:
-            entry = self.committed.get(user_id)
-            if entry is None:
-                return {'userId': user_id, 'state': 'removing' if user_id in self.pending_removals
-                        else 'removed'}
-            if entry['generation'] != generation:
+            key = (user_id, email.lower())
+            link = self.links.get(key)
+            if link is None:
+                state = 'removing' if user_id in self.pending_removals else 'removed'
+                return {'userId': user_id, 'state': state}
+            if link['generation'] != generation:
                 raise WorkerError('generation_mismatch')
-            self._ensure_started()
+            others = [k for k in self.links if k[0] == user_id and k != key]
+            if not others:
+                self._ensure_started()
+            del self.links[key]
+            if others:
+                self._persist()
+                return {'userId': user_id, 'state': 'unlinked'}
             if user_id not in self.pending_removals:
                 self._begin_removal(user_id, 'remove')
             self._persist()
@@ -299,29 +369,74 @@ class BridgeController:
 
     # -- timers ------------------------------------------------------------------------
     def tick(self):
+        recover = False
         with self.lock:
+            if self.closed:
+                return
             now = self.clock()
-            for operation in list(self.operations.values()):
-                expired = now - operation.created_at >= self.ttl_seconds
-                if expired and operation.state in ACTIVE_STATES:
-                    self._stop_attempt(operation, 'expired')
-                elif expired and operation.state == 'connected' and not operation.committed:
-                    self._end(operation, 'expired')
-                    if operation.createdByAttempt:
-                        self._begin_removal(operation.userId, 'attempt')
-            for user_id, item in list(self.pending_removals.items()):
-                if now - item['since'] >= REMOVAL_RETRY_SECONDS:
-                    self._retry_removal(user_id)
-            holder = self.operations.get(self.slot)
-            recover = (holder is not None and holder.state in TERMINAL_STATES and
-                       holder.ended_at is not None and
-                       now - holder.ended_at >= self.recovery_seconds and
-                       holder.userId not in self.pending_removals)
+            self._expire(now)
+            if not self.recovering:
+                recover = self._removal_timers(now)
+                holder = self.operations.get(self.slot)
+                if (holder is not None and holder.state in TERMINAL_STATES and
+                        holder.ended_at is not None and
+                        now - holder.ended_at >= self.recovery_seconds and
+                        holder.userId not in self.pending_removals):
+                    holder.reconcile = True
+                    recover = True
+                if self.started and not self._alive():
+                    if self._needs_bridge() or self.slot is not None:
+                        recover = True
+                    else:
+                        # Nothing to serve: forget the dead process; next use starts it lazily.
+                        self.started = False
+                        self.native_lost = False
+                elif not self.started and self._needs_bridge() and now >= self.next_start_at:
+                    try:
+                        self._ensure_started()
+                        self._after_restart()
+                    except WorkerError:
+                        self.next_start_at = now + self.recovery_seconds
+            self._prune(now)
             if recover:
                 self.recovering = True
             self._persist()
         if recover:
             self._recover()
+
+    def _expire(self, now):
+        for operation in list(self.operations.values()):
+            expired = now - operation.created_at >= self.ttl_seconds
+            if expired and operation.state in ACTIVE_STATES:
+                self._stop_attempt(operation, 'expired')
+            elif expired and operation.state == 'connected' and not operation.committed:
+                self._end(operation, 'expired')
+                if operation.createdByAttempt:
+                    self._begin_removal(operation.userId, 'attempt')
+
+    def _removal_timers(self, now):
+        """Retry removals; a stuck attempt removal gets bounded process recoveries."""
+        recover = False
+        for user_id, item in list(self.pending_removals.items()):
+            if now - item['since'] < REMOVAL_RETRY_SECONDS:
+                continue
+            if item['reason'] == 'attempt' and not item.get('stuck'):
+                if item['recoveries'] < MAX_REMOVAL_RECOVERIES:
+                    item['recoveries'] += 1
+                    item['since'] = now
+                    recover = True
+                    continue
+                item['stuck'] = True
+                _log('native_removal_stuck')
+            self._retry_removal(user_id)
+        return recover
+
+    def _prune(self, now):
+        for operation_id, operation in list(self.operations.items()):
+            if (operation.state in TERMINAL_STATES and operation.ended_at is not None and
+                    now - operation.ended_at >= self.ttl_seconds and
+                    self.slot != operation_id and not operation.reconcile):
+                del self.operations[operation_id]
 
     def _recover(self):
         _log('native_recovery')
@@ -333,12 +448,47 @@ class BridgeController:
             ok = False
         with self.lock:
             self.recovering = False
-            self.slot = None
-            self.started = ok
-            if ok:
-                for user_id in list(self.pending_removals):
-                    self._retry_removal(user_id)
+            self.started = ok and not self.closed
+            self.native_lost = False
+            if self.started:
+                self._after_restart()
+            else:
+                holder = self.operations.get(self.slot)
+                if holder is not None:
+                    holder.ended_at = self.clock()
             self._persist()
+
+    def _after_restart(self):
+        """Reconcile users a lost terminal event may have left, then free the slot."""
+        earlier_removals = list(self.pending_removals)
+        reconciled = True
+        for operation in list(self.operations.values()):
+            if operation.reconcile:
+                reconciled = self._reconcile_orphans(operation) and reconciled
+        holder = self.operations.get(self.slot)
+        if reconciled and (holder is None or holder.state in TERMINAL_STATES):
+            self.slot = None
+        elif holder is not None:
+            holder.ended_at = self.clock()
+        # A restarted process forgot in-flight deletions: re-issue the earlier ones.
+        for user_id in earlier_removals:
+            self._retry_removal(user_id)
+
+    def _reconcile_orphans(self, operation):
+        try:
+            users = set(self.native.list_users())
+        except Exception as error:  # noqa: BLE001
+            _log('native_reconcile_failed ' + type(error).__name__)
+            return False
+        known = set(operation.preexisting) | {key[0] for key in self.links}
+        known |= set(self.pending_removals)
+        known |= {op.userId for op in self.operations.values()
+                  if op is not operation and op.userId and op.state in ('connected', 'checking')}
+        for user_id in sorted(users - known):
+            _log('native_orphan_user')
+            self._begin_removal(user_id, 'attempt')
+        operation.reconcile = False
+        return True
 
     # -- events ------------------------------------------------------------------------
     def _on_event(self, event):
@@ -351,13 +501,15 @@ class BridgeController:
             elif kind == 'error':
                 self._on_login_error(operation, event.get('code'))
             elif kind == 'hv':
-                if operation is not None:
-                    if operation.state in ACTIVE_STATES:
-                        self._stop_attempt(operation, 'failed', 'verification_required')
+                if operation is not None and operation.state in ACTIVE_STATES:
+                    self._stop_attempt(operation, 'failed', 'verification_required')
             elif kind in ('finished', 'already_logged_in'):
                 self._on_login_finished(operation, kind, event.get('userId'))
             elif kind == 'user_changed':
                 self._on_user_changed(event.get('userId'))
+            elif kind == 'stream_ended':
+                _log('native_stream_ended')
+                self.native_lost = True
             elif kind == 'no_keychain':
                 _log('native_no_keychain')
             self._persist()
@@ -395,9 +547,7 @@ class BridgeController:
             except Exception:  # noqa: BLE001
                 present = True
             if not present:
-                item = self.pending_removals.pop(user_id)
-                if item['reason'] == 'remove':
-                    self.committed.pop(user_id, None)
+                self.pending_removals.pop(user_id)
                 _log('native_user_removed')
         for operation in self.operations.values():
             if operation.state == 'checking' and operation.userId == user_id:
@@ -422,7 +572,7 @@ class BridgeController:
             operation.errorCode = None
             self._release(operation)
             return
-        if not getattr(operation, 'split_requested', False):
+        if not operation.split_requested:
             operation.split_requested = True
             try:
                 self.native.set_split(operation.userId)
@@ -446,9 +596,6 @@ class BridgeController:
         operation.errorCode = code
         operation.ended_at = self.clock()
 
-    def _fail(self, operation, code):
-        self._end(operation, 'failed', code)
-
     def _stop_attempt(self, operation, state, code=None):
         """Change public state; the slot stays until a terminal event or recovery."""
         login_finished = operation.state == 'checking'
@@ -467,22 +614,31 @@ class BridgeController:
         if self.slot == operation.id:
             self.slot = None
 
+    def _removal(self, reason, now):
+        return {'reason': reason, 'since': now, 'recoveries': 0, 'stuck': False}
+
     def _begin_removal(self, user_id, reason):
-        self.pending_removals[user_id] = {'reason': reason, 'since': self.clock()}
+        item = self.pending_removals.get(user_id)
+        if item is None:
+            item = self.pending_removals[user_id] = self._removal(reason, self.clock())
+        else:
+            item['since'] = self.clock()
+            if reason == 'remove':
+                item['reason'] = reason
         try:
             self.native.remove_user(user_id)
         except Exception as error:  # noqa: BLE001
             _log('native_remove_failed ' + type(error).__name__)
 
     def _retry_removal(self, user_id):
-        item = self.pending_removals[user_id]
+        if user_id not in self.pending_removals:
+            return
         try:
             present = user_id in self.native.list_users()
-        except Exception:  # noqa: BLE001
+        except Exception as error:  # noqa: BLE001
+            _log('native_list_failed ' + type(error).__name__)
             return
         if not present:
             self.pending_removals.pop(user_id)
-            if item['reason'] == 'remove':
-                self.committed.pop(user_id, None)
             return
-        self._begin_removal(user_id, item['reason'])
+        self._begin_removal(user_id, self.pending_removals[user_id]['reason'])

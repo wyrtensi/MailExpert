@@ -15,7 +15,7 @@ PROTON_STATE_ARCHIVE=proton-state.tar
 PROTON_WORKER_UID=1000
 # Set by proton_snapshot_begin while the worker's snapshot gate is closed; PROTON_REFUSAL is why
 # it was not (called directly, never in a command substitution: these globals must survive).
-PROTON_SNAPSHOT='' PROTON_REFUSAL='' PROTON_RENEWER=''
+PROTON_SNAPSHOT='' PROTON_REFUSAL='' PROTON_RENEWER='' PROTON_RENEW_FAILED=''
 
 # commit_has_proton_worker <repository> <commit>: status 0 when <commit> ships the worker. The
 # target commit decides, never the running version: older versions and their backups have none.
@@ -60,6 +60,29 @@ proton_container() {
 # on its private socket. Prints the JSON answer; status 1 for anything but 2xx.
 proton_request() {
   app_compose exec -T proton-worker python /opt/mailexpert-proton/worker.py --request "$@"
+}
+
+# proton_renew <id>: one renewal of the snapshot gate, bounded by PROTON_RENEW_TIMEOUT (30 s) so a
+# stuck exec cannot eat the gate's 5-minute margin. Status 0 only when the worker still holds
+# <id>; the answer on stdout.
+proton_renew() {
+  local answer
+  answer=$(timeout "${PROTON_RENEW_TIMEOUT:-30}" "${APP_COMPOSE[@]}" exec -T proton-worker \
+    python /opt/mailexpert-proton/worker.py --request POST /snapshot/renew "$1") || return 1
+  printf '%s\n' "$answer"
+  [ "$(jq -r '.snapshotId // empty' <<<"$answer" 2>/dev/null)" = "$1" ]
+}
+
+# proton_snapshot_check <id>: right before and right after the capture of the worker's state the
+# backup's own gate must still be held (renewed here synchronously), and the background renewer
+# must not have failed; otherwise Bridge may have run during the capture and the backup stops.
+proton_snapshot_check() {
+  [ -n "$1" ] || return 0
+  if [ -n "$PROTON_RENEW_FAILED" ] && [ -s "$PROTON_RENEW_FAILED" ]; then
+    die "the backup lost its Proton snapshot gate: renewing the gate failed during the backup; nothing is uploaded"
+  fi
+  proton_renew "$1" >/dev/null ||
+    die "the backup lost its Proton snapshot gate (expired, or the worker restarted): Bridge may have run during the capture; nothing is uploaded"
 }
 
 # proton_error <JSON answer>: its errorCode, or worker_unavailable.
@@ -114,14 +137,23 @@ proton_snapshot_begin() {
 # proton_snapshot_end: opens the gate again and lets the worker restart Bridge. Safe to call
 # again (the EXIT trap); a failure is a warning: restarting the worker opens it as well.
 proton_snapshot_end() {
+  local answer
   if [ -n "$PROTON_RENEWER" ]; then
     kill "$PROTON_RENEWER" 2>/dev/null || true
     wait "$PROTON_RENEWER" 2>/dev/null || true
     PROTON_RENEWER=''
   fi
+  if [ -n "$PROTON_RENEW_FAILED" ]; then
+    rm -f "$PROTON_RENEW_FAILED"
+    PROTON_RENEW_FAILED=''
+  fi
   [ -n "$PROTON_SNAPSHOT" ] || return 0
-  if proton_request POST /snapshot/end "$PROTON_SNAPSHOT" >/dev/null; then
+  if answer=$(proton_request POST /snapshot/end "$PROTON_SNAPSHOT"); then
     PROTON_SNAPSHOT=''
+    if [ "$(jq -r '.ended' <<<"$answer" 2>/dev/null)" = false ]; then
+      warn "the Proton snapshot gate was gone before the backup ended it (expired, or the worker restarted)"
+      return 2
+    fi
     log "proton worker: snapshot gate open"
     return 0
   fi
@@ -134,7 +166,7 @@ proton_snapshot_end() {
 proton_refusal_text() {
   case $PROTON_REFUSAL in
     snapshot_busy)
-      printf '%s\n' "the Proton worker did not stop for the backup (snapshot_busy: a Proton send or sign-in did not finish within 60 s); nothing was dumped. A send stuck for good is released only by a restart of the worker once the old backend has stopped: docker compose -p $CFG_PROJECT restart backend proton-worker" ;;
+      printf '%s\n' "the Proton worker did not stop for the backup (snapshot_busy: a Proton send or sign-in did not finish within 60 s); nothing was dumped. A send stuck for good is released only once the old backend has stopped: docker compose -p $CFG_PROJECT stop backend proton-worker, then install.sh --prefix $OPT_PREFIX (it recreates both and checks the namespace)" ;;
     *)
       printf '%s\n' "the Proton worker did not stop for the backup ($PROTON_REFUSAL); nothing was dumped: see docker compose -p $CFG_PROJECT logs proton-worker" ;;
   esac
@@ -142,14 +174,25 @@ proton_refusal_text() {
 
 # proton_start_renewer <id>: renews the gate every PROTON_RENEW_SECONDS (60) while this shell
 # lives, in the background (PROTON_RENEWER).
+# A failed renewal is a warning and recorded in PROTON_RENEW_FAILED, which proton_snapshot_check
+# turns into a failed backup. The renewer closes the backup's lock descriptors: a backup killed
+# without its exit trap must not keep backup.lock, update.lock or install.lock held through it.
 proton_start_renewer() {
-  local id=$1 parent=$$ every=${PROTON_RENEW_SECONDS:-60}
+  local id=$1 parent=$$ every=${PROTON_RENEW_SECONDS:-60} fd
+  PROTON_RENEW_FAILED=$(mktemp)
   (
+    for fd in ${BACKUP_FD:-} ${UPDATE_FD:-} ${INSTALL_FD:-} ${UPDATE_LOCK_FD:-}; do
+      [[ $fd =~ ^[0-9]+$ ]] && eval "exec $fd>&-"
+    done
     while sleep "$every"; do
       kill -0 "$parent" 2>/dev/null || exit 0
-      proton_request POST /snapshot/renew "$id" >/dev/null 2>&1 || true
+      if ! proton_renew "$id" >/dev/null 2>&1; then
+        kill -0 "$parent" 2>/dev/null || exit 0
+        printf 'renew failed\n' >>"$PROTON_RENEW_FAILED"
+        warn "renewing the Proton snapshot gate failed; this backup will stop before its upload"
+      fi
     done
-  ) </dev/null >/dev/null 2>&1 &
+  ) </dev/null >/dev/null &
   PROTON_RENEWER=$!
 }
 

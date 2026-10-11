@@ -36,8 +36,16 @@ case " $* " in
     if [ -n "${DOCKER_SNAPSHOT_TIMEOUT:-}" ]; then echo '{"error":"timeout","errorCode":"worker_unavailable","httpStatus":0}'; exit 1; fi
     echo '{"state":"snapshot","linkedAddresses":2,"sendLeases":0,"httpStatus":200}' ;;
   *" exec -T proton-worker python "*"/snapshot/end backup-old "*) : >"$BATS_TEST_TMPDIR/stale-ended"; echo '{"state":"idle","httpStatus":200}' ;;
-  *" exec -T proton-worker python "*"/snapshot/end"*) : >"$BATS_TEST_TMPDIR/gate-open"; echo '{"state":"running","httpStatus":200}' ;;
-  *" exec -T proton-worker python "*"/snapshot/renew"*) echo renew >>"$BATS_TEST_TMPDIR/renewals"; echo '{"state":"snapshot","httpStatus":200}' ;;
+  *" exec -T proton-worker python "*"/snapshot/end"*)
+    : >"$BATS_TEST_TMPDIR/gate-open"
+    if [ -n "${DOCKER_GATE_LOST:-}" ]; then echo '{"state":"running","ended":false,"httpStatus":200}'
+    else echo '{"state":"running","ended":true,"httpStatus":200}'; fi ;;
+  *" exec -T proton-worker python "*"/snapshot/renew"*)
+    echo renew >>"$BATS_TEST_TMPDIR/renewals"
+    if [ -n "${DOCKER_RENEW_HANG:-}" ]; then exec sleep 5; fi
+    if [ -n "${DOCKER_GATE_LOST:-}" ]; then echo '{"errorCode":"operation_conflict","httpStatus":409}'; exit 1; fi
+    id=${!#}
+    echo "{\"state\":\"snapshot\",\"snapshotId\":\"$id\",\"httpStatus\":200}" ;;
   *" exec -T proton-worker python "*"/healthz"*)
     if [ -n "${DOCKER_STALE_GATE:-}" ]; then echo '{"state":"snapshot","snapshotId":"backup-old","httpStatus":200}'
     else echo '{"state":"idle","snapshotId":null,"httpStatus":200}'; fi ;;
@@ -83,23 +91,23 @@ service_block() {
   local base=$REPO_DIR/docker-compose.yml prod=$REPO_DIR/deploy/compose.prod.yml block
   block=$(service_block "$base" proton-worker)
   grep -q '^    network_mode: service:backend$' <<<"$block"
-  ! grep -q 'ports:' <<<"$block"
-  ! grep -q 'docker.sock' <<<"$block"
+  if grep -q 'ports:' <<<"$block"; then false; fi
+  if grep -q 'docker.sock' <<<"$block"; then false; fi
   grep -A2 'depends_on:' <<<"$block" | grep -q 'backend:'
   grep -A3 'depends_on:' <<<"$block" | grep -q 'condition: service_started'
   grep -q 'user: "1000:1000"' <<<"$block"
   grep -q 'read_only: true' <<<"$block"
-  ! service_block "$prod" proton-worker | grep -q 'ports:'
+  if service_block "$prod" proton-worker | grep -q 'ports:'; then false; fi
   service_block "$prod" proton-worker | grep -q 'mem_limit: 1g'
   # proton_state only in the worker, proton_runtime only in backend and worker.
   [ "$(grep -c 'proton_state:/var/lib/mailexpert-proton' "$base")" -eq 1 ]
   [ "$(grep -c 'proton_runtime:/run/mailexpert-proton$' "$base")" -eq 2 ]
   service_block "$base" backend | grep -q 'proton_runtime:/run/mailexpert-proton'
-  ! service_block "$base" backend | grep -q 'proton_state'
+  if service_block "$base" backend | grep -q 'proton_state:'; then false; fi
   # No other service joins any namespace; the backend publishes no port either.
   [ "$(grep -c 'network_mode:' "$base")" -eq 1 ]
-  ! service_block "$base" backend | grep -q 'ports:'
-  ! service_block "$prod" backend | grep -q 'ports:'
+  if service_block "$base" backend | grep -q 'ports:'; then false; fi
+  if service_block "$prod" backend | grep -q 'ports:'; then false; fi
 }
 
 @test "worker_ports_are_private: a running worker with a published port, or a neighbour in the namespace, is a problem" {
@@ -149,7 +157,7 @@ service_block() {
   git -C "$repo" add -A && git -C "$repo" -c user.name=t -c user.email=t@example.com commit -q -m new
   new=$(git -C "$repo" rev-parse HEAD)
   APP_DIR=$repo
-  ! commit_has_proton_worker "$repo" "$old"
+  if commit_has_proton_worker "$repo" "$old"; then false; fi
   commit_has_proton_worker "$repo" "$new"
   [ "$(target_images "$old" sha-old '')" = "ghcr.io/o/mailexpert-backend:sha-old
 ghcr.io/o/mailexpert-frontend:sha-old" ]
@@ -248,7 +256,7 @@ ghcr.io/o/mailexpert-proton-worker:sha-new" ]
   [[ $output == *"holds no Proton worker state: the worker's state was cleared, managed Proton mailboxes need reconnecting"* ]]
   grep -q 'run --rm -i --network none --user 0' "$DOCKER_LOG"
   grep -q 'sh 1000 clear$' "$DOCKER_LOG"
-  ! grep -q 'sh 1000 restore$' "$DOCKER_LOG"
+  if grep -q 'sh 1000 restore$' "$DOCKER_LOG"; then false; fi
   # With the archive: it goes to the helper on stdin, as root without network, on the worker's volumes.
   printf 'archive' >"$dir/proton-state.tar"
   : >"$DOCKER_LOG"
@@ -352,4 +360,62 @@ STUB_EOF
   [ -z "$(proton_snapshot_problem idle 0)" ]
   [[ $(proton_snapshot_problem snapshot 0) == *"snapshot gate is closed with no backup running"* ]]
   grep -q 'proton_snapshot_problem' "$DEPLOY_DIR/status.sh"
+}
+
+@test "Important A: the backup verifies its own gate around the capture and fails when it is gone" {
+  proton_snapshot_begin snap-1 2>/dev/null
+  run proton_snapshot_check snap-1
+  [ "$status" -eq 0 ]
+  DOCKER_GATE_LOST=1 run proton_snapshot_check snap-1
+  [ "$status" -ne 0 ]
+  [[ $output == *"lost its Proton snapshot gate"* ]]
+  # /snapshot/end that did not close our gate fails the backup.
+  DOCKER_GATE_LOST=1 run proton_snapshot_end
+  [ "$status" -ne 0 ]
+  [[ $output == *"the Proton snapshot gate was gone before the backup ended it"* ]]
+  proton_snapshot_end 2>/dev/null
+  # backup.sh: checked after the dump (right before the state) and right after the state, and
+  # the end's answer decides.
+  local dump before stage after end
+  dump=$(grep -n '^  dump_database "\$STAGING"' "$DEPLOY_DIR/backup.sh" | cut -d: -f1)
+  before=$(grep -n '^  proton_snapshot_check "\$PROTON_SNAPSHOT"' "$DEPLOY_DIR/backup.sh" | head -n 1 | cut -d: -f1)
+  stage=$(grep -n '^  stage_proton_state "\$STAGING"' "$DEPLOY_DIR/backup.sh" | cut -d: -f1)
+  after=$(grep -n '^  proton_snapshot_check "\$PROTON_SNAPSHOT"' "$DEPLOY_DIR/backup.sh" | tail -n 1 | cut -d: -f1)
+  end=$(grep -n '^  proton_snapshot_end || die' "$DEPLOY_DIR/backup.sh" | cut -d: -f1)
+  [ -n "$dump" ]
+  [ -n "$before" ]
+  [ -n "$end" ]
+  [ "$dump" -lt "$before" ]
+  [ "$before" -lt "$stage" ]
+  [ "$stage" -lt "$after" ]
+  [ "$after" -lt "$end" ]
+}
+
+@test "Important A: a stuck renew times out and the failure is surfaced and fails the check" {
+  export PROTON_RENEW_SECONDS=0.2 PROTON_RENEW_TIMEOUT=1 DOCKER_RENEW_HANG=1
+  proton_snapshot_begin snap-1 2>"$BATS_TEST_TMPDIR/err"
+  sleep 3
+  grep -q 'renewing the Proton snapshot gate failed' "$BATS_TEST_TMPDIR/err"
+  unset DOCKER_RENEW_HANG
+  run proton_snapshot_check snap-1
+  [ "$status" -ne 0 ]
+  [[ $output == *"renewing the gate failed during the backup"* ]]
+  proton_snapshot_end 2>/dev/null || true
+}
+
+@test "Minor C: the renewer does not hold the backup's lock descriptors" {
+  local lock=$BATS_TEST_TMPDIR/backup.lock fd
+  export PROTON_RENEW_SECONDS=5
+  exec {BACKUP_FD}>"$lock"
+  flock -n "$BACKUP_FD"
+  proton_snapshot_begin snap-1 2>/dev/null
+  sleep 0.3
+  if ls -l "/proc/$PROTON_RENEWER/fd" | grep -q "$lock"; then false; fi
+  proton_snapshot_end 2>/dev/null
+  exec {BACKUP_FD}>&-
+}
+
+@test "Minor B: a stuck sender is cleared by stopping backend and worker, then install.sh" {
+  PROTON_REFUSAL=snapshot_busy OPT_PREFIX=/opt/x run proton_refusal_text
+  [[ $output == *"docker compose -p me-test stop backend proton-worker, then install.sh --prefix /opt/x"* ]]
 }

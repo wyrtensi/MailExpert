@@ -298,8 +298,11 @@ main() {
   proton_snapshot_begin "backup-$(gen_hex 6)" >/dev/null ||
     die "$(proton_refusal_text)"
   dump_database "$STAGING"
+  # The gate must have held through the dump and must hold through the state's capture.
+  proton_snapshot_check "$PROTON_SNAPSHOT"
   stage_proton_state "$STAGING"
-  proton_snapshot_end || true
+  proton_snapshot_check "$PROTON_SNAPSHOT"
+  proton_snapshot_end || die "the Proton worker's gate was not held to the end of the capture; nothing is uploaded"
   seconds=$((SECONDS - started))
   bytes=$(stat -c %s "$STAGING/db.dump")
   counts=$(<"$STAGING/counts.json")

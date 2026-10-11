@@ -240,6 +240,17 @@ class SnapshotGateTests(unittest.TestCase):
         with self.assertRaisesRegex(WorkerError, '^operation_conflict$'):
             self.controller.snapshot_renew('snap-1')
 
+    def test_end_reports_whether_it_closed_the_callers_gate(self):
+        self.link()
+        self.controller.snapshot_begin('snap-1')
+        self.assertTrue(self.controller.snapshot_end('snap-1')['ended'])
+        # The gate is gone already (expired, a worker restart): the caller learns it.
+        self.assertFalse(self.controller.snapshot_end('snap-1')['ended'])
+        self.controller.snapshot_begin('snap-2')
+        self.clock += 301
+        self.controller.tick()
+        self.assertFalse(self.controller.snapshot_end('snap-2')['ended'])
+
     def test_backend_lease_id_is_idempotent(self):
         self.assertEqual(self.controller.acquire_send_lease('lease-a'), {'leaseId': 'lease-a'})
         self.assertEqual(self.controller.acquire_send_lease('lease-a'), {'leaseId': 'lease-a'})

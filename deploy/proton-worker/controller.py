@@ -493,15 +493,19 @@ class BridgeController:
             return self.health()
 
     def snapshot_end(self, snapshot_id):
-        """Open the gate again and start Bridge when links or removals need it."""
+        """Open the gate again and start Bridge when links or removals need it.
+
+        ended tells the caller whether its gate was still held: false when it expired or the
+        worker restarted, so a capture made under it cannot be trusted.
+        """
         _safe_id(snapshot_id)
         with self.lock:
             if self.snapshot is None:
-                return self.health()
+                return dict(self.health(), ended=False)
             if self.snapshot != snapshot_id:
                 raise WorkerError('operation_conflict')
             self._open_gate('snapshot_end')
-            return self.health()
+            return dict(self.health(), ended=True)
 
     def snapshot_renew(self, snapshot_id):
         """The holder is alive: the gate stays closed snapshot_ttl_seconds longer."""

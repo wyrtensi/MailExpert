@@ -131,6 +131,12 @@ const SAME_VALUE_ALLOWED = {
   'admin.accounts.add.yahooTitle':           'any', // Yahoo — a tile of "Add account", a product name
   'admin.accounts.add.mailruTitle':          'any', // Mail.ru — a tile of "Add account", a product name
   'admin.accounts.add.icloudTitle':          'any', // iCloud — a tile of "Add account", a product name
+  'admin.accounts.provider.gmail':            'any', // product name, same in both languages
+  'admin.accounts.provider.microsoft':        'any', // product name, same in both languages
+  'admin.accounts.provider.proton':           'any', // product name, same in both languages
+  'admin.accounts.provider.yahoo':            'any', // product name, same in both languages
+  'admin.accounts.provider.mailru':           'any', // product name, same in both languages
+  'admin.accounts.provider.icloud':           'any', // product name, same in both languages
   'admin.accounts.add.addressPh':            'any', // name@example.com
   'admin.accounts.add.protonAddressPh':      'any', // name@proton.me
   'admin.accounts.add.securityImplicit':     'any', // SSL/TLS — protocol names

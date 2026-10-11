@@ -1573,7 +1573,25 @@
         "errorDeletionPending": "Ящик ожидает удаления: сначала отмените удаление."
       },
       "errorConnectionAdminOnly": "Настройки сервера ящика может менять только администратор. Обратитесь к администратору.",
-      "errorOAuthMailboxNotFound": "Этот ящик не входит через Google или Microsoft, сбрасывать нечего."
+      "errorOAuthMailboxNotFound": "Этот ящик не входит через Google или Microsoft, сбрасывать нечего.",
+      "provider": {
+        "gmail": "Gmail",
+        "microsoft": "Microsoft",
+        "domain": "Наш ящик",
+        "proton": "Proton",
+        "yahoo": "Yahoo",
+        "yandex": "Яндекс Почта",
+        "mailru": "Mail.ru",
+        "icloud": "iCloud",
+        "other": "Другой"
+      },
+      "mode": {
+        "preset": "Готовые серверы",
+        "managed": "Управляемое",
+        "manual": "Ручные настройки"
+      },
+      "protonReconnect": "Войти в Proton заново",
+      "managedServerNote": "Подключение этого ящика управляется MailExpert и здесь не меняется. Чтобы использовать другие настройки, добавьте ящик заново как «Другой»."
     },
     "folderMappings": {
       "title": "Сопоставление папок",

@@ -241,7 +241,6 @@ test('as a plain user the admin routes answer 403, the user routes still answer'
       ['GET', '/integrations'],
       ['POST', '/integrations/microsoft', {}],
       ['POST', '/categories/sources', {}],
-      ['POST', '/accounts', { name: 'x' }],
       ['POST', '/accounts/demo-gmail/threading/preview', {}],
       ['PATCH', '/plugins/gtd', { enabled: false }],
     ];

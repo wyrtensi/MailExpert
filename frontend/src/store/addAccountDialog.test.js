@@ -51,3 +51,14 @@ test('closing the settings does not close the dialog opened over them, and still
   assert.equal(useStore.getState().showAddAccountDialog, true);
   assert.equal(useStore.getState().accountSettingsRequested, null);
 });
+
+test('openProtonReconnect opens the dialog with the mailbox as the Proton seed, and closing drops the seed', () => {
+  useStore.getState().openProtonReconnect({ id: 'a9', email_address: 'team@proton.test', password: 'never-kept', extra: 1 });
+  const state = useStore.getState();
+  assert.equal(state.showAddAccountDialog, true);
+  assert.deepEqual(state.addAccountSeed, { id: 'a9', email_address: 'team@proton.test' });
+  useStore.getState().closeAddAccount();
+  assert.equal(useStore.getState().addAccountSeed, null);
+  useStore.getState().openAddAccount();
+  assert.equal(useStore.getState().addAccountSeed, null, 'a plain open carries no seed');
+});

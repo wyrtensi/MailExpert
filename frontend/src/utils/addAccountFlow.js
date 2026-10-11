@@ -4,7 +4,9 @@
 // and die with it.
 import { ADD_ACCOUNT_KINDS } from './addAccount.js';
 
-export function initialAddAccountFlow() {
+// A seed (the mailbox a Proton reconnect came from) opens the Proton form with its address.
+export function initialAddAccountFlow(seed = null) {
+  if (seed?.id && typeof seed.email_address === 'string') return { screen: 'form', provider: 'proton', email: seed.email_address };
   return { screen: 'picker', provider: null, email: '' };
 }
 

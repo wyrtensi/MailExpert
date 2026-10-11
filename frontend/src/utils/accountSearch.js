@@ -18,12 +18,33 @@ function providerHost(host) {
 
 // Words a person may use for the provider, whatever the interface language: the identifiers the
 // server stores, plus the names of the products behind them.
+// Names a person may type for each mail_provider and connection_mode the server stores, in both
+// interface languages. The mail server is indexed only when it names a real service: the
+// loopback address of a managed Proton mailbox says nothing about it.
+const PROVIDER_NAMES = {
+  proton: ['proton', 'protonmail', 'proton mail', 'протон'],
+  yahoo: ['yahoo', 'ямху', 'яху'],
+  yandex: ['yandex', 'яндекс'],
+  mailru: ['mail.ru', 'mailru', 'майл', 'мейл', 'мэйл'],
+  icloud: ['icloud', 'apple', 'айклауд', 'эппл'],
+  other: ['other', 'imap', 'другой'],
+};
+const MODE_NAMES = {
+  preset: ['preset', 'готовый', 'пресет'],
+  managed: ['managed', 'bridge', 'управляемый', 'управляемое'],
+  manual: ['manual', 'ручной', 'ручное'],
+};
+const LOOPBACK_HOST = /^(127\.\d+\.\d+\.\d+|localhost|\[?::1\]?)$/i;
+
 function providerWords(account, mailNodeLabel) {
   const words = [];
   if (account.oauth_provider === 'google') words.push('google', 'gmail');
   else if (account.oauth_provider === 'microsoft') words.push('microsoft', 'outlook', 'office 365');
   if (account.mail_node === true) words.push('mail node', mailNodeLabel);
-  words.push(providerHost(account.imap_host));
+  if (Object.hasOwn(PROVIDER_NAMES, account.mail_provider)) words.push(...PROVIDER_NAMES[account.mail_provider]);
+  if (Object.hasOwn(MODE_NAMES, account.connection_mode)) words.push(...MODE_NAMES[account.connection_mode]);
+  const host = providerHost(account.imap_host);
+  if (!LOOPBACK_HOST.test(host)) words.push(host);
   return words;
 }
 

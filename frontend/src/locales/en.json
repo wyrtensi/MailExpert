@@ -1537,7 +1537,25 @@
         "errorDeletionPending": "This mailbox is pending deletion: cancel the deletion first."
       },
       "errorConnectionAdminOnly": "Only an administrator can change the server settings of a mailbox. Ask an administrator.",
-      "errorOAuthMailboxNotFound": "This mailbox does not sign in with Google or Microsoft, so there is nothing to reset."
+      "errorOAuthMailboxNotFound": "This mailbox does not sign in with Google or Microsoft, so there is nothing to reset.",
+      "provider": {
+        "gmail": "Gmail",
+        "microsoft": "Microsoft",
+        "domain": "Our mailbox",
+        "proton": "Proton",
+        "yahoo": "Yahoo",
+        "yandex": "Yandex Mail",
+        "mailru": "Mail.ru",
+        "icloud": "iCloud",
+        "other": "Other"
+      },
+      "mode": {
+        "preset": "Preset servers",
+        "managed": "Managed",
+        "manual": "Manual settings"
+      },
+      "protonReconnect": "Sign in to Proton again",
+      "managedServerNote": "The connection of this mailbox is managed by MailExpert and cannot be changed here. To use other settings, add the mailbox again as Other."
     },
     "folderMappings": {
       "title": "Folder mappings",

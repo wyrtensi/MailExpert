@@ -12,6 +12,7 @@ import FolderPathLabel from './FolderPathLabel.jsx';
 import { folderMatchesQuery } from '../utils/folderDisplay.js';
 import { useUiScale, descale } from '../hooks/useUiScale.js';
 import { useMobile } from '../hooks/useMobile.js';
+import { isSnoozedFolder } from '../utils/snoozedFolder.js';
 
 // The spam-folder rule shared with MessagePane.jsx and the reply/forward helpers; it mirrors
 // resolveAllSpamPaths on the backend.
@@ -231,7 +232,7 @@ export default function ContextMenu({ x, y, message, onClose, onAction, defaultM
           icon: <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.75"><rect x="2" y="3" width="20" height="5" rx="1"/><path d="M4 8v11a1 1 0 001 1h14a1 1 0 001-1V8"/><polyline points="9 13 12 16 15 13"/><line x1="12" y1="11" x2="12" y2="16"/></svg>,
           action: () => onAction('archive'),
         }]),
-        ...(message.folder !== 'Snoozed' && menuPolicy.snooze ? [{
+        ...(!isSnoozedFolder(message.folder) && menuPolicy.snooze ? [{
           label: t('contextMenu.snooze.label'),
           icon: <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.75"><circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/></svg>,
           action: () => setSnoozeView(true),

@@ -682,8 +682,15 @@ export const useStore = create((set, get) => ({
   // mailbox filter, the selected mailbox, folder, letter and search all stay under the dialog.
   // The dialog's own screen, typed address and passwords are local to it, never kept here.
   showAddAccountDialog: false,
-  openAddAccount: () => set({ showAddAccountDialog: true }),
-  closeAddAccount: () => set({ showAddAccountDialog: false }),
+  // The mailbox a Proton reconnect came from (id and address only): the dialog opens on the Proton
+  // form with the address filled in. Any other open, and closing, drop it.
+  addAccountSeed: null,
+  openAddAccount: () => set({ showAddAccountDialog: true, addAccountSeed: null }),
+  openProtonReconnect: (account) => set({
+    showAddAccountDialog: true,
+    addAccountSeed: account?.id ? { id: account.id, email_address: account.email_address } : null,
+  }),
+  closeAddAccount: () => set({ showAddAccountDialog: false, addAccountSeed: null }),
   // Set by the sidebar's "Account settings" item with the account's id: the accounts tab opens
   // that account's own settings view (the edit form) and clears it. Same hand-off as above, so
   // the target survives the tab not being mounted yet.

@@ -110,3 +110,11 @@ describe('newAttemptId without crypto.randomUUID (plain-HTTP installs)', () => {
     }
   });
 });
+
+describe('flow seeded for a Proton reconnect', () => {
+  test('starts on the Proton form with the mailbox address typed in', () => {
+    assert.deepEqual(initialAddAccountFlow({ id: 'a1', email_address: 'team@proton.test' }),
+      { screen: 'form', provider: 'proton', email: 'team@proton.test' });
+    assert.deepEqual(initialAddAccountFlow(null), { screen: 'picker', provider: null, email: '' });
+  });
+});

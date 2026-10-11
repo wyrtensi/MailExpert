@@ -185,3 +185,12 @@ describe('canReconnectOAuth', () => {
     assert.equal(canReconnectOAuth({ oauth_provider: 'google' }, { isAdmin: false }), true);
   });
 });
+
+describe('HEALTH_COLORS', () => {
+  it('has a theme colour for every health code, the Proton codes included', async () => {
+    const { HEALTH_COLORS, ACCOUNT_HEALTH_CODES } = await import('./accountHealth.js');
+    for (const code of ACCOUNT_HEALTH_CODES) assert.match(HEALTH_COLORS[code], /^var\(--/, code);
+    assert.equal(HEALTH_COLORS.proton_reconnect_required, 'var(--red)');
+    assert.equal(HEALTH_COLORS.proton_unavailable, 'var(--amber)');
+  });
+});

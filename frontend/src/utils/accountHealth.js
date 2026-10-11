@@ -32,6 +32,18 @@ export const HEALTH_LABEL_KEYS = Object.freeze({
   disabled: 'sidebar.health.disabled',
 });
 
+// Theme variables per health code, so the sidebar indicator follows light and dark themes. A lost
+// Proton session needs the person (red); a Proton service that is only unavailable may recover (amber).
+export const HEALTH_COLORS = Object.freeze({
+  healthy: 'var(--green)',
+  stale: 'var(--amber)',
+  failed: 'var(--red)',
+  oauth_reconnect_required: 'var(--red)',
+  proton_reconnect_required: 'var(--red)',
+  proton_unavailable: 'var(--amber)',
+  disabled: 'var(--text-tertiary)',
+});
+
 // Microsoft connect entry (AdminPanel → Integrations adds a mailbox through it; a reconnect names
 // the mailbox, utils/microsoftOAuth.js).
 export { MICROSOFT_OAUTH_PATH };

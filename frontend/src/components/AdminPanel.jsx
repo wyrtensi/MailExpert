@@ -48,14 +48,15 @@ import MailNodeOutagesSection from './MailNodeOutagesSection.jsx';
 import PanelUpdateSection from './PanelUpdateSection.jsx';
 import MailNodeQuarantine from './MailNodeQuarantine.jsx';
 import MailNodeForeignAliases from './MailNodeForeignAliases.jsx';
-import { accountUpdateFromForm } from '../utils/accountUpdate.js';
+import { accountUpdateFromForm, hasLockedConnection } from '../utils/accountUpdate.js';
+import { accountProviderLabels } from '../utils/accountProvider.js';
 import {
   canDeactivate, canDeleteAccount, isForeignNodeAlias, isMailNodeErrorCode, isNodeMailbox, isReadOnlyMailbox, mailNodeErrorKey,
   nodeMailboxDeactivateDialog, nodeMailboxDeleteDialog, pendingDeletion,
 } from '../utils/mailNode.js';
 import MailboxDeletionNotice, { MailboxDeactivatedNotice, TenantPendingLine } from './MailboxDeletionNotice.jsx';
 import { openOAuthWindow } from '../utils/oauthWindow.js';
-import { MICROSOFT_OAUTH_PATH, reconnectUrlFor } from '../utils/accountHealth.js';
+import { HEALTH_COLORS, HEALTH_LABEL_KEYS, MICROSOFT_OAUTH_PATH, reconnectUrlFor } from '../utils/accountHealth.js';
 import { isGoogleReconnectRequired } from '../utils/googleOAuth.js';
 import { microsoftOAuthErrorKey } from '../utils/microsoftOAuth.js';
 import { getEffectiveShortcuts, getGroupedActions, ACTION_DEFS, SPECIAL_KEY_LABELS, parseModKey, modLabel } from '../utils/defaultShortcuts.js';
@@ -126,7 +127,7 @@ export function AccountForm({ initial, onSave, onCancel, initialEmail = '', onEm
   const isEdit = !!initial?.id;
   // The server settings of an existing mailbox are an administrator's to change (the backend
   // refuses them from anyone else): other users see a note in their place.
-  const serverLocked = isEdit && !user?.isAdmin;
+  const serverLocked = isEdit && (!user?.isAdmin || hasLockedConnection(initial));
   const [form, setForm] = useState(initial || {
     name: '', email_address: initialEmail, color: '#6366f1', protocol: 'imap',
     imap_host: '', imap_port: 993, imap_skip_tls_verify: false,
@@ -249,7 +250,7 @@ export function AccountForm({ initial, onSave, onCancel, initialEmail = '', onEm
         </div>
       ) : serverLocked ? (
         <div style={{ fontSize: 12, color: 'var(--text-tertiary)', margin: '16px 0 0', lineHeight: 1.5 }}>
-          {t('admin.accounts.serverAdminOnlyNote')}
+          {hasLockedConnection(initial) ? t('admin.accounts.managedServerNote') : t('admin.accounts.serverAdminOnlyNote')}
         </div>
       ) : (
         <>
@@ -505,7 +506,7 @@ function threadingBlockedMessage(err, t) {
 // Exported (like ThemesTab below) only so AccountsTab.render.test.js can mount it.
 export function AccountsTab() {
   const { t } = useTranslation();
-  const { accounts, setAccounts, updateAccount, setUnreadCounts, addNotification, backfillProgress, user, openAddAccount, accountSettingsRequested, clearAccountSettingsRequest, accountsReady } = useStore();
+  const { accounts, setAccounts, updateAccount, setUnreadCounts, addNotification, backfillProgress, user, openAddAccount, openProtonReconnect, accountSettingsRequested, clearAccountSettingsRequest, accountsReady } = useStore();
   const isAdmin = !!user?.isAdmin;
   const [subview, setSubview] = useState('list'); // 'list' | 'edit' | 'folders' | 'aliases'
   const [editTarget, setEditTarget] = useState(null);
@@ -554,7 +555,7 @@ export function AccountsTab() {
   const [aliasFormSaving, setAliasFormSaving] = useState(false);
 
   const handleEdit = async (form) => {
-    const updates = accountUpdateFromForm(form, { isAdmin });
+    const updates = accountUpdateFromForm(form, { isAdmin, account: editTarget });
     const updated = await api.updateAccount(editTarget.id, updates);
     updateAccount(editTarget.id, updated);
     api.getUnreadCounts().then(setUnreadCounts).catch(console.error);
@@ -1227,7 +1228,7 @@ export function AccountsTab() {
         </div>
       )}
 
-      {accounts.length > 1 && (
+      {(
         <div style={{ marginBottom: 14 }}>
           <input
             type="search"
@@ -1294,8 +1295,21 @@ export function AccountsTab() {
               <div style={{ fontSize: 12, color: 'var(--text-tertiary)', marginTop: 1, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
                 {account.email_address}
               </div>
+              {(() => {
+                const { provider, mode } = accountProviderLabels(account);
+                if (!provider && !mode) return null;
+                return (
+                  <div style={{ fontSize: 11, color: 'var(--text-secondary)', marginTop: 3, display: 'flex', gap: 6, flexWrap: 'wrap' }}>
+                    {provider && <span>{t(provider)}</span>}
+                    {provider && mode && <span aria-hidden="true">·</span>}
+                    {mode && <span>{t(mode)}</span>}
+                  </div>
+                );
+              })()}
               <div style={{ fontSize: 11, marginTop: 3, display: 'flex', alignItems: 'center', gap: 6, flexWrap: 'wrap' }}>
-                {isGoogleReconnectRequired(account) ? (
+                {account.health === 'proton_reconnect_required' || account.health === 'proton_unavailable' ? (
+                  <span style={{ color: HEALTH_COLORS[account.health], display: 'inline-flex', alignItems: 'center', gap: 4 }}><WarningIcon size={12} /> {t(HEALTH_LABEL_KEYS[account.health])}</span>
+                ) : isGoogleReconnectRequired(account) ? (
                   <span style={{ color: 'var(--red)', display: 'inline-flex', alignItems: 'center', gap: 4 }}><WarningIcon size={12} /> {t('admin.accounts.oauthReconnectRequired')}</span>
                 ) : account.sync_error ? (
                   <span style={{
@@ -1321,7 +1335,21 @@ export function AccountsTab() {
                   {t('admin.accounts.reconnectGmail')}
                 </button>
               )}
-              {account.sync_error && !isGoogleReconnectRequired(account) && (
+              {account.can_reconnect_proton === true && (
+                <button
+                  type="button"
+                  title={t('admin.accounts.protonReconnect')}
+                  onClick={() => openProtonReconnect(account)}
+                  style={{
+                    minHeight: 44, minWidth: 44, padding: '5px 12px', background: account.health === 'proton_reconnect_required' ? 'var(--accent)' : 'transparent',
+                    border: '1px solid var(--border)', borderRadius: 6, cursor: 'pointer', fontSize: 12, fontWeight: 500,
+                    color: account.health === 'proton_reconnect_required' ? 'var(--accent-text)' : 'var(--text-secondary)',
+                  }}
+                >
+                  {t('admin.accounts.protonReconnect')}
+                </button>
+              )}
+              {account.sync_error && !isGoogleReconnectRequired(account) && account.can_reconnect_proton !== true && (
                 <IconBtn onClick={() => handleReconnect(account.id)} title={t('sidebar.accountMenu.reconnect')}>
                   <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
                     <polyline points="23 4 23 10 17 10"/>

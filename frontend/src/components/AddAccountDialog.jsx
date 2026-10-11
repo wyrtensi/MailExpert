@@ -74,8 +74,9 @@ export default function AddAccountDialog({ onClose, forms = FORMS }) {
   const { t } = useTranslation();
   const titleId = useId();
   const accounts = useStore((s) => s.accounts);
+  const seed = useStore((s) => s.addAccountSeed);
   const fontSize = useStore((s) => s.fontSize) || 100;
-  const [flow, dispatch] = useReducer(transitionAddAccountFlow, undefined, initialAddAccountFlow);
+  const [flow, dispatch] = useReducer(transitionAddAccountFlow, seed, initialAddAccountFlow);
   const [googleStatus, setGoogleStatus] = useState(null);
   const [domainStatus, setDomainStatus] = useState(null);
   // The safe, shared part of the status the provider forms need: the catalog of the four fixed
@@ -335,6 +336,7 @@ export default function AddAccountDialog({ onClose, forms = FORMS }) {
                     onEmailChange={(email) => dispatch({ type: 'email', email })}
                     signal={session?.signal}
                     accounts={accounts}
+                    seedAccount={seed}
                     catalog={formStatus.catalog}
                     manualPolicy={formStatus.manualPolicy}
                     proton={formStatus.proton}

@@ -117,7 +117,10 @@ export async function reconcileProtonLinks({ signal } = {}) {
             u.cleanup_pending, u.removal_state,
             EXISTS (SELECT 1 FROM proton_connections c
                      WHERE (c.account_id = l.account_id OR c.reconnect_account_id = l.account_id)
-                       AND c.state <> ALL ($1)) AS attempt_in_flight
+                       AND c.state <> ALL ($1)
+                       -- An unfinished attempt past its ID lifetime no longer holds the mailbox; a
+                       -- commit waiting for the worker does whatever its age (it is retried).
+                       AND (c.state = 'committing' OR c.expires_at > now())) AS attempt_in_flight
        FROM proton_mailbox_links l
        JOIN proton_users u ON u.proton_user_id = l.proton_user_id AND u.generation = l.generation
        JOIN email_accounts a ON a.id = l.account_id

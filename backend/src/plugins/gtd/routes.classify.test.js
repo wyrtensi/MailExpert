@@ -257,6 +257,41 @@ describe('DELETE /api/gtd/classify — remove a GTD label', () => {
   });
 });
 
+// A managed Proton mailbox keeps user folders under Folders/: the label lands in Folders/Todo
+// while the GTD configuration still says Todo. The response and the undo token name the real
+// destination, and the undo removes the copy there.
+describe('GTD classify on a managed Proton mailbox', () => {
+  const proton = { ...account, mail_provider: 'proton', connection_mode: 'managed' };
+
+  it('reports the translated destination and undoes it there', async () => {
+    stubQueries({ acct: proton });
+    imapManager.ensureFolder.mockImplementation(async (_account, folder) => ({ path: `Folders/${folder}`, created: true }));
+    const res = await classify({ messageId: MSG_ID, state: 'todo' });
+    expect(res.status).toBe(200);
+    const body = await res.json();
+    expect(body).toEqual({
+      ok: true, folder: 'Folders/Todo', applied: true,
+      undoToken: { messageId: MSG_ID, state: 'todo', folder: 'Folders/Todo', uid: 77 },
+    });
+    expect(imapManager.copyMessage).toHaveBeenCalledWith(ACCT_ID, 10, 'INBOX', 'Folders/Todo');
+
+    const undo = await undoClassify(body.undoToken);
+    expect(undo.status).toBe(200);
+    expect(await undo.json()).toEqual({ ok: true, removed: true, folder: 'Folders/Todo' });
+    expect(imapManager.removeMessageCopy).toHaveBeenCalledWith(ACCT_ID, 77, 'Folders/Todo');
+  });
+
+  it('still refuses a token for a folder the state does not map to', async () => {
+    stubQueries({ acct: proton });
+    const res = await undoClassify({ messageId: MSG_ID, state: 'todo', folder: 'Folders/Elsewhere', uid: 77 });
+    expect(res.status).toBe(409);
+    // An ordinary mailbox never accepts the translated path.
+    stubQueries();
+    expect((await undoClassify({ messageId: MSG_ID, state: 'todo', folder: 'Folders/Todo', uid: 77 })).status).toBe(409);
+    expect(imapManager.removeMessageCopy).not.toHaveBeenCalled();
+  });
+});
+
 describe('POST /api/gtd/classify/undo — remove only the request-owned copy', () => {
   const token = { messageId: MSG_ID, state: 'todo', folder: 'Todo', uid: 77 };
 

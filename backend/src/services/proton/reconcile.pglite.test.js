@@ -237,6 +237,35 @@ describe('reconcileProtonLinks', () => {
     await state.db.query('DELETE FROM users WHERE id = $1', [actor.id]);
   });
 
+  it('an expired attempt that never committed stops holding its mailbox back', async () => {
+    // A stuck attempt left 'starting' or 'checking' past its ID lifetime (the sweeper only follows
+    // committing and worker-live rows) must not block certificate rotation until a restart.
+    const { rows: [actor] } = await state.db.query(`INSERT INTO users (username) VALUES ('employee-3') RETURNING id`);
+    const { account: rotated } = await seed({ email: 'first@proton.me' });
+    const { account: checking } = await seed({ email: 'second@proton.me' });
+    const { account: committing } = await seed({ email: 'third@proton.me' });
+    await state.db.query(
+      `INSERT INTO proton_connections (actor_user_id, request_id, requested_email, state, reconnect_intent, reconnect_account_id, expires_at)
+       VALUES ($1, gen_random_uuid(), 'first@proton.me', 'starting', true, $2, now() - interval '1 minute'),
+              ($1, gen_random_uuid(), 'second@proton.me', 'checking', true, $3, now() + interval '5 minutes')`,
+      [actor.id, rotated.id, checking.id]);
+    // A commit waiting for the worker holds its mailbox whatever its age: it is retried, never expired.
+    await state.db.query(
+      `INSERT INTO proton_connections (actor_user_id, request_id, requested_email, proton_user_id, state, account_id, expires_at)
+       VALUES ($1, gen_random_uuid(), 'third@proton.me', $2, 'committing', $3, now() - interval '1 hour')`,
+      [actor.id, NATIVE, committing.id]);
+    for (const email of ['first@proton.me', 'second@proton.me', 'third@proton.me']) {
+      bridge.users.get(NATIVE).addresses.set(email, material(NATIVE, email, { pem: NEW, password: 'bridge-new' }));
+    }
+
+    expect(await reconcileProtonLinks()).toEqual({ changed: [rotated.id], reconnectRequired: [] });
+    expect(bridge.calls.map(call => call.body.email)).toEqual(['first@proton.me']);
+    expect(await link(rotated.id)).toMatchObject({ certificate_pem: NEW });
+    for (const id of [checking.id, committing.id]) expect(await link(id)).toMatchObject({ certificate_pem: OLD });
+    await state.db.query('DELETE FROM proton_connections');
+    await state.db.query('DELETE FROM users WHERE id = $1', [actor.id]);
+  });
+
   it('keeps the known status of a mailbox while its new sign-in runs', async () => {
     const { rows: [actor] } = await state.db.query(`INSERT INTO users (username) VALUES ('employee-2') RETURNING id`);
     const { account: lost } = await seed({ email: 'first@proton.me' });

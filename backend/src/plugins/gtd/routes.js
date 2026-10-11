@@ -4,7 +4,7 @@ import { getGtdSections } from './gtdSections.js';
 import { queueGistGeneration } from './gtdGist.js';
 import { importPet, decodeUploadedSheet, getPetMeta, getPetSheet, parsePetSlug, customPetSlug } from './gtdPet.js';
 import { getGtdConfig, resolveGtdStateFolder, sanitizeGtdFolders, sanitizeGtdFoldersDetailed, DEFAULT_GTD_FOLDERS, planGtdFolderPersist, invalidateGtdConfigCache } from './gtdConfig.js';
-import { applyLabel, removeExactLabelCopy, removeLabel, resolveLabelCopyUid, markThreadRead, markCopySeen, findSurvivingCopy, checkMessageCopy, mailboxBusyBody, ensureLabelFolders, archiveInboxCopy, moveCopyToInbox, broadcast, loadOwnedMessage, getOwnedAccount, getMessageCopyFolders, getAccountConfig, setAccountConfig, assertNoPendingCopies } from '../api.js';
+import { applyLabel, removeExactLabelCopy, removeLabel, resolveLabelCopyUid, markThreadRead, markCopySeen, findSurvivingCopy, checkMessageCopy, mailboxBusyBody, ensureLabelFolders, archiveInboxCopy, moveCopyToInbox, broadcast, loadOwnedMessage, getOwnedAccount, getMessageCopyFolders, getAccountConfig, setAccountConfig, assertNoPendingCopies, labelFolderPath } from '../api.js';
 
 const router = Router();
 router.use(requireAuth);
@@ -183,10 +183,12 @@ router.post('/classify', async (req, res) => {
     return res.status(500).json({ error: 'Failed to apply GTD label' });
   }
 
+  // Where the label really landed: a managed Proton mailbox puts it under Folders/.
+  const landed = result.folder ?? toFolder;
   const undoToken = result.applied && result.uid != null && msg.message_id
-    ? { messageId, state, folder: toFolder, uid: result.uid }
+    ? { messageId, state, folder: landed, uid: result.uid }
     : null;
-  res.json({ ok: true, folder: toFolder, applied: result.applied, undoToken });
+  res.json({ ok: true, folder: landed, applied: result.applied, undoToken });
 });
 
 // POST /api/gtd/classify/undo — remove only the exact UID created by the classify request.
@@ -207,8 +209,13 @@ router.post('/classify/undo', async (req, res) => {
   const { enabled, folders } = await getGtdConfig(msg.account_id);
   const target = classifyTarget({ enabled, folders, state });
   if (target.error) return res.status(target.status).json({ error: target.error });
+  // The token names where classify put the copy: the state folder, or its translated path in a
+  // mailbox that keeps user folders in a namespace (managed Proton: Folders/).
   if (target.folder !== folder) {
-    return res.status(409).json({ error: 'GTD state folder changed — undo token is stale' });
+    const account = await getOwnedAccount(req.session.userId, msg.account_id);
+    if (!account || labelFolderPath(account, target.folder) !== folder) {
+      return res.status(409).json({ error: 'GTD state folder changed — undo token is stale' });
+    }
   }
 
   try {

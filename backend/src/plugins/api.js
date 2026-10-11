@@ -17,6 +17,7 @@
 
 import { getMailEngine } from './mailEngine.js';
 import * as labelsWrite from '../services/labels.js';
+import { accountFolderPath, ProtonFolderError } from '../services/proton/folders.js';
 import { archiveInboxCopy as _archiveInboxCopy, moveCopyToInbox as _moveCopyToInbox } from '../services/archiveInbox.js';
 
 // ── Labels (read) ─────────────────────────────────────────────────────────────
@@ -45,6 +46,16 @@ export const findSurvivingCopy = (account, message, excludedFolders) => labelsWr
 export const checkMessageCopy = (account, copy, folder, messageId) => labelsWrite.checkMessageCopy(getMailEngine(), account, copy, folder, messageId);
 export const ensureLabelFolders = (account, folderPaths) => labelsWrite.ensureLabelFolders(getMailEngine(), account, folderPaths);
 export const resolveLabelCopyUid = labelsWrite.resolveLabelCopyUid;
+// The server path a label folder name takes in this mailbox (a managed Proton mailbox keeps user
+// folders under Folders/, services/proton/folders.js), or null when it cannot be a folder there.
+export function labelFolderPath(account, folder) {
+  try {
+    return accountFolderPath(account, folder);
+  } catch (err) {
+    if (err instanceof ProtonFolderError) return null;
+    throw err;
+  }
+}
 // Throws an error with movePending: true when the message or one of its copies in `folders` is
 // waiting for its move to reach the mail server; answer it with 409 { code: 'move_pending' }.
 export const assertNoPendingCopies = labelsWrite.assertNoPendingCopies;

@@ -149,6 +149,9 @@ collect_containers() {
   is_standby && return 0
   if [ -n "${FACT[proton_worker]+set}" ]; then
     FACT[proton_worker]=$(proton_worker_state)
+    local backup_running=0
+    if lock_held "$STATE_DIR/backup.lock"; then backup_running=1; fi
+    lines_into PROBLEMS < <(proton_snapshot_problem "${FACT[proton_worker]}" "$backup_running")
     case ${FACT[proton_worker]} in
       idle | running | recovering | snapshot) ;;
       *) warning "proton worker: ${FACT[proton_worker]}: managed Proton mailboxes are unavailable (docker compose -p $CFG_PROJECT logs proton-worker)" ;;

@@ -1,3 +1,4 @@
+import { randomUUID } from 'node:crypto';
 import { callWorker as defaultCallWorker } from './workerClient.js';
 import { isManagedProtonAccount } from './mailEndpoint.js';
 
@@ -14,6 +15,10 @@ import { isManagedProtonAccount } from './mailEndpoint.js';
 // nothing irreversible happened. Once fn runs, its outcome is the caller's, unchanged: a lease never
 // turns an accepted or unknown delivery into a retry. A lease has no time limit; a release that
 // fails leaves it with the worker until the worker is recreated after this backend stopped.
+//
+// The backend names each lease. A request it gave up on (a timeout while the worker was busy) may
+// still be granted later, so the name is cancelled with DELETE: the worker remembers the cancel and
+// refuses that late grant.
 
 export const MAINTENANCE_WAIT_MS = 120_000;
 export const MAINTENANCE_POLL_MS = 2_000;
@@ -30,20 +35,27 @@ export class ProtonMaintenanceError extends Error {
 
 const delay = (ms) => new Promise(resolve => { setTimeout(resolve, ms); });
 
-async function acquire({ callWorker, sleep, waitMs, pollMs, now }) {
+async function acquire(leaseId, { callWorker, sleep, waitMs, pollMs, now }) {
   const deadline = now() + waitMs;
   for (;;) {
     let answer;
     try {
-      answer = await callWorker('POST', '/leases/send', undefined, { timeoutMs: 15_000 });
+      answer = await callWorker('POST', '/leases/send', { leaseId }, { timeoutMs: 15_000 });
     } catch (err) {
-      if (err?.code !== 'maintenance_busy') throw new ProtonMaintenanceError('worker_unavailable');
+      if (err?.code !== 'maintenance_busy') {
+        // Refused for good, or the outcome is unknown: cancel the name either way.
+        await release(callWorker, leaseId);
+        throw new ProtonMaintenanceError('worker_unavailable');
+      }
       if (now() + pollMs > deadline) throw new ProtonMaintenanceError('maintenance_busy');
       await sleep(pollMs);
       continue;
     }
-    if (typeof answer?.leaseId !== 'string' || !answer.leaseId) throw new ProtonMaintenanceError('worker_unavailable');
-    return answer.leaseId;
+    if (answer?.leaseId !== leaseId) {
+      await release(callWorker, leaseId);
+      throw new ProtonMaintenanceError('worker_unavailable');
+    }
+    return leaseId;
   }
 }
 
@@ -63,10 +75,10 @@ async function release(callWorker, leaseId) {
 
 export async function withProtonSendLease(account, fn, {
   callWorker = defaultCallWorker, sleep = delay, waitMs = MAINTENANCE_WAIT_MS, pollMs = MAINTENANCE_POLL_MS,
-  now = Date.now,
+  now = Date.now, newLeaseId = () => randomUUID().replace(/-/g, ''),
 } = {}) {
   if (!isManagedProtonAccount(account)) return fn();
-  const leaseId = await acquire({ callWorker, sleep, waitMs, pollMs, now });
+  const leaseId = await acquire(newLeaseId(), { callWorker, sleep, waitMs, pollMs, now });
   try {
     return await fn();
   } finally {

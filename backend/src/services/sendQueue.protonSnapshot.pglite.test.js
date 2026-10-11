@@ -56,14 +56,14 @@ beforeEach(async () => {
     return { messageId: '<m@example.com>', accepted: ['you@example.com'], rejected: [] };
   });
   createAccountSmtpTransport.mockImplementation(async (account) => ({ account, transport: { sendMail: smtpSendMail } }));
-  worker.callWorker = vi.fn(async (method, path) => {
-    events.push(`${method} ${path}`);
+  worker.callWorker = vi.fn(async (method, path, body) => {
+    events.push(`${method} ${path.replace(/[0-9a-f]{32}$/, '<lease>')}`);
     if (method === 'DELETE') {
       const { rows: [job] } = await db.query('SELECT status FROM jobs LIMIT 1');
       events.push(`job ${job.status} at release`);
       return { released: true };
     }
-    return { leaseId: 'lease1' };
+    return { leaseId: body.leaseId };
   });
 });
 
@@ -85,7 +85,7 @@ describe('send queue under the Proton snapshot gate', () => {
   it('takes the lease before the effect and releases it after the completion committed', async () => {
     const id = await enqueue(PROTON);
     await runDueJobs({ wait: true });
-    expect(events).toEqual(['POST /leases/send', 'smtp', 'DELETE /leases/lease1', 'job done at release']);
+    expect(events).toEqual(['POST /leases/send', 'smtp', 'DELETE /leases/<lease>', 'job done at release']);
     expect((await jobRow(id)).status).toBe('done');
   });
 
@@ -108,7 +108,7 @@ describe('send queue under the Proton snapshot gate', () => {
     const id = await enqueue(PROTON);
     await runDueJobs({ wait: true });
     expect(events.filter(event => event === 'smtp')).toHaveLength(1);
-    expect(events).toContain('DELETE /leases/lease1');
+    expect(events).toContain('DELETE /leases/<lease>');
     const row = await jobRow(id);
     expect(row.effect_started_at).not.toBeNull();
     expect(row.status).toBe('needs_attention');

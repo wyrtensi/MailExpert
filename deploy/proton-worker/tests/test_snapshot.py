@@ -55,7 +55,8 @@ class SnapshotGateTests(unittest.TestCase):
 
     def make(self):
         return BridgeController(self.native, Path(self.temp.name), clock=lambda: self.clock,
-                                recovery_seconds=5, snapshot_wait_seconds=0.2)
+                                recovery_seconds=5, snapshot_wait_seconds=0.2,
+                                snapshot_ttl_seconds=300)
 
     def link(self):
         self.controller.start_connection('attempt-a', 'mail@example.com', 'secret-sentinel')
@@ -202,6 +203,60 @@ class SnapshotGateTests(unittest.TestCase):
             self.controller.release_send_lease('../x')
 
 
+    # -- fix round 1: a gate whose holder died, leases the backend gave up on ------------
+    def test_gate_of_a_dead_holder_expires_and_bridge_restarts(self):
+        self.link()
+        self.controller.snapshot_begin('snap-1')
+        self.assertEqual(self.controller.health()['snapshotId'], 'snap-1')
+        self.clock += 299
+        self.controller.tick()
+        self.assertEqual(self.controller.health()['state'], 'snapshot')
+        self.clock += 2
+        self.controller.tick()
+        health = self.controller.health()
+        self.assertNotEqual(health['state'], 'snapshot')
+        self.assertIsNone(health['snapshotId'])
+        self.assertTrue(self.native.running())
+        self.assertTrue(self.controller.acquire_send_lease('lease-a')['leaseId'])
+
+    def test_renewal_keeps_the_gate_of_a_live_holder(self):
+        self.link()
+        self.controller.snapshot_begin('snap-1')
+        for _ in range(4):
+            self.clock += 200
+            self.controller.snapshot_renew('snap-1')
+            self.controller.tick()
+        self.assertEqual(self.controller.health()['state'], 'snapshot')
+        with self.assertRaisesRegex(WorkerError, '^operation_conflict$'):
+            self.controller.snapshot_renew('snap-2')
+
+    def test_expired_gate_is_reclaimed_by_a_new_begin(self):
+        self.link()
+        self.controller.snapshot_begin('snap-1')
+        with self.assertRaisesRegex(WorkerError, '^operation_conflict$'):
+            self.controller.snapshot_begin('snap-2')
+        self.clock += 301
+        self.assertEqual(self.controller.snapshot_begin('snap-2')['snapshotId'], 'snap-2')
+        with self.assertRaisesRegex(WorkerError, '^operation_conflict$'):
+            self.controller.snapshot_renew('snap-1')
+
+    def test_backend_lease_id_is_idempotent(self):
+        self.assertEqual(self.controller.acquire_send_lease('lease-a'), {'leaseId': 'lease-a'})
+        self.assertEqual(self.controller.acquire_send_lease('lease-a'), {'leaseId': 'lease-a'})
+        self.assertEqual(self.controller.health()['sendLeases'], 1)
+        self.assertEqual(self.controller.release_send_lease('lease-a'), {'released': True})
+        self.assertEqual(self.controller.health()['sendLeases'], 0)
+
+    def test_late_grant_after_cancel_is_released_at_once(self):
+        # The backend gave up and sent DELETE before the worker handled its POST.
+        self.assertEqual(self.controller.release_send_lease('lease-b'), {'released': False})
+        with self.assertRaisesRegex(WorkerError, '^lease_cancelled$'):
+            self.controller.acquire_send_lease('lease-b')
+        self.assertEqual(self.controller.health()['sendLeases'], 0)
+        self.link()
+        self.assertEqual(self.controller.snapshot_begin('snap-1')['state'], 'snapshot')
+
+
 class SnapshotRouteTests(unittest.TestCase):
     def call(self, pathname, method, path, body=None):
         client = socket.socket(socket.AF_UNIX)
@@ -221,9 +276,13 @@ class SnapshotRouteTests(unittest.TestCase):
         seen = []
 
         class Controller:
-            def acquire_send_lease(self):
-                seen.append('acquire')
-                return {'leaseId': 'lease-1'}
+            def acquire_send_lease(self, lease_id=None):
+                seen.append(('acquire', lease_id))
+                return {'leaseId': lease_id}
+
+            def snapshot_renew(self, snapshot_id):
+                seen.append(('renew', snapshot_id))
+                return {'state': 'snapshot'}
 
             def release_send_lease(self, lease_id):
                 seen.append(('release', lease_id))
@@ -243,7 +302,10 @@ class SnapshotRouteTests(unittest.TestCase):
             thread = threading.Thread(target=server.serve_forever, daemon=True)
             thread.start()
             try:
-                self.assertEqual(self.call(pathname, 'POST', '/leases/send'), (200, {'leaseId': 'lease-1'}))
+                self.assertEqual(self.call(pathname, 'POST', '/leases/send', {'leaseId': 'lease-1'}),
+                                 (200, {'leaseId': 'lease-1'}))
+                self.assertEqual(self.call(pathname, 'POST', '/snapshot/renew', {'snapshotId': 'snap-1'}),
+                                 (200, {'state': 'snapshot'}))
                 self.assertEqual(self.call(pathname, 'DELETE', '/leases/lease-1'), (200, {'released': True}))
                 self.assertEqual(self.call(pathname, 'POST', '/snapshot/begin', {'snapshotId': 'snap-1'}),
                                  (409, {'errorCode': 'snapshot_busy'}))
@@ -254,7 +316,8 @@ class SnapshotRouteTests(unittest.TestCase):
                 server.shutdown()
                 server.server_close()
                 thread.join()
-        self.assertEqual(seen, ['acquire', ('release', 'lease-1'), ('begin', 'snap-1'), ('end', 'snap-1')])
+        self.assertEqual(seen, [('acquire', 'lease-1'), ('renew', 'snap-1'), ('release', 'lease-1'),
+                                ('begin', 'snap-1'), ('end', 'snap-1')])
 
 
 if __name__ == '__main__':

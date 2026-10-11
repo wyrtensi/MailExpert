@@ -201,6 +201,28 @@ last=$(<"$A/state/backup-last.json")
   fail "the Proton worker's gate stayed closed after the backup"
 pass "manual backup"
 
+# 5b. A backup killed (SIGKILL, no EXIT trap) while it holds the Proton worker's gate: the gate
+# stays closed for now, status.sh calls it a problem, and the next backup ends it and runs.
+proton_health() { docker exec "$A_PROJECT-proton-worker" python /opt/mailexpert-proton/worker.py --request GET /healthz; }
+setsid bash "$DEPLOY_DIR/backup.sh" --prefix "$A" --tag manual >/dev/null 2>&1 &
+killed=$!
+for _ in $(seq 120); do
+  [ "$(proton_health | jq -r .state)" = snapshot ] && break
+  sleep 0.5
+done
+[ "$(proton_health | jq -r .state)" = snapshot ] || fail "the killed backup never closed the gate"
+kill -9 -- "-$killed" 2>/dev/null || kill -9 "$killed"
+wait "$killed" 2>/dev/null || true
+sleep 1
+[ "$(proton_health | jq -r .state)" = snapshot ] || fail "the gate of a killed backup is open at once (expected: held until it expires or is reclaimed)"
+OUT=$(deploy status.sh --prefix "$A" 2>&1) || true
+[[ $OUT == *"snapshot gate is closed with no backup running"* ]] || fail "status.sh does not report the stuck gate: $OUT"
+rm -rf "$A/backups/staging"
+expect_exit 0 deploy backup.sh --prefix "$A" --tag manual
+[[ $OUT == *"ending the Proton snapshot gate left by an earlier backup"* ]] || fail "the next backup did not end the stale gate"
+[ "$(proton_health | jq -r .state)" = idle ] || fail "the gate stayed closed after the reclaiming backup"
+pass "a killed backup's Proton gate is reported and reclaimed by the next backup"
+
 # 6. --verify: restore into a scratch database, no pending migration, the credential decrypts
 # with the key from the snapshot; nothing printed but counts, nothing left behind.
 expect_exit 0 deploy backup.sh --prefix "$A" --tag manual --verify

@@ -18,6 +18,7 @@ import re
 import threading
 import time
 import uuid
+from collections import OrderedDict
 from pathlib import Path
 
 LOGIN_TTL_SECONDS = 600
@@ -27,6 +28,10 @@ MAX_RECONCILE_FAILURES = 5
 RECONCILE_BACKOFF_CAP = 60
 RECOVERY_BACKOFF_CAP = 300
 SNAPSHOT_WAIT_SECONDS = 60
+# A gate whose holder stops renewing it (a backup killed without its exit trap) reopens.
+SNAPSHOT_TTL_SECONDS = 300
+# DELETEs of leases not (yet) granted, kept so that a late grant is released at once.
+CANCELLED_LEASES_KEPT = 4096
 CONNECTED = 2
 ACTIVE_STATES = {'starting', 'authenticating', 'needs_2fa', 'needs_second_password', 'checking'}
 TERMINAL_STATES = {'connected', 'failed', 'cancelled', 'expired'}
@@ -85,9 +90,13 @@ def _safe_email(value):
 
 class BridgeController:
     def __init__(self, native, state_dir, clock=time.monotonic, recovery_seconds=30,
-                 ttl_seconds=LOGIN_TTL_SECONDS, snapshot_wait_seconds=SNAPSHOT_WAIT_SECONDS):
+                 ttl_seconds=LOGIN_TTL_SECONDS, snapshot_wait_seconds=SNAPSHOT_WAIT_SECONDS,
+                 snapshot_ttl_seconds=SNAPSHOT_TTL_SECONDS):
         self.native = native
         self.snapshot_wait_seconds = snapshot_wait_seconds
+        self.snapshot_ttl_seconds = snapshot_ttl_seconds
+        self.snapshot_expires_at = None
+        self.cancelled_leases = OrderedDict()
         self.state_dir = Path(state_dir)
         self.clock = clock
         self.recovery_seconds = recovery_seconds
@@ -219,7 +228,7 @@ class BridgeController:
         else:
             state = 'idle'
         return {'state': state, 'loginBusy': self._busy(), 'linkedAddresses': len(self.links),
-                'sendLeases': len(self.send_leases),
+                'sendLeases': len(self.send_leases), 'snapshotId': self.snapshot,
                 'pendingRemovals': len(self.pending_removals),
                 'stuckRemovals': sum(1 for item in list(self.pending_removals.values())
                                      if item.get('stuck'))}
@@ -405,13 +414,24 @@ class BridgeController:
                 any(item['reason'] == 'attempt' and not item.get('stuck')
                     for item in list(self.pending_removals.values())))
 
-    def acquire_send_lease(self):
-        """Reserve one actual Proton send; refused while a snapshot holds the gate."""
+    def acquire_send_lease(self, lease_id=None):
+        """Reserve one actual Proton send; refused while a snapshot holds the gate.
+
+        The backend names the lease, so it can cancel a request it gave up on: a DELETE that
+        arrives first is remembered and the late grant is refused (lease_cancelled). Granting
+        an id already held is idempotent.
+        """
+        if lease_id is None:
+            lease_id = uuid.uuid4().hex
+        _safe_id(lease_id)
         with self.lock:
+            if self.cancelled_leases.pop(lease_id, None) is not None:
+                raise WorkerError('lease_cancelled')
+            if lease_id in self.send_leases:
+                return {'leaseId': lease_id}
             if self.closed:
                 raise WorkerError('worker_unavailable')
             self._admit()
-            lease_id = uuid.uuid4().hex
             self.send_leases.add(lease_id)
             return {'leaseId': lease_id}
 
@@ -420,6 +440,10 @@ class BridgeController:
         with self.lock:
             released = lease_id in self.send_leases
             self.send_leases.discard(lease_id)
+            if not released:
+                self.cancelled_leases[lease_id] = True
+                while len(self.cancelled_leases) > CANCELLED_LEASES_KEPT:
+                    self.cancelled_leases.popitem(last=False)
             self.drained.notify_all()
             return {'released': released}
 
@@ -434,10 +458,17 @@ class BridgeController:
             if self.snapshot is not None:
                 if self.snapshot == snapshot_id:
                     return self.health()
-                raise WorkerError('operation_conflict')
+                if self.clock() < self.snapshot_expires_at:
+                    raise WorkerError('operation_conflict')
+                # The previous holder stopped renewing: its gate is taken over as it is.
+                _log('snapshot_reclaimed')
+                self.snapshot = snapshot_id
+                self.snapshot_expires_at = self.clock() + self.snapshot_ttl_seconds
+                return self.health()
             if self.closed:
                 raise WorkerError('worker_unavailable')
             self.snapshot = snapshot_id
+            self.snapshot_expires_at = self.clock() + self.snapshot_ttl_seconds
             try:
                 drained = self.drained.wait_for(
                     lambda: not self.send_leases and not self._login_active(),
@@ -469,17 +500,30 @@ class BridgeController:
                 return self.health()
             if self.snapshot != snapshot_id:
                 raise WorkerError('operation_conflict')
-            self.snapshot = None
-            self.drained.notify_all()
-            if self._needs_bridge():
-                try:
-                    self._ensure_started()
-                except WorkerError:
-                    # tick() starts it again with its backoff.
-                    self.next_start_at = self.clock() + self.recovery_seconds
-            self._persist()
-            _log('snapshot_end')
+            self._open_gate('snapshot_end')
             return self.health()
+
+    def snapshot_renew(self, snapshot_id):
+        """The holder is alive: the gate stays closed snapshot_ttl_seconds longer."""
+        _safe_id(snapshot_id)
+        with self.lock:
+            if self.snapshot != snapshot_id:
+                raise WorkerError('operation_conflict')
+            self.snapshot_expires_at = self.clock() + self.snapshot_ttl_seconds
+            return self.health()
+
+    def _open_gate(self, reason):
+        self.snapshot = None
+        self.snapshot_expires_at = None
+        self.drained.notify_all()
+        if self._needs_bridge():
+            try:
+                self._ensure_started()
+            except WorkerError:
+                # tick() starts it again with its backoff.
+                self.next_start_at = self.clock() + self.recovery_seconds
+        self._persist()
+        _log(reason)
 
     # -- timers ------------------------------------------------------------------------
     def tick(self):
@@ -488,8 +532,10 @@ class BridgeController:
             if self.closed:
                 return
             if self.snapshot is not None:
-                # Bridge is stopped on purpose for a state capture: nothing restarts it.
-                return
+                if self.clock() < self.snapshot_expires_at:
+                    # Bridge is stopped on purpose for a state capture: nothing restarts it.
+                    return
+                self._open_gate('snapshot_expired')
             now = self.clock()
             self._expire(now)
             if not self.recovering:

@@ -296,7 +296,7 @@ main() {
   # finish whatever happens.
   # proton_snapshot_begin is called directly (not in $(...)): PROTON_SNAPSHOT must reach finish.
   proton_snapshot_begin "backup-$(gen_hex 6)" >/dev/null ||
-    die "the Proton worker did not stop for the backup ($PROTON_REFUSAL: a Proton send or sign-in did not finish within 60 s); nothing was dumped, run the backup again later"
+    die "$(proton_refusal_text)"
   dump_database "$STAGING"
   stage_proton_state "$STAGING"
   proton_snapshot_end || true

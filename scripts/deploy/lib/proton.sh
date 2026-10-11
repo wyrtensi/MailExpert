@@ -15,7 +15,7 @@ PROTON_STATE_ARCHIVE=proton-state.tar
 PROTON_WORKER_UID=1000
 # Set by proton_snapshot_begin while the worker's snapshot gate is closed; PROTON_REFUSAL is why
 # it was not (called directly, never in a command substitution: these globals must survive).
-PROTON_SNAPSHOT='' PROTON_REFUSAL=''
+PROTON_SNAPSHOT='' PROTON_REFUSAL='' PROTON_RENEWER=''
 
 # commit_has_proton_worker <repository> <commit>: status 0 when <commit> ships the worker. The
 # target commit decides, never the running version: older versions and their backups have none.
@@ -77,11 +77,26 @@ proton_error() {
 # that is not a refusal (no HTTP status: the request timed out or the exec failed) leaves the
 # outcome unknown: the worker may still close the gate, so PROTON_SNAPSHOT is set and the caller's
 # proton_snapshot_end (idempotent in the worker) opens it again.
+#
+# Only backup.sh begins a snapshot, under backup.lock: a gate held by another id is a dead
+# backup's (killed without its EXIT trap) and is ended first. While the gate is held a background
+# renewer keeps it alive; it stops with proton_snapshot_end or when this shell dies, and the
+# worker reopens a gate nobody renews after 5 minutes.
 proton_snapshot_begin() {
-  local answer status
+  local answer status held ok=1
   proton_worker_installed || return 0
   [ -n "$(proton_container)" ] || return 0
-  if ! answer=$(proton_request POST /snapshot/begin "$1"); then
+  answer=$(proton_request POST /snapshot/begin "$1") || ok=0
+  if [ "$ok" = 0 ] && [ "$(proton_error "$answer")" = operation_conflict ]; then
+    held=$(proton_request GET /healthz 2>/dev/null | jq -r '.snapshotId // empty' 2>/dev/null) || held=''
+    if [ -n "$held" ] && [ "$held" != "$1" ]; then
+      warn "ending the Proton snapshot gate left by an earlier backup ($held)"
+      proton_request POST /snapshot/end "$held" >/dev/null || true
+      ok=1
+      answer=$(proton_request POST /snapshot/begin "$1") || ok=0
+    fi
+  fi
+  if [ "$ok" = 0 ]; then
     PROTON_REFUSAL=$(proton_error "$answer")
     status=$(jq -r '.httpStatus // 0' <<<"$answer" 2>/dev/null) || status=0
     if ! [[ $status =~ ^[0-9]+$ ]] || [ "$status" -lt 400 ]; then
@@ -92,12 +107,18 @@ proton_snapshot_begin() {
     return 1
   fi
   PROTON_SNAPSHOT=$1
+  proton_start_renewer "$1"
   log "proton worker: snapshot gate closed, Bridge stopped ($(jq -r '"\(.linkedAddresses // 0) linked addresses"' <<<"$answer" 2>/dev/null || echo 'state held'))"
 }
 
 # proton_snapshot_end: opens the gate again and lets the worker restart Bridge. Safe to call
 # again (the EXIT trap); a failure is a warning: restarting the worker opens it as well.
 proton_snapshot_end() {
+  if [ -n "$PROTON_RENEWER" ]; then
+    kill "$PROTON_RENEWER" 2>/dev/null || true
+    wait "$PROTON_RENEWER" 2>/dev/null || true
+    PROTON_RENEWER=''
+  fi
   [ -n "$PROTON_SNAPSHOT" ] || return 0
   if proton_request POST /snapshot/end "$PROTON_SNAPSHOT" >/dev/null; then
     PROTON_SNAPSHOT=''
@@ -109,6 +130,38 @@ proton_snapshot_end() {
 }
 
 # stage_proton_state <dir>: the worker's state (Bridge vault and keychain, the controller
+# proton_refusal_text: why backup.sh stops before its dump, for PROTON_REFUSAL.
+proton_refusal_text() {
+  case $PROTON_REFUSAL in
+    snapshot_busy)
+      printf '%s\n' "the Proton worker did not stop for the backup (snapshot_busy: a Proton send or sign-in did not finish within 60 s); nothing was dumped. A send stuck for good is released only by a restart of the worker once the old backend has stopped: docker compose -p $CFG_PROJECT restart backend proton-worker" ;;
+    *)
+      printf '%s\n' "the Proton worker did not stop for the backup ($PROTON_REFUSAL); nothing was dumped: see docker compose -p $CFG_PROJECT logs proton-worker" ;;
+  esac
+}
+
+# proton_start_renewer <id>: renews the gate every PROTON_RENEW_SECONDS (60) while this shell
+# lives, in the background (PROTON_RENEWER).
+proton_start_renewer() {
+  local id=$1 parent=$$ every=${PROTON_RENEW_SECONDS:-60}
+  (
+    while sleep "$every"; do
+      kill -0 "$parent" 2>/dev/null || exit 0
+      proton_request POST /snapshot/renew "$id" >/dev/null 2>&1 || true
+    done
+  ) </dev/null >/dev/null 2>&1 &
+  PROTON_RENEWER=$!
+}
+
+# proton_snapshot_problem <worker state> <a backup runs: 0|1>: a gate closed with no backup to
+# hold it (the worker reopens it within 5 minutes; until then Proton is unavailable).
+proton_snapshot_problem() {
+  if [ "$1" = snapshot ] && [ "$2" = 0 ]; then
+    echo "proton worker: the snapshot gate is closed with no backup running: Proton mail waits; it reopens within 5 minutes, or now with: docker compose -p ${CFG_PROJECT:-<project>} restart proton-worker"
+  fi
+  return 0
+}
+
 # journal) as <dir>/proton-state.tar, root 0600: read in the running worker while its snapshot
 # gate holds Bridge stopped, or from a stopped container as it is. Only the file count is printed.
 stage_proton_state() {
@@ -121,7 +174,9 @@ stage_proton_state() {
   fi
   (umask 077 && : >"$dir/$PROTON_STATE_ARCHIVE")
   if [ -n "$PROTON_SNAPSHOT" ]; then
-    app_compose exec -T proton-worker tar -C "$PROTON_STATE_PATH" --numeric-owner -cf - . >"$dir/$PROTON_STATE_ARCHIVE" 2>/dev/null
+    # GNU tar names skipped sockets (gpg-agent) on stderr; paths only, never contents.
+    app_compose exec -T proton-worker tar -C "$PROTON_STATE_PATH" --numeric-owner -cf - . >"$dir/$PROTON_STATE_ARCHIVE" \
+      2> >(grep -v 'socket ignored' >&2)
   else
     docker cp "$id:$PROTON_STATE_PATH/." - >"$dir/$PROTON_STATE_ARCHIVE"
   fi
@@ -140,11 +195,15 @@ proton_state_volume() {
 
 # The helper below runs as root without network in the installed worker image, on the worker's
 # volumes only: it makes the state and runtime directories the worker's (uid 1000, 0700) and
-# checks them; with an archive on stdin it first replaces the state with it.
+# checks them; with an archive on stdin (restore) it first replaces the state with it, with clear
+# it empties the state.
 # shellcheck disable=SC2016 # expanded by sh inside the helper container
 PROTON_PATHS_SCRIPT='set -eu
 uid=$1
 for d in /state /runtime; do chown "$uid:$uid" "$d"; chmod 0700 "$d"; done
+if [ "${2:-}" = clear ]; then
+  find /state -mindepth 1 -delete
+fi
 if [ "${2:-}" = restore ]; then
   find /state -mindepth 1 -delete
   tar -C /state --numeric-owner -xpf -
@@ -157,7 +216,7 @@ for d in /state /runtime; do
 done
 find /state -mindepth 1 -type f | wc -l'
 
-# proton_paths [restore]: the helper on the volumes of the worker's container (created first,
+# proton_paths [restore|clear]: the helper on the volumes of the worker's container (created first,
 # not started: `up --no-start` makes the volumes with the project's labels).
 proton_paths() {
   local state runtime id image
@@ -185,16 +244,16 @@ ensure_proton_paths() {
 
 # restore_proton_state <dir>: <dir>/proton-state.tar into the worker's state volume, the worker
 # stopped (restore.sh before the first start, rollback.sh after the database swap). A snapshot
-# without it (made by a version without the worker, or without its container) leaves the state
-# empty: managed Proton mailboxes stay unavailable until someone reconnects them; nothing else
-# changes.
+# without it (made by a version without the worker, or without its container) clears the state:
+# a newer vault must not disagree with the restored database, so managed Proton mailboxes need
+# reconnecting; nothing else changes.
 restore_proton_state() {
   local dir=$1 files
   proton_worker_installed || return 0
   if [ -n "$(proton_container)" ]; then app_compose stop proton-worker >/dev/null; fi
   if [ ! -s "$dir/$PROTON_STATE_ARCHIVE" ]; then
-    files=$(proton_paths </dev/null) || die "the Proton worker's volumes could not be prepared (the error is above)"
-    warn "the backup holds no Proton worker state: managed Proton mailboxes stay unavailable until they are reconnected"
+    files=$(proton_paths clear </dev/null) || die "the Proton worker's state could not be cleared (the error is above); the worker stays stopped"
+    warn "the backup holds no Proton worker state: the worker's state was cleared, managed Proton mailboxes need reconnecting"
     return 0
   fi
   files=$(proton_paths restore <"$dir/$PROTON_STATE_ARCHIVE") ||
@@ -206,11 +265,11 @@ restore_proton_state() {
 # each; nothing when the worker joins the running backend's namespace, no other container joins
 # it, and neither publishes a port (Bridge's focus port included).
 proton_namespace_problems() {
-  local backend worker backend_name mode line id name joined
+  local backend worker backend_name mode line id name joined all
   backend=$(app_compose ps --quiet backend 2>/dev/null | head -n 1)
   worker=$(proton_container)
   if [ -z "$backend" ] || [ -z "$worker" ]; then
-    echo "proton-worker: backend or worker is not running"
+    echo "not running"
     return 0
   fi
   backend=$(docker inspect -f '{{.Id}}' "$backend")
@@ -240,6 +299,11 @@ ensure_proton_namespace() {
   local problems
   proton_worker_installed || return 0
   problems=$(proton_namespace_problems)
+  if [ "$problems" = "not running" ]; then
+    # Proton is down, ordinary mail is not: the update goes on, the health check reports it.
+    warn "the Proton worker is not running: managed Proton mailboxes are unavailable; see docker compose -p $CFG_PROJECT logs proton-worker, then run install.sh --prefix $OPT_PREFIX again"
+    return 0
+  fi
   if grep -q 'not the running backend' <<<"$problems"; then
     log "proton worker: in a stale network namespace, recreating it"
     app_compose up -d --no-deps --force-recreate proton-worker >/dev/null ||

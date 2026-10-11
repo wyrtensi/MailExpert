@@ -5,16 +5,17 @@ const MANAGED = { id: 'a1', mail_provider: 'proton', connection_mode: 'managed' 
 
 function worker(...answers) {
   const calls = [];
-  const callWorker = vi.fn(async (method, path) => {
+  const callWorker = vi.fn(async (method, path, body) => {
     calls.push(`${method} ${path}`);
     if (method === 'DELETE') return { released: true };
     const next = answers.shift();
     if (next instanceof Error) throw next;
-    return next;
+    return { ...next, leaseId: body.leaseId };
   });
   return { calls, callWorker };
 }
 
+const LEASE = () => 'abc123';
 const busy = () => Object.assign(new Error('maintenance_busy'), { code: 'maintenance_busy' });
 
 describe('withProtonSendLease', () => {
@@ -30,7 +31,7 @@ describe('withProtonSendLease', () => {
     const result = await withProtonSendLease(MANAGED, async () => {
       calls.push('send');
       return 'sent';
-    }, { callWorker });
+    }, { callWorker, newLeaseId: LEASE });
     expect(result).toBe('sent');
     expect(calls).toEqual(['POST /leases/send', 'send', 'DELETE /leases/abc123']);
   });
@@ -38,7 +39,7 @@ describe('withProtonSendLease', () => {
   it('releases the lease when the send fails, and rethrows the send error unchanged', async () => {
     const { calls, callWorker } = worker({ leaseId: 'abc123' });
     const failure = Object.assign(new Error('uncertain'), { definite: false });
-    await expect(withProtonSendLease(MANAGED, async () => { throw failure; }, { callWorker })).rejects.toBe(failure);
+    await expect(withProtonSendLease(MANAGED, async () => { throw failure; }, { callWorker, newLeaseId: LEASE })).rejects.toBe(failure);
     expect(calls).toEqual(['POST /leases/send', 'DELETE /leases/abc123']);
   });
 
@@ -77,9 +78,36 @@ describe('withProtonSendLease', () => {
       return { leaseId: 'abc123' };
     });
     const error = vi.spyOn(console, 'error').mockImplementation(() => {});
-    expect(await withProtonSendLease(MANAGED, async () => 'sent', { callWorker })).toBe('sent');
+    expect(await withProtonSendLease(MANAGED, async () => 'sent', { callWorker, newLeaseId: LEASE })).toBe('sent');
     expect(callWorker.mock.calls.filter(([method]) => method === 'DELETE')).toHaveLength(2);
     expect(error.mock.calls.join(' ')).not.toContain('abc123');
     error.mockRestore();
+  });
+
+  it('names the lease itself, keeps the name across maintenance retries, and cancels it when it gives up', async () => {
+    const requests = [];
+    const callWorker = vi.fn(async (method, path, body) => {
+      requests.push([method, path, body?.leaseId]);
+      if (method === 'DELETE') return { released: false };
+      if (requests.length === 1) throw busy();
+      throw Object.assign(new Error('worker_timeout'), { code: 'worker_timeout' });
+    });
+    const fn = vi.fn();
+    await expect(withProtonSendLease(MANAGED, fn, { callWorker, sleep: async () => {}, newLeaseId: () => 'lease0001' }))
+      .rejects.toMatchObject({ name: 'ProtonMaintenanceError', code: 'worker_unavailable' });
+    expect(fn).not.toHaveBeenCalled();
+    // The worker may still grant the timed-out request: the DELETE cancels it, by the same name.
+    expect(requests).toEqual([
+      ['POST', '/leases/send', 'lease0001'], ['POST', '/leases/send', 'lease0001'], ['DELETE', '/leases/lease0001', undefined],
+    ]);
+  });
+
+  it('a busy gate that outlasts the wait needs no cancel: nothing was granted', async () => {
+    const { calls, callWorker } = worker(busy(), busy());
+    let now = 0;
+    await expect(withProtonSendLease(MANAGED, vi.fn(), {
+      callWorker, sleep: async (ms) => { now += ms; }, waitMs: 1500, pollMs: 1000, now: () => now,
+    })).rejects.toMatchObject({ code: 'maintenance_busy' });
+    expect(calls.filter(call => call.startsWith('DELETE'))).toEqual([]);
   });
 });

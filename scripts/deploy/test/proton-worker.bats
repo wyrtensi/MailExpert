@@ -29,11 +29,18 @@ case " $* " in
   *" ps --all --quiet proton-worker "* | *" ps --quiet proton-worker "*) [ -n "${DOCKER_NO_WORKER:-}" ] || echo worker-short ;;
   *" up -d --no-deps --force-recreate proton-worker "*) : >"$BATS_TEST_TMPDIR/recreated" ;;
   *" exec -T proton-worker python "*"/snapshot/begin"*)
+    if [ -n "${DOCKER_STALE_GATE:-}" ] && [ ! -e "$BATS_TEST_TMPDIR/stale-ended" ]; then
+      echo '{"errorCode":"operation_conflict","httpStatus":409}'; exit 1
+    fi
     if [ -n "${DOCKER_SNAPSHOT_BUSY:-}" ]; then echo '{"errorCode":"snapshot_busy","httpStatus":409}'; exit 1; fi
     if [ -n "${DOCKER_SNAPSHOT_TIMEOUT:-}" ]; then echo '{"error":"timeout","errorCode":"worker_unavailable","httpStatus":0}'; exit 1; fi
     echo '{"state":"snapshot","linkedAddresses":2,"sendLeases":0,"httpStatus":200}' ;;
+  *" exec -T proton-worker python "*"/snapshot/end backup-old "*) : >"$BATS_TEST_TMPDIR/stale-ended"; echo '{"state":"idle","httpStatus":200}' ;;
   *" exec -T proton-worker python "*"/snapshot/end"*) : >"$BATS_TEST_TMPDIR/gate-open"; echo '{"state":"running","httpStatus":200}' ;;
-  *" exec -T proton-worker python "*"/healthz"*) echo '{"state":"idle","httpStatus":200}' ;;
+  *" exec -T proton-worker python "*"/snapshot/renew"*) echo renew >>"$BATS_TEST_TMPDIR/renewals"; echo '{"state":"snapshot","httpStatus":200}' ;;
+  *" exec -T proton-worker python "*"/healthz"*)
+    if [ -n "${DOCKER_STALE_GATE:-}" ]; then echo '{"state":"snapshot","snapshotId":"backup-old","httpStatus":200}'
+    else echo '{"state":"idle","snapshotId":null,"httpStatus":200}'; fi ;;
   *" exec -T proton-worker tar "*)
     d=$(mktemp -d); mkdir -p "$d/bridge"; printf 'vault-secret-sentinel' >"$d/bridge/vault.enc"; printf '{}' >"$d/controller.json"
     tar -C "$d" -cf - . ;;
@@ -238,9 +245,10 @@ ghcr.io/o/mailexpert-proton-worker:sha-new" ]
   mkdir -p "$dir"
   run restore_proton_state "$dir"
   [ "$status" -eq 0 ]
-  [[ $output == *"holds no Proton worker state: managed Proton mailboxes stay unavailable until they are reconnected"* ]]
+  [[ $output == *"holds no Proton worker state: the worker's state was cleared, managed Proton mailboxes need reconnecting"* ]]
   grep -q 'run --rm -i --network none --user 0' "$DOCKER_LOG"
-  ! grep -q 'run --rm -i --network none --user 0.* restore$' "$DOCKER_LOG"
+  grep -q 'sh 1000 clear$' "$DOCKER_LOG"
+  ! grep -q 'sh 1000 restore$' "$DOCKER_LOG"
   # With the archive: it goes to the helper on stdin, as root without network, on the worker's volumes.
   printf 'archive' >"$dir/proton-state.tar"
   : >"$DOCKER_LOG"
@@ -296,4 +304,52 @@ ghcr.io/o/mailexpert-proton-worker:sha-new" ]
 exit 1
 STUB_EOF
   [ "$(proton_worker_state)" = error ]
+}
+
+@test "a stopped worker only warns after an install: ordinary mail and updates go on" {
+  DOCKER_NO_WORKER=1 run ensure_proton_namespace
+  [ "$status" -eq 0 ]
+  [[ $output == *"warning: the Proton worker is not running"* ]]
+  # The owner's conditions still stop it.
+  DOCKER_OTHER=backendid run ensure_proton_namespace
+  [ "$status" -ne 0 ]
+  DOCKER_WORKER_PORTS=1 run ensure_proton_namespace
+  [ "$status" -ne 0 ]
+}
+
+@test "a gate left closed by a killed backup is ended before the next backup's begin" {
+  DOCKER_STALE_GATE=1 proton_snapshot_begin backup-new 2>"$BATS_TEST_TMPDIR/err"
+  [ -e "$BATS_TEST_TMPDIR/stale-ended" ]
+  [ "$PROTON_SNAPSHOT" = backup-new ]
+  grep -q 'ending the Proton snapshot gate left by an earlier backup (backup-old)' "$BATS_TEST_TMPDIR/err"
+  proton_snapshot_end 2>/dev/null
+}
+
+@test "the backup renews its gate while it lives; a killed holder stops renewing" {
+  export PROTON_RENEW_SECONDS=0.2
+  proton_snapshot_begin snap-1 2>/dev/null
+  [ -n "$PROTON_RENEWER" ]
+  sleep 1
+  [ "$(wc -l <"$BATS_TEST_TMPDIR/renewals")" -ge 2 ]
+  proton_snapshot_end 2>/dev/null
+  [ -z "$PROTON_RENEWER" ]
+  local after
+  after=$(wc -l <"$BATS_TEST_TMPDIR/renewals")
+  sleep 0.6
+  [ "$(wc -l <"$BATS_TEST_TMPDIR/renewals")" -eq "$after" ]
+  # A holder killed without its EXIT trap: the renewer notices and stops, the worker's TTL reopens.
+  : >"$BATS_TEST_TMPDIR/renewals"
+  bash -c 'source "$1/lib/common.sh"; source "$1/lib/proton.sh"; APP_COMPOSE=(docker compose -p me-test); APP_DIR=$2
+    proton_snapshot_begin snap-2 2>/dev/null; kill -9 $$' _ "$DEPLOY_DIR" "$APP_DIR" || true
+  sleep 0.6
+  after=$(wc -l <"$BATS_TEST_TMPDIR/renewals")
+  sleep 0.6
+  [ "$(wc -l <"$BATS_TEST_TMPDIR/renewals")" -eq "$after" ]
+}
+
+@test "proton_snapshot_problem: a gate held with no backup running is a problem" {
+  [ -z "$(proton_snapshot_problem snapshot 1)" ]
+  [ -z "$(proton_snapshot_problem idle 0)" ]
+  [[ $(proton_snapshot_problem snapshot 0) == *"snapshot gate is closed with no backup running"* ]]
+  grep -q 'proton_snapshot_problem' "$DEPLOY_DIR/status.sh"
 }

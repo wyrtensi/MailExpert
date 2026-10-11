@@ -1025,9 +1025,9 @@ describe('forwardRuleMessage under the Proton snapshot gate', () => {
   });
 
   it('rule_forwarder_drains_before_snapshot: the send and its sent mark run inside one lease', async () => {
-    callWorker.mockImplementation(async (method, path) => {
-      events.push(`${method} ${path}`);
-      return method === 'POST' ? { leaseId: 'lease1' } : { released: true };
+    callWorker.mockImplementation(async (method, path, body) => {
+      events.push(`${method} ${path.replace(/[0-9a-f]{32}$/, '<lease>')}`);
+      return method === 'POST' ? { leaseId: body.leaseId } : { released: true };
     });
     query
       .mockResolvedValueOnce(SENDABLE)
@@ -1036,7 +1036,7 @@ describe('forwardRuleMessage under the Proton snapshot gate', () => {
       .mockImplementationOnce(async (sql) => { events.push(sql.includes("status = 'sent'") ? 'sql sent' : 'sql'); return { rows: [] }; });
 
     await expect(forwardRuleMessage(input)).resolves.toBe('sent');
-    expect(events).toEqual(['POST /leases/send', 'smtp', 'sql sent', 'DELETE /leases/lease1']);
+    expect(events).toEqual(['POST /leases/send', 'smtp', 'sql sent', 'DELETE /leases/<lease>']);
   });
 
   it('a closed gate stops the forward before SMTP and releases the reservation for a retry', async () => {

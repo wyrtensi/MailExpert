@@ -9,16 +9,17 @@ Routes (JSON, bodies <= 64 KiB):
   POST /connections/:id/cancel
   POST /users/:id/credentials       {operationId} | {generation, email}
   POST /users/:id/remove            {generation, email}  (one (user, address) link)
-  POST   /leases/send               -> {leaseId}  reserve one actual send (backend)
-  DELETE /leases/:id                release it
+  POST   /leases/send               {leaseId}  reserve one actual send (backend names it)
+  DELETE /leases/:id                release it, or cancel a grant still on its way
   POST /snapshot/begin              {snapshotId}  close the gate, drain, stop Bridge (host)
+  POST /snapshot/renew              {snapshotId}  keep it closed: it reopens 5 min after the last
   POST /snapshot/end                {snapshotId}  open the gate, start Bridge when needed
 GET /healthz answers 503 when Bridge should run (links, removals) but does not.
 Request bodies and native details are never logged.
 
 Host side (deploy scripts, through `docker compose exec proton-worker`):
   worker.py --healthcheck
-  worker.py --request GET /healthz | --request POST /snapshot/begin|/snapshot/end <snapshotId>
+  worker.py --request GET /healthz | --request POST /snapshot/begin|renew|end <snapshotId>
 prints the JSON answer and exits 0 for 2xx, 1 otherwise.
 """
 
@@ -44,7 +45,7 @@ MAX_BODY = 65536
 ID = r'([A-Za-z0-9%+_=-]{1,384})'
 STATUS = {'not_found': 404, 'login_busy': 409, 'operation_conflict': 409,
           'generation_mismatch': 409, 'not_connected': 409, 'address_mismatch': 409,
-          'maintenance_busy': 409, 'snapshot_busy': 409,
+          'maintenance_busy': 409, 'snapshot_busy': 409, 'lease_cancelled': 409,
           'invalid_challenge': 400, 'worker_invalid_request': 400, 'worker_unavailable': 503}
 
 
@@ -83,11 +84,14 @@ def _routes(controller):
              email=body.get('email'))),
         ('POST', re.compile(r'^/users/%s/remove$' % ID),
          lambda body, i: controller.remove_user(i, body.get('generation'), body.get('email'))),
-        ('POST', re.compile(r'^/leases/send$'), lambda body: controller.acquire_send_lease()),
+        ('POST', re.compile(r'^/leases/send$'),
+         lambda body: controller.acquire_send_lease(body.get('leaseId'))),
         ('DELETE', re.compile(r'^/leases/%s$' % ID),
          lambda body, i: controller.release_send_lease(i)),
         ('POST', re.compile(r'^/snapshot/begin$'),
          lambda body: controller.snapshot_begin(body.get('snapshotId'))),
+        ('POST', re.compile(r'^/snapshot/renew$'),
+         lambda body: controller.snapshot_renew(body.get('snapshotId'))),
         ('POST', re.compile(r'^/snapshot/end$'),
          lambda body: controller.snapshot_end(body.get('snapshotId'))),
     ]
@@ -258,12 +262,13 @@ def healthcheck(pathname=SOCKET_PATH):
 
 # The host may only read health and drive the snapshot gate; sends and logins are the
 # backend's, through the same socket.
-HOST_REQUESTS = {('GET', '/healthz'), ('POST', '/snapshot/begin'), ('POST', '/snapshot/end')}
+HOST_REQUESTS = {('GET', '/healthz'), ('POST', '/snapshot/begin'), ('POST', '/snapshot/renew'),
+                 ('POST', '/snapshot/end')}
 
 
 def host_request(args):
     if len(args) < 2 or (args[0], args[1]) not in HOST_REQUESTS:
-        os.write(2, b'proton-worker: usage: --request GET /healthz | POST /snapshot/begin|end <id>\n')
+        os.write(2, b'proton-worker: usage: --request GET /healthz | POST /snapshot/begin|renew|end <id>\n')
         return 2
     method, path = args[0], args[1]
     body = None

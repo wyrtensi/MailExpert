@@ -212,7 +212,8 @@ jobs:
 
   deploy-e2e:
     name: Deploy e2e
-    needs: [shellcheck, bats]
+    # proton-worker first: its cache-to warms the slow Bridge build this job loads from cache.
+    needs: [shellcheck, bats, proton-worker]
     runs-on: ubuntu-latest
     timeout-minutes: 45
 

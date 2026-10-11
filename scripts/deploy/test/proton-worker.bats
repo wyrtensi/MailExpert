@@ -30,6 +30,7 @@ case " $* " in
   *" up -d --no-deps --force-recreate proton-worker "*) : >"$BATS_TEST_TMPDIR/recreated" ;;
   *" exec -T proton-worker python "*"/snapshot/begin"*)
     if [ -n "${DOCKER_SNAPSHOT_BUSY:-}" ]; then echo '{"errorCode":"snapshot_busy","httpStatus":409}'; exit 1; fi
+    if [ -n "${DOCKER_SNAPSHOT_TIMEOUT:-}" ]; then echo '{"error":"timeout","errorCode":"worker_unavailable","httpStatus":0}'; exit 1; fi
     echo '{"state":"snapshot","linkedAddresses":2,"sendLeases":0,"httpStatus":200}' ;;
   *" exec -T proton-worker python "*"/snapshot/end"*) : >"$BATS_TEST_TMPDIR/gate-open"; echo '{"state":"running","httpStatus":200}' ;;
   *" exec -T proton-worker python "*"/healthz"*) echo '{"state":"idle","httpStatus":200}' ;;
@@ -197,6 +198,15 @@ ghcr.io/o/mailexpert-proton-worker:sha-new" ]
   [ -n "$dump" ]
   [ "$begin" -lt "$dump" ]
   sed -n '/^finish() {/,/^}/p' "$DEPLOY_DIR/backup.sh" | grep -q proton_snapshot_end
+}
+
+@test "snapshot_failure_releases_gate: an unknown outcome (timeout) still reopens the gate on exit" {
+  DOCKER_SNAPSHOT_TIMEOUT=1 proton_snapshot_begin snap-1 >"$BATS_TEST_TMPDIR/out" || true
+  [ "$(cat "$BATS_TEST_TMPDIR/out")" = "worker_unavailable, outcome unknown" ]
+  [ "$PROTON_SNAPSHOT" = snap-1 ]
+  proton_snapshot_end 2>/dev/null
+  [ -e "$BATS_TEST_TMPDIR/gate-open" ]
+  [ -z "$PROTON_SNAPSHOT" ]
 }
 
 @test "the gate wraps the capture: begin, the state read in the worker, then end; no state values printed" {

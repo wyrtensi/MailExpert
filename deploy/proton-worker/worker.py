@@ -273,8 +273,9 @@ def host_request(args):
             return 2
         body = {'snapshotId': args[2]}
     try:
-        # The snapshot gate waits up to 60 s for draining sends: allow for it.
-        status, answer = request(method, path, body, timeout=90)
+        # The snapshot gate waits up to 60 s for draining sends, then Bridge's shutdown takes up
+        # to 110 s (native.py: StopEventStream, stream join, Quit, exit wait): allow for both.
+        status, answer = request(method, path, body, timeout=200)
     except OSError as error:
         status, answer = 0, {'errorCode': 'worker_unavailable', 'error': type(error).__name__}
     sys.stdout.write(json.dumps(dict(answer, httpStatus=status), sort_keys=True) + '\n')

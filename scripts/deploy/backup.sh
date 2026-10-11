@@ -294,6 +294,7 @@ main() {
   # its state are captured, so both describe the same moment (lib/proton.sh). Bounded at 60 s;
   # a busy worker fails the backup before the dump. Reopened right after the capture, and by
   # finish whatever happens.
+  # proton_snapshot_begin is called directly (not in $(...)): PROTON_SNAPSHOT must reach finish.
   proton_snapshot_begin "backup-$(gen_hex 6)" >/dev/null ||
     die "the Proton worker did not stop for the backup ($PROTON_REFUSAL: a Proton send or sign-in did not finish within 60 s); nothing was dumped, run the backup again later"
   dump_database "$STAGING"

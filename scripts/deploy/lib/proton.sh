@@ -73,13 +73,21 @@ proton_error() {
 # removals), waits up to 60 s for the sends in flight, then stops Bridge and waits for its exit.
 # Status 0 with the gate closed, or when there is nothing to hold (no worker in this version, its
 # container not running: Bridge is not running then either); 1 with the reason on stdout
-# (snapshot_busy: a send or a login did not finish in time; the gate is open again).
+# (snapshot_busy: a send or a login did not finish in time; the gate is open again). An answer
+# that is not a refusal (no HTTP status: the request timed out or the exec failed) leaves the
+# outcome unknown: the worker may still close the gate, so PROTON_SNAPSHOT is set and the caller's
+# proton_snapshot_end (idempotent in the worker) opens it again.
 proton_snapshot_begin() {
-  local answer
+  local answer status
   proton_worker_installed || return 0
   [ -n "$(proton_container)" ] || return 0
   if ! answer=$(proton_request POST /snapshot/begin "$1"); then
     PROTON_REFUSAL=$(proton_error "$answer")
+    status=$(jq -r '.httpStatus // 0' <<<"$answer" 2>/dev/null) || status=0
+    if ! [[ $status =~ ^[0-9]+$ ]] || [ "$status" -lt 400 ]; then
+      PROTON_SNAPSHOT=$1
+      PROTON_REFUSAL="$PROTON_REFUSAL, outcome unknown"
+    fi
     printf '%s\n' "$PROTON_REFUSAL"
     return 1
   fi

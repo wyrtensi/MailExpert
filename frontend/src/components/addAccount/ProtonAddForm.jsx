@@ -2,7 +2,7 @@ import { useEffect, useMemo, useRef, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import { api } from '../../utils/api.js';
 import { GMAIL_EMAIL_PATTERN } from '../../utils/addAccount.js';
-import { newAttemptId } from '../../utils/addAccountFlow.js';
+import { newAttemptId, submitWithReplay } from '../../utils/addAccountFlow.js';
 import { findReconnectTarget, protonErrorKey, protonStartBody } from '../../utils/providerConnection.js';
 import AdvancedConnectionFields from './AdvancedConnectionFields.jsx';
 
@@ -160,9 +160,14 @@ export default function ProtonAddForm({
     setBusy(true);
     setErrorKey(null);
     try {
-      const status = await api.startProtonConnection(protonStartBody({
-        email: address, password, requestId: attemptRef.current, reconnectAccountId: target?.id, metadata,
-      }), { signal });
+      // A lost answer is replayed once with the same id (the server answers the same attempt).
+      const status = await submitWithReplay(
+        (id) => api.startProtonConnection(protonStartBody({
+          email: address, password, requestId: id, reconnectAccountId: target?.id, metadata,
+        }), { signal }),
+        attemptRef.current,
+        { signal },
+      );
       if (signal?.aborted) { cancelOnServer(status?.id); return; }
       if (liveRef.current) setPassword('');
       if (liveRef.current) setBusy(false);

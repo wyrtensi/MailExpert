@@ -967,6 +967,13 @@ textarea.add-account-input { min-height: 88px; resize: vertical; }
 .add-account-fieldset { margin: 0; padding: 0; border: none; min-width: 0; }
 .add-account-fieldset > legend { padding: 0; margin-bottom: 8px; font-size: 12px; font-weight: 600; color: var(--text-primary); }
 .add-account-help { padding: 12px 14px; border-radius: 8px; background: var(--bg-tertiary); font-size: 12px; line-height: 1.55; color: var(--text-secondary); min-width: 0; }
+.add-account-help-title { color: var(--text-primary); }
+.add-account-help-note { margin: 0 0 8px; }
+.add-account-help-gap { margin-top: 8px; }
+.add-account-link-anchor { display: inline-flex; align-items: center; text-decoration: none; }
+.add-account-help a.add-account-link-anchor { color: var(--text-secondary); }
+.add-account-help a.add-account-link-anchor:hover { color: var(--text-primary); }
+.add-account-help-link { display: inline-flex; align-items: center; min-height: 44px; min-width: 44px; }
 .add-account-help ol { margin: 6px 0 8px; padding-left: 20px; }
 .add-account-help li { margin-bottom: 3px; }
 .add-account-help a { color: var(--accent); overflow-wrap: anywhere; }

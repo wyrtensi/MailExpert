@@ -79,13 +79,13 @@ export default function AppPasswordHelp({ provider, url }) {
   const providerName = t(`admin.accounts.add.${provider}Title`);
   return (
     <div className="add-account-help" ref={rootRef} data-app-password-help={provider}>
-      <strong style={{ color: 'var(--text-primary)' }}>{t('admin.accounts.add.appPassword.title')}</strong>
+      <strong className="add-account-help-title">{t('admin.accounts.add.appPassword.title')}</strong>
       <ol>
         {steps.slice(0, 3).map((key) => <li key={key}>{t(key)}</li>)}
       </ol>
-      <p style={{ margin: '0 0 8px' }}>{t(steps[3])}</p>
+      <p className="add-account-help-note">{t(steps[3])}</p>
       <div className="add-account-actions">
-        <a className="add-account-link-button" href={url} target="_blank" rel="noopener noreferrer" style={{ display: 'inline-flex', alignItems: 'center', textDecoration: 'none' }}>
+        <a className="add-account-link-button add-account-link-anchor" href={url} target="_blank" rel="noopener noreferrer">
           {t('admin.accounts.add.appPassword.create')}
         </a>
         <button
@@ -98,16 +98,16 @@ export default function AppPasswordHelp({ provider, url }) {
         </button>
       </div>
       <div role="status" aria-live="polite">
-        {copy === 'copied' && <p className="add-account-success" style={{ marginTop: 8 }}>{t('admin.accounts.add.appPassword.copied')}</p>}
+        {copy === 'copied' && <p className="add-account-success add-account-help-gap">{t('admin.accounts.add.appPassword.copied')}</p>}
       </div>
       {copy === 'failed' && (
         <div role="alert">
-          <p className="add-account-error" style={{ marginTop: 8 }}>{t('admin.accounts.add.appPassword.copyFailed')}</p>
+          <p className="add-account-error add-account-help-gap">{t('admin.accounts.add.appPassword.copyFailed')}</p>
           <code ref={urlRef} className="add-account-url" data-copy-fallback>{url}</code>
         </div>
       )}
       <p className="add-account-note">
-        <a href={helpUrl} target="_blank" rel="noopener noreferrer">{t('admin.accounts.add.appPassword.officialHelp', { service: providerName })}</a>
+        <a className="add-account-help-link" href={helpUrl} target="_blank" rel="noopener noreferrer">{t('admin.accounts.add.appPassword.officialHelp', { service: providerName })}</a>
       </p>
     </div>
   );

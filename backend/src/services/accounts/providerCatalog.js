@@ -16,7 +16,7 @@ const providers = [
     id: 'yandex',
     imap: { host: 'imap.yandex.ru', port: 993, tls: 'implicit' },
     smtp: { host: 'smtp.yandex.ru', port: 465, tls: 'implicit' },
-    appPasswordUrl: 'https://id.yandex.ru/security/app-passwords',
+    appPasswordUrl: 'https://id.yandex.ru/security',
     publicDomains: ['yandex.ru', 'ya.ru', 'yandex.com', 'yandex.by', 'yandex.kz', 'yandex.com.tr'],
     loginAlternatives: { imap: ['full_address', 'local_part_public_domain'], smtp: ['full_address', 'local_part_public_domain'] },
   },

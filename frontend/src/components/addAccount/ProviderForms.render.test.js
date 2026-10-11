@@ -73,7 +73,7 @@ const CONNECTION_ID = '5a8b1a22-3f5d-4be0-9b8e-3c1a5f0d7e11';
 
 const CATALOG = [
   { id: 'yahoo', imap: { host: 'imap.mail.yahoo.com', port: 993, tls: 'implicit' }, smtp: { host: 'smtp.mail.yahoo.com', port: 587, tls: 'starttls' }, appPasswordUrl: 'https://login.yahoo.com/account/security', publicDomains: ['yahoo.com', 'ymail.com'], loginAlternatives: { imap: ['full_address'], smtp: ['full_address'] } },
-  { id: 'yandex', imap: { host: 'imap.yandex.ru', port: 993, tls: 'implicit' }, smtp: { host: 'smtp.yandex.ru', port: 465, tls: 'implicit' }, appPasswordUrl: 'https://id.yandex.ru/security/app-passwords', publicDomains: ['yandex.ru', 'ya.ru'], loginAlternatives: { imap: ['full_address'], smtp: ['full_address'] } },
+  { id: 'yandex', imap: { host: 'imap.yandex.ru', port: 993, tls: 'implicit' }, smtp: { host: 'smtp.yandex.ru', port: 465, tls: 'implicit' }, appPasswordUrl: 'https://id.yandex.ru/security', publicDomains: ['yandex.ru', 'ya.ru'], loginAlternatives: { imap: ['full_address'], smtp: ['full_address'] } },
   { id: 'mailru', imap: { host: 'imap.mail.ru', port: 993, tls: 'implicit' }, smtp: { host: 'smtp.mail.ru', port: 465, tls: 'implicit' }, appPasswordUrl: 'https://account.mail.ru/user/2-step-auth/passwords/', publicDomains: ['mail.ru', 'bk.ru', 'list.ru'], loginAlternatives: { imap: ['full_address'], smtp: ['full_address'] } },
   { id: 'icloud', imap: { host: 'imap.mail.me.com', port: 993, tls: 'implicit' }, smtp: { host: 'smtp.mail.me.com', port: 587, tls: 'starttls' }, appPasswordUrl: 'https://account.apple.com/', publicDomains: ['icloud.com', 'me.com'], loginAlternatives: { imap: ['full_address', 'local_part'], smtp: ['full_address'] } },
 ];
@@ -601,6 +601,21 @@ describe('Proton', () => {
     const settled = gets().length;
     await idle(50);
     assert.equal(gets().length, settled, 'polling stops when the attempt ends');
+  });
+
+  test('a lost start answer is replayed once with the same attempt id in the body', async () => {
+    let attempts = 0;
+    answers['POST /api/accounts/proton/connect'] = () => {
+      attempts += 1;
+      return attempts === 1 ? new TypeError('network down') : { id: CONNECTION_ID, state: 'authenticating' };
+    };
+    const { host } = await mount(React.createElement(Harness, { Form: ProtonAddForm, proton: READY, ...fastProps }));
+    await fillAndStart(host);
+    const starts = calls.filter((c) => c.method === 'POST' && c.path === '/api/accounts/proton/connect');
+    assert.equal(starts.length, 2);
+    assert.match(starts[0].body.requestId, UUID);
+    assert.equal(starts[1].body.requestId, starts[0].body.requestId, 'no new UUID on the replay');
+    await until(() => host.querySelector('[data-proton-working]'), 'the attempt is running');
   });
 
   test('a second password asks with a password field', async () => {

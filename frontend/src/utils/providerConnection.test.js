@@ -18,7 +18,7 @@ import {
 
 const CATALOG = [
   { id: 'yahoo', imap: { host: 'imap.mail.yahoo.com', port: 993, tls: 'implicit' }, smtp: { host: 'smtp.mail.yahoo.com', port: 587, tls: 'starttls' }, appPasswordUrl: 'https://login.yahoo.com/account/security', publicDomains: ['yahoo.com', 'ymail.com', 'rocketmail.com'], loginAlternatives: { imap: ['full_address'], smtp: ['full_address'] } },
-  { id: 'yandex', imap: { host: 'imap.yandex.ru', port: 993, tls: 'implicit' }, smtp: { host: 'smtp.yandex.ru', port: 465, tls: 'implicit' }, appPasswordUrl: 'https://id.yandex.ru/security/app-passwords', publicDomains: ['yandex.ru', 'ya.ru', 'yandex.com'], loginAlternatives: { imap: ['full_address'], smtp: ['full_address'] } },
+  { id: 'yandex', imap: { host: 'imap.yandex.ru', port: 993, tls: 'implicit' }, smtp: { host: 'smtp.yandex.ru', port: 465, tls: 'implicit' }, appPasswordUrl: 'https://id.yandex.ru/security', publicDomains: ['yandex.ru', 'ya.ru', 'yandex.com'], loginAlternatives: { imap: ['full_address'], smtp: ['full_address'] } },
   { id: 'mailru', imap: { host: 'imap.mail.ru', port: 993, tls: 'implicit' }, smtp: { host: 'smtp.mail.ru', port: 465, tls: 'implicit' }, appPasswordUrl: 'https://account.mail.ru/user/2-step-auth/passwords/', publicDomains: ['mail.ru', 'bk.ru', 'list.ru', 'inbox.ru', 'internet.ru'], loginAlternatives: { imap: ['full_address'], smtp: ['full_address'] } },
   { id: 'icloud', imap: { host: 'imap.mail.me.com', port: 993, tls: 'implicit' }, smtp: { host: 'smtp.mail.me.com', port: 587, tls: 'starttls' }, appPasswordUrl: 'https://account.apple.com/', publicDomains: ['icloud.com', 'me.com', 'mac.com'], loginAlternatives: { imap: ['full_address', 'local_part'], smtp: ['full_address'] } },
 ];

@@ -29,6 +29,7 @@ import accountRoutes from './routes/accounts.js';
 import accountProviderRoutes from './routes/accountProviders.js';
 import accountProtonRoutes from './routes/accountProton.js';
 import { reconcileProtonConnectionsAtStartup, setProtonMailEngine, startProtonConnectionSweeper } from './services/proton/connections.js';
+import { setProtonReconcileEngine, startProtonLinkReconciler } from './services/proton/reconcile.js';
 import mailNodeRoutes from './routes/mailNode.js';
 import mailNodeQuarantineRoutes from './routes/mailNodeQuarantine.js';
 import mailNodeOutageRoutes from './routes/mailNodeOutages.js';
@@ -195,6 +196,7 @@ app.set('imapManager', imapManager);
 setMailEngine(imapManager);
 // Managed Proton attempts connect the mailbox they commit through the same engine.
 setProtonMailEngine(imapManager);
+setProtonReconcileEngine(imapManager);
 
 // Routes
 app.use('/api/auth', authRoutes);
@@ -382,6 +384,9 @@ try {
   console.error('Proton connection reconciliation failed:', err.message);
 }
 startProtonConnectionSweeper();
+// Committed managed Proton links follow Bridge: a rotated certificate or password is stored and the
+// mailbox reconnects; a lost session is reported for a new sign-in (services/proton/reconcile.js).
+const stopProtonLinkReconciler = startProtonLinkReconciler();
 
 const PORT = process.env.PORT || 3000;
 httpServer.listen(PORT, () => {
@@ -393,6 +398,7 @@ process.on('SIGTERM', () => {
   // The job queue stops claiming at once, before anything else (a tick in progress included), and
   // its running jobs get up to 8 s: a send in progress finishes rather than being cut mid-DATA.
   const workerStopped = stopJobWorker({ waitMs: 8000 }).catch(() => false);
+  stopProtonLinkReconciler();
   httpServer.close(async () => {
     await workerStopped;
     // close() lets pending commands finish before the connection is shut down.

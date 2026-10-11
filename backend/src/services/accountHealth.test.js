@@ -17,8 +17,8 @@ describe('computeAccountHealth', () => {
     expect(fixture.staleAfterMs).toBe(STALE_AFTER_MS);
   });
 
-  it('exposes exactly the five stable codes', () => {
-    expect([...ACCOUNT_HEALTH_CODES].sort()).toEqual(['disabled', 'failed', 'healthy', 'oauth_reconnect_required', 'stale']);
+  it('exposes exactly the seven stable codes', () => {
+    expect([...ACCOUNT_HEALTH_CODES].sort()).toEqual(['disabled', 'failed', 'healthy', 'oauth_reconnect_required', 'proton_reconnect_required', 'proton_unavailable', 'stale']);
     expect(fixture.cases.every(c => ACCOUNT_HEALTH_CODES.includes(c.expected))).toBe(true);
   });
 

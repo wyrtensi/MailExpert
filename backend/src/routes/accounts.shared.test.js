@@ -20,6 +20,8 @@ vi.mock('../index.js', () => ({
   },
 }));
 vi.mock('../services/encryption.js', () => ({ encrypt: vi.fn((v) => (v ? `enc:${v}` : v)), decrypt: vi.fn() }));
+// Reconcile status of managed Proton links (services/proton/reconcile.js), per account.
+vi.mock('../services/proton/reconcile.js', () => ({ protonLinkStatus: vi.fn(() => null) }));
 vi.mock('../services/hostValidation.js', () => ({ validateHost: vi.fn(async () => null) }));
 vi.mock('../services/connectionPolicy.js', () => ({
   getConnectionPolicy: vi.fn().mockResolvedValue({ allowPrivateHosts: false, allowInsecureTls: false, allowNonstandardPorts: true }),
@@ -30,6 +32,7 @@ import accountRoutes from './accounts.js';
 import { query } from '../services/db.js';
 import { imapManager } from '../index.js';
 import { isAdminRequest } from '../middleware/auth.js';
+import { protonLinkStatus } from '../services/proton/reconcile.js';
 import { createRealSchemaDb } from '../services/testing/realSchema.js';
 
 const ID = '66666666-6666-4666-8666-666666666666';
@@ -111,6 +114,65 @@ describe('mailboxes are shared by every user', () => {
         expect(JSON.stringify(accounts)).not.toContain('secret-sentinel');
         expect(JSON.stringify(accounts)).not.toContain('native-fixture');
       }
+    } finally {
+      await db.close();
+    }
+  });
+
+  it('reports a lost managed Proton session as a safe health code every employee can act on', async () => {
+    const db = await createRealSchemaDb();
+    const employee = '10000000-0000-4000-8000-000000000003';
+    try {
+      await db.exec(`
+        INSERT INTO users (id, username, password_hash) VALUES ('${employee}', 'employee', 'fixture');
+        INSERT INTO email_accounts (id, name, email_address, mail_provider, connection_mode, imap_tls_mode, last_sync, sync_error)
+          VALUES ('${ID}', 'Box', 'box@proton.me', 'proton', 'managed', 'implicit', now(), 'Authentication failed');
+        INSERT INTO email_accounts (name, email_address, mail_provider, connection_mode, last_sync)
+          VALUES ('Preset', 'preset@proton.me', 'proton', 'preset', now());
+        INSERT INTO proton_users (proton_user_id) VALUES ('native-fixture');
+        INSERT INTO proton_mailbox_links (account_id, proton_user_id, generation, certificate_pem, certificate_fingerprint, tls_servername)
+          SELECT '${ID}', proton_user_id, generation, 'secret-sentinel', 'secret-sentinel', '127.0.0.1' FROM proton_users;
+      `);
+      query.mockImplementation((sql, params) => db.query(sql, params));
+      isAdminRequest.mockResolvedValue(false);
+      // The status is only ever applied to the managed mailbox it was recorded for.
+      protonLinkStatus.mockImplementation(() => ({ code: 'proton_reconnect_required' }));
+      const res = await fetch(`${base}/api/accounts`, { headers: { 'x-user-id': employee } });
+      const accounts = await res.json();
+      const box = accounts.find(account => account.id === ID);
+      expect(box).toMatchObject({ health: 'proton_reconnect_required', proton_status: 'proton_reconnect_required', can_reconnect_proton: true });
+      expect(accounts.find(account => account.name === 'Preset')).toMatchObject({ health: 'healthy', proton_status: null, can_reconnect_proton: false });
+      expect(JSON.stringify(accounts)).not.toContain('secret-sentinel');
+      expect(JSON.stringify(accounts)).not.toContain('native-fixture');
+
+      protonLinkStatus.mockImplementation(() => ({ code: 'proton_unavailable' }));
+      const offline = await (await fetch(`${base}/api/accounts`, { headers: { 'x-user-id': employee } })).json();
+      expect(offline.find(account => account.id === ID)).toMatchObject({ health: 'proton_unavailable', proton_status: 'proton_unavailable' });
+    } finally {
+      protonLinkStatus.mockImplementation(() => null);
+      await db.close();
+    }
+  });
+
+  it('never takes a certificate or fingerprint from the browser', async () => {
+    const db = await createRealSchemaDb();
+    try {
+      await db.exec(`
+        INSERT INTO email_accounts (id, name, email_address, mail_provider, connection_mode, imap_tls_mode, imap_host, imap_port, smtp_host, smtp_port)
+          VALUES ('${ID}', 'Box', 'box@proton.me', 'proton', 'managed', 'implicit', '127.0.0.1', 1993, '127.0.0.1', 1465);
+        INSERT INTO proton_users (proton_user_id) VALUES ('native-fixture');
+        INSERT INTO proton_mailbox_links (account_id, proton_user_id, generation, certificate_pem, certificate_fingerprint, tls_servername)
+          SELECT '${ID}', proton_user_id, generation, 'current-pem', 'current-fingerprint', '127.0.0.1' FROM proton_users;
+      `);
+      query.mockImplementation((sql, params) => db.query(sql, params));
+      const res = await fetch(`${base}/api/accounts/${ID}`, {
+        method: 'PUT', headers: { 'Content-Type': 'application/json', 'X-Requested-With': 'MailExpert' },
+        body: JSON.stringify({ name: 'Renamed', certificate_pem: 'old-pem', certificate_fingerprint: 'old-fingerprint', tls_servername: 'evil.example.com', generation: '00000000-0000-4000-8000-000000000000' }),
+      });
+      expect(res.status).toBe(200);
+      expect((await db.query('SELECT certificate_pem, certificate_fingerprint, tls_servername FROM proton_mailbox_links')).rows)
+        .toEqual([{ certificate_pem: 'current-pem', certificate_fingerprint: 'current-fingerprint', tls_servername: '127.0.0.1' }]);
+      expect((await db.query('SELECT name FROM email_accounts')).rows).toEqual([{ name: 'Renamed' }]);
     } finally {
       await db.close();
     }

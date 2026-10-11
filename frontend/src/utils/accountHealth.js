@@ -10,10 +10,16 @@ import { MICROSOFT_OAUTH_PATH, buildMicrosoftReconnectUrl } from './microsoftOAu
 
 export const STALE_AFTER_MS = 15 * 60 * 1000;
 
-export const ACCOUNT_HEALTH_CODES = Object.freeze(['healthy', 'stale', 'failed', 'oauth_reconnect_required', 'disabled']);
+export const ACCOUNT_HEALTH_CODES = Object.freeze([
+  'healthy', 'stale', 'failed', 'oauth_reconnect_required', 'proton_reconnect_required', 'proton_unavailable', 'disabled',
+]);
+
+// Safe status codes of a managed Proton mailbox's link (backend services/proton/reconcile.js),
+// sent as proton_status. The reconnect code may also arrive as sync_error over WebSocket.
+const PROTON_STATUS_CODES = new Set(['proton_reconnect_required', 'proton_unavailable']);
 
 // Account fields the rule reads. A patch touching none of them keeps the server code.
-export const HEALTH_FIELDS = Object.freeze(['enabled', 'oauth_reconnect_required', 'sync_error', 'last_sync']);
+export const HEALTH_FIELDS = Object.freeze(['enabled', 'oauth_reconnect_required', 'proton_status', 'sync_error', 'last_sync']);
 
 // Spelled out literally so the i18n source-coverage test can find the keys.
 export const HEALTH_LABEL_KEYS = Object.freeze({
@@ -21,6 +27,8 @@ export const HEALTH_LABEL_KEYS = Object.freeze({
   stale: 'sidebar.health.stale',
   failed: 'sidebar.health.failed',
   oauth_reconnect_required: 'sidebar.health.reconnectRequired',
+  proton_reconnect_required: 'sidebar.health.protonReconnectRequired',
+  proton_unavailable: 'sidebar.health.protonUnavailable',
   disabled: 'sidebar.health.disabled',
 });
 
@@ -28,12 +36,15 @@ export const HEALTH_LABEL_KEYS = Object.freeze({
 // the mailbox, utils/microsoftOAuth.js).
 export { MICROSOFT_OAUTH_PATH };
 
-// Priority: disabled → oauth_reconnect_required → failed → stale → healthy.
+// Priority: disabled → oauth_reconnect_required → proton_reconnect_required →
+// proton_unavailable → failed → stale → healthy.
 // Keep in sync with the backend; the shared fixture test fails on drift.
 export function computeAccountHealth(account, now = Date.now()) {
   const a = account ?? {};
   if (a.enabled === false) return 'disabled';
   if (a.oauth_reconnect_required === true || a.sync_error === 'oauth_reconnect_required') return 'oauth_reconnect_required';
+  if (a.proton_status === 'proton_reconnect_required' || a.sync_error === 'proton_reconnect_required') return 'proton_reconnect_required';
+  if (PROTON_STATUS_CODES.has(a.proton_status)) return a.proton_status;
   if (a.sync_error) return 'failed';
   const lastSync = a.last_sync == null ? NaN : new Date(a.last_sync).getTime();
   const nowMs = now instanceof Date ? now.getTime() : Number(now);
@@ -84,11 +95,18 @@ export function canReconnectOAuth(account, { isAdmin = false } = {}) {
   return true;
 }
 
-// What the account context menu's "Reconnect" item does. An IMAP reconnect cannot
+// What the account context menu's "Reconnect" item does ('proton': a new Proton sign-in, see
+// below). An IMAP reconnect cannot
 // fix a revoked grant, so reconnect-required OAuth accounts re-run consent instead —
 // or, for a Microsoft mailbox and a user who is not an administrator, nothing
 // ('admin_required': the menu leaves the item out and the row says to ask an administrator).
 export function reconnectMenuAction(account, { isAdmin = false } = {}) {
+  // A managed Proton mailbox whose Bridge session is gone needs a new Proton sign-in, which any
+  // approved employee may start for the shared mailbox (the server grants can_reconnect_proton).
+  // The sign-in dialog is seeded with this mailbox and its address.
+  if (account?.health === 'proton_reconnect_required' && account.can_reconnect_proton === true) {
+    return { kind: 'proton', accountId: account.id, email: account.email_address };
+  }
   const url = account?.health === 'oauth_reconnect_required' ? reconnectUrlFor(account) : null;
   if (!url) return { kind: 'imap' };
   return canReconnectOAuth(account, { isAdmin }) ? { kind: 'oauth', url } : { kind: 'admin_required' };

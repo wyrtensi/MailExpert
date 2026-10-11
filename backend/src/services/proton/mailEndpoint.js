@@ -33,6 +33,21 @@ export function isManagedProtonAccount(account) {
   return account?.mail_provider === 'proton' && account?.connection_mode === 'managed';
 }
 
+// Whether the mailbox is a managed Proton mailbox by its database link, read again from the
+// stored row: provider columns on an account object alone never qualify (a hand-made or forged row
+// may carry them). Used where trust changes behavior, such as skipping the Sent APPEND.
+export async function hasManagedProtonLink(account) {
+  if (!isManagedProtonAccount(account) || typeof account.id !== 'string' || !UUID.test(account.id)) return false;
+  const { rows } = await query(
+    `SELECT 1 FROM proton_mailbox_links l
+       JOIN proton_users u ON u.proton_user_id = l.proton_user_id AND u.generation = l.generation
+       JOIN email_accounts a ON a.id = l.account_id
+      WHERE l.account_id = $1 AND a.mail_provider = 'proton' AND a.connection_mode = 'managed'`,
+    [account.id],
+  );
+  return rows.length > 0;
+}
+
 function normalizedFingerprint(value) {
   return typeof value === 'string' ? value.replace(/:/g, '').toLowerCase() : '';
 }

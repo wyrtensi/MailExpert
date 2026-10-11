@@ -20,6 +20,8 @@ vi.mock('../accounts/deleteAccount.js', async original => {
   const { deleteAccount } = await original();
   return { deleteAccount: vi.fn(deleteAccount) };
 });
+// A successful reconnect clears a lost-session status at once (services/proton/reconcile.js).
+vi.mock('./reconcile.js', () => ({ clearProtonLinkStatus: vi.fn() }));
 vi.mock('../redis.js', () => ({ redisClient: { incr: async () => { throw new Error('offline'); }, del: async () => {} } }));
 
 const { callWorker } = await import('./workerClient.js');
@@ -27,6 +29,7 @@ const { isProtonApiReachable } = await import('./apiReachability.js');
 const { probeConnection } = await import('../accounts/connectionProbe.js');
 const { recordAudit } = await import('../auditLog.js');
 const { deleteAccount } = await import('../accounts/deleteAccount.js');
+const { clearProtonLinkStatus } = await import('./reconcile.js');
 const { reset } = await import('../rateLimiter.js');
 const { closeCreationAdmission, reopenCreationAdmission } = await import('../accounts/accountCreation.js');
 const {
@@ -238,6 +241,7 @@ describe('Proton connection operations', () => {
     expect(engine.disconnectAccount).toHaveBeenCalledWith(account.id);
     expect(engine.connectAccount).toHaveBeenCalledOnce();
     expect(recordAudit).toHaveBeenCalledWith(expect.objectContaining({ action: 'mailbox.reconnected', accountId: account.id, actorUserId: OTHER }));
+    expect(clearProtonLinkStatus.mock.calls).toEqual([[account.id]]);
   });
 
   it('reconnect needs a managed link and the same address', async () => {

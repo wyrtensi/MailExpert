@@ -1,4 +1,4 @@
-import { describe, it, expect, vi, beforeEach } from 'vitest';
+import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 
 // What becomes of a send job when the mail server answers: delivered, retried (certainly nothing
 // was delivered and it may pass), failed (certainly nothing was delivered, and it will not pass), or
@@ -207,5 +207,56 @@ describe('OAuth reconnect-required on send', () => {
   it('retries a transient refresh failure during the send', async () => {
     sendMail.mockRejectedValueOnce(Object.assign(new Error('OAuth token refresh failed: oauth_refresh_failed'), { name: 'OAuthTokenError', code: 'oauth_refresh_failed' }));
     await expect(deliver()).rejects.toMatchObject({ jobOutcome: 'retry', code: 'oauth_refresh_failed' });
+  });
+});
+
+// Bridge files the Sent copy of a letter sent through it (the spike saw exactly one), so a managed
+// Proton mailbox skips the APPEND. Only the database link proves the mailbox is managed: the
+// provider columns of the row alone do not.
+describe('the Sent copy of a managed Proton mailbox', () => {
+  const PROTON_ID = '71000000-0000-4000-8000-000000000001';
+  const protonAccount = {
+    id: PROTON_ID, email_address: 'box@proton.me', name: 'Box', mail_provider: 'proton', connection_mode: 'managed',
+    smtp_host: '127.0.0.1', smtp_port: 1465, imap_host: '127.0.0.1', imap_port: 1993,
+  };
+  const appendToSent = vi.fn(async () => ({ uid: null }));
+  const protonImap = { ...imapManager, appendToSent, upsertSentMessageRecord: vi.fn(async () => {}) };
+  const sendAs = (sender, linked) => {
+    query.mockImplementation(async (sql) => (/proton_mailbox_links/.test(sql) ? { rows: linked ? [{ linked: 1 }] : [] } : { rows: [{ id: 'book1' }] }));
+    createAccountSmtpTransport.mockResolvedValue({ account: sender, transport: { sendMail } });
+    return deliverOutgoingMessage({ account: sender, mail: mail(), actorUserId: 'u1', imapManager: protonImap, markEffectStarted, onDelivered });
+  };
+  const linkQueries = () => query.mock.calls.filter(([sql]) => /proton_mailbox_links/.test(sql));
+
+  beforeEach(() => {
+    // Only the post-send timers (Sent sync, APPEND bound); nodemailer's stream needs the real queue.
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
+    resolveSentFolder.mockResolvedValue('Sent');
+  });
+  afterEach(() => { vi.clearAllTimers(); vi.useRealTimers(); });
+
+  it('managed_proton_sent_is_single_copy', async () => {
+    const result = await sendAs(protonAccount, true);
+    expect(sendMail).toHaveBeenCalledOnce();
+    expect(appendToSent).not.toHaveBeenCalled();
+    expect(result).toMatchObject({ sentFolder: 'Sent', sentCopySaved: null });
+    expect(linkQueries()).toHaveLength(1);
+    expect(linkQueries()[0][1]).toEqual([PROTON_ID]);
+    // The link is checked before the letter goes out.
+    expect(query.mock.invocationCallOrder[query.mock.calls.indexOf(linkQueries()[0])]).toBeLessThan(sendMail.mock.invocationCallOrder[0]);
+  });
+
+  it('spoofed_label_keeps_normal_sent_append', async () => {
+    // Managed provider columns without a link in the database.
+    await sendAs(protonAccount, false);
+    expect(appendToSent).toHaveBeenCalledOnce();
+    expect(appendToSent.mock.calls[0][1]).toBe('Sent');
+
+    // A Proton mailbox added with ordinary settings never asks for the link at all.
+    appendToSent.mockClear();
+    query.mockClear();
+    await sendAs({ ...protonAccount, connection_mode: 'preset' }, true);
+    expect(appendToSent).toHaveBeenCalledOnce();
+    expect(linkQueries()).toEqual([]);
   });
 });

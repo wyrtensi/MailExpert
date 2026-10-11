@@ -828,6 +828,8 @@
       "failedDetail": "Ошибка синхронизации: {{detail}}",
       "reconnectRequired": "Вход истёк, нужно подключить заново",
       "reconnectAskAdmin": "Вход истёк, попросите администратора подключить ящик заново",
+      "protonReconnectRequired": "Сессия Proton потеряна, войдите в Proton заново",
+      "protonUnavailable": "Сервис Proton временно недоступен",
       "reconnectAccount": "Подключить {{email}} заново",
       "disabled": "Ящик отключён"
     },

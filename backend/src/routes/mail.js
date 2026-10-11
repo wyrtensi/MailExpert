@@ -12,6 +12,8 @@ import { imapManager } from '../index.js';
 import { isConnectionRefusal, isMailboxBusyError, extractImapError } from '../services/imapManager.js';
 import { MAILBOX_BUSY_CODE, mailboxBusyBody, sendMailboxBusy, sendMovePending, movePendingBody, MOVE_PENDING_CODE } from '../utils/mailboxBusy.js';
 import { isPendingUid } from '../services/moveQueue.js';
+import { isManagedProtonAccount } from '../services/proton/mailEndpoint.js';
+import { normalizeProtonFolderPath, ProtonFolderError } from '../services/proton/folders.js';
 import { sanitizeEmail, stripEmailHead, hasRemoteImages, blockRemoteImages, rewriteEbayImageserUrls, rewriteAnchorHrefs } from '../services/emailSanitizer.js';
 import { snippetFromBody, decodeMimeWords, parseRawHeaders, parseMailboxList, buildHeadersFromMessage } from '../services/messageParser.js';
 import { resolveTrashFolder, resolveAllTrashPaths, resolveAllDraftsPaths, resolveArchiveFolder, isAllMailFolder, resolveSpamFolder, resolveAllSpamPaths, getDeleteStrategy, adjustFolderCounts, fanOutReadToSiblings, fanOutStarToSiblings, fanOutBulkReadToSiblings } from '../utils/mailUtils.js';
@@ -1179,6 +1181,16 @@ router.post('/folders', async (req, res) => {
   if (parentPath && !isValidFolderName(parentPath)) return res.status(400).json({ error: 'Invalid parent path' });
   const check = await query('SELECT * FROM email_accounts WHERE id = $1', [accountId]);
   if (!check.rows.length) return res.status(404).json({ error: 'Account not found' });
+  // A managed Proton mailbox takes user folders only under Folders/ (ensureFolder translates a root
+  // name); a label or a child of a system mailbox is refused here with a stable code.
+  if (isManagedProtonAccount(check.rows[0])) {
+    try {
+      normalizeProtonFolderPath(name.trim(), { parent: parentPath || null });
+    } catch (err) {
+      if (err instanceof ProtonFolderError) return res.status(400).json({ error: 'This folder cannot be created in this mailbox', code: err.code });
+      throw err;
+    }
+  }
 
   // Join parent and leaf with '/' and let ensureFolder translate: it splits on
   // '/' and imapflow joins the segments with the server's real hierarchy
@@ -1371,6 +1383,7 @@ router.post('/folders/rename', async (req, res) => {
     await imapManager.moveQueue.reguardAccount(accountId);
     res.json({ ok: true, newPath });
   } catch (err) {
+    if (err instanceof ProtonFolderError) return res.status(400).json({ error: 'This folder cannot be renamed in this mailbox', code: err.code });
     console.error('Rename folder error:', err);
     if (isMailboxBusyError(err)) return sendMailboxBusy(res, err);
     res.status(500).json({ error: 'Failed to rename folder' });
@@ -2248,7 +2261,9 @@ router.post('/messages/:id/snooze', async (req, res) => {
 
   if (!msg.message_id) return res.status(400).json({ error: 'Message has no Message-ID header — cannot snooze' });
 
-  const snoozedFolder = 'Snoozed';
+  // The name asked for; the server path (Folders/Snoozed on a managed Proton mailbox) comes from
+  // ensureFolder below and is what the move, the rows and the wakeup use.
+  let snoozedFolder = 'Snoozed';
 
   if (msg.folder === snoozedFolder) {
     return res.status(400).json({ error: 'Message is already in Snoozed folder' });
@@ -2283,11 +2298,14 @@ router.post('/messages/:id/snooze', async (req, res) => {
   );
 
   try {
-    await imapManager.ensureFolder(account, snoozedFolder);
+    ({ path: snoozedFolder } = await imapManager.ensureFolder(account, snoozedFolder, { resolvePath: true }));
   } catch (err) {
     console.error(`Snooze ensureFolder failed for message ${id}:`, err.message);
     if (isMailboxBusyError(err)) return sendMailboxBusy(res, err);
     return res.status(500).json({ error: 'Failed to move message to Snoozed folder' });
+  }
+  if (msg.folder === snoozedFolder) {
+    return res.status(400).json({ error: 'Message is already in Snoozed folder' });
   }
 
   for (const tm of convo) {

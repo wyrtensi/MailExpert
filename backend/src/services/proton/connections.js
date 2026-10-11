@@ -13,6 +13,7 @@ import { deleteAccount } from '../accounts/deleteAccount.js';
 import { persistManualAccount, safeAccount } from '../accounts/manualAccounts.js';
 import { callWorker } from './workerClient.js';
 import { isProtonApiReachable } from './apiReachability.js';
+import { clearProtonLinkStatus } from './reconcile.js';
 import {
   PROTON_LOOPBACK_HOST, PROTON_PORTS, ProtonEndpointError, probeManagedProtonConnection, trustedProtonEndpoint,
 } from './mailEndpoint.js';
@@ -424,6 +425,8 @@ async function commitWorker(row, { generation, previousGeneration = null, timeou
   const connected = await update(row.id, ['committing'], { state: 'connected' });
   if (!connected) return load(row.id);
   metadataById.delete(row.id);
+  // The new sign-in proved the link: a lost-session status from the reconciler no longer holds.
+  clearProtonLinkStatus(connected.account_id);
   recordAudit(auditOf(auditActor(connected), {
     accountId: connected.account_id, action: connected.reconnect_intent ? 'mailbox.reconnected' : 'mailbox.added',
     details: { provider: 'proton', mode: 'managed', protocol: 'imap' },

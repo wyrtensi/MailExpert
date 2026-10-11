@@ -11,6 +11,7 @@ import { redactEmail } from '../utils/redact.js';
 import { sanitizeSignature } from '../services/emailSanitizer.js';
 import { getConnectionPolicy } from '../services/connectionPolicy.js';
 import { computeAccountHealth } from '../services/accountHealth.js';
+import { protonLinkStatus } from '../services/proton/reconcile.js';
 import { pluginRegistry } from '../plugins/registry.js';
 import { recordAudit } from '../services/auditLog.js';
 import { uuidParam } from '../utils/uuid.js';
@@ -96,13 +97,17 @@ router.get('/', async (req, res) => {
     const publicAccount = { ...a };
     delete publicAccount.added_by;
     delete publicAccount.proton_managed_link;
+    // A managed Proton link that is not usable right now (services/proton/reconcile.js): a safe
+    // code only, applied to that mailbox alone.
+    const protonStatus = isManagedProton(a) ? protonLinkStatus(a.id)?.code ?? null : null;
     return {
       ...publicAccount,
       ...Object.assign({}, ...patches),
       can_reconnect_proton: isManagedProton(a),
+      proton_status: protonStatus,
       signature: a.signature ? sanitizeSignature(a.signature) : a.signature,
       // Stable code only (see services/accountHealth.js); sync_error stays the sole error text.
-      health: computeAccountHealth(a, now),
+      health: computeAccountHealth({ ...a, proton_status: protonStatus }, now),
       provider_ids_backfill: providerIdStates.get(a.id) ?? null,
       thread_recompute: recomputeStates.get(a.id) ?? null,
       aliases: (aliasMap[a.id] || []).map(alias => ({

@@ -794,6 +794,8 @@
       "failedDetail": "Sync failed: {{detail}}",
       "reconnectRequired": "Sign-in expired, reconnect required",
       "reconnectAskAdmin": "Sign-in expired, ask an administrator to reconnect it",
+      "protonReconnectRequired": "Proton session lost, sign in to Proton again",
+      "protonUnavailable": "Proton service temporarily unavailable",
       "reconnectAccount": "Reconnect {{email}}",
       "disabled": "Mailbox disabled"
     },

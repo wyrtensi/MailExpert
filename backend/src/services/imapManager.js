@@ -24,6 +24,7 @@ import { adjustFolderCounts, resolveSpamFolder } from '../utils/mailUtils.js';
 import { createPinnedLookup } from './hostValidation.js';
 import { imapTlsSettings, resolveMailEndpoint } from './accounts/mailEndpoint.js';
 import { isManagedProtonAccount, MANAGED_PROTON_ENDPOINT, ProtonEndpointError } from './proton/mailEndpoint.js';
+import { accountFolderPath, accountRenameTarget } from './proton/folders.js';
 import { getConnectionPolicy } from './connectionPolicy.js';
 import { applyInboxRules, applyBlockList } from './inboxRules.js';
 import { generateVCard } from '../utils/vcard.js';
@@ -7833,9 +7834,12 @@ export class ImapManager {
   // the mailbox has under this account's personal namespace (e.g. 'INBOX.Todo' on a
   // prefixed server), `created` is true only when THIS call made it. The "create missing
   // folders" action reports both so the settings UI can show the real path and whether it
-  // pre-existed. Namespace/delimiter/already-exists handling lives in ensureMailbox.
+  // pre-existed. Namespace/delimiter/already-exists handling lives in ensureMailbox. A managed
+  // Proton mailbox keeps user folders under Folders/ (services/proton/folders.js): the name is
+  // translated here, before any session, so rules, snooze and labels get it too.
   async ensureFolder(account, path, opts = {}) {
-    return withFreshClient(account, (client) => ensureMailbox(client, path, opts));
+    const target = accountFolderPath(account, path);
+    return withFreshClient(account, (client) => ensureMailbox(client, target, opts));
   }
 
   async moveMessageGetNewUid(account, uid, fromFolder, toFolder, { background = false } = {}) {
@@ -7874,6 +7878,7 @@ export class ImapManager {
   async renameFolder(account, oldPath, newPath) {
     // The guard below cannot deselect INBOX, and the UI never offers renaming it.
     if (oldPath.toUpperCase() === 'INBOX') throw new Error('INBOX cannot be renamed');
+    const target = accountRenameTarget(account, oldPath, newPath);
     return withFreshClient(account, async (client) => {
       // imapflow sends CLOSE before RENAME when this folder is selected, and CLOSE expunges
       // every message flagged \Deleted, including mail another client only flagged. Selecting
@@ -7882,7 +7887,7 @@ export class ImapManager {
         const lock = await client.getMailboxLock('INBOX');
         lock.release();
       }
-      await client.mailboxRename(oldPath, newPath);
+      await client.mailboxRename(oldPath, target);
     });
   }
 

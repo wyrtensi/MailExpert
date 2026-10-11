@@ -110,6 +110,8 @@ beforeEach(() => {
   getGtdConfig.mockReset();
   getGtdConfig.mockResolvedValue({ enabled: true, folders: DEFAULT_GTD_FOLDERS });
   imapManager.copyMessage.mockResolvedValue(77);
+  // ensureFolder answers the real server path, as imapManager.ensureFolder does.
+  imapManager.ensureFolder.mockImplementation(async (_account, folder) => ({ path: folder, created: false }));
   // By default the server confirms a surviving copy, and the account is not Gmail.
   imapManager.hasMessageCopy.mockResolvedValue(true);
   imapManager.isLabelStore.mockReturnValue(false);
@@ -144,7 +146,7 @@ describe('POST /api/gtd/classify — apply a GTD label (COPY)', () => {
       undoToken: { messageId: MSG_ID, state: 'todo', folder: 'Todo', uid: 77 },
     });
     // Callers own folder existence, so classify ensures then copies — the message stays in INBOX.
-    expect(imapManager.ensureFolder).toHaveBeenCalledWith(account, 'Todo');
+    expect(imapManager.ensureFolder).toHaveBeenCalledWith(account, 'Todo', { resolvePath: true });
     expect(imapManager.copyMessage).toHaveBeenCalledWith(ACCT_ID, 10, 'INBOX', 'Todo');
   });
 

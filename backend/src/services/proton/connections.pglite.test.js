@@ -15,12 +15,18 @@ vi.mock('./apiReachability.js', () => ({ isProtonApiReachable: vi.fn(async () =>
 vi.mock('../accounts/connectionProbe.js', () => ({ probeConnection: vi.fn(async c => ({ imapLogin: c.auth_user, smtpLogin: c.smtp_auth_user })) }));
 vi.mock('../encryption.js', () => ({ encrypt: v => v ? 'enc:' + v : null, decrypt: v => v }));
 vi.mock('../auditLog.js', () => ({ recordAudit: vi.fn() }));
+// The real shared deletion, observed: an abandoned commit must go through it.
+vi.mock('../accounts/deleteAccount.js', async original => {
+  const { deleteAccount } = await original();
+  return { deleteAccount: vi.fn(deleteAccount) };
+});
 vi.mock('../redis.js', () => ({ redisClient: { incr: async () => { throw new Error('offline'); }, del: async () => {} } }));
 
 const { callWorker } = await import('./workerClient.js');
 const { isProtonApiReachable } = await import('./apiReachability.js');
 const { probeConnection } = await import('../accounts/connectionProbe.js');
 const { recordAudit } = await import('../auditLog.js');
+const { deleteAccount } = await import('../accounts/deleteAccount.js');
 const { reset } = await import('../rateLimiter.js');
 const { closeCreationAdmission, reopenCreationAdmission } = await import('../accounts/accountCreation.js');
 const {
@@ -432,8 +438,11 @@ describe('Proton connection operations', () => {
     expect(await poll(started.id)).toEqual({ id: started.id, state: 'failed', errorCode: 'proton_unavailable' });
     await protonConnectionWork();
     expect(await count('email_accounts')).toBe(0);
+    expect(deleteAccount).toHaveBeenCalledOnce();
+    expect(deleteAccount).toHaveBeenCalledWith(expect.objectContaining({ id: committing.account_id, email_address: 'box@proton.me' }),
+      expect.objectContaining({ actor: { userId: OWNER }, reason: 'proton_commit_abandoned', engine }));
     expect(engine.disconnectAccount).toHaveBeenCalledWith(committing.account_id);
     expect((await state.db.query('SELECT status, error_code FROM jobs')).rows).toEqual([{ status: 'failed', error_code: 'account_missing' }]);
-    expect(recordAudit).toHaveBeenCalledWith(expect.objectContaining({ action: 'mailbox.deleted', accountEmail: 'box@proton.me' }));
+    expect(recordAudit).toHaveBeenCalledWith({ actorUserId: OWNER, accountEmail: 'box@proton.me', action: 'mailbox.deleted', details: { mailNode: false, reason: 'proton_commit_abandoned' } });
   });
 });

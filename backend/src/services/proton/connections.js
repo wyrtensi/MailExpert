@@ -9,7 +9,7 @@ import { ConnectionError } from '../accounts/connectionErrors.js';
 import {
   CREATION_REQUEST_GRACE_MS, CREATION_REQUEST_ID, pruneFinishedCreationRequests, withCreationAdmission,
 } from '../accounts/accountCreation.js';
-import { failJobsOfDeletedAccount } from '../jobQueue.js';
+import { deleteAccount } from '../accounts/deleteAccount.js';
 import { persistManualAccount, safeAccount } from '../accounts/manualAccounts.js';
 import { callWorker } from './workerClient.js';
 import { isProtonApiReachable } from './apiReachability.js';
@@ -433,29 +433,33 @@ async function commitWorker(row, { generation, previousGeneration = null, timeou
 }
 
 // The worker lost the attempt before recording the link (its TTL, a cancel, a removal): a new
-// mailbox without a native session is taken back; a reconnected mailbox keeps its row. The new
-// mailbox goes as DELETE /api/accounts/:id removes an ordinary one: its waiting jobs fail first,
-// the row goes, the engine lets go of it (connectAllEnabled may have connected it at start).
+// mailbox without a native session is taken back through the ordinary deletion (jobs failed, row
+// deleted, audit, the engine lets go: connectAllEnabled may have connected it at start); a
+// reconnected mailbox keeps its row. Deleting first keeps a retry idempotent: a row left
+// 'committing' with its mailbox gone is ended by the next pass.
 async function abandonCommit(row) {
-  if (!row.reconnect_intent && row.account_id) await failJobsOfDeletedAccount(row.account_id);
   let ended;
   try {
     ended = await withAccountAddressLock(row.requested_email, async client => {
-      await client.query('BEGIN');
-      try {
-        const { rows: [op] } = await client.query(
-          `UPDATE proton_connections SET state = 'failed', error_code = 'proton_unavailable'
-            WHERE id = $1 AND state = 'committing' RETURNING *`, [row.id],
+      const { rows: [op] } = await client.query(`SELECT * FROM proton_connections WHERE id = $1 AND state = 'committing'`, [row.id]);
+      if (!op) return null;
+      if (!op.reconnect_intent && op.account_id) {
+        const { rows: [account] } = await client.query(
+          'SELECT id, email_address FROM email_accounts WHERE id = $1',
+          [op.account_id],
         );
-        const removed = op && !op.reconnect_intent && op.account_id
-          ? (await client.query('DELETE FROM email_accounts WHERE id = $1 RETURNING id, email_address', [op.account_id])).rows[0]
-          : null;
-        await client.query('COMMIT');
-        return op && { op, removed };
-      } catch (err) {
-        await client.query('ROLLBACK');
-        throw err;
+        if (account) {
+          const { disconnected } = await deleteAccount(account, {
+            actor: auditActor(op), reason: 'proton_commit_abandoned', client, engine: mailEngine,
+          });
+          track(Symbol('disconnect'), disconnected);
+        }
       }
+      const { rows: [failed] } = await client.query(
+        `UPDATE proton_connections SET state = 'failed', error_code = 'proton_unavailable'
+          WHERE id = $1 AND state = 'committing' RETURNING *`, [row.id],
+      );
+      return failed;
     });
   } catch {
     return row;
@@ -463,14 +467,7 @@ async function abandonCommit(row) {
   if (!ended) return load(row.id);
   metadataById.delete(row.id);
   auditFailure(row, 'proton_unavailable');
-  if (ended.removed) {
-    recordAudit(auditOf(auditActor(row), {
-      accountEmail: ended.removed.email_address, action: 'mailbox.deleted',
-      details: { provider: 'proton', mode: 'managed', code: 'commit_abandoned' },
-    }));
-    if (mailEngine) track(Symbol('disconnect'), mailEngine.disconnectAccount(ended.removed.id));
-  }
-  return ended.op;
+  return ended;
 }
 
 function connectMailbox(row) {

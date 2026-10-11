@@ -7,7 +7,6 @@ import { isAdminRequest, requireAuth, requireAdmin } from '../middleware/auth.js
 import { imapManager } from '../index.js';
 import { providerProfile } from '../services/imapManager.js';
 import { decrypt } from '../services/encryption.js';
-import { revokeGoogleToken } from '../services/oauth/googleOAuth.js';
 import { redactEmail } from '../utils/redact.js';
 import { sanitizeSignature } from '../services/emailSanitizer.js';
 import { getConnectionPolicy } from '../services/connectionPolicy.js';
@@ -27,7 +26,7 @@ import {
 } from '../services/mailNode/mailboxActions.js';
 import { routeActor } from '../services/actor.js';
 import { mailNodeFailure, onOtherMailHost, refuse as refuseMailNode } from './mailNode.js';
-import { failJobsOfDeletedAccount } from '../services/jobQueue.js';
+import { deleteAccount } from '../services/accounts/deleteAccount.js';
 import {
   CONNECTION_FIELDS, applyImapTlsMode, changedConnectionFields, changedServersError,
   reconnectAccount, reconnectQueue, storedColumnValue,
@@ -437,34 +436,8 @@ router.delete('/:id', async (req, res) => {
       }
     }
 
-    // Delete from DB first (cascades to messages and folders immediately).
-    // Disconnect IMAP afterward — fire-and-forget so a slow server logout
-    // doesn't block the response.
-    // Letters waiting to be sent from it fail first, so their authors hear of them (jobQueue.js).
-    await failJobsOfDeletedAccount(id);
-    // Revoked before the row goes, and awaited: Google revokes the person's access to the whole
-    // project, so a revoke answered after the row is gone could also cut a grant the same address
-    // got by being added again meanwhile. While the row exists, adding the address is refused
-    // (already_connected). revokeGoogleToken never throws and times out on its own
-    // (PROVIDER_FETCH_TIMEOUT_MS), so the deletion waits at most that long and never fails on it.
-    // The grant journal (google_oauth_grants) is left untouched, same as every other revoke path
-    // in this codebase — it is a lifetime record for the app's Google user cap, not a list of live
-    // grants, and a revoked user still counts against that cap.
-    if (googleRevokeToken) {
-      const revoked = await revokeGoogleToken(googleRevokeToken).catch(() => false);
-      console.log(`Google OAuth grant ${revoked ? 'revoked' : 'revoke failed'} for removed mailbox ${redactEmail(check.rows[0].email_address)}`);
-    }
-    await query('DELETE FROM email_accounts WHERE id = $1', [id]);
-    // The row is gone, so the entry names the mailbox by the address read above.
-    recordAudit({
-      actorUserId: req.session.userId,
-      accountEmail: check.rows[0].email_address,
-      action: 'mailbox.deleted',
-      details: { mailNode: false },
-    });
-    imapManager.disconnectAccount(id).catch(err =>
-      console.error(`Disconnect error after delete for ${id}:`, err.message)
-    );
+    // Shared with an abandoned managed Proton commit (services/accounts/deleteAccount.js).
+    await deleteAccount(check.rows[0], { actor: routeActor(req), googleRevokeToken, engine: imapManager });
     res.json({ ok: true });
   } catch (err) {
     console.error('Account delete error:', err);

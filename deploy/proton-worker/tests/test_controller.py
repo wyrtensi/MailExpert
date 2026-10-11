@@ -590,3 +590,105 @@ class ControllerTests(unittest.TestCase):
             self.controller.tick()
         self.assertGreaterEqual(self.native.recoveries, 2)
         self.assertLessEqual(self.native.recoveries, 5)
+
+    # -- Task 8: lifecycle of native users shared by addresses and attempts ---------------
+
+    def two_addresses(self, commit_b=False):
+        """Attempt A creates user-a for mail@; attempt B then signs in alias@ of that user."""
+        self.controller.start_connection('attempt-a', 'mail@example.com', 'secret-sentinel')
+        self.native.add_user(addresses=['mail@example.com', 'alias@example.com'], split=True)
+        self.native.event('finished', userId='user-a')
+        self.assertTrue(self.controller.connection_status('attempt-a').createdByAttempt)
+        self.controller.start_connection('attempt-b', 'alias@example.com', 'secret-sentinel')
+        self.native.event('already_logged_in', userId='user-a')
+        self.assertEqual(self.controller.connection_status('attempt-b').state, 'connected')
+        if commit_b:
+            self.controller.commit_connection('attempt-b', 'user-a', 'generation-b')
+
+    def test_cancelled_login_only_cleans_attempt_owned_user(self):
+        # Task 5 review I3: A created the user, B (another address of it) is still live.
+        self.two_addresses()
+        self.controller.cancel_connection('attempt-a')
+        self.assertEqual(self.native.removed_users, [])
+        self.assertNotIn('user-a', self.controller.pending_removals)
+        self.controller.commit_connection('attempt-b', 'user-a', 'generation-b')
+        self.assertEqual(self.controller.credentials(
+            'user-a', generation='generation-b', email='alias@example.com')['email'],
+            'alias@example.com')
+
+    def test_live_attempt_inherits_cleanup_of_cancelled_creator(self):
+        self.two_addresses()
+        self.controller.cancel_connection('attempt-a')
+        self.controller.cancel_connection('attempt-b')
+        self.assertEqual(self.native.removed_users, ['user-a'])
+
+    def test_cancel_keeps_user_of_committed_parallel_address(self):
+        self.two_addresses(commit_b=True)
+        self.controller.cancel_connection('attempt-a')
+        self.assertEqual(self.native.removed_users, [])
+        self.assertEqual(self.controller.credentials(
+            'user-a', generation='generation-b', email='alias@example.com')['email'],
+            'alias@example.com')
+
+    def test_expired_creator_keeps_user_of_committed_address(self):
+        self.two_addresses(commit_b=True)
+        self.clock += 601
+        self.controller.tick()
+        self.assertEqual(self.controller.connection_status('attempt-a').state, 'expired')
+        self.assertEqual(self.native.removed_users, [])
+
+    def test_last_link_removal_keeps_user_of_live_attempt(self):
+        self.commit('attempt-a', 'mail@example.com', 'generation-a')
+        self.controller.start_connection('attempt-b', 'alias@example.com', 'secret-sentinel')
+        self.native.event('already_logged_in', userId='user-a')
+        self.assertEqual(self.controller.remove_user(
+            'user-a', 'generation-a', 'mail@example.com')['state'], 'unlinked')
+        self.assertEqual(self.native.removed_users, [])
+        self.controller.cancel_connection('attempt-b')
+        self.assertEqual(self.native.removed_users, ['user-a'])
+
+    def test_remove_rpc_ack_does_not_release_lock(self):
+        self.commit('attempt-a', 'mail@example.com', 'generation-a')
+        self.assertEqual(self.controller.remove_user(
+            'user-a', 'generation-a', 'mail@example.com')['state'], 'removing')
+        self.assertEqual(self.native.removed_users, ['user-a'])
+        self.assertEqual(self.controller.remove_user(
+            'user-a', 'generation-a', 'mail@example.com')['state'], 'removing')
+        self.assertEqual(self.controller.health()['pendingRemovals'], 1)
+
+    def test_removal_event_requires_list_absence(self):
+        self.commit('attempt-a', 'mail@example.com', 'generation-a')
+        self.controller.remove_user('user-a', 'generation-a', 'mail@example.com')
+        self.native.event('user_changed', userId='user-a')
+        self.assertIn('user-a', self.controller.pending_removals)
+        del self.native.users['user-a']
+        self.assertIn('user-a', self.controller.pending_removals)
+        self.native.event('user_changed', userId='user-a')
+        self.assertEqual(self.controller.remove_user(
+            'user-a', 'generation-a', 'mail@example.com')['state'], 'removed')
+
+    def test_removal_timeout_blocks_readd(self):
+        self.commit('attempt-a', 'mail@example.com', 'generation-a')
+        self.controller.remove_user('user-a', 'generation-a', 'mail@example.com')
+        self.clock += 121
+        self.controller.tick()
+        self.assertEqual(self.native.removed_users, ['user-a', 'user-a'])
+        self.assertIn('user-a', self.controller.pending_removals)
+        self.controller.start_connection('attempt-b', 'mail@example.com', 'secret-sentinel')
+        self.native.event('already_logged_in', userId='user-a')
+        with self.assertRaisesRegex(WorkerError, '^operation_conflict$'):
+            self.controller.commit_connection('attempt-b', 'user-a', 'generation-b')
+
+    def test_recovery_reconciles_pending_removal(self):
+        self.commit('attempt-a', 'mail@example.com', 'generation-a')
+        self.controller.remove_user('user-a', 'generation-a', 'mail@example.com')
+        self.controller.shutdown()
+        restarted = BridgeController(self.native, Path(self.temp.name),
+                                     clock=lambda: self.clock, recovery_seconds=5)
+        self.addCleanup(restarted.shutdown)
+        restarted.boot()
+        self.assertEqual(self.native.removed_users, ['user-a', 'user-a'])
+        del self.native.users['user-a']
+        self.native.event('user_changed', userId='user-a')
+        self.assertEqual(restarted.remove_user(
+            'user-a', 'generation-a', 'mail@example.com')['state'], 'removed')

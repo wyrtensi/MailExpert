@@ -284,8 +284,7 @@ class BridgeController:
             operation = self._operation(operation_id)
             if operation.state == 'connected' and not operation.committed:
                 self._end(operation, 'cancelled')
-                if operation.createdByAttempt:
-                    self._begin_removal(operation.userId, 'attempt')
+                self._drop_attempt_user(operation)
             elif operation.state in ACTIVE_STATES:
                 self._stop_attempt(operation, 'cancelled')
             self._persist()
@@ -371,7 +370,7 @@ class BridgeController:
             if not others:
                 self._ensure_started()
             del self.links[key]
-            if others:
+            if others or self._hand_over(user_id):
                 self._persist()
                 return {'userId': user_id, 'state': 'unlinked'}
             if user_id not in self.pending_removals:
@@ -432,8 +431,7 @@ class BridgeController:
                 self._stop_attempt(operation, 'expired')
             elif expired and operation.state == 'connected' and not operation.committed:
                 self._end(operation, 'expired')
-                if operation.createdByAttempt:
-                    self._begin_removal(operation.userId, 'attempt')
+                self._drop_attempt_user(operation)
 
     def _removal_timers(self, now, can_recover=True):
         """Retry removals; a stuck attempt removal gets bounded process recoveries."""
@@ -579,10 +577,8 @@ class BridgeController:
         if operation.state in ACTIVE_STATES:
             operation.state = 'checking'
             self._reconcile(operation)
-        elif operation.createdByAttempt:
-            self._begin_removal(user_id, 'attempt')
-            self._release(operation)
         else:
+            self._drop_attempt_user(operation)
             self._release(operation)
 
     def _on_user_changed(self, user_id):
@@ -606,8 +602,7 @@ class BridgeController:
             return
         if not self._owns(user, operation.userId, operation.email):
             self._end(operation, 'failed', 'address_mismatch')
-            if operation.createdByAttempt:
-                self._begin_removal(operation.userId, 'attempt')
+            self._drop_attempt_user(operation)
             self._release(operation)
             return
         if user['state'] != CONNECTED:
@@ -646,8 +641,7 @@ class BridgeController:
         login_finished = operation.state == 'checking'
         self._end(operation, state, code)
         if login_finished:
-            if operation.createdByAttempt:
-                self._begin_removal(operation.userId, 'attempt')
+            self._drop_attempt_user(operation)
             self._release(operation)
             return
         try:
@@ -658,6 +652,29 @@ class BridgeController:
     def _release(self, operation):
         if self.slot == operation.id:
             self.slot = None
+
+    def _drop_attempt_user(self, operation):
+        """Remove the native user an ended attempt created, unless something still uses it.
+
+        A committed link of the user (another address) keeps it. A live attempt that signed in
+        the same user (another address, not committed yet) keeps it too and inherits the
+        clean-up: if that attempt ends without a commit, the user goes with it.
+        """
+        user_id = operation.userId
+        if not operation.createdByAttempt or not user_id:
+            return
+        if any(key[0] == user_id for key in self.links) or self._hand_over(user_id, operation):
+            return
+        self._begin_removal(user_id, 'attempt')
+
+    def _hand_over(self, user_id, ended=None):
+        """Give the clean-up of a user to the live attempts that use it; False when none do."""
+        heirs = [op for op in self.operations.values()
+                 if op is not ended and op.userId == user_id and not op.committed and
+                 (op.state in ACTIVE_STATES or op.state == 'connected')]
+        for heir in heirs:
+            heir.createdByAttempt = True
+        return bool(heirs)
 
     def _removal(self, reason, now):
         return {'reason': reason, 'since': now, 'recoveries': 0, 'stuck': False}

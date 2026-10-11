@@ -209,6 +209,51 @@ describe('reconcileProtonLinks', () => {
     expect(await link(stale.id)).toMatchObject({ certificate_pem: OLD });
   });
 
+  it('leaves a link alone while a connection attempt for its mailbox is in flight', async () => {
+    // The SQL commit of an attempt lands before the worker records the link: until then the worker
+    // answers for the old material (reconnect) or for nothing (new mailbox).
+    const { rows: [actor] } = await state.db.query(`INSERT INTO users (username) VALUES ('employee') RETURNING id`);
+    const { account: added } = await seed({ email: 'first@proton.me' });
+    const { account: reconnecting } = await seed({ email: 'second@proton.me' });
+    const { account: settled } = await seed({ email: 'third@proton.me', userId: OTHER_NATIVE });
+    await state.db.query(
+      `INSERT INTO proton_connections (actor_user_id, request_id, requested_email, proton_user_id, state, account_id)
+       VALUES ($1, gen_random_uuid(), 'first@proton.me', $2, 'committing', $3)`, [actor.id, NATIVE, added.id]);
+    await state.db.query(
+      `INSERT INTO proton_connections (actor_user_id, request_id, requested_email, state, reconnect_intent, reconnect_account_id)
+       VALUES ($1, gen_random_uuid(), 'second@proton.me', 'authenticating', true, $2)`, [actor.id, reconnecting.id]);
+    // A finished attempt does not hold its mailbox back.
+    await state.db.query(
+      `INSERT INTO proton_connections (actor_user_id, request_id, requested_email, state, account_id)
+       VALUES ($1, gen_random_uuid(), 'third@proton.me', 'connected', $2)`, [actor.id, settled.id]);
+    bridge.users.delete(NATIVE);
+
+    expect(await reconcileProtonLinks()).toEqual({ changed: [], reconnectRequired: [] });
+    expect(bridge.calls.map(call => call.body.email)).toEqual(['third@proton.me']);
+    for (const id of [added.id, reconnecting.id]) expect(protonLinkStatus(id)).toBeNull();
+    expect(engine.broadcast).not.toHaveBeenCalled();
+    expect(reconnectAccount).not.toHaveBeenCalled();
+    await state.db.query('DELETE FROM proton_connections');
+    await state.db.query('DELETE FROM users WHERE id = $1', [actor.id]);
+  });
+
+  it('keeps the known status of a mailbox while its new sign-in runs', async () => {
+    const { rows: [actor] } = await state.db.query(`INSERT INTO users (username) VALUES ('employee-2') RETURNING id`);
+    const { account: lost } = await seed({ email: 'first@proton.me' });
+    bridge.users.delete(NATIVE);
+    await reconcileProtonLinks();
+    expect(protonLinkStatus(lost.id)).toEqual({ code: 'proton_reconnect_required' });
+    await state.db.query(
+      `INSERT INTO proton_connections (actor_user_id, request_id, requested_email, state, reconnect_intent, reconnect_account_id)
+       VALUES ($1, gen_random_uuid(), 'first@proton.me', 'needs_2fa', true, $2)`, [actor.id, lost.id]);
+    bridge.calls = [];
+    expect(await reconcileProtonLinks()).toEqual({ changed: [], reconnectRequired: [lost.id] });
+    expect(bridge.calls).toEqual([]);
+    expect(protonLinkStatus(lost.id)).toEqual({ code: 'proton_reconnect_required' });
+    await state.db.query('DELETE FROM proton_connections');
+    await state.db.query('DELETE FROM users WHERE id = $1', [actor.id]);
+  });
+
   it('a native user being removed is left to its cleanup', async () => {
     const { account: removing } = await seed({ email: 'first@proton.me' });
     await state.db.query(`UPDATE proton_users SET removal_state = 'removing' WHERE proton_user_id = $1`, [NATIVE]);

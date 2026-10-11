@@ -15,7 +15,8 @@ import { trustedProtonEndpoint } from './mailEndpoint.js';
 //     or restored state): proton_reconnect_required, until any employee signs in again;
 //   - the worker does not answer: proton_unavailable, a temporary state. Nothing is changed, and the
 //     mailbox never falls back to another endpoint: only the managed link reaches Bridge.
-// Links of a native user in cleanup or removal are left to that lifecycle. Nothing is deleted here.
+// Links of a native user in cleanup or removal are left to that lifecycle, and a mailbox with a
+// connection attempt in flight to that attempt. Nothing is deleted here.
 // Statuses live in this process and are rebuilt by every pass (startup, then every minute).
 
 const PASS_BUDGET_MS = 45000;
@@ -24,6 +25,8 @@ const CALL_TIMEOUT_MS = 5000;
 const LOST = new Set(['not_found', 'not_connected', 'generation_mismatch', 'address_mismatch']);
 // The worker itself is out of reach: the rest of the pass would only wait out the same timeout.
 const OFFLINE = new Set(['worker_unavailable', 'worker_timeout']);
+// States of services/proton/connections.js after which an attempt no longer touches its mailbox.
+const FINISHED_ATTEMPT = ['connected', 'failed', 'cancelled', 'expired'];
 
 export const PROTON_RECONNECT_REQUIRED = 'proton_reconnect_required';
 export const PROTON_UNAVAILABLE = 'proton_unavailable';
@@ -111,12 +114,15 @@ function reconnect(accountId) {
 export async function reconcileProtonLinks({ signal } = {}) {
   const { rows: links } = await query(
     `SELECT l.account_id, l.proton_user_id, l.generation, l.certificate_fingerprint, a.email_address, a.auth_pass,
-            u.cleanup_pending, u.removal_state
+            u.cleanup_pending, u.removal_state,
+            EXISTS (SELECT 1 FROM proton_connections c
+                     WHERE (c.account_id = l.account_id OR c.reconnect_account_id = l.account_id)
+                       AND c.state <> ALL ($1)) AS attempt_in_flight
        FROM proton_mailbox_links l
        JOIN proton_users u ON u.proton_user_id = l.proton_user_id AND u.generation = l.generation
        JOIN email_accounts a ON a.id = l.account_id
       WHERE a.mail_provider = 'proton' AND a.connection_mode = 'managed'
-      ORDER BY a.email_address, l.account_id`,
+      ORDER BY a.email_address, l.account_id`, [FINISHED_ATTEMPT],
   );
   const previous = statuses;
   const next = new Map();
@@ -125,7 +131,10 @@ export async function reconcileProtonLinks({ signal } = {}) {
   for (const link of links) {
     const id = link.account_id;
     if (link.cleanup_pending || link.removal_state) continue;
-    if (signal?.aborted) {
+    // A connection attempt for this mailbox has written (or will write) the link before the worker
+    // records it, and the worker answers for the old material until then: the attempt decides, and
+    // its commit clears the status (connections.js). Until then the known status stands.
+    if (signal?.aborted || link.attempt_in_flight) {
       if (previous.has(id)) next.set(id, previous.get(id));
       continue;
     }

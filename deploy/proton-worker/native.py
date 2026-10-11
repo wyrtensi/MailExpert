@@ -338,7 +338,8 @@ class NativeBridge:
             self._launch()
 
     def running(self):
-        return self.process is not None and self.process.poll() is None
+        process = self.process
+        return process is not None and process.poll() is None
 
     # -- RPCs --------------------------------------------------------------------------
     def _call(self, name, request):

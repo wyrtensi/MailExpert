@@ -152,7 +152,10 @@ class BridgeController:
     # -- process -----------------------------------------------------------------------
     def _needs_bridge(self):
         return bool(self.links or self.pending_removals or
-                    any(op.reconcile for op in self.operations.values()))
+                    self._reconcile_pending())
+
+    def _reconcile_pending(self):
+        return any(op.reconcile for op in list(self.operations.values()))
 
     def _alive(self):
         running = getattr(self.native, 'running', None)
@@ -163,7 +166,6 @@ class BridgeController:
         with self.lock:
             if self._needs_bridge():
                 self._ensure_started()
-                self._after_restart()
                 self._persist()
 
     def _ensure_started(self):
@@ -179,9 +181,10 @@ class BridgeController:
             self.started = False
             _log('native_start_failed ' + type(error).__name__)
             raise WorkerError('worker_unavailable') from None
-        was_started, self.started, self.native_lost = self.started, True, False
-        if was_started:
-            self._after_restart()
+        self.started, self.native_lost = True, False
+        # Any successful (re)start reconciles: crash-pending orphans, lost terminal events and
+        # removals the previous process may have forgotten, however Bridge got started.
+        self._after_restart()
 
     def health(self):
         # Lock-free on purpose: plain attribute reads, never blocked by native calls.
@@ -210,7 +213,7 @@ class BridgeController:
 
     # -- login -------------------------------------------------------------------------
     def _busy(self):
-        return (self.slot is not None or self.recovering or
+        return (self.slot is not None or self.recovering or self._reconcile_pending() or
                 any(item['reason'] == 'attempt' and not item.get('stuck')
                     for item in list(self.pending_removals.values())))
 
@@ -394,7 +397,6 @@ class BridgeController:
                 elif not self.started and self._needs_bridge() and now >= self.next_start_at:
                     try:
                         self._ensure_started()
-                        self._after_restart()
                     except WorkerError:
                         self.next_start_at = now + self.recovery_seconds
             self._prune(now)

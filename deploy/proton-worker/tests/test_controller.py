@@ -443,3 +443,52 @@ class ControllerTests(unittest.TestCase):
         self.assertEqual(writes, [])
         self.controller.cancel_connection('attempt-a')
         self.assertEqual(len(writes), 1)
+
+    # -- fix round 2 -------------------------------------------------------------------
+
+    def failing_first_start(self):
+        original = self.native.start
+        state = {'failed': False}
+
+        def start(callback):
+            if not state['failed']:
+                state['failed'] = True
+                raise RuntimeError('start timeout')
+            original(callback)
+        self.native.start = start
+
+    def test_pending_reconcile_blocks_logins_and_runs_on_lazy_start(self):
+        # R1-I1: boot fails after a crash; no login is admitted before the orphan is reconciled.
+        self.native.add_user('user-old', addresses=['old@example.com'], split=True)
+        self.start()
+        self.native.add_user()
+        self.failing_first_start()
+        restarted = BridgeController(self.native, Path(self.temp.name), clock=lambda: self.clock,
+                                     recovery_seconds=5)
+        with self.assertRaisesRegex(WorkerError, '^worker_unavailable$'):
+            restarted.boot()
+        with self.assertRaisesRegex(WorkerError, '^login_busy$'):
+            restarted.start_connection('attempt-b', 'mail@example.com', 'secret-sentinel')
+        self.clock += 6
+        restarted.tick()
+        self.assertEqual(self.native.removed_users, ['user-a'])
+        with self.assertRaisesRegex(WorkerError, '^login_busy$'):
+            restarted.start_connection('attempt-b', 'mail@example.com', 'secret-sentinel')
+        del self.native.users['user-a']
+        self.native.event('user_changed', userId='user-a')
+        self.assertEqual(restarted.start_connection(
+            'attempt-b', 'mail@example.com', 'secret-sentinel').state, 'authenticating')
+
+    def test_request_started_bridge_reconciles_orphans(self):
+        # R1-I1: Bridge started by a credentials request (not a restart) still reconciles.
+        self.commit()
+        self.controller.start_connection('attempt-b', 'new@example.com', 'secret-sentinel')
+        self.native.add_user('user-b', addresses=['new@example.com'])
+        self.failing_first_start()
+        restarted = BridgeController(self.native, Path(self.temp.name), clock=lambda: self.clock,
+                                     recovery_seconds=5)
+        with self.assertRaisesRegex(WorkerError, '^worker_unavailable$'):
+            restarted.boot()
+        result = restarted.credentials('user-a', generation='generation-a', email='mail@example.com')
+        self.assertEqual(result['userId'], 'user-a')
+        self.assertEqual(self.native.removed_users, ['user-b'])

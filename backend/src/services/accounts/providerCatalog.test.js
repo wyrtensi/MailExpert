@@ -34,7 +34,7 @@ describe('mailbox provider catalog', () => {
     const row = {
       id: 'account', mail_provider: 'proton', connection_mode: 'managed', imap_tls_mode: 'implicit',
       can_reconnect_proton: true, auth_pass: 'secret-sentinel', smtp_auth_pass: 'secret-sentinel',
-      oauth_access_token: 'secret-sentinel', user_id: 'secret-sentinel', generation: 'secret-sentinel',
+      oauth_access_token: 'secret-sentinel', proton_user_id: 'secret-sentinel', generation: 'secret-sentinel',
       certificate_pem: 'secret-sentinel', certificate_fingerprint: 'secret-sentinel',
       tls_servername: 'secret-sentinel', creator_user_id: 'secret-sentinel',
     };

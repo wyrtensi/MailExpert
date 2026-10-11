@@ -16,32 +16,32 @@ UPDATE email_accounts SET mail_provider = CASE
    AND (mail_node OR oauth_provider IN ('google', 'microsoft'));
 
 CREATE TABLE IF NOT EXISTS proton_users (
-  user_id text PRIMARY KEY,
+  proton_user_id text PRIMARY KEY,
   generation uuid NOT NULL DEFAULT gen_random_uuid(),
   creator_user_id uuid REFERENCES users(id) ON DELETE SET NULL,
   cleanup_pending boolean NOT NULL DEFAULT false,
   removal_state text,
-  UNIQUE (user_id, generation)
+  UNIQUE (proton_user_id, generation)
 );
 
 CREATE TABLE IF NOT EXISTS proton_mailbox_links (
   account_id uuid PRIMARY KEY REFERENCES email_accounts(id) ON DELETE CASCADE,
-  user_id text NOT NULL,
+  proton_user_id text NOT NULL,
   generation uuid NOT NULL,
   certificate_pem text NOT NULL,
   certificate_fingerprint text NOT NULL,
   tls_servername text NOT NULL,
-  FOREIGN KEY (user_id, generation) REFERENCES proton_users(user_id, generation)
+  FOREIGN KEY (proton_user_id, generation) REFERENCES proton_users(proton_user_id, generation)
     DEFERRABLE INITIALLY DEFERRED
 );
-CREATE INDEX IF NOT EXISTS proton_mailbox_links_user_idx ON proton_mailbox_links (user_id);
+CREATE INDEX IF NOT EXISTS proton_mailbox_links_proton_user_idx ON proton_mailbox_links (proton_user_id);
 
 CREATE TABLE IF NOT EXISTS proton_connections (
   id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
   actor_user_id uuid NOT NULL REFERENCES users(id) ON DELETE CASCADE,
   request_id uuid NOT NULL,
   requested_email text NOT NULL,
-  user_id text REFERENCES proton_users(user_id) ON DELETE SET NULL,
+  proton_user_id text REFERENCES proton_users(proton_user_id) ON DELETE SET NULL,
   state text NOT NULL,
   account_id uuid REFERENCES email_accounts(id) ON DELETE SET NULL,
   reconnect_account_id uuid REFERENCES email_accounts(id) ON DELETE SET NULL,

@@ -72,8 +72,8 @@ describe('provider migration on every previous schema migration', () => {
     await db.query(`INSERT INTO proton_connections
       (actor_user_id, request_id, requested_email, state, reconnect_intent, reconnect_account_id)
       VALUES ($1, gen_random_uuid(), 'legacy@example.com', 'pending', true, $2)`, [ACTOR, ACCOUNT]);
-    const { rows: [row] } = await db.query('SELECT user_id, reconnect_intent, reconnect_account_id FROM proton_connections WHERE reconnect_intent = true');
-    expect(row).toEqual({ user_id: null, reconnect_intent: true, reconnect_account_id: ACCOUNT });
+    const { rows: [row] } = await db.query('SELECT proton_user_id, reconnect_intent, reconnect_account_id FROM proton_connections WHERE reconnect_intent = true');
+    expect(row).toEqual({ proton_user_id: null, reconnect_intent: true, reconnect_account_id: ACCOUNT });
     await expect(db.query(`INSERT INTO proton_connections
       (actor_user_id, request_id, requested_email, state, reconnect_account_id)
       VALUES ($1, gen_random_uuid(), 'missing@example.com', 'pending', $2)`, [ACTOR, '99999999-0000-4000-8000-000000000001'])).rejects.toThrow(/foreign key/);
@@ -100,18 +100,18 @@ describe('provider migration on every previous schema migration', () => {
 
   it('managed_links_are_durable_generation_bound_and_cascade_with_mailbox', async () => {
     const { rows: [account] } = await db.query("INSERT INTO email_accounts (name, email_address) VALUES ('Managed', 'managed@example.com') RETURNING id");
-    await db.query('INSERT INTO proton_users (user_id, generation, creator_user_id) VALUES ($1, $2, $3)', ['native-user', GENERATION, ACTOR]);
+    await db.query('INSERT INTO proton_users (proton_user_id, generation, creator_user_id) VALUES ($1, $2, $3)', ['native-user', GENERATION, ACTOR]);
     await expect(db.query(`INSERT INTO proton_mailbox_links
-      (account_id, user_id, generation, certificate_pem, certificate_fingerprint, tls_servername)
+      (account_id, proton_user_id, generation, certificate_pem, certificate_fingerprint, tls_servername)
       VALUES ($1, $2, gen_random_uuid(), 'certificate-fixture', 'fingerprint-fixture', 'localhost')`, [account.id, 'native-user'])).rejects.toThrow(/foreign key/);
     await db.query(`INSERT INTO proton_mailbox_links
-      (account_id, user_id, generation, certificate_pem, certificate_fingerprint, tls_servername)
+      (account_id, proton_user_id, generation, certificate_pem, certificate_fingerprint, tls_servername)
       VALUES ($1, $2, $3, 'certificate-fixture', 'fingerprint-fixture', 'localhost')`, [account.id, 'native-user', GENERATION]);
     await db.query("DELETE FROM proton_connections WHERE expires_at < now() + interval '11 minutes'");
     expect((await db.query('SELECT account_id FROM proton_mailbox_links')).rows).toEqual([{ account_id: account.id }]);
     await db.query('DELETE FROM email_accounts WHERE id = $1', [account.id]);
     expect((await db.query('SELECT * FROM proton_mailbox_links')).rows).toEqual([]);
-    expect((await db.query('SELECT user_id, cleanup_pending, removal_state FROM proton_users')).rows).toEqual([{ user_id: 'native-user', cleanup_pending: false, removal_state: null }]);
+    expect((await db.query('SELECT proton_user_id, cleanup_pending, removal_state FROM proton_users')).rows).toEqual([{ proton_user_id: 'native-user', cleanup_pending: false, removal_state: null }]);
   });
 
   it('has_no_password_otp_or_credential_hash_columns_in_operation_tables', async () => {
@@ -123,12 +123,12 @@ describe('provider migration on every previous schema migration', () => {
   it('rotates_user_and_all_link_generations_atomically_but_rejects_stale_links', async () => {
     const { rows: [account] } = await db.query("INSERT INTO email_accounts (name, email_address) VALUES ('Rotation', 'rotation@example.com') RETURNING id");
     await db.query(`INSERT INTO proton_mailbox_links
-      (account_id, user_id, generation, certificate_pem, certificate_fingerprint, tls_servername)
+      (account_id, proton_user_id, generation, certificate_pem, certificate_fingerprint, tls_servername)
       VALUES ($1, 'native-user', $2, 'certificate-fixture', 'fingerprint-fixture', 'localhost')`, [account.id, GENERATION]);
     const nextGeneration = '30000000-0000-4000-8000-000000000002';
     await db.exec('BEGIN');
-    await db.query('UPDATE proton_users SET generation = $1 WHERE user_id = $2', [nextGeneration, 'native-user']);
-    await db.query('UPDATE proton_mailbox_links SET generation = $1 WHERE user_id = $2', [nextGeneration, 'native-user']);
+    await db.query('UPDATE proton_users SET generation = $1 WHERE proton_user_id = $2', [nextGeneration, 'native-user']);
+    await db.query('UPDATE proton_mailbox_links SET generation = $1 WHERE proton_user_id = $2', [nextGeneration, 'native-user']);
     await db.exec('COMMIT');
     expect((await db.query('SELECT generation FROM proton_mailbox_links WHERE account_id = $1', [account.id])).rows).toEqual([{ generation: nextGeneration }]);
     await expect(db.query('UPDATE proton_mailbox_links SET generation = $1 WHERE account_id = $2', [GENERATION, account.id])).rejects.toThrow(/foreign key/);
@@ -138,6 +138,6 @@ describe('provider migration on every previous schema migration', () => {
     await db.exec(readFileSync(migrationUrl, 'utf8'));
     const { rows } = await db.query("SELECT mail_provider, connection_mode, imap_tls_mode FROM email_accounts WHERE name = 'Preset'");
     expect(rows).toEqual([{ mail_provider: 'yahoo', connection_mode: 'preset', imap_tls_mode: 'starttls' }]);
-    expect((await db.query('SELECT user_id FROM proton_users')).rows).toEqual([{ user_id: 'native-user' }]);
+    expect((await db.query('SELECT proton_user_id FROM proton_users')).rows).toEqual([{ proton_user_id: 'native-user' }]);
   });
 });

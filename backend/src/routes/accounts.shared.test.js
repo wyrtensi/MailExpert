@@ -94,9 +94,9 @@ describe('mailboxes are shared by every user', () => {
         INSERT INTO email_accounts (name, email_address, added_by, mail_provider, connection_mode)
           VALUES ('Unlinked', 'unlinked@example.com', '${adder}', 'proton', 'managed'),
                  ('Legacy', 'legacy@example.com', '${adder}', NULL, 'manual');
-        INSERT INTO proton_users (user_id, creator_user_id) VALUES ('native-fixture', '${creator}');
-        INSERT INTO proton_mailbox_links (account_id, user_id, generation, certificate_pem, certificate_fingerprint, tls_servername)
-          SELECT '${ID}', user_id, generation, 'secret-sentinel', 'secret-sentinel', 'localhost' FROM proton_users;
+        INSERT INTO proton_users (proton_user_id, creator_user_id) VALUES ('native-fixture', '${creator}');
+        INSERT INTO proton_mailbox_links (account_id, proton_user_id, generation, certificate_pem, certificate_fingerprint, tls_servername)
+          SELECT '${ID}', proton_user_id, generation, 'secret-sentinel', 'secret-sentinel', 'localhost' FROM proton_users;
       `);
       query.mockImplementation((sql, params) => db.query(sql, params));
       for (const [actor, admin] of [[creator, false], [adder, false], [employee, false], [employee, true]]) {

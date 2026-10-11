@@ -29,7 +29,7 @@ beforeAll(async () => {
   fingerprint = workerFingerprint(publicCertificate);
   holder.db = await createRealSchemaDb();
   await holder.db.query(`INSERT INTO users (id, username, password_hash) VALUES ($1, 'employee', 'fixture')`, [ACTOR]);
-  await holder.db.query(`INSERT INTO proton_users (user_id, generation) VALUES ($1, $2), ($3, gen_random_uuid())`, [NATIVE_USER, GENERATION, OTHER_NATIVE_USER]);
+  await holder.db.query(`INSERT INTO proton_users (proton_user_id, generation) VALUES ($1, $2), ($3, gen_random_uuid())`, [NATIVE_USER, GENERATION, OTHER_NATIVE_USER]);
   // The stored host and port are deliberately elsewhere: a managed endpoint never reads them.
   await holder.db.query(`INSERT INTO email_accounts (id, name, email_address, imap_host, imap_port, smtp_host, smtp_port, mail_provider, connection_mode, imap_tls_mode)
     VALUES ($1, 'Linked', 'linked@proton.me', '203.0.113.9', 993, '203.0.113.9', 587, 'proton', 'managed', 'implicit'),
@@ -37,7 +37,7 @@ beforeAll(async () => {
            ($3, 'Relabeled', 'relabeled@proton.me', '127.0.0.1', 1993, '127.0.0.1', 1465, 'proton', 'manual', 'implicit')`,
   [LINKED, UNLINKED, RELABELED]);
   for (const account of [LINKED, RELABELED]) {
-    await holder.db.query(`INSERT INTO proton_mailbox_links (account_id, user_id, generation, certificate_pem, certificate_fingerprint, tls_servername)
+    await holder.db.query(`INSERT INTO proton_mailbox_links (account_id, proton_user_id, generation, certificate_pem, certificate_fingerprint, tls_servername)
       VALUES ($1, $2, $3, $4, $5, '127.0.0.1')`, [account, NATIVE_USER, GENERATION, publicCertificate, fingerprint]);
   }
 });
@@ -56,7 +56,7 @@ function credentials(overrides = {}) {
 }
 
 async function operation({ state = 'checking', userId = NATIVE_USER, email = 'Box@Proton.me', expired = false } = {}) {
-  await holder.db.query(`INSERT INTO proton_connections (id, actor_user_id, request_id, requested_email, state, user_id, expires_at)
+  await holder.db.query(`INSERT INTO proton_connections (id, actor_user_id, request_id, requested_email, state, proton_user_id, expires_at)
     VALUES ($1, $2, gen_random_uuid(), $3, $4, $5, NOW() + ($6 || ' minutes')::interval)`,
   [OPERATION, ACTOR, email, state, userId, expired ? '-1' : '10']);
 }

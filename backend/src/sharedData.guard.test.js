@@ -18,9 +18,6 @@ const PERSONAL_DATA_FILES = new Set([
   'services/admin/systemSettings.js',
   'services/authEvents.js',
   'services/pushNotifications.js',
-  // Not an owner: the native Proton account ID of proton_users/proton_mailbox_links/
-  // proton_connections (migration 0099), which binds a managed mailbox to its Bridge user.
-  'services/proton/mailEndpoint.js',
 ]);
 
 function sourceFiles(dir) {

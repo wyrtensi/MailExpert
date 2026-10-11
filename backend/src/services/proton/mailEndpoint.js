@@ -90,7 +90,7 @@ export async function resolveProtonEndpoint(accountId, protocol, { signal } = {}
   const { rows: [link] } = await query(
     `SELECT l.certificate_pem, l.certificate_fingerprint, l.tls_servername
        FROM proton_mailbox_links l
-       JOIN proton_users u ON u.user_id = l.user_id AND u.generation = l.generation
+       JOIN proton_users u ON u.proton_user_id = l.proton_user_id AND u.generation = l.generation
        JOIN email_accounts a ON a.id = l.account_id
       WHERE l.account_id = $1 AND a.mail_provider = 'proton' AND a.connection_mode = 'managed'`,
     [accountId],
@@ -114,17 +114,17 @@ export async function probeManagedProtonConnection(operationId, { signal } = {})
   checkAbort(signal);
   if (typeof operationId !== 'string' || !UUID.test(operationId)) throw new ProtonEndpointError('proton_operation_invalid');
   const { rows: [operation] } = await query(
-    `SELECT user_id, requested_email FROM proton_connections
-      WHERE id = $1 AND state = 'checking' AND user_id IS NOT NULL AND expires_at > NOW()`,
+    `SELECT proton_user_id, requested_email FROM proton_connections
+      WHERE id = $1 AND state = 'checking' AND proton_user_id IS NOT NULL AND expires_at > NOW()`,
     [operationId],
   );
   checkAbort(signal);
   if (!operation) throw new ProtonEndpointError('proton_operation_invalid');
 
-  const returned = await callWorker('POST', `/users/${operation.user_id}/credentials`, { operationId }, { signal });
+  const returned = await callWorker('POST', `/users/${operation.proton_user_id}/credentials`, { operationId }, { signal });
   checkAbort(signal);
   const email = normalizedEmail(returned?.email);
-  if (returned?.userId !== operation.user_id || !email || email !== normalizedEmail(operation.requested_email)
+  if (returned?.userId !== operation.proton_user_id || !email || email !== normalizedEmail(operation.requested_email)
     || typeof returned.bridgePassword !== 'string' || !returned.bridgePassword) {
     throw new ProtonEndpointError('proton_identity_mismatch');
   }

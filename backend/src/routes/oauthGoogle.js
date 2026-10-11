@@ -44,7 +44,10 @@ class CallbackError extends Error {
   }
 }
 
-const errorRedirect = (code) => `/?oauth_error=${code}&oauth_provider=${PROVIDER}`;
+// `attemptId` is the dialog's opaque id from the state (already validated when it was stored): the
+// page tells its own attempt from an older one by it.
+const withAttempt = (attemptId) => (attemptId ? `&oauth_attempt=${attemptId}` : '');
+const errorRedirect = (code, attemptId = null) => `/?oauth_error=${code}&oauth_provider=${PROVIDER}${withAttempt(attemptId)}`;
 
 // `?account=<id>` names the Gmail mailbox to reconnect; nothing else starts a flow here. Adding a
 // mailbox goes through POST /api/oauth/google/start, where the CSRF check covers the seat it
@@ -178,7 +181,7 @@ router.get('/callback', async (req, res) => {
     reconnectAccount(account, result);
     // The second sender name from the form was not kept (same as the main one): say so.
     const notice = senderNameDropped ? '&oauth_notice=sender_name_duplicate' : '';
-    res.redirect(`/?oauth_success=${PROVIDER}&oauth_result=${result}${notice}`);
+    res.redirect(`/?oauth_success=${PROVIDER}&oauth_result=${result}${notice}${withAttempt(pending.attemptId)}`);
   } catch (err) {
     const stable = typeof err?.code === 'string' && CALLBACK_ERROR_CODES.has(err.code)
       ? err.code
@@ -187,7 +190,7 @@ router.get('/callback', async (req, res) => {
     console.error(`Google OAuth callback failed: ${stable} (${err?.name || 'Error'})`);
     if (pending?.appId && pending.email && !released) await releaseGoogleSeat(pending.appId, pending.email, pending.reservation);
     if (issued) await revokeRefusedGrant(issued);
-    res.redirect(errorRedirect(stable));
+    res.redirect(errorRedirect(stable, pending?.attemptId));
   }
 });
 

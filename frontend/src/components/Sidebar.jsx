@@ -1127,6 +1127,15 @@ export default function Sidebar() {
           collapsed={sidebarCollapsed}
           onClick={() => { setShowContacts(!showContacts); if (isMobile) setMobileSidebarOpen(false); }}
         />
+        {/* Always here, whatever the number of mailboxes and whether the sidebar is collapsed or the
+            mailbox filter is shown: it opens the add-account dialog (store.openAddAccount). */}
+        <NavItem
+          icon={ICONS.addAccount}
+          label={t('sidebar.addAccount')}
+          active={false}
+          collapsed={sidebarCollapsed}
+          onClick={() => { openAddAccount(); if (isMobile) setMobileSidebarOpen(false); }}
+        />
         {scheduledSummary.count > 0 && (
           <NavItem
             icon={ICONS.scheduled}
@@ -1361,8 +1370,8 @@ export default function Sidebar() {
 
         {/* Mailbox filter: narrows only the rendered rows below, never the store's accounts,
             the selection or unread counts. The "+" next to it is a second, more discoverable
-            entry point into the same add-account flow the user menu's "Add account" triggers
-            (openAddAccount sets addAccountRequested, which AdminPanel's AccountsTab consumes). */}
+            entry point into the same add-account dialog the fixed "Add account" item above and the
+            user menu trigger (store.openAddAccount; it changes nothing else). */}
         {/* Sticky: the filter stays in reach while the list of mailboxes scrolls under it. It runs
             to the nav's edges (the negative margins undo its padding) so rows do not show through. */}
         {showAccountFilter && (

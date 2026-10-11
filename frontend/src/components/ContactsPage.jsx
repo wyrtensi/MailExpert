@@ -9,6 +9,7 @@ import SenderAvatarImage from './SenderAvatarImage.jsx';
 import { contactComposeAddress, contactForEmail, contactFormFromSender, websiteHref, websiteLabel } from '../utils/contactLinks.js';
 import { copyToClipboard } from '../utils/clipboard.js';
 import ContactLetters from './ContactLetters.jsx';
+import AddAccountButton from './addAccount/AddAccountButton.jsx';
 
 // Deterministic avatar color from a string
 function avatarColor(str) {
@@ -572,6 +573,8 @@ export default function ContactsPage() {
           }}>
             {mobileHeaderTitle}
           </h2>
+
+          <AddAccountButton />
 
           {mobilePanel === 'list' && (
             <button

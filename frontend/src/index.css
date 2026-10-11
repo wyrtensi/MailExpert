@@ -761,3 +761,135 @@ body, #root {
 [data-mailexpert-theme="winxp"] .mailexpert-window-titlebar .mailexpert-window-btn {
   color: #ffffff !important;
 }
+
+/* ── Add account dialog (components/AddAccountDialog.jsx) ───────────────────
+   Portal in document.body, outside the app's scale wrapper: --add-account-scale is the font-size
+   preference, applied to the panel only (its limits are divided by it) so the viewport is never
+   transformed twice. Colours come from the theme variables, so both themes work unchanged. */
+.add-account-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 2500;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 16px;
+  box-sizing: border-box;
+  background: var(--overlay-scrim);
+  animation: add-account-fade 0.15s ease-out;
+}
+.add-account-panel {
+  --add-account-scale: 1;
+  display: flex;
+  flex-direction: column;
+  box-sizing: border-box;
+  width: min(760px, calc((100vw - 32px) / var(--add-account-scale)));
+  max-height: calc((100dvh - 32px) / var(--add-account-scale));
+  transform: scale(var(--add-account-scale));
+  transform-origin: center center;
+  background: var(--bg-elevated);
+  color: var(--text-primary);
+  border: 1px solid var(--border);
+  border-radius: 14px;
+  box-shadow: var(--shadow-modal);
+  overflow: hidden;
+  outline: none;
+}
+.add-account-header {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-shrink: 0;
+  padding: 12px 14px;
+  border-bottom: 1px solid var(--border-subtle);
+}
+.add-account-title {
+  flex: 1;
+  min-width: 0;
+  margin: 0;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  font-size: 16px;
+  font-weight: 600;
+  overflow-wrap: anywhere;
+  outline: none;
+}
+.add-account-title-icon { display: inline-flex; flex-shrink: 0; }
+.add-account-icon-button,
+.add-account-back {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  min-width: 44px;
+  min-height: 44px;
+  padding: 0 10px;
+  box-sizing: border-box;
+  background: none;
+  border: none;
+  border-radius: 8px;
+  color: var(--text-secondary);
+  font-size: 13px;
+  cursor: pointer;
+}
+.add-account-icon-button:hover,
+.add-account-back:hover { background: var(--bg-hover); color: var(--text-primary); }
+.add-account-body {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  padding: 16px 18px 20px;
+  overflow-wrap: anywhere;
+}
+.add-account-hint { margin: 0 0 14px; font-size: 13px; color: var(--text-secondary); line-height: 1.5; }
+.add-account-grid {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 10px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+.add-account-tile {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 10px;
+  width: 100%;
+  min-width: 0;
+  min-height: 104px;
+  padding: 14px 8px;
+  box-sizing: border-box;
+  background: var(--bg-tertiary);
+  color: var(--text-primary);
+  border: 1px solid var(--border-subtle);
+  border-radius: 10px;
+  font-size: 13px;
+  font-weight: 500;
+  text-align: center;
+  cursor: pointer;
+  transition: background 0.12s, border-color 0.12s;
+}
+.add-account-tile:hover { background: var(--bg-hover); border-color: var(--border); }
+.add-account-tile[aria-disabled="true"] { opacity: 0.7; }
+.add-account-tile-name { min-width: 0; overflow-wrap: anywhere; }
+.add-account-tile-state { font-size: 11px; font-weight: 400; color: var(--text-tertiary); overflow-wrap: anywhere; }
+.add-account-tile[data-last-selected="true"] { border-width: 2px; border-color: var(--accent); padding: 13px 7px; }
+.add-account-icon-button:focus-visible,
+.add-account-back:focus-visible,
+.add-account-tile:focus-visible,
+.add-account-panel:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+@media (max-width: 599px) {
+  .add-account-overlay { padding: 8px; }
+  .add-account-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+}
+@keyframes add-account-fade { from { opacity: 0; } to { opacity: 1; } }
+@media (prefers-reduced-motion: reduce) {
+  .add-account-overlay { animation: none; }
+  .add-account-tile { transition: none; }
+}

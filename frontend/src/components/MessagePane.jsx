@@ -60,6 +60,7 @@ import ContextMenu from './ContextMenu.jsx';
 import { formatDateTime, localeTag } from '../utils/formatDate.js';
 import { mailboxBusyOr, mailboxBusyText, isMailboxBusy } from '../utils/mailboxBusy.js';
 import { splitByConfirmed } from '../utils/optimisticRemoval.js';
+import AddAccountButton from './addAccount/AddAccountButton.jsx';
 
 function parseAddressField(raw) {
   try {
@@ -2173,6 +2174,7 @@ ${bodyContent}
           }}>
             {message?.subject || ''}
           </div>
+          <AddAccountButton />
           <button
             disabled={!hasPrev}
             onClick={() => selectAndMarkRead(allMessages[currentIdx - 1])}

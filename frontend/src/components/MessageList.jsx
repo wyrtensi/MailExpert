@@ -57,6 +57,7 @@ import { splitByConfirmed, unreadByAccount } from '../utils/optimisticRemoval.js
 import { searchScopeKey } from '../utils/searchScope.js';
 import { unreadAfterHeadRead } from '../utils/threadUnread.js';
 import { snapshotFlag } from '../utils/flagSnapshot.js';
+import AddAccountButton from './addAccount/AddAccountButton.jsx';
 
 // Folder icon for move picker
 function FolderIcon({ specialUse, size = 13 }) {
@@ -2882,6 +2883,8 @@ export default function MessageList() {
               </span>
             )}
           </div>
+
+          <AddAccountButton />
 
           {/* Unread filter */}
           <button

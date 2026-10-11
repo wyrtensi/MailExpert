@@ -6,6 +6,15 @@ export const OAUTH_STATE_TTL_SECONDS = 600;
 // 32 random bytes encode to 43 base64url characters; anything else was not issued here.
 const STATE_PATTERN = /^[A-Za-z0-9_-]{43}$/;
 
+// The attempt id the add-account dialog mints for one connection attempt (a UUID today). Opaque to
+// the server: it is only stored and handed back in the callback redirect, so it must be a short
+// token that is safe in a URL query. Anything else is treated as absent.
+const ATTEMPT_ID_PATTERN = /^[A-Za-z0-9_-]{16,64}$/;
+
+export function parseAttemptId(value) {
+  return typeof value === 'string' && ATTEMPT_ID_PATTERN.test(value) ? value : null;
+}
+
 // Key by a hash of the state so the raw value (which travels through the browser and
 // the provider) is never used directly as a Redis key.
 function stateKey(provider, state) {
@@ -20,9 +29,11 @@ function stateKey(provider, state) {
 // `accountId` names which mailbox is being reconnected. `senderName` and `senderNameAlt` are the
 // names a mailbox added from the Gmail form sends under (utils/senderNames.js). `reservation` is
 // the id of the seat reservation selectGoogleApp took for this flow, released by the callback.
+// `attemptId` is the dialog's opaque id of this connection attempt; the callback echoes it in the
+// redirect so a late result of an older attempt cannot be taken for the newest one.
 export async function createOAuthState({
   provider, userId = null, loginHint = null, appId = null, mode = null, email = null, accountId = null,
-  senderName = null, senderNameAlt = null, reservation = null,
+  senderName = null, senderNameAlt = null, reservation = null, attemptId = null,
 }) {
   const state = randomBytes(32).toString('base64url');
   const codeVerifier = randomBytes(32).toString('base64url');
@@ -41,6 +52,7 @@ export async function createOAuthState({
       senderName: senderName || null,
       senderNameAlt: senderNameAlt || null,
       reservation: reservation || null,
+      attemptId: parseAttemptId(attemptId),
     }),
     { NX: true, EX: OAUTH_STATE_TTL_SECONDS },
   );
@@ -70,6 +82,7 @@ export async function consumeOAuthState({ provider, state, anonymous = false }) 
       senderName: typeof data.senderName === 'string' ? data.senderName : null,
       senderNameAlt: typeof data.senderNameAlt === 'string' ? data.senderNameAlt : null,
       reservation: typeof data.reservation === 'string' ? data.reservation : null,
+      attemptId: parseAttemptId(data.attemptId),
     };
   } catch {
     return null;

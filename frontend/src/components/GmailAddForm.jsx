@@ -18,6 +18,7 @@ import {
   suggestionAction,
 } from '../utils/addAccount.js';
 import { senderNamesPayload } from '../utils/mailNode.js';
+import { isAttemptId, newAttemptId } from '../utils/addAccountFlow.js';
 
 const inputStyle = {
   width: '100%', padding: '9px 12px', background: 'var(--bg-tertiary)', border: '1px solid var(--border)',
@@ -32,9 +33,23 @@ const hintStyle = { marginTop: 5, fontSize: 11, color: 'var(--text-tertiary)', l
 // reports back to this window (App.jsx forwards it), and MailApp announces the result.
 // The demo has no Google: the consent step is a card in the form, and allowing it connects the
 // address locally and posts the same success message the callback would.
-export default function GmailAddForm({ accounts, onDone, demo = isDemoMode }) {
+//
+// Props (all optional but `accounts`): `initialEmail` / `onEmailChange` keep the typed address in the
+// dialog while the form is open; `signal` is aborted when the dialog leaves the form, after which
+// nothing is reported; `onAttemptStart` runs when a start is sent; `onConnected({ kind: 'oauth',
+// attemptId })` runs when the callback of THIS form's attempt reports success. Each start the user
+// asks for mints its own attempt id (a failed start is retried with the same one); the callback
+// hands it back, so the result of an older attempt never closes the form of a newer one. The
+// MailApp listener refreshes the mailbox list for every result regardless.
+export default function GmailAddForm({
+  accounts, initialEmail = '', onEmailChange, signal, onAttemptStart, onConnected, demo = isDemoMode,
+}) {
   const { t } = useTranslation();
-  const [email, setEmail] = useState('');
+  const [email, setEmailState] = useState(initialEmail);
+  const setEmail = (value) => { setEmailState(value); onEmailChange?.(value); };
+  const attemptRef = useRef(null);
+  // A start that reached a Google tab hands its id over to the callback; the next start gets a new one.
+  const attemptSentRef = useRef(false);
   const [known, setKnown] = useState([]);
   const [open, setOpen] = useState(false);
   const [highlight, setHighlight] = useState(-1);
@@ -68,16 +83,19 @@ export default function GmailAddForm({ accounts, onDone, demo = isDemoMode }) {
   useEffect(() => {
     const handleMessage = (e) => {
       if (e.origin !== window.location.origin || e.data?.provider !== 'google') return;
+      if (signal?.aborted) return;
+      const mine = !!attemptRef.current && isAttemptId(e.data?.attempt) && e.data.attempt === attemptRef.current;
       if (e.data?.type === 'oauth_success') {
+        if (!mine) return;
         setLaunchPath(null);
-        onDone();
+        onConnected?.({ kind: 'oauth', attemptId: attemptRef.current });
       } else if (e.data?.type === 'oauth_error') {
-        setLaunchPath(null);
+        if (mine) setLaunchPath(null);
       }
     };
     window.addEventListener('message', handleMessage);
     return () => window.removeEventListener('message', handleMessage);
-  }, [onDone]);
+  }, [onConnected, signal]);
 
   // The fallback link lives as long as the launch key behind it.
   useEffect(() => {
@@ -107,6 +125,13 @@ export default function GmailAddForm({ accounts, onDone, demo = isDemoMode }) {
 
   const start = async () => {
     if (!canStart) return;
+    // Minted here, in the handler, never during render: a new user-initiated start gets a new id,
+    // a start that failed before reaching Google is retried with the one it had.
+    if (!attemptRef.current || attemptSentRef.current) {
+      attemptRef.current = newAttemptId();
+      attemptSentRef.current = false;
+    }
+    const attemptId = attemptRef.current;
     if (demo) {
       setErrorKey(null);
       setDemoConsent(email.trim());
@@ -115,14 +140,17 @@ export default function GmailAddForm({ accounts, onDone, demo = isDemoMode }) {
     setBusy(true);
     setErrorKey(null);
     setLaunchPath(null);
+    onAttemptStart?.();
     try {
-      const { path } = await api.startGoogleOAuth(email.trim(), names);
+      const { path } = await api.startGoogleOAuth(email.trim(), names, attemptId, signal);
+      if (signal?.aborted) return;
+      attemptSentRef.current = true;
       // The tab is opened after an await, so a popup blocker may stop it and the page cannot
       // tell: the link below is always offered while the path is valid.
       setLaunchPath(path);
       openOAuthWindow(path);
     } catch (err) {
-      setErrorKey(gmailStartErrorKey(err?.code));
+      if (!signal?.aborted) setErrorKey(gmailStartErrorKey(err?.code));
     } finally {
       setBusy(false);
     }
@@ -132,8 +160,9 @@ export default function GmailAddForm({ accounts, onDone, demo = isDemoMode }) {
     setBusy(true);
     setErrorKey(null);
     try {
-      const { result } = await api.startGoogleOAuth(demoConsent, names);
-      window.postMessage({ type: 'oauth_success', provider: 'google', result }, window.location.origin);
+      const { result } = await api.startGoogleOAuth(demoConsent, names, attemptRef.current);
+      attemptSentRef.current = true;
+      window.postMessage({ type: 'oauth_success', provider: 'google', result, attempt: attemptRef.current }, window.location.origin);
     } catch (err) {
       setErrorKey(gmailStartErrorKey(err?.code));
       setDemoConsent(null);
@@ -174,7 +203,8 @@ export default function GmailAddForm({ accounts, onDone, demo = isDemoMode }) {
 
   const onKeyDown = (e) => {
     if (e.key === 'Escape') {
-      if (listOpen) { e.preventDefault(); closeList(); }
+      // The open list takes the key: the dialog around the form must not also close.
+      if (listOpen) { e.preventDefault(); e.stopPropagation(); closeList(); }
       return;
     }
     if (e.key === 'ArrowDown' || e.key === 'ArrowUp') {

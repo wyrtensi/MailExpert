@@ -675,12 +675,15 @@ export const useStore = create((set, get) => ({
   adminTab: 'accounts', // a TABS id of AdminPanel.jsx: 'accounts' | 'appearance' | 'integrations' | 'mail-node' | 'users' | ...
   // Closing the settings also drops a request still waiting for the (lazy-loaded) panel to take it,
   // so it cannot fire later and open a view nobody asked for.
-  setShowAdmin: (v) => set(v ? { showAdmin: true } : { showAdmin: false, addAccountRequested: false, accountSettingsRequested: null }),
+  setShowAdmin: (v) => set(v ? { showAdmin: true } : { showAdmin: false, accountSettingsRequested: null }),
   setAdminTab: (t) => set({ adminTab: t }),
-  // Set by the sidebar's "Add account" item; the accounts tab opens its add view and clears it.
-  addAccountRequested: false,
-  openAddAccount: () => set({ showAdmin: true, adminTab: 'accounts', addAccountRequested: true }),
-  clearAddAccountRequest: () => set({ addAccountRequested: false }),
+  // The "Add account" dialog (components/AddAccountDialog.jsx, mounted by MailApp through a portal).
+  // Every entry point calls openAddAccount; it touches nothing else, so the settings tab, the
+  // mailbox filter, the selected mailbox, folder, letter and search all stay under the dialog.
+  // The dialog's own screen, typed address and passwords are local to it, never kept here.
+  showAddAccountDialog: false,
+  openAddAccount: () => set({ showAddAccountDialog: true }),
+  closeAddAccount: () => set({ showAddAccountDialog: false }),
   // Set by the sidebar's "Account settings" item with the account's id: the accounts tab opens
   // that account's own settings view (the edit form) and clears it. Same hand-off as above, so
   // the target survives the tab not being mounted yet.

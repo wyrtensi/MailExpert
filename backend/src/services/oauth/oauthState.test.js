@@ -18,7 +18,7 @@ vi.mock('../redis.js', () => ({
 }));
 
 const { redisClient } = await import('../redis.js');
-const { createOAuthState, consumeOAuthState, OAUTH_STATE_TTL_SECONDS } = await import('./oauthState.js');
+const { createOAuthState, consumeOAuthState, parseAttemptId, OAUTH_STATE_TTL_SECONDS } = await import('./oauthState.js');
 
 const base64url = (buf) => buf.toString('base64url');
 
@@ -45,7 +45,7 @@ describe('OAuth state + PKCE store', () => {
     const saved = JSON.parse(raw);
     expect(saved).toEqual({
       userId: 'u1', codeVerifier: expect.any(String), loginHint: 'x@gmail.com', appId: null,
-      mode: null, email: null, accountId: null, senderName: null, senderNameAlt: null, reservation: null,
+      mode: null, email: null, accountId: null, senderName: null, senderNameAlt: null, reservation: null, attemptId: null,
     });
     expect(saved.codeVerifier.length).toBeGreaterThanOrEqual(43);
     expect(a.codeChallenge).toBe(base64url(createHash('sha256').update(saved.codeVerifier).digest()));
@@ -57,7 +57,7 @@ describe('OAuth state + PKCE store', () => {
     const first = await consumeOAuthState({ provider: 'google', state });
     expect(first).toEqual({
       userId: 'u1', codeVerifier: expect.any(String), loginHint: null, appId: null,
-      mode: null, email: null, accountId: null, senderName: null, senderNameAlt: null, reservation: null,
+      mode: null, email: null, accountId: null, senderName: null, senderNameAlt: null, reservation: null, attemptId: null,
     });
     expect(await consumeOAuthState({ provider: 'google', state })).toBeNull();
     expect(redisClient.getDel).toHaveBeenCalledTimes(2);
@@ -95,7 +95,7 @@ describe('OAuth state + PKCE store', () => {
     expect(await consumeOAuthState({ provider: 'auth-google', state: second.state, anonymous: true }))
       .toEqual({
         userId: null, codeVerifier: expect.any(String), loginHint: null, appId: null,
-        mode: null, email: null, accountId: null, senderName: null, senderNameAlt: null, reservation: null,
+        mode: null, email: null, accountId: null, senderName: null, senderNameAlt: null, reservation: null, attemptId: null,
       });
   });
 
@@ -125,7 +125,31 @@ describe('OAuth state + PKCE store', () => {
   it('reports no mode, email or target for a flow started without them', async () => {
     const { state } = await createOAuthState({ provider: 'google', userId: 'u1' });
     await expect(consumeOAuthState({ provider: 'google', state })).resolves.toMatchObject({
-      mode: null, email: null, accountId: null, senderName: null, senderNameAlt: null, reservation: null,
+      mode: null, email: null, accountId: null, senderName: null, senderNameAlt: null, reservation: null, attemptId: null,
     });
+  });
+});
+
+describe('OAuth attempt id', () => {
+  const ATTEMPT = 'a1b2c3d4-0000-4000-8000-0123456789ab';
+
+  it('is stored with the state and handed back on consume', async () => {
+    const { state } = await createOAuthState({ provider: 'google', userId: 'u1', attemptId: ATTEMPT });
+    expect(JSON.parse([...store.values()][0].value).attemptId).toBe(ATTEMPT);
+    expect((await consumeOAuthState({ provider: 'google', state })).attemptId).toBe(ATTEMPT);
+  });
+
+  it('is dropped when it is not an opaque id, so nothing odd is echoed to the browser', async () => {
+    for (const bad of ['short', 'has space has space has space', '<script>alert(1)</script>', 'x'.repeat(65), 12345]) {
+      store.clear();
+      const { state } = await createOAuthState({ provider: 'google', userId: 'u1', attemptId: bad });
+      expect((await consumeOAuthState({ provider: 'google', state })).attemptId, String(bad)).toBeNull();
+    }
+  });
+
+  it('exposes one validator for the routes', () => {
+    expect(parseAttemptId(ATTEMPT)).toBe(ATTEMPT);
+    expect(parseAttemptId(undefined)).toBeNull();
+    expect(parseAttemptId('no way')).toBeNull();
   });
 });

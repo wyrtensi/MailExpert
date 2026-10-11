@@ -48,10 +48,6 @@ import MailNodeOutagesSection from './MailNodeOutagesSection.jsx';
 import PanelUpdateSection from './PanelUpdateSection.jsx';
 import MailNodeQuarantine from './MailNodeQuarantine.jsx';
 import MailNodeForeignAliases from './MailNodeForeignAliases.jsx';
-import DomainMailboxAddForm from './DomainMailboxAddForm.jsx';
-import AddAccountTabs from './AddAccountTabs.jsx';
-import GmailAddForm from './GmailAddForm.jsx';
-import { addAccountOptions, defaultAddKind } from '../utils/addAccount.js';
 import { accountUpdateFromForm } from '../utils/accountUpdate.js';
 import {
   canDeactivate, canDeleteAccount, isForeignNodeAlias, isMailNodeErrorCode, isNodeMailbox, isReadOnlyMailbox, mailNodeErrorKey,
@@ -121,7 +117,9 @@ function isMicrosoftImapHost(host) {
 // A rule screen's own meaning of a shared code (not_found is also a panel update refusal).
 const RULE_ERROR_KEYS = { not_found: 'admin.rules.errorNotFound' };
 
-function AccountForm({ initial, onSave, onCancel }) {
+// Exported for the add-account dialog's "Other" way. `initialEmail` and `onEmailChange` keep the
+// address typed in the dialog (add mode only).
+export function AccountForm({ initial, onSave, onCancel, initialEmail = '', onEmailChange }) {
   const { t } = useTranslation();
   const { categorizationEnabled, user } = useStore();
 
@@ -130,7 +128,7 @@ function AccountForm({ initial, onSave, onCancel }) {
   // refuses them from anyone else): other users see a note in their place.
   const serverLocked = isEdit && !user?.isAdmin;
   const [form, setForm] = useState(initial || {
-    name: '', email_address: '', color: '#6366f1', protocol: 'imap',
+    name: '', email_address: initialEmail, color: '#6366f1', protocol: 'imap',
     imap_host: '', imap_port: 993, imap_skip_tls_verify: false,
     smtp_host: '', smtp_port: 587, smtp_tls: 'STARTTLS',
     smtp_auth_user: '', smtp_auth_pass: '',
@@ -153,7 +151,10 @@ function AccountForm({ initial, onSave, onCancel }) {
       .catch(() => {});
   }, []);
 
-  const set = (key, val) => setForm(f => ({ ...f, [key]: val }));
+  const set = (key, val) => {
+    if (key === 'email_address') onEmailChange?.(val);
+    setForm(f => ({ ...f, [key]: val }));
+  };
 
   const handlePreset = (key) => {
     const p = PRESETS[key];
@@ -504,47 +505,15 @@ function threadingBlockedMessage(err, t) {
 // Exported (like ThemesTab below) only so AccountsTab.render.test.js can mount it.
 export function AccountsTab() {
   const { t } = useTranslation();
-  const { accounts, setAccounts, updateAccount, setUnreadCounts, addNotification, backfillProgress, user, addAccountRequested, clearAddAccountRequest, accountSettingsRequested, clearAccountSettingsRequest, accountsReady } = useStore();
+  const { accounts, setAccounts, updateAccount, setUnreadCounts, addNotification, backfillProgress, user, openAddAccount, accountSettingsRequested, clearAccountSettingsRequest, accountsReady } = useStore();
   const isAdmin = !!user?.isAdmin;
-  const [subview, setSubview] = useState('list'); // 'list' | 'add' | 'edit' | 'folders' | 'aliases'
+  const [subview, setSubview] = useState('list'); // 'list' | 'edit' | 'folders' | 'aliases'
   const [editTarget, setEditTarget] = useState(null);
   const [folderMappings, setFolderMappings] = useState({});
   const [availableFolders, setAvailableFolders] = useState([]);
   const [foldersLoading, setFoldersLoading] = useState(false);
   const [foldersSaving, setFoldersSaving] = useState(false);
   const [confirmDialog, setConfirmDialog] = useState(null);
-
-  // "Add account": a tab per way (utils/addAccount.js decides which are offered), its form under it.
-  const [addKind, setAddKind] = useState(null);
-  const [googleStatus, setGoogleStatus] = useState(null);
-  const [domainStatus, setDomainStatus] = useState(null);
-  // The statuses are cleared on the way out, so every opening starts from "loading" and no tab is
-  // picked from a stale or half-known status (an admin would see the manual form flash first).
-  useEffect(() => {
-    if (subview !== 'add') return;
-    api.getIntegrationsStatus()
-      .then((data) => {
-        setGoogleStatus(data?.google || { configured: false, available: false });
-        setDomainStatus(data?.domainMail || { configured: false });
-      })
-      .catch(() => {
-        setGoogleStatus({ configured: false, available: false });
-        setDomainStatus({ configured: false });
-      });
-  }, [subview]);
-  const closeAdd = useCallback(() => {
-    setAddKind(null);
-    setGoogleStatus(null);
-    setDomainStatus(null);
-    setSubview('list');
-  }, []);
-
-  useEffect(() => {
-    if (!addAccountRequested) return;
-    clearAddAccountRequest();
-    setAddKind(null);
-    setSubview('add');
-  }, [addAccountRequested, clearAddAccountRequest]);
 
   // The sidebar's "Account settings" item names the account (openAccountSettings): open that
   // account's own settings view, the edit form. The request stays until the account is in the
@@ -583,12 +552,6 @@ export function AccountsTab() {
   const [aliasFormId, setAliasFormId] = useState(null);
   const [aliasFormError, setAliasFormError] = useState('');
   const [aliasFormSaving, setAliasFormSaving] = useState(false);
-
-  const handleAdd = async (form) => {
-    const account = await api.addAccount(form);
-    setAccounts([...accounts, account]);
-    closeAdd();
-  };
 
   const handleEdit = async (form) => {
     const updates = accountUpdateFromForm(form, { isAdmin });
@@ -925,39 +888,6 @@ export function AccountsTab() {
     });
   };
 
-  if (subview === 'add') {
-    // One form per way to add a mailbox, keyed like ADD_ACCOUNT_KINDS.
-    const ADD_FORMS = {
-      gmail: () => <GmailAddForm accounts={accounts} onDone={closeAdd} />,
-      domain: () => <DomainMailboxAddForm accounts={accounts} onCreated={(account) => { setAccounts([...accounts, account]); closeAdd(); }} />,
-      manual: () => <AccountForm onSave={handleAdd} onCancel={closeAdd} />,
-    };
-    const addOptions = addAccountOptions({ isAdmin, googleStatus, domainStatus });
-    return (
-      <div>
-        <button onClick={closeAdd} style={{
-          display: 'flex', alignItems: 'center', gap: 6,
-          background: 'none', border: 'none', color: 'var(--text-secondary)',
-          cursor: 'pointer', fontSize: 13, padding: '0 0 16px 0',
-        }}>
-          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
-            <polyline points="15 18 9 12 15 6"/>
-          </svg>
-          {t('sidebar.backToAccounts')}
-        </button>
-        <div style={{ fontSize: 15, fontWeight: 600, color: 'var(--text-primary)', marginBottom: 14 }}>
-          {t('admin.accounts.addTitle')}
-        </div>
-        <AddAccountTabs
-          options={addOptions}
-          active={addKind ?? defaultAddKind(addOptions)}
-          onSelect={setAddKind}
-          renderForm={(kind) => ADD_FORMS[kind]()}
-        />
-      </div>
-    );
-  }
-
   if (subview === 'edit' && editTarget) {
     return (
       <div>
@@ -1278,7 +1208,7 @@ export function AccountsTab() {
         <div style={{ fontSize: 15, fontWeight: 600, color: 'var(--text-primary)' }}>
           {t('admin.accounts.title')}
         </div>
-        <button onClick={() => setSubview('add')} style={{
+        <button onClick={openAddAccount} style={{
           display: 'flex', alignItems: 'center', gap: 6,
           padding: '7px 12px', background: 'var(--accent)',
           border: 'none', borderRadius: 7, color: 'var(--accent-text)',

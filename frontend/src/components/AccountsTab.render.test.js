@@ -87,7 +87,7 @@ describe('AccountsTab opened for one account (sidebar "Account settings")', () =
     await React.act(async () => root.render(null));
     useStore.setState({
       accounts: ACCOUNTS, accountsReady: true, user: { id: 'u1', isAdmin: true },
-      showAdmin: false, adminTab: 'appearance', accountSettingsRequested: null, addAccountRequested: false,
+      showAdmin: false, adminTab: 'appearance', accountSettingsRequested: null, showAddAccountDialog: false,
     });
   });
 
@@ -147,12 +147,13 @@ describe('AccountsTab opened for one account (sidebar "Account settings")', () =
     assert.equal(nameField().value, 'Operations', 'the fields are the second account\'s, not the first one\'s');
   });
 
-  test('closing the settings drops a request that has not been taken yet', async () => {
+  test('closing the settings drops a request that has not been taken yet, but not the add-account dialog', async () => {
     useStore.getState().openAccountSettings('a2');
-    useStore.setState({ addAccountRequested: true });
+    useStore.getState().openAddAccount();
     useStore.getState().setShowAdmin(false);
     assert.equal(useStore.getState().accountSettingsRequested, null);
-    assert.equal(useStore.getState().addAccountRequested, false);
+    assert.equal(useStore.getState().showAddAccountDialog, true);
+    useStore.getState().closeAddAccount();
     await React.act(async () => { root.render(React.createElement(AccountsTab)); });
     await settle();
     assert.ok(showsList(), 'nothing opens later');
@@ -254,6 +255,22 @@ describe('AccountsTab search', () => {
     });
     assert.equal(searchBox().value, '');
     assert.deepEqual(shown(), ['sales@', 'ops@', 'support@']);
+  });
+
+  test('settings_opens_same_dialog_and_keeps_filter: the add button opens the store dialog, the list and the filter stay', async () => {
+    await type('ops');
+    assert.deepEqual(shown(), ['ops@']);
+    const before = useStore.getState();
+    const addButton = [...host.querySelectorAll('button')].find(b => b.textContent.includes('admin.accounts.addButton'));
+    await React.act(async () => { addButton.click(); });
+    const after = useStore.getState();
+    assert.equal(after.showAddAccountDialog, true);
+    assert.equal(after.showAdmin, before.showAdmin);
+    assert.equal(after.adminTab, before.adminTab);
+    assert.equal(searchBox().value, 'ops', 'the filter is not reset');
+    assert.deepEqual(shown(), ['ops@'], 'the list under the dialog is the same');
+    assert.ok(!host.textContent.includes('admin.accounts.addTitle'), 'no add sub-view inside the settings any more');
+    assert.equal(after.accounts, before.accounts, 'the shared list is untouched');
   });
 
   test('is not offered for a single account', async () => {

@@ -39,11 +39,17 @@ const buttonStyle = (primary, enabled = true) => ({
 // administrator turns an alias with another address into its own mailbox (D-16); a domain the node
 // cannot take mailboxes in is not chosen, and the form says why: a node domain not ready yet, or a
 // domain that is not on the node at all (gmail.com, say). `onCancel` adds a Cancel button.
-export default function DomainMailboxAddForm({ accounts = [], onCreated, initial = null, onCancel = null }) {
+// Inside the add-account dialog the form also takes `initialEmail` (its part before @ starts the
+// name field), `onEmailChange` (told the address as it is typed), `signal` (aborted when the
+// dialog leaves the form: a late answer changes nothing here) and `onAttemptStart` (told when the
+// create request is sent).
+export default function DomainMailboxAddForm({
+  accounts = [], onCreated, initial = null, onCancel = null, initialEmail = '', onEmailChange, signal, onAttemptStart,
+}) {
   const { t } = useTranslation();
   const [domains, setDomains] = useState(null);
   const [loadError, setLoadError] = useState(null);
-  const [localPart, setLocalPart] = useState(initial?.localPart ?? '');
+  const [localPart, setLocalPart] = useState(initial?.localPart ?? (initialEmail.split('@')[0] || ''));
   const [domain, setDomain] = useState('');
   const [initialDomainProblem, setInitialDomainProblem] = useState(null); // null | 'notReady' | 'notNode'
   const [senderName, setSenderName] = useState(initial?.senderName ?? '');
@@ -90,6 +96,11 @@ export default function DomainMailboxAddForm({ accounts = [], onCreated, initial
   const noSeat = !!seatsBlock && !seatsBlock.canTake;
   const canContinue = !busy && !formError && !noSeat;
   const email = `${normalizeLocalPart(localPart)}@${domain}`;
+  useEffect(() => {
+    if (onEmailChange && localPart) onEmailChange(email);
+    // Only a typed address is reported; the callback's identity does not matter.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [email]);
   const names = senderNamesPayload({ senderName, senderNameAlt });
   // The mailbox list shows the sender name unless another name is given.
   const listName = name.trim() || names.senderName || email;
@@ -105,10 +116,14 @@ export default function DomainMailboxAddForm({ accounts = [], onCreated, initial
     if (!canContinue) return;
     setBusy(true);
     setError(null);
+    onAttemptStart?.();
     try {
       const account = await api.addDomainMailbox({ localPart: normalizeLocalPart(localPart), domain, name: listName, ...names });
+      // The mailbox exists on the server whatever the form is doing: the caller decides what to do
+      // with a result that arrives after the form was left.
       onCreated(account);
     } catch (err) {
+      if (signal?.aborted) return;
       setError({ key: mailNodeErrorKey(err?.code), detail: mailNodeErrorDetail(err) });
       if (err?.code === 'no_free_seats' || err?.code === 'seats_unknown') loadSeats();
       setConfirming(false);

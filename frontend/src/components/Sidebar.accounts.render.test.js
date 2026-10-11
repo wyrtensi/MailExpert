@@ -413,3 +413,57 @@ describe('Sidebar account list', () => {
     });
   });
 });
+
+describe('Sidebar add-account entry', () => {
+  let host, root;
+  before(() => {
+    api.savePreferences = () => Promise.resolve();
+    api.savePreferencesOnExit = () => Promise.resolve();
+    api.getFolders = () => Promise.resolve([]);
+    host = dom.window.document.createElement('div');
+    dom.window.document.body.appendChild(host);
+    root = createRoot(host);
+  });
+  after(async () => {
+    await React.act(async () => root.unmount());
+    host.remove();
+  });
+
+  const render = async (accounts, collapsed = false) => {
+    await React.act(async () => root.render(null));
+    localStorage.clear();
+    useStore.setState({
+      accounts, accountsReady: true, user: { id: 'u1', isAdmin: false },
+      pinnedAccounts: [], accountFilter: '', sidebarCollapsed: collapsed,
+      selectedAccountId: null, selectedFolder: 'INBOX', showAdmin: false, showAddAccountDialog: false,
+      expandedAccounts: {},
+    });
+    await React.act(async () => { root.render(React.createElement(Sidebar)); });
+  };
+  // The permanent action sits in the fixed block above the scrolling mailbox list.
+  const entry = () => [...host.querySelectorAll('[role="button"]')].find(el => !el.closest('nav') && (el.getAttribute('aria-label') ?? el.textContent).includes('sidebar.addAccount'));
+
+  for (const [name, accounts] of [['zero', []], ['one', ACCOUNTS.slice(0, 1)], ['many', ACCOUNTS]]) {
+    test(`button_visible_with_zero_one_many_accounts_and_collapsed_sidebar: ${name} mailboxes`, async () => {
+      await render(accounts);
+      assert.ok(entry(), 'visible in the expanded sidebar');
+      assert.ok(entry().textContent.includes('sidebar.addAccount'), 'with its label');
+      await render(accounts, true);
+      assert.ok(entry(), 'visible in the collapsed sidebar');
+      assert.equal(entry().getAttribute('aria-label'), 'sidebar.addAccount', 'with an accessible label');
+      assert.equal(entry().getAttribute('title'), 'sidebar.addAccount', 'and a tooltip');
+    });
+  }
+
+  test('opening_does_not_change_current_mail_context: it opens only the dialog', async () => {
+    await render(ACCOUNTS);
+    useStore.setState({ selectedAccountId: 'b', selectedFolder: 'Sent', selectedMessageId: 'm9', searchQuery: 'invoice' });
+    const before = useStore.getState();
+    await React.act(async () => { entry().click(); });
+    const after = useStore.getState();
+    assert.equal(after.showAddAccountDialog, true);
+    for (const k of ['showAdmin', 'adminTab', 'selectedAccountId', 'selectedFolder', 'selectedMessageId', 'searchQuery', 'accountFilter']) {
+      assert.equal(after[k], before[k], k);
+    }
+  });
+});

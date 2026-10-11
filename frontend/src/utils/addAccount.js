@@ -3,9 +3,11 @@
 // `node --test`.
 import { computeAccountHealth, reconnectUrlFor } from './accountHealth.js';
 
-// The ways to add a mailbox, in the order the dialog lists them. The dialog renders whatever
-// addAccountOptions returns through a kind -> form table (AdminPanel.jsx).
-export const ADD_ACCOUNT_KINDS = Object.freeze(['gmail', 'domain', 'manual']);
+// The ways to add a mailbox, in the order the picker lists them. Every approved employee sees all
+// eight; there is no admin-only filtering. `other` is the manual IMAP/SMTP form (it was `manual`).
+// The dialog renders whatever addAccountOptions returns through a kind -> form table
+// (components/AddAccountDialog.jsx).
+export const ADD_ACCOUNT_KINDS = Object.freeze(['domain', 'gmail', 'proton', 'yahoo', 'yandex', 'mailru', 'icloud', 'other']);
 
 // Same check as POST /api/oauth/google/start (backend services/oauth/googleLaunch.js).
 export const GMAIL_EMAIL_PATTERN = /^[^\s@]{1,64}@[^\s@]{1,255}$/;
@@ -16,10 +18,16 @@ export const KNOWN_EMAILS_DEBOUNCE_MS = 200;
 // How long the one-time launch path from start stays valid (GOOGLE_LAUNCH_TTL_SECONDS).
 export const GOOGLE_LAUNCH_TTL_MS = 60 * 1000;
 
+// Spelled out literally so the i18n coverage test finds them.
 const OPTION_KEYS = {
-  gmail: { titleKey: 'admin.accounts.add.gmailTitle', descriptionKey: 'admin.accounts.add.gmailDescription' },
-  domain: { titleKey: 'admin.accounts.add.domainTitle', descriptionKey: 'admin.accounts.add.domainDescription' },
-  manual: { titleKey: 'admin.accounts.add.manualTitle', descriptionKey: 'admin.accounts.add.manualDescription' },
+  domain: { titleKey: 'admin.accounts.add.domainTitle' },
+  gmail: { titleKey: 'admin.accounts.add.gmailTitle' },
+  proton: { titleKey: 'admin.accounts.add.protonTitle' },
+  yahoo: { titleKey: 'admin.accounts.add.yahooTitle' },
+  yandex: { titleKey: 'admin.accounts.add.yandexTitle' },
+  mailru: { titleKey: 'admin.accounts.add.mailruTitle' },
+  icloud: { titleKey: 'admin.accounts.add.icloudTitle' },
+  other: { titleKey: 'admin.accounts.add.otherTitle' },
 };
 
 // Spelled out literally so the i18n coverage test finds them.
@@ -41,18 +49,17 @@ const START_ERROR_FALLBACK_KEY = 'admin.integrations.google.errorGeneric';
 
 const normalize = (email) => String(email ?? '').trim().toLowerCase();
 
-// Options the dialog lists, one tab each. Manual server setup is for administrators only (the server answers
-// 403 to anyone else). Gmail is listed for everyone but stays inactive, with the reason, while Google
-// is not configured; the mailbox on the mail node likewise until an administrator sets the node up.
-// While no Google app has a free seat Gmail stays usable with a note: an address an app already
-// counted goes back there without a new seat, and only the server, given the address, can tell
-// (it answers no_app_capacity otherwise). `hintKey` is the reason of an inactive option, or the
-// note shown above the form of an active one. `googleStatus` and `domainStatus` are the `google`
-// and `domainMail` parts of GET /api/integrations/status, or null while it loads.
-export function addAccountOptions({ isAdmin = false, googleStatus = null, domainStatus = null } = {}) {
-  const options = [];
-  for (const kind of ADD_ACCOUNT_KINDS) {
-    if (kind === 'manual' && !isAdmin) continue;
+// Options the picker lists, one tile each, for every approved employee. Gmail is listed but stays
+// inactive, with the reason, while Google is not configured; the mailbox on the mail node likewise
+// until an administrator sets the node up. While no Google app has a free seat Gmail stays usable
+// with a note: an address an app already counted goes back there without a new seat, and only the
+// server, given the address, can tell (it answers no_app_capacity otherwise). `hintKey` is the
+// reason of an inactive option, or the note shown above the form of an active one. `googleStatus`
+// and `domainStatus` are the `google` and `domainMail` parts of GET /api/integrations/status, or
+// null while it loads. The other providers are always active here: their own forms report an
+// unavailable service (for instance the Proton worker).
+export function addAccountOptions({ googleStatus = null, domainStatus = null } = {}) {
+  return ADD_ACCOUNT_KINDS.map((kind) => {
     let enabled = true;
     let hintKey = null;
     if (kind === 'gmail') {
@@ -63,16 +70,8 @@ export function addAccountOptions({ isAdmin = false, googleStatus = null, domain
       enabled = domainStatus?.configured === true;
       hintKey = enabled || !domainStatus ? null : 'admin.accounts.add.domainNotConfigured';
     }
-    options.push({ kind, ...OPTION_KEYS[kind], enabled, hintKey });
-  }
-  return options;
-}
-
-// The way "Add account" opens on: personal Gmail, the everyday case, even while Gmail is
-// unavailable (the panel then says why) or the statuses are still loading; otherwise the first
-// listed. It never falls through to manual server setup on its own.
-export function defaultAddKind(options = []) {
-  return (options.find((option) => option.kind === 'gmail') ?? options[0])?.kind ?? null;
+    return { kind, ...OPTION_KEYS[kind], enabled, hintKey };
+  });
 }
 
 // How a mailbox of the install shows up in the suggestions. Mailboxes are shared, so every
@@ -162,4 +161,24 @@ export function pickHighlightedSuggestion(rows, highlight, listOpen) {
 // Own-property lookup so codes like "toString" fall back to the generic message.
 export function gmailStartErrorKey(code) {
   return typeof code === 'string' && Object.hasOwn(START_ERROR_KEYS, code) ? START_ERROR_KEYS[code] : START_ERROR_FALLBACK_KEY;
+}
+
+// The body POST /api/accounts takes for the manual ("other") way: only the fields the server's
+// manual contract knows (it rejects anything else), numeric ports as numbers, and the provider
+// marked as `other`. The password stays in this object only for the request.
+const MANUAL_FIELDS = [
+  'name', 'sender_name', 'email_address', 'color', 'protocol', 'imap_host', 'imap_port', 'imap_tls',
+  'imap_tls_mode', 'imap_skip_tls_verify', 'smtp_host', 'smtp_port', 'smtp_tls', 'auth_user', 'auth_pass',
+  'smtp_auth_user', 'smtp_auth_pass', 'signature',
+];
+export function manualCreatePayload(form = {}) {
+  const body = { provider: 'other' };
+  for (const key of MANUAL_FIELDS) {
+    const value = form[key];
+    if (value === undefined || value === null || value === '') continue;
+    body[key] = (key === 'imap_port' || key === 'smtp_port') && typeof value === 'string' && /^\d+$/.test(value.trim())
+      ? Number(value.trim())
+      : value;
+  }
+  return body;
 }

@@ -1,0 +1,4 @@
+# Runtime dependencies of the Proton worker (native Bridge gRPC client).
+# Lock: requirements.lock (pip-compile --generate-hashes --allow-unsafe).
+grpcio==1.84.0
+protobuf==7.36.2

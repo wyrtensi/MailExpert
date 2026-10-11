@@ -4,11 +4,13 @@ vi.mock('./db.js', () => ({ query: vi.fn() }));
 vi.mock('./smtpTransport.js', () => ({
   createAccountSmtpTransport: vi.fn(),
 }));
+vi.mock('./proton/workerClient.js', () => ({ callWorker: vi.fn() }));
 
 import { createHash, createHmac, hkdfSync } from 'crypto';
 import nodemailer from 'nodemailer';
 import { query } from './db.js';
 import { createAccountSmtpTransport } from './smtpTransport.js';
+import { callWorker } from './proton/workerClient.js';
 import { parseRawHeaders } from './messageParser.js';
 import {
   buildForwardMessage,
@@ -993,5 +995,72 @@ describe('forwardRuleMessage', () => {
     } finally {
       warn.mockRestore();
     }
+  });
+});
+
+describe('forwardRuleMessage under the Proton snapshot gate', () => {
+  const proton = { ...account, mail_provider: 'proton', connection_mode: 'managed' };
+  let events;
+  let transport;
+  let input;
+
+  beforeEach(() => {
+    vi.clearAllMocks();
+    query.mockReset();
+    events = [];
+    transport = { sendMail: vi.fn(async () => { events.push('smtp'); return { accepted: true }; }) };
+    createAccountSmtpTransport.mockResolvedValue({ account: proton, transport });
+    input = {
+      ruleId: 'rule-1',
+      message: { id: messageRow.id },
+      account: proton,
+      imapManager: {
+        fetchHeaders: vi.fn(async () => 'Subject: Quarterly review\r\nFrom: sender@example.com'),
+        fetchMessageBody: vi.fn(),
+        fetchMultipleAttachments: vi.fn().mockResolvedValue(new Map()),
+        moveQueue: { serverLocation: vi.fn(async (row) => ({ folder: row.folder, uid: Number(row.uid) })) },
+      },
+      recipient: 'recipient@example.com',
+    };
+  });
+
+  it('rule_forwarder_drains_before_snapshot: the send and its sent mark run inside one lease', async () => {
+    callWorker.mockImplementation(async (method, path) => {
+      events.push(`${method} ${path}`);
+      return method === 'POST' ? { leaseId: 'lease1' } : { released: true };
+    });
+    query
+      .mockResolvedValueOnce(SENDABLE)
+      .mockResolvedValueOnce({ rows: [{ id: 'delivery-1' }] })
+      .mockResolvedValueOnce({ rows: [messageRow] })
+      .mockImplementationOnce(async (sql) => { events.push(sql.includes("status = 'sent'") ? 'sql sent' : 'sql'); return { rows: [] }; });
+
+    await expect(forwardRuleMessage(input)).resolves.toBe('sent');
+    expect(events).toEqual(['POST /leases/send', 'smtp', 'sql sent', 'DELETE /leases/lease1']);
+  });
+
+  it('a closed gate stops the forward before SMTP and releases the reservation for a retry', async () => {
+    callWorker.mockRejectedValue(Object.assign(new Error('worker_unavailable'), { code: 'worker_unavailable' }));
+    query
+      .mockResolvedValueOnce(SENDABLE)
+      .mockResolvedValueOnce({ rows: [{ id: 'delivery-1' }] })
+      .mockResolvedValueOnce({ rows: [messageRow] })
+      .mockResolvedValueOnce({ rows: [] });
+
+    await expect(forwardRuleMessage(input)).rejects.toMatchObject({ name: 'ProtonMaintenanceError' });
+    expect(transport.sendMail).not.toHaveBeenCalled();
+    expect(query.mock.calls.at(-1)[0]).toContain('DELETE FROM inbox_rule_forwards');
+  });
+
+  it('an ordinary mailbox forwards without the worker', async () => {
+    createAccountSmtpTransport.mockResolvedValue({ account, transport });
+    query
+      .mockResolvedValueOnce(SENDABLE)
+      .mockResolvedValueOnce({ rows: [{ id: 'delivery-1' }] })
+      .mockResolvedValueOnce({ rows: [messageRow] })
+      .mockResolvedValueOnce({ rows: [] });
+
+    await expect(forwardRuleMessage({ ...input, account })).resolves.toBe('sent');
+    expect(callWorker).not.toHaveBeenCalled();
   });
 });

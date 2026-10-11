@@ -3,7 +3,7 @@ import http from 'node:http';
 const SAFE_CODES = new Set([
   'login_busy', 'invalid_credentials', 'verification_required', 'invalid_challenge',
   'not_connected', 'not_found', 'generation_mismatch', 'address_mismatch',
-  'worker_unavailable', 'worker_invalid_request', 'operation_conflict',
+  'worker_unavailable', 'worker_invalid_request', 'operation_conflict', 'maintenance_busy',
 ]);
 
 function failure(code) {
@@ -14,8 +14,12 @@ function failure(code) {
 // never '/', '.', '%' or whitespace. The worker decodes the percent-encoded path segment and
 // checks the same rule before use.
 const ID = /^(?=[A-Za-z0-9+_=-]{1,128}$)[A-Za-z0-9+_-]+={0,2}$/;
+// The snapshot gate (/snapshot/begin|end) is the host's (backup.sh): the backend only takes and
+// gives back send leases (maintenance.js).
 const ROUTES = [
   /^\/(healthz|connections)()()$/,
+  /^\/(leases)\/(send)()$/,
+  /^\/(leases)\/([^/]+)()$/,
   /^\/(connections)\/([^/]+)((?:\/(?:continue|commit|cancel))?)$/,
   /^\/(users)\/([^/]+)(\/(?:credentials|remove))$/,
 ];
@@ -39,7 +43,7 @@ export const PROTON_WORKER_SOCKET = '/run/mailexpert-proton/worker.sock';
 export function createWorkerClient({ socketPath = PROTON_WORKER_SOCKET } = {}) {
   return async function callWorker(method, path, body, { signal, timeoutMs = 15000 } = {}) {
     const requestPath = workerPath(path);
-    if (!['GET', 'POST'].includes(method) || !requestPath || !Number.isFinite(timeoutMs) || timeoutMs <= 0) {
+    if (!['GET', 'POST', 'DELETE'].includes(method) || !requestPath || !Number.isFinite(timeoutMs) || timeoutMs <= 0) {
       throw failure('worker_invalid_request');
     }
     if (signal?.aborted) throw failure('worker_cancelled');

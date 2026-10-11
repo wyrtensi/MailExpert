@@ -9,8 +9,17 @@ Routes (JSON, bodies <= 64 KiB):
   POST /connections/:id/cancel
   POST /users/:id/credentials       {operationId} | {generation, email}
   POST /users/:id/remove            {generation, email}  (one (user, address) link)
+  POST   /leases/send               -> {leaseId}  reserve one actual send (backend)
+  DELETE /leases/:id                release it
+  POST /snapshot/begin              {snapshotId}  close the gate, drain, stop Bridge (host)
+  POST /snapshot/end                {snapshotId}  open the gate, start Bridge when needed
 GET /healthz answers 503 when Bridge should run (links, removals) but does not.
 Request bodies and native details are never logged.
+
+Host side (deploy scripts, through `docker compose exec proton-worker`):
+  worker.py --healthcheck
+  worker.py --request GET /healthz | --request POST /snapshot/begin|/snapshot/end <snapshotId>
+prints the JSON answer and exits 0 for 2xx, 1 otherwise.
 """
 
 import json
@@ -35,6 +44,7 @@ MAX_BODY = 65536
 ID = r'([A-Za-z0-9%+_=-]{1,384})'
 STATUS = {'not_found': 404, 'login_busy': 409, 'operation_conflict': 409,
           'generation_mismatch': 409, 'not_connected': 409, 'address_mismatch': 409,
+          'maintenance_busy': 409, 'snapshot_busy': 409,
           'invalid_challenge': 400, 'worker_invalid_request': 400, 'worker_unavailable': 503}
 
 
@@ -73,6 +83,13 @@ def _routes(controller):
              email=body.get('email'))),
         ('POST', re.compile(r'^/users/%s/remove$' % ID),
          lambda body, i: controller.remove_user(i, body.get('generation'), body.get('email'))),
+        ('POST', re.compile(r'^/leases/send$'), lambda body: controller.acquire_send_lease()),
+        ('DELETE', re.compile(r'^/leases/%s$' % ID),
+         lambda body, i: controller.release_send_lease(i)),
+        ('POST', re.compile(r'^/snapshot/begin$'),
+         lambda body: controller.snapshot_begin(body.get('snapshotId'))),
+        ('POST', re.compile(r'^/snapshot/end$'),
+         lambda body: controller.snapshot_end(body.get('snapshotId'))),
     ]
 
 
@@ -92,6 +109,9 @@ class Handler(BaseHTTPRequestHandler):
 
     def do_POST(self):
         self._dispatch('POST')
+
+    def do_DELETE(self):
+        self._dispatch('DELETE')
 
     def _dispatch(self, method):
         try:
@@ -206,22 +226,64 @@ def main():
     return 0
 
 
-def healthcheck(pathname=SOCKET_PATH):
+def request(method, path, body=None, pathname=SOCKET_PATH, timeout=4):
+    """One call to the worker's own socket: (status, parsed JSON answer)."""
     import http.client
     import socket
+    client = socket.socket(socket.AF_UNIX)
+    client.settimeout(timeout)
+    client.connect(os.environ.get('PROTON_WORKER_SOCKET', pathname))
+    connection = http.client.HTTPConnection('localhost', timeout=timeout)
+    connection.sock = client
+    data = json.dumps(body).encode('utf-8') if body is not None else None
+    headers = {'Content-Type': 'application/json'} if data else {}
+    connection.request(method, path, body=data, headers=headers)
+    response = connection.getresponse()
+    status, raw = response.status, response.read()
+    connection.close()
     try:
-        client = socket.socket(socket.AF_UNIX)
-        client.settimeout(4)
-        client.connect(os.environ.get('PROTON_WORKER_SOCKET', pathname))
-        connection = http.client.HTTPConnection('localhost', timeout=4)
-        connection.sock = client
-        connection.request('GET', '/healthz')
-        status = connection.getresponse().status
-        connection.close()
+        answer = json.loads(raw.decode('utf-8')) if raw else {}
+    except ValueError:
+        answer = {'errorCode': 'worker_unavailable'}
+    return status, answer
+
+
+def healthcheck(pathname=SOCKET_PATH):
+    try:
+        status, _ = request('GET', '/healthz', pathname=pathname)
     except OSError:
         return 1
     return 0 if status == 200 else 1
 
 
+# The host may only read health and drive the snapshot gate; sends and logins are the
+# backend's, through the same socket.
+HOST_REQUESTS = {('GET', '/healthz'), ('POST', '/snapshot/begin'), ('POST', '/snapshot/end')}
+
+
+def host_request(args):
+    if len(args) < 2 or (args[0], args[1]) not in HOST_REQUESTS:
+        os.write(2, b'proton-worker: usage: --request GET /healthz | POST /snapshot/begin|end <id>\n')
+        return 2
+    method, path = args[0], args[1]
+    body = None
+    if path.startswith('/snapshot/'):
+        if len(args) != 3:
+            os.write(2, b'proton-worker: a snapshot request needs its id\n')
+            return 2
+        body = {'snapshotId': args[2]}
+    try:
+        # The snapshot gate waits up to 60 s for draining sends: allow for it.
+        status, answer = request(method, path, body, timeout=90)
+    except OSError as error:
+        status, answer = 0, {'errorCode': 'worker_unavailable', 'error': type(error).__name__}
+    sys.stdout.write(json.dumps(dict(answer, httpStatus=status), sort_keys=True) + '\n')
+    return 0 if 200 <= status < 300 else 1
+
+
 if __name__ == '__main__':
-    sys.exit(healthcheck() if sys.argv[1:] == ['--healthcheck'] else main())
+    if sys.argv[1:] == ['--healthcheck']:
+        sys.exit(healthcheck())
+    if sys.argv[1:2] == ['--request']:
+        sys.exit(host_request(sys.argv[2:]))
+    sys.exit(main())

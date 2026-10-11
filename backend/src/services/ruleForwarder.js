@@ -5,6 +5,7 @@ import { deriveKey } from './encryption.js';
 import { sanitizeEmail } from './emailSanitizer.js';
 import { parseHeadersInput } from './messageParser.js';
 import { createAccountSendTransport } from './mailSendTransport.js';
+import { withProtonSendLease } from './proton/maintenance.js';
 import { sendFailureIsDefinite } from './smtpErrors.js';
 import { isDisabledMailbox, isReadOnlyNodeMailbox } from '../utils/senderNames.js';
 import { ATTACHMENT_LIMIT_ERROR, MAX_ATTACHMENT_BYTES } from '../utils/attachmentLimit.js';
@@ -390,28 +391,33 @@ export async function forwardRuleMessage({
     if (sendTransport.error) throw new Error(sendTransport.error);
     if (!sendTransport.transport) throw new Error('Mail transport is unavailable');
 
-    try {
-      await sendTransport.transport.sendMail(mailOptions);
-    } catch (sendErr) {
-      // A definite failure (the server rejected it, or refused the connection outright) never
-      // delivered anything — safe to drop the reservation below and let the rule retry this
-      // message on its next match. Anything else (a connection break with no reply, or a Gmail
-      // API timeout with no result — see services/mailSendTransport.js) is uncertain: the
-      // message may already be on its way, so `.definite = false` keeps the reservation and
-      // stops a retry from sending a second copy.
-      const definite = sendFailureIsDefinite(sendErr);
-      throw Object.assign(new Error(definite ? 'Forward delivery failed' : 'Forward delivery uncertain — leaving it pending to avoid a duplicate'), {
-        cause: sendErr,
-        definite,
-      });
-    }
-    delivered = true;
-    await query(
-      `UPDATE inbox_rule_forwards
-       SET status = 'sent', sent_at = NOW()
-       WHERE id = $1`,
-      [reservationId]
-    );
+    // A managed Proton mailbox forwards inside the worker's send lease (proton/maintenance.js), the
+    // reservation's 'sent' included, so a backup's snapshot drains it whole. A closed gate throws
+    // before sendMail: a definite failure, the reservation is released and the rule retries.
+    await withProtonSendLease(account, async () => {
+      try {
+        await sendTransport.transport.sendMail(mailOptions);
+      } catch (sendErr) {
+        // A definite failure (the server rejected it, or refused the connection outright) never
+        // delivered anything — safe to drop the reservation below and let the rule retry this
+        // message on its next match. Anything else (a connection break with no reply, or a Gmail
+        // API timeout with no result — see services/mailSendTransport.js) is uncertain: the
+        // message may already be on its way, so `.definite = false` keeps the reservation and
+        // stops a retry from sending a second copy.
+        const definite = sendFailureIsDefinite(sendErr);
+        throw Object.assign(new Error(definite ? 'Forward delivery failed' : 'Forward delivery uncertain — leaving it pending to avoid a duplicate'), {
+          cause: sendErr,
+          definite,
+        });
+      }
+      delivered = true;
+      await query(
+        `UPDATE inbox_rule_forwards
+         SET status = 'sent', sent_at = NOW()
+         WHERE id = $1`,
+        [reservationId]
+      );
+    });
     return 'sent';
   } catch (err) {
     // err.definite === false marks the one uncertain case above: leave the reservation pending

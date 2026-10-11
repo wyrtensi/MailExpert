@@ -88,4 +88,30 @@ describe('private worker client', () => {
     const { callWorker } = await import('./workerClient.js');
     await expect(callWorker('GET', 'http://127.0.0.1/')).rejects.toMatchObject({ code: 'worker_invalid_request' });
   });
+  it('takes and gives back send leases, but never drives the host-only snapshot gate', async () => {
+    const received = [];
+    const socketPath = await fixture((request, response) => {
+      received.push(`${request.method} ${request.url}`);
+      response.setHeader('Content-Type', 'application/json');
+      response.end(request.method === 'POST' ? '{"leaseId":"abc123"}' : '{"released":true}');
+    });
+    const { createWorkerClient } = await import('./workerClient.js');
+    const callWorker = createWorkerClient({ socketPath });
+    expect(await callWorker('POST', '/leases/send')).toEqual({ leaseId: 'abc123' });
+    expect(await callWorker('DELETE', '/leases/abc123')).toEqual({ released: true });
+    for (const path of ['/snapshot/begin', '/snapshot/end', '/leases/../snapshot/begin']) {
+      await expect(callWorker('POST', path, { snapshotId: 'x' })).rejects.toMatchObject({ code: 'worker_invalid_request' });
+    }
+    await expect(callWorker('PUT', '/leases/send')).rejects.toMatchObject({ code: 'worker_invalid_request' });
+    expect(received).toEqual(['POST /leases/send', 'DELETE /leases/abc123']);
+  });
+
+  it('passes the maintenance code through as a safe code', async () => {
+    const socketPath = await fixture((request, response) => {
+      response.writeHead(409, { 'Content-Type': 'application/json' });
+      response.end('{"errorCode":"maintenance_busy"}');
+    });
+    const { createWorkerClient } = await import('./workerClient.js');
+    await expect(createWorkerClient({ socketPath })('POST', '/leases/send')).rejects.toMatchObject({ code: 'maintenance_busy' });
+  });
 });

@@ -229,6 +229,26 @@ class ControllerTests(unittest.TestCase):
         with self.assertRaises(WorkerError):
             self.controller.credentials('user-a', generation='generation-b', email='mail@example.com')
 
+    def test_padded_base64_user_id_is_accepted(self):
+        # Proton user IDs are base64url with '=' padding.
+        padded = 'aB3-x_Yz9Qw8LmNo-pQrStUvWxYz0123456789AbCdEfGhIjKlMnOpQrStUvWxYz_-AbCd=='
+        self.start()
+        self.native.add_user(user_id=padded)
+        self.native.event('finished', userId=padded)
+        self.native.users[padded]['splitMode'] = True
+        self.native.event('user_changed', userId=padded)
+        self.assertEqual(self.controller.connection_status('attempt-a').userId, padded)
+        self.assertEqual(self.controller.credentials(padded, operation_id='attempt-a')['userId'], padded)
+        self.controller.commit_connection('attempt-a', padded, 'generation-a')
+        self.assertEqual(self.controller.credentials(
+            padded, generation='generation-a', email='mail@example.com')['userId'], padded)
+        self.assertEqual(self.controller.remove_user(padded, 'generation-a', 'mail@example.com')['state'], 'removing')
+
+    def test_unsafe_user_ids_are_rejected(self):
+        for value in ['a/b', 'a.b', 'a%3D', 'a=b', '=', '==a', 'a===', 'x' * 129, '', 'a b', 'a+/b==']:
+            with self.assertRaisesRegex(WorkerError, '^worker_invalid_request$'):
+                self.controller.credentials(value, generation='generation-a', email='mail@example.com')
+
     def test_untrusted_address_is_rejected(self):
         self.start()
         self.native.add_user(addresses=['other@example.com'], split=True)

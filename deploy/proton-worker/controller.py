@@ -32,7 +32,9 @@ CHALLENGES = {'2fa': 'needs_2fa', 'second_password': 'needs_second_password'}
 RETRYABLE_ERRORS = {'tfa_error', 'two_passwords_error'}
 ERROR_CODES = {'bad_password': 'invalid_credentials', 'verification': 'verification_required'}
 JOURNAL = 'controller.json'
-ID_PATTERN = re.compile(r'^[A-Za-z0-9_-]{1,128}$')
+# Operation IDs (UUIDs) and native Proton user IDs: base64/base64url with optional '=' padding.
+# Never '/', '.', '%' or whitespace, so an ID cannot change a path or a journal key.
+ID_PATTERN = re.compile(r'(?=[A-Za-z0-9+_=-]{1,128}\Z)[A-Za-z0-9+_-]+={0,2}\Z')
 
 
 class WorkerError(Exception):

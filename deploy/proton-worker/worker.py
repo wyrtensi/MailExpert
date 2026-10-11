@@ -23,17 +23,29 @@ import sys
 import threading
 from http.server import BaseHTTPRequestHandler
 from pathlib import Path
+from urllib.parse import unquote
 
-from controller import BridgeController, WorkerError
+from controller import ID_PATTERN, BridgeController, WorkerError
 
 SOCKET_PATH = '/run/mailexpert-proton/worker.sock'
 STATE_DIR = '/var/lib/mailexpert-proton'
 NATIVE_RUNTIME_DIR = '/run/mailexpert-proton-native'
 MAX_BODY = 65536
-ID = r'([A-Za-z0-9_-]{1,128})'
+# A path ID is percent-encoded by the backend client; it is decoded and validated before use.
+ID = r'([A-Za-z0-9%+_=-]{1,384})'
 STATUS = {'not_found': 404, 'login_busy': 409, 'operation_conflict': 409,
           'generation_mismatch': 409, 'not_connected': 409, 'address_mismatch': 409,
           'invalid_challenge': 400, 'worker_invalid_request': 400, 'worker_unavailable': 503}
+
+
+def _path_id(raw):
+    try:
+        value = unquote(raw, encoding='utf-8', errors='strict')
+    except UnicodeDecodeError:
+        raise WorkerError('worker_invalid_request') from None
+    if not ID_PATTERN.match(value):
+        raise WorkerError('worker_invalid_request')
+    return value
 
 
 def _routes(controller):
@@ -87,7 +99,7 @@ class Handler(BaseHTTPRequestHandler):
             for route_method, pattern, handler in self.server.routes:
                 match = pattern.match(self.path)
                 if match and route_method == method:
-                    result = handler(body, *match.groups())
+                    result = handler(body, *[_path_id(raw) for raw in match.groups()])
                     degraded = self.path == '/healthz' and result.get('state') == 'degraded'
                     self._send(503 if degraded else 200, result)
                     return

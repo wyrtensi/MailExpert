@@ -62,6 +62,28 @@ describe('private worker client', () => {
       .rejects.toMatchObject({ code: 'worker_unavailable', message: 'worker_unavailable' });
   });
 
+  it('percent-encodes a padded base64 Proton user ID in the path', async () => {
+    const received = [];
+    const socketPath = await fixture((request, response) => {
+      received.push(request.url);
+      response.setHeader('Content-Type', 'application/json');
+      response.end('{"ok":true}');
+    });
+    const { createWorkerClient } = await import('./workerClient.js');
+    const callWorker = createWorkerClient({ socketPath });
+    const padded = 'aB3-x_Yz9Qw8LmNo+pQrStUvWxYz0123456789AbCd==';
+    expect(await callWorker('POST', `/users/${padded}/credentials`, { operationId: 'attempt-a' })).toEqual({ ok: true });
+    expect(await callWorker('POST', `/users/${padded}/remove`, { generation: 'g', email: 'a@b.example' })).toEqual({ ok: true });
+    expect(received).toEqual([
+      '/users/aB3-x_Yz9Qw8LmNo%2BpQrStUvWxYz0123456789AbCd%3D%3D/credentials',
+      '/users/aB3-x_Yz9Qw8LmNo%2BpQrStUvWxYz0123456789AbCd%3D%3D/remove',
+    ]);
+    for (const unsafe of ['a/b', 'a.b', 'a%3D', 'a=b', '=', 'a===', 'x'.repeat(129), '..', 'a b']) {
+      await expect(callWorker('POST', `/users/${unsafe}/credentials`, {})).rejects.toMatchObject({ code: 'worker_invalid_request' });
+    }
+    expect(received).toHaveLength(2);
+  });
+
   it('rejects absolute URLs rather than opening TCP', async () => {
     const { callWorker } = await import('./workerClient.js');
     await expect(callWorker('GET', 'http://127.0.0.1/')).rejects.toMatchObject({ code: 'worker_invalid_request' });

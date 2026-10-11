@@ -5,7 +5,7 @@
 // The harness mirrors AccountsTab.render.test.js: node --test cannot parse JSX, so the loader
 // hook transforms .jsx with sucrase, and react-i18next is stubbed.
 
-import { test, describe, before, after, beforeEach } from 'node:test';
+import { test, describe, before, after, beforeEach, mock } from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { registerHooks } from 'node:module';
@@ -363,23 +363,54 @@ describe('AddAccountDialog Gmail attempts', () => {
     assert.ok(!/dvh/.test(panel));
   });
 
-  test('return from an external browser (window focus) reconciles the list, bounded, and finishes when the address is there', async () => {
+  test('return from an external browser reconciles on focus for the whole OAuth state lifetime, against the launched address', async () => {
+    failFirst = false;
+    let reads = 0;
+    let list = [];
+    api.getAccounts = () => { reads += 1; return Promise.resolve(list); };
+    mock.timers.enable({ apis: ['Date'], now: 1_000_000 });
+    try {
+      await cont();
+      const focus = async () => { await React.act(async () => { window.dispatchEvent(new dom.window.Event('focus')); }); await settle(); };
+      await focus();
+      await focus();
+      assert.equal(reads, 1, 'a burst of focus events is one read');
+      // The field is edited after the start: the attempt still looks for the address it launched with.
+      const input = dialog().querySelector('input[type="email"]');
+      await React.act(async () => {
+        const setter = Object.getOwnPropertyDescriptor(dom.window.HTMLInputElement.prototype, 'value').set;
+        setter.call(input, 'someone-else@example.com');
+        input.dispatchEvent(new dom.window.Event('input', { bubbles: true }));
+      });
+      mock.timers.tick(90_000); // past the 60 s launch-link lifetime, far inside the 600 s state lifetime
+      list = [{ id: 'other', email_address: 'someone-else@example.com' }];
+      await focus();
+      assert.equal(reads, 2, 'still listening after 90 s');
+      assert.equal(closed, 0, 'the edited address is not what the attempt waits for');
+      list = [{ id: 'g', email_address: 'ME@example.com' }];
+      mock.timers.tick(5_000);
+      await focus();
+      assert.equal(closed, 1, 'the launched address appeared: the form finishes');
+      assert.deepEqual(useStore.getState().accounts.map((a) => a.id), ['g']);
+    } finally {
+      mock.timers.reset();
+    }
+  });
+
+  test('the focus listener stops after the OAuth state lifetime (600 s)', async () => {
     failFirst = false;
     let reads = 0;
     api.getAccounts = () => { reads += 1; return Promise.resolve([]); };
-    await cont();
-    for (let i = 0; i < 7; i += 1) {
+    mock.timers.enable({ apis: ['Date'], now: 2_000_000 });
+    try {
+      await cont();
+      mock.timers.tick(601_000);
       await React.act(async () => { window.dispatchEvent(new dom.window.Event('focus')); });
       await settle();
+      assert.equal(reads, 0);
+    } finally {
+      mock.timers.reset();
     }
-    assert.equal(reads, 5, 'at most five reads per start');
-    assert.equal(closed, 0, 'not connected yet: the form waits');
-    await cont();
-    api.getAccounts = () => Promise.resolve([{ id: 'g', email_address: 'ME@example.com' }]);
-    await React.act(async () => { window.dispatchEvent(new dom.window.Event('focus')); });
-    await settle();
-    assert.equal(closed, 1, 'the mailbox appeared: the form finishes');
-    assert.deepEqual(useStore.getState().accounts.map((a) => a.id), ['g']);
   });
 
   test('a start that failed is retried with the same attempt id', async () => {

@@ -137,7 +137,7 @@ export default function MessageList() {
     searchQuery, setSearchQuery, isSearching, setIsSearching,
     searchResults, setSearchResults, openCompose, accountsReady, accounts,
     messagesRefreshToken, layout, setLayout, pageSize, setPageSize, scrollMode,
-    setMobileSidebarOpen, unreadCounts, showContacts, setShowContacts,
+    setMobileSidebarOpen, unreadCounts,
     threadedView, expandedThreadId, setExpandedThreadId,
     threadMessages, setThreadMessages, clearThreadMessages, loadingThread, setLoadingThread,
     hoverQuickActions, hoverActionSet, showMobileAvatars, showMessagePreviews,
@@ -2830,11 +2830,11 @@ export default function MessageList() {
       {/* ── Mobile header ───────────────────────────────────────────────── */}
       {isMobile && (
         <div data-mobile-list-header style={{
-          // Wraps instead of squeezing: at 320 px the controls move to a second row and the title
-          // keeps its basis, so the folder name stays readable and no action is hidden.
-          display: 'flex', alignItems: 'center', gap: 4, flexWrap: 'wrap',
+          // One row down to 320 px: every control is a 44 px icon, the title takes what is left
+          // (minimum 64 px), and Contacts lives in the sidebar drawer on a phone.
+          display: 'flex', alignItems: 'center', gap: 2, flexWrap: 'nowrap',
           paddingTop: 'calc(var(--sat) + 10px)',
-          paddingBottom: 10, paddingLeft: 12, paddingRight: 12,
+          paddingBottom: 10, paddingLeft: 8, paddingRight: 8,
           borderBottom: '1px solid var(--border-subtle)',
           boxShadow: listScrolled ? '0 1px 10px rgba(0,0,0,0.2)' : 'none',
           transition: 'box-shadow 0.2s ease',
@@ -2857,7 +2857,7 @@ export default function MessageList() {
           </button>
 
           {/* Folder / account title + unread count */}
-          <div data-mobile-list-title style={{ flex: '1 1 140px', minWidth: 140, display: 'flex', alignItems: 'center', gap: 8, overflow: 'hidden' }}>
+          <div data-mobile-list-title style={{ flex: '1 1 0', minWidth: 64, display: 'flex', alignItems: 'center', gap: 8, overflow: 'hidden' }}>
             <h2 style={{
               margin: 0, fontSize: 16, fontWeight: 600,
               color: 'var(--text-primary)', overflow: 'hidden',
@@ -2894,16 +2894,22 @@ export default function MessageList() {
           <button
             onClick={() => setUnreadOnly(!unreadOnly)}
             title={unreadOnly ? t('messageList.showAll') : t('messageList.unreadOnly')}
+            aria-label={unreadOnly ? t('messageList.showAll') : t('messageList.unreadOnly')}
+            aria-pressed={unreadOnly}
             style={{
               background: unreadOnly ? 'var(--accent-dim)' : 'none',
-              border: `1px solid ${unreadOnly ? 'var(--accent)' : 'transparent'}`,
-              borderRadius: 6, padding: '5px 7px',
+              border: 'none',
+              borderRadius: 7, padding: 0, flexShrink: 0,
               color: unreadOnly ? 'var(--accent)' : 'var(--text-tertiary)',
-              cursor: 'pointer', fontSize: 11, fontWeight: 500,
-              minHeight: 44, display: 'flex', alignItems: 'center',
+              cursor: 'pointer',
+              minWidth: 44, minHeight: 44, display: 'flex', alignItems: 'center', justifyContent: 'center',
             }}
           >
-            {t('messageList.unread')}
+            <svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.75" aria-hidden="true">
+              <path d="M4 4h16a2 2 0 012 2v12a2 2 0 01-2 2H4a2 2 0 01-2-2V6a2 2 0 012-2z" />
+              <polyline points="22,6 12,13 2,6" />
+              <circle cx="19" cy="6" r="3.2" fill="currentColor" stroke="none" />
+            </svg>
           </button>
 
           {/* Sync */}
@@ -2925,26 +2931,6 @@ export default function MessageList() {
               <polyline points="23 4 23 10 17 10"/>
               <polyline points="1 20 1 14 7 14"/>
               <path d="M3.51 9a9 9 0 0114.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0020.49 15"/>
-            </svg>
-          </button>
-
-          {/* Contacts */}
-          <button
-            onClick={() => setShowContacts(!showContacts)}
-            aria-label={t('contacts.title')}
-            style={{
-              background: showContacts ? 'var(--bg-hover)' : 'none', border: 'none',
-              color: showContacts ? 'var(--accent)' : 'var(--text-tertiary)',
-              cursor: 'pointer', padding: 0, borderRadius: 7, display: 'flex',
-              alignItems: 'center', justifyContent: 'center',
-              minWidth: 44, minHeight: 44,
-            }}
-          >
-            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.75">
-              <path d="M17 21v-2a4 4 0 00-4-4H5a4 4 0 00-4 4v2"/>
-              <circle cx="9" cy="7" r="4"/>
-              <path d="M23 21v-2a4 4 0 00-3-3.87"/>
-              <path d="M16 3.13a4 4 0 010 7.75"/>
             </svg>
           </button>
 

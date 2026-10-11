@@ -6,6 +6,8 @@ import { createLatestRequest } from '../utils/latestRequest.js';
 import { isDemoMode } from '../demo/mode.js';
 import {
   GOOGLE_LAUNCH_TTL_MS,
+  GOOGLE_OAUTH_STATE_TTL_MS,
+  OAUTH_RETURN_MIN_INTERVAL_MS,
   KNOWN_EMAILS_DEBOUNCE_MS,
   SUGGESTION_BADGE_KEYS,
   buildEmailSuggestions,
@@ -27,7 +29,6 @@ const inputStyle = {
   borderRadius: 7, color: 'var(--text-primary)', fontSize: 13, outline: 'none', boxSizing: 'border-box',
 };
 const LIST_ID = 'gmail-add-suggestions';
-const RETURN_RECONCILE_LIMIT = 5;
 const labelStyle = { display: 'block', fontSize: 12, color: 'var(--text-secondary)', marginBottom: 5, marginTop: 14 };
 const hintStyle = { marginTop: 5, fontSize: 11, color: 'var(--text-tertiary)', lineHeight: 1.5 };
 
@@ -53,7 +54,12 @@ export default function GmailAddForm({
   const attemptRef = useRef(null);
   // A start that reached a Google tab hands its id over to the callback; the next start gets a new one.
   const attemptSentRef = useRef(false);
-  const returnReadsRef = useRef(0);
+  // What the started attempt waits for: the address it was launched with, its id and the moment
+  // the server's OAuth state expires. Independent of the 60 s launch link.
+  const awaitingRef = useRef(null);
+  const [awaiting, setAwaiting] = useState(false);
+  const onConnectedRef = useRef(onConnected);
+  useEffect(() => { onConnectedRef.current = onConnected; }, [onConnected]);
   const [known, setKnown] = useState([]);
   const [open, setOpen] = useState(false);
   const [highlight, setHighlight] = useState(-1);
@@ -91,10 +97,12 @@ export default function GmailAddForm({
       const mine = !!attemptRef.current && isAttemptId(e.data?.attempt) && e.data.attempt === attemptRef.current;
       if (e.data?.type === 'oauth_success') {
         if (!mine) return;
+        awaitingRef.current = null;
+        setAwaiting(false);
         setLaunchPath(null);
         onConnected?.({ kind: 'oauth', attemptId: attemptRef.current });
       } else if (e.data?.type === 'oauth_error') {
-        if (mine) setLaunchPath(null);
+        if (mine) { awaitingRef.current = null; setAwaiting(false); setLaunchPath(null); }
       }
     };
     window.addEventListener('message', handleMessage);
@@ -102,27 +110,33 @@ export default function GmailAddForm({
   }, [onConnected, signal]);
 
   // Electron (and any browser that opens Google outside this window) never posts a result back:
-  // when the window gets focus again while a start is waiting, read the mailbox list from the
-  // server (generation-checked, at most RETURN_RECONCILE_LIMIT times per start) and finish if the
-  // address is there now.
+  // while an attempt is waiting, each return of focus to the window reads the mailbox list from the
+  // server (generation-checked; focus events less than OAUTH_RETURN_MIN_INTERVAL_MS apart count as
+  // one) and finishes when the launched address is there. The wait lasts as long as the server's
+  // OAuth state (10 minutes), not as long as the 60 s launch link, and is dropped by a result for
+  // this attempt, a new start, or leaving the form.
   useEffect(() => {
-    if (!launchPath) return undefined;
+    if (!awaiting) return undefined;
     const onReturn = () => {
-      if (signal?.aborted || returnReadsRef.current >= RETURN_RECONCILE_LIMIT) return;
-      returnReadsRef.current += 1;
+      const wait = awaitingRef.current;
+      if (!wait || signal?.aborted) return;
+      const now = Date.now();
+      if (now > wait.until) { awaitingRef.current = null; setAwaiting(false); return; }
+      if (now - wait.lastRead < OAUTH_RETURN_MIN_INTERVAL_MS) return;
+      wait.lastRead = now;
       reconcileAccounts().then(() => {
-        if (signal?.aborted) return;
-        const wanted = email.trim().toLowerCase();
-        const found = useStore.getState().accounts.some((a) => String(a?.email_address ?? '').trim().toLowerCase() === wanted);
-        if (found && attemptRef.current) {
-          setLaunchPath(null);
-          onConnected?.({ kind: 'oauth', attemptId: attemptRef.current });
-        }
+        if (signal?.aborted || awaitingRef.current !== wait) return;
+        const found = useStore.getState().accounts.some((a) => String(a?.email_address ?? '').trim().toLowerCase() === wait.email);
+        if (!found) return;
+        awaitingRef.current = null;
+        setAwaiting(false);
+        setLaunchPath(null);
+        onConnectedRef.current?.({ kind: 'oauth', attemptId: wait.attemptId });
       });
     };
     window.addEventListener('focus', onReturn);
     return () => window.removeEventListener('focus', onReturn);
-  }, [launchPath, email, signal, onConnected]);
+  }, [awaiting, signal]);
 
   // The fallback link lives as long as the launch key behind it.
   useEffect(() => {
@@ -157,7 +171,8 @@ export default function GmailAddForm({
     if (!attemptRef.current || attemptSentRef.current) {
       attemptRef.current = newAttemptId();
       attemptSentRef.current = false;
-      returnReadsRef.current = 0;
+      awaitingRef.current = null;
+
     }
     const attemptId = attemptRef.current;
     if (demo) {
@@ -173,6 +188,8 @@ export default function GmailAddForm({
       const { path } = await api.startGoogleOAuth(email.trim(), names, attemptId, signal);
       if (signal?.aborted) return;
       attemptSentRef.current = true;
+      awaitingRef.current = { email: email.trim().toLowerCase(), attemptId, until: Date.now() + GOOGLE_OAUTH_STATE_TTL_MS, lastRead: 0 };
+      setAwaiting(true);
       // The tab is opened after an await, so a popup blocker may stop it and the page cannot
       // tell: the link below is always offered while the path is valid.
       setLaunchPath(path);

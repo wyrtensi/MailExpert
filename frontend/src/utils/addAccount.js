@@ -17,6 +17,11 @@ export const KNOWN_EMAILS_MAX_QUERY = 254;
 export const KNOWN_EMAILS_DEBOUNCE_MS = 200;
 // How long the one-time launch path from start stays valid (GOOGLE_LAUNCH_TTL_SECONDS).
 export const GOOGLE_LAUNCH_TTL_MS = 60 * 1000;
+// How long the OAuth state of a started flow stays valid (OAUTH_STATE_TTL_SECONDS on the server):
+// a user may spend that long on Google's page, and the form keeps waiting for the return meanwhile.
+export const GOOGLE_OAUTH_STATE_TTL_MS = 600 * 1000;
+// Window focus events closer together than this count as one return (one read of the list).
+export const OAUTH_RETURN_MIN_INTERVAL_MS = 3 * 1000;
 
 // Spelled out literally so the i18n coverage test finds them.
 const OPTION_KEYS = {

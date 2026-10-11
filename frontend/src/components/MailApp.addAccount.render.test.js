@@ -130,14 +130,33 @@ describe('MailApp with the add-account dialog', () => {
     assert.equal(selectButton(), null, 'the list is still in selection mode');
   });
 
-  test('the mobile list header wraps at 320 px so the folder title keeps room and no action is hidden', async () => {
+  test('the mobile list header stays on one row at 320 px: icon-only controls, the title keeps its minimum, every action reachable', async () => {
     await mount(320);
     const header = document.querySelector('[data-mobile-list-header]');
-    const title = document.querySelector('[data-mobile-list-title]');
-    assert.equal(header.style.flexWrap, 'wrap');
-    assert.ok(parseInt(title.style.minWidth, 10) >= 120, 'the title keeps a readable minimum width');
-    assert.ok(header.querySelector('[data-add-account-trigger]'), 'the add action is still in the header');
-    assert.ok(header.querySelector('[aria-label="messageList.selectMessages"]'), 'and so are the other actions');
+    assert.equal(header.style.flexWrap, 'nowrap');
+    // Fixed widths the row asks for: padding, gaps and the minimum of every child.
+    const px = (v) => parseInt(v, 10) || 0;
+    const children = [...header.children];
+    const needed = px(header.style.paddingLeft) + px(header.style.paddingRight)
+      + px(header.style.columnGap || header.style.gap) * (children.length - 1)
+      + children.reduce((sum, el) => sum + px(el.style.minWidth), 0);
+    assert.ok(needed <= 320, `the row needs ${needed}px of 320`);
+    const title = header.querySelector('[data-mobile-list-title]');
+    assert.ok(px(title.style.minWidth) >= 64, 'the title keeps a readable minimum');
+    for (const el of header.querySelectorAll('button')) {
+      assert.ok(px(el.style.minWidth) >= 44 && px(el.style.minHeight) >= 44, 'touch targets stay 44 px');
+      assert.ok(el.getAttribute('aria-label') || el.textContent.trim(), 'each control is named');
+    }
+    const add = header.querySelector('[data-add-account-trigger]');
+    assert.equal(add.textContent.trim(), '', 'the add action is icon-only');
+    assert.equal(add.getAttribute('aria-label'), 'sidebar.addAccount');
+    assert.equal(add.getAttribute('title'), 'sidebar.addAccount');
+    assert.ok(header.querySelector('[aria-label="messageList.unreadOnly"]'), 'the unread filter is there as an icon');
+    assert.ok(header.querySelector('[aria-label="messageList.sync"]'));
+    assert.ok(header.querySelector('[aria-label="messageList.selectMessages"]'));
+    assert.equal(header.querySelector('[aria-label="contacts.title"]'), null, 'Contacts left the header...');
+    const contactsInDrawer = [...document.querySelectorAll('[role="button"]')].some((el) => el.textContent.includes('contacts.title'));
+    assert.ok(contactsInDrawer, '...and stays reachable from the sidebar drawer');
   });
 
   test('the command palette opens with Cmd+K when no dialog is open', async () => {

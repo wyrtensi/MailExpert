@@ -158,6 +158,8 @@ Backend client `callWorker(method,path,body,{signal,timeoutMs})` via Node HTTP `
 
 **Files:** Create `backend/src/services/proton/connections.js`, `connections.pglite.test.js`, `backend/src/routes/accountProton.js`, `accountProton.test.js`; Modify `backend/src/index.js`, `services/accounts/accountCreation.js`. Depends on tasks 4 **and 6**, so implement after task 6.
 
+**Решение владельца 2026-10-12:** Bridge без сети отвечает `USERNAME_PASSWORD_ERROR`, а не `CONNECTION_ERROR` (проверено в Task 4 при `--network none`). При `invalid_credentials` worker/backend отдельно проверяют доступность Proton API; если она недоступна, операция завершается `connection`. Test: недоступный Proton API с ответом bad_password даёт `connection`, доступный — `invalid_credentials`.
+
 **Interfaces:** Consumes `callWorker` from task 4 and `probeManagedProtonConnection` from task 6. `startProtonConnection(input,actor)`, `getProtonConnection(id,actor)`, `continueProtonConnection(id,input,actor)`, `cancelProtonConnection(id,actor)` return public `{id,state,errorCode?,account?}`. Start input `{email,password,requestId,reconnectAccountId?,...optional metadata}`; continuation `{challenge:'2fa'|'second_password',secret}`. Opaque UUID requestId creates one attempt per actor, not an email URL. Named exports live in `services/proton/connections.js`.
 
 **Уточнение после повторного изучения:** DB unique actor/request ID и durable reconnect intent из task 1 обеспечивают idempotency до native call. Reconnect любого approved employee сохраняет account ID и проверяет same native user; duplicate без explicit reconnect отвергается. Admission task 9 охватывает probe/SQL commit/worker commit reconciliation, не только native RPC. Step 1 добавить `duplicate_request_never_restarts_native_login`, `any_employee_reconnects_same_account`, `anonymous_or_disabled_cannot_start_reconnect`, `reconnect_wrong_native_user_rejected`, `cancel_commit_race_reconciles_once`, `snapshot_waits_for_sql_commit_reconcile`; public account capability используется task 11.
@@ -257,6 +259,8 @@ Backend client `callWorker(method,path,body,{signal,timeoutMs})` via Node HTTP `
 - [ ] **4. GREEN:** повторить bats; shellcheck как в CI для изменённых scripts; backend sendQueue tests PASS. Собрать все image fixtures и запустить штатные install/update/backend-recreate/backup/restore e2e внутри выделенного Docker-in-Docker fixture; exit 0, readiness true, опубликованных Proton портов нет. Fixtures не используют пользовательский `me-stage`.
 - [ ] **5. Commit:** `feat: ship Proton worker with deploy and recovery lifecycle`.
 
+**Решение владельца 2026-10-12:** проверить, что в сетевой namespace worker не входит ни один контейнер, кроме backend, и что порт focus Bridge (случайный порт на 127.0.0.1) не публикуется; это условие принятого риска из spec.
+
 ### Task 10: Отдельный диалог и постоянные точки входа
 
 **Files:** Create `frontend/src/components/AddAccountDialog.jsx`, `AddAccountDialog.render.test.js`, `addAccount/ProviderPicker.jsx`, `ProviderIcon.jsx`, `frontend/src/utils/addAccountFlow.js`, `addAccountFlow.test.js`, `frontend/src/store/addAccountDialog.test.js`; Modify `components/MailApp.jsx`, `Sidebar.jsx`, `AdminPanel.jsx`, `components/AddAccountTabs.jsx` (remove after no callers), `store/index.js`, `utils/addAccount.js`, `utils/addAccount.test.js`, `index.css`, locales en/ru, `Sidebar.accounts.render.test.js`, `AccountsTab.render.test.js`.
@@ -300,6 +304,8 @@ Backend client `callWorker(method,path,body,{signal,timeoutMs})` via Node HTTP `
 - [ ] **3. Реализовать forms/API/status.** Fixed Yahoo/Yandex/Mail.ru/iCloud forms two fields plus official app-password link/copy URL; Apple path hint next to documented root link. Advanced manual fields prefilled, changed server settings submit to `/accounts`, TLS verification bypass absent. Defaults reset button restores provider route; merely opening advanced does not convert mode. Other shares same field editor with no invented hosts. Optional name/color/sender/signature are collapsed in same block. Gmail retains OAuth, advanced existing sender metadata and safe connection explanation; node retains domains/seats/current confirmation flow, advanced safe details; Proton main credentials/challenges local only, advanced metadata and managed explanation. Poll every 1 s while active, expire at 10 min, stop on back/close/unmount; send explicit cancel as well as abort; unsupported HV clear translated message. Clipboard failure renders selectable link, URL contains no input. Help links target blank with noopener/noreferrer; OAuth popup retains its required opener. All strings in locales; reuse clipboard helpers and test focus/inert fallback.
 - [ ] **4. GREEN:** повторить commands плюс `node --test src/utils/addAccount.test.js src/utils/mailNode.test.js src/utils/api.errors.test.js src/utils/api.demo.test.js`; direct API CSRF/locked handling PASS. Public integration status response secret sentinel test PASS.
 - [ ] **5. Commit:** `feat: simplify provider forms with advanced connection settings`.
+
+**Решение владельца 2026-10-12:** текст ошибки `invalid_credentials` для Proton добавляет подсказку «если пароль верный, проверьте доступ сервера к Proton»; `connection` показывается отдельным сообщением. Строки en/ru с одинаковыми ключами.
 
 ### Task 12: Поиск, подробности ящиков и demo
 

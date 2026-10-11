@@ -71,7 +71,7 @@ Worker: `deploy/proton-worker/{Dockerfile,entrypoint.sh,bridge-version,requireme
 - [ ] **1. Написать тесты** `catalog_has_four_exact_presets`, `migration_preserves_legacy_accounts`, `safe_account_excludes_managed_credentials`. Точные утверждения:
   ```js
   expect(getImapProvider('mailru').imap.host).toBe('imap.mail.ru');
-  expect(getImapProvider('yandex').appPasswordUrl).toBe('https://id.yandex.ru/security/app-passwords');
+  expect(getImapProvider('yandex').appPasswordUrl).toBe('https://id.yandex.ru/security');
   expect(getImapProvider('proton')).toBeNull();
   expect(JSON.stringify(safeAccount(row))).not.toContain('secret-sentinel');
   ```

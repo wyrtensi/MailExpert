@@ -177,7 +177,7 @@ Backend хранит каталог разрешённых провайдеро�
 | Провайдер | IMAP | SMTP | Пароль приложения |
 | --- | --- | --- | --- |
 | Yahoo | `imap.mail.yahoo.com:993`, TLS | `smtp.mail.yahoo.com:587`, обязательный STARTTLS | `https://login.yahoo.com/account/security` |
-| Яндекс | `imap.yandex.ru:993`, TLS | `smtp.yandex.ru:465`, TLS | `https://id.yandex.ru/security/app-passwords` |
+| Яндекс | `imap.yandex.ru:993`, TLS | `smtp.yandex.ru:465`, TLS | `https://id.yandex.ru/security` |
 | Mail.ru | `imap.mail.ru:993`, TLS | `smtp.mail.ru:465`, TLS | `https://account.mail.ru/user/2-step-auth/passwords/` |
 | iCloud | `imap.mail.me.com:993`, TLS | `smtp.mail.me.com:587`, обязательный STARTTLS | `https://account.apple.com/` |
 

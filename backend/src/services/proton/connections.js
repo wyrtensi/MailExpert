@@ -6,7 +6,10 @@ import { consume } from '../rateLimiter.js';
 import { createKeyedSerializer } from '../../utils/keyedSerializer.js';
 import { reconnectAccount, withAccountAddressLock } from '../accounts/connection.js';
 import { ConnectionError } from '../accounts/connectionErrors.js';
-import { CREATION_REQUEST_ID, withCreationAdmission } from '../accounts/accountCreation.js';
+import {
+  CREATION_REQUEST_GRACE_MS, CREATION_REQUEST_ID, pruneFinishedCreationRequests, withCreationAdmission,
+} from '../accounts/accountCreation.js';
+import { failJobsOfDeletedAccount } from '../jobQueue.js';
 import { persistManualAccount, safeAccount } from '../accounts/manualAccounts.js';
 import { callWorker } from './workerClient.js';
 import { isProtonApiReachable } from './apiReachability.js';
@@ -430,8 +433,11 @@ async function commitWorker(row, { generation, previousGeneration = null, timeou
 }
 
 // The worker lost the attempt before recording the link (its TTL, a cancel, a removal): a new
-// mailbox without a native session is taken back; a reconnected mailbox keeps its row.
+// mailbox without a native session is taken back; a reconnected mailbox keeps its row. The new
+// mailbox goes as DELETE /api/accounts/:id removes an ordinary one: its waiting jobs fail first,
+// the row goes, the engine lets go of it (connectAllEnabled may have connected it at start).
 async function abandonCommit(row) {
+  if (!row.reconnect_intent && row.account_id) await failJobsOfDeletedAccount(row.account_id);
   let ended;
   try {
     ended = await withAccountAddressLock(row.requested_email, async client => {
@@ -441,9 +447,11 @@ async function abandonCommit(row) {
           `UPDATE proton_connections SET state = 'failed', error_code = 'proton_unavailable'
             WHERE id = $1 AND state = 'committing' RETURNING *`, [row.id],
         );
-        if (op && !op.reconnect_intent && op.account_id) await client.query('DELETE FROM email_accounts WHERE id = $1', [op.account_id]);
+        const removed = op && !op.reconnect_intent && op.account_id
+          ? (await client.query('DELETE FROM email_accounts WHERE id = $1 RETURNING id, email_address', [op.account_id])).rows[0]
+          : null;
         await client.query('COMMIT');
-        return op;
+        return op && { op, removed };
       } catch (err) {
         await client.query('ROLLBACK');
         throw err;
@@ -455,7 +463,14 @@ async function abandonCommit(row) {
   if (!ended) return load(row.id);
   metadataById.delete(row.id);
   auditFailure(row, 'proton_unavailable');
-  return ended;
+  if (ended.removed) {
+    recordAudit(auditOf(auditActor(row), {
+      accountEmail: ended.removed.email_address, action: 'mailbox.deleted',
+      details: { provider: 'proton', mode: 'managed', code: 'commit_abandoned' },
+    }));
+    if (mailEngine) track(Symbol('disconnect'), mailEngine.disconnectAccount(ended.removed.id));
+  }
+  return ended.op;
 }
 
 function connectMailbox(row) {
@@ -554,13 +569,22 @@ export async function reconcileProtonConnectionsAtStartup() {
   })());
 }
 
-// Every minute: retry pending worker commits and end attempts nobody polls any more.
-export async function sweepProtonConnections() {
+// Every minute: retry pending worker commits, end attempts nobody polls any more, and delete
+// finished attempts one lifetime after their ID expired (a late replay still finds them; the
+// mailbox and its link are the durable record). 'committing' rows are never deleted. Expired
+// account creation requests of the other routes go in the same pass.
+export async function sweepProtonConnections({ graceMs = CREATION_REQUEST_GRACE_MS } = {}) {
   const { rows } = await query(
     `SELECT id FROM proton_connections
       WHERE state = 'committing' OR (state = ANY($1) AND expires_at <= now())`, [WORKER_LIVE],
   );
   for (const { id } of rows) await operationQueue(id, async () => sync(await load(id)));
+  await query(
+    `DELETE FROM proton_connections
+      WHERE state = ANY($1) AND expires_at < now() - make_interval(secs => $2::double precision / 1000)`,
+    [['connected', 'failed', 'cancelled', 'expired'], graceMs],
+  );
+  await pruneFinishedCreationRequests({ graceMs });
 }
 
 export function startProtonConnectionSweeper({ intervalMs = 60000 } = {}) {

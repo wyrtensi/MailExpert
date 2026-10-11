@@ -1,3 +1,4 @@
+import { query } from '../db.js';
 import { consume } from '../rateLimiter.js';
 import { probeConnection } from './connectionProbe.js';
 import { ConnectionError } from './connectionErrors.js';
@@ -61,6 +62,17 @@ export async function createVerifiedAccount(candidate, actor, { provider, mode, 
     recordAudit(auditOf(actor, { accountEmail: email, action: 'mailbox.connection_failed', details: { provider, mode, code } }));
     return refusal(code);
   }
+}
+
+// A request ID lives 10 minutes (expires_at); its outcome is kept one more lifetime for a late
+// replay, then deleted. The Proton sweeper (services/proton/connections.js) runs this every minute.
+export const CREATION_REQUEST_GRACE_MS = 600000;
+export async function pruneFinishedCreationRequests({ graceMs = CREATION_REQUEST_GRACE_MS } = {}) {
+  const { rowCount } = await query(
+    `DELETE FROM account_creation_requests
+      WHERE expires_at < now() - make_interval(secs => $1::double precision / 1000)`, [graceMs],
+  );
+  return rowCount;
 }
 
 const running = new Map();

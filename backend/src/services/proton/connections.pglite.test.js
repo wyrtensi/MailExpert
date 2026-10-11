@@ -26,6 +26,7 @@ const { closeCreationAdmission, reopenCreationAdmission } = await import('../acc
 const {
   startProtonConnection, getProtonConnection, continueProtonConnection, cancelProtonConnection,
   reconcileProtonConnectionsAtStartup, protonConnectionWork, setProtonMailEngine, PROTON_CONNECTION_TTL_MS,
+  sweepProtonConnections,
 } = await import('./connections.js');
 
 const OWNER = '70000000-0000-4000-8000-000000000001';
@@ -77,7 +78,7 @@ afterAll(async () => { await state.db.close(); });
 beforeEach(async () => {
   vi.clearAllMocks();
   for (const user of [OWNER, OTHER, ADMIN]) { await reset(`account-create:${user}`); await reset(`proton-poll:${user}`); }
-  await state.db.exec('DELETE FROM proton_connections; DELETE FROM proton_mailbox_links; DELETE FROM email_accounts; DELETE FROM proton_users;');
+  await state.db.exec('DELETE FROM jobs; DELETE FROM account_creation_requests; DELETE FROM proton_connections; DELETE FROM proton_mailbox_links; DELETE FROM email_accounts; DELETE FROM proton_users;');
   fake = createFakeWorker();
   callWorker.mockImplementation(fake.call);
   isProtonApiReachable.mockResolvedValue(true);
@@ -378,5 +379,61 @@ describe('Proton connection operations', () => {
     expect(await getProtonConnection(b.id, other)).toMatchObject({ state: 'connected', account: { email_address: 'b@proton.me' } });
     expect(fake.paths('/cancel').map(call => call.path)).toEqual([`/connections/${a.id}/cancel`]);
     expect((await state.db.query('SELECT proton_user_id FROM proton_mailbox_links')).rows).toEqual([{ proton_user_id: OTHER_NATIVE }]);
+  });
+  it('the sweeper deletes finished attempts after their lifetime and keeps pending commits', async () => {
+    const { account } = await seedLinkedAccount();
+    const rows = {};
+    // age: minutes since expires_at; negative = still inside the ID lifetime
+    for (const [name, stateName, age] of [
+      ['failedOld', 'failed', 11], ['cancelledOld', 'cancelled', 11], ['expiredOld', 'expired', 11], ['connectedOld', 'connected', 11],
+      ['failedRecent', 'failed', 5], ['connectedFresh', 'connected', -5], ['committingOld', 'committing', 60], ['needs2faOld', 'needs_2fa', 5],
+    ]) {
+      const id = randomUUID();
+      rows[name] = id;
+      await state.db.query(`INSERT INTO proton_connections (id, actor_user_id, request_id, requested_email, state, proton_user_id, account_id, expires_at)
+        VALUES ($1, $2, gen_random_uuid(), 'box@proton.me', $3, $4, $5, now() - ($6 || ' minutes')::interval)`,
+      [id, OWNER, stateName, ['committing', 'connected'].includes(stateName) ? NATIVE : null, ['committing', 'connected'].includes(stateName) ? account.id : null, String(age)]);
+    }
+    fake.operations.set(rows.committingOld, { id: rows.committingOld, email: 'box@proton.me', state: 'connected', userId: NATIVE, committed: false });
+    fake.down = true;
+    for (const [request, age] of [[randomUUID(), 11], [randomUUID(), 5], [randomUUID(), -5]]) {
+      await state.db.query(`INSERT INTO account_creation_requests (actor_user_id, request_id, requested_email, provider, mode, result_code, expires_at)
+        VALUES ($1, $2, 'x@example.com', 'yahoo', 'preset', 'connected', now() - ($3 || ' minutes')::interval)`, [OWNER, request, String(age)]);
+    }
+    await sweepProtonConnections();
+    await protonConnectionWork();
+    const left = new Set((await state.db.query('SELECT id FROM proton_connections')).rows.map(r => r.id));
+    for (const name of ['failedOld', 'cancelledOld', 'expiredOld', 'connectedOld']) expect(left.has(rows[name])).toBe(false);
+    for (const name of ['failedRecent', 'connectedFresh', 'committingOld']) expect(left.has(rows[name])).toBe(true);
+    expect(await row(rows.committingOld)).toMatchObject({ state: 'committing' });
+    // A live attempt past its TTL is ended (and cancelled in the worker); a later sweep deletes it.
+    expect(await row(rows.needs2faOld)).toMatchObject({ state: 'expired' });
+    expect(await count('account_creation_requests')).toBe(2);
+    expect(await count('email_accounts')).toBe(1);
+  });
+
+  it('an abandoned commit tears the new mailbox down like a deletion', async () => {
+    const started = await start();
+    fake.connect(started.id, NATIVE);
+    fake.commitGate = new Promise(() => {});
+    callWorker.mockImplementation(async (method, path, body) => {
+      if (path.endsWith('/commit')) throw Object.assign(new Error('worker_timeout'), { code: 'worker_timeout' });
+      return fake.call(method, path, body);
+    });
+    await poll(started.id);
+    const committing = await row(started.id);
+    expect(committing.state).toBe('committing');
+    await state.db.query(`INSERT INTO jobs (kind, account_id, status) VALUES ('send_message', $1, 'queued')`, [committing.account_id]);
+    // The engine may already hold the mailbox (connectAllEnabled at start).
+    callWorker.mockImplementation(async (method, path, body) => {
+      if (path.endsWith('/commit')) throw Object.assign(new Error('not_connected'), { code: 'not_connected' });
+      return fake.call(method, path, body);
+    });
+    expect(await poll(started.id)).toEqual({ id: started.id, state: 'failed', errorCode: 'proton_unavailable' });
+    await protonConnectionWork();
+    expect(await count('email_accounts')).toBe(0);
+    expect(engine.disconnectAccount).toHaveBeenCalledWith(committing.account_id);
+    expect((await state.db.query('SELECT status, error_code FROM jobs')).rows).toEqual([{ status: 'failed', error_code: 'account_missing' }]);
+    expect(recordAudit).toHaveBeenCalledWith(expect.objectContaining({ action: 'mailbox.deleted', accountEmail: 'box@proton.me' }));
   });
 });

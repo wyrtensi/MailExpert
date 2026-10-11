@@ -37,8 +37,9 @@ function workerPath(path) {
   return null;
 }
 
-// The private socket the backend and the worker share (a dedicated runtime directory).
-export const PROTON_WORKER_SOCKET = '/run/mailexpert-proton/worker.sock';
+// The private socket the backend and the worker share (a dedicated runtime directory);
+// PROTON_WORKER_SOCKET (docker-compose.yml) may point it elsewhere in the shared runtime volume.
+export const PROTON_WORKER_SOCKET = process.env.PROTON_WORKER_SOCKET || '/run/mailexpert-proton/worker.sock';
 
 export function createWorkerClient({ socketPath = PROTON_WORKER_SOCKET } = {}) {
   return async function callWorker(method, path, body, { signal, timeoutMs = 15000 } = {}) {

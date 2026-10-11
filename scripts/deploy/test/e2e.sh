@@ -7,7 +7,7 @@
 #   scripts/deploy/test/e2e.sh --version sha-<12> --image-prefix local.invalid
 #
 # --only install|backup runs one scenario (default: both).
-# The images <prefix>/mailexpert-{backend,frontend,edge}:<version> must be built from HEAD, and
+# The images <prefix>/mailexpert-{backend,frontend,edge,proton-worker}:<version> must be built from HEAD, and
 # the tracked files must match HEAD: the test installs HEAD from a git bundle.
 # shellcheck source-path=SCRIPTDIR
 set -euo pipefail
@@ -68,6 +68,8 @@ pull_hub() {
 
 IMAGES=("$IMAGE_PREFIX/mailexpert-backend:$VERSION" "$IMAGE_PREFIX/mailexpert-frontend:$VERSION"
   "$IMAGE_PREFIX/mailexpert-edge:$VERSION" postgres:16-alpine redis:7-alpine "$RESTIC_IMAGE" "$S3_IMAGE")
+# The Proton worker's image when HEAD ships it (lib/proton.sh).
+if [ -f "$TEST_DIR/../../../deploy/proton-worker/Dockerfile" ]; then IMAGES+=("$IMAGE_PREFIX/mailexpert-proton-worker:$VERSION"); fi
 for image in "${IMAGES[@]}"; do
   if docker image inspect "$image" >/dev/null 2>&1; then continue; fi
   case $image in

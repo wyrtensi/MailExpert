@@ -24,6 +24,8 @@ SCRIPT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 . "$SCRIPT_DIR/lib/backup.sh"
 # shellcheck source=lib/updater.sh
 . "$SCRIPT_DIR/lib/updater.sh"
+# shellcheck source=lib/proton.sh
+. "$SCRIPT_DIR/lib/proton.sh"
 
 exit_on_unexpected_failure
 
@@ -213,6 +215,11 @@ write_app_settings() {
 ensure_app_images() {
   ensure_image "$BACKEND_IMAGE"
   ensure_image "$CFG_IMAGE_PREFIX/mailexpert-frontend:$CFG_VERSION"
+  # The checked-out version decides: older versions have no Proton worker.
+  if proton_worker_installed; then
+    ensure_image "$(proton_worker_image "$CFG_VERSION")"
+    log "the managed Proton worker reserves up to 1 GiB of memory on top of the panel's minimum"
+  fi
 }
 
 # record_spool_uid: the uid the backend image runs as, asked from the image itself (a throwaway
@@ -466,6 +473,9 @@ main() {
   if [ "$CFG_SYSTEM" = 1 ]; then apply_ufw; fi
   if [ "$OPT_START" = 1 ]; then
     wait_ready
+    # The worker shares the backend's network namespace: after any recreation (an update, a
+    # rollback, the updater) the actual namespace is checked, not the compose text.
+    ensure_proton_namespace
     forget_rolled_back
     verify_edge
   fi

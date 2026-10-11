@@ -46,6 +46,8 @@ LIB_DIR=$SCRIPT_DIR/lib
 . "$LIB_DIR/status.sh"
 # shellcheck source=lib/channel.sh
 . "$LIB_DIR/channel.sh"
+# shellcheck source=lib/proton.sh
+. "$LIB_DIR/proton.sh"
 
 MIN_FREE_PCT=${MAILEXPERT_MIN_FREE_PCT:-15}
 
@@ -135,17 +137,30 @@ collect_containers() {
     FACT[tenant_worker]=1
     app_services+=(tenant-worker)
   fi
+  # The managed Proton worker, in versions that have it: its container and its own state (idle,
+  # running, recovering, snapshot, degraded, error). Proton being down never stops ordinary mail.
+  if proton_worker_installed; then
+    app_services+=(proton-worker)
+    FACT[proton_worker]=unknown
+  fi
   services=$(edge_services)
   FACT[edge_services]=$(paste -sd, - <<<"$services")
   FACT[edge_image]=$(env_get "$EDGE_ENV" EDGE_IMAGE 2>/dev/null) || FACT[edge_image]=''
   is_standby && return 0
+  if [ -n "${FACT[proton_worker]+set}" ]; then
+    FACT[proton_worker]=$(proton_worker_state)
+    case ${FACT[proton_worker]} in
+      idle | running | recovering | snapshot) ;;
+      *) warning "proton worker: ${FACT[proton_worker]}: managed Proton mailboxes are unavailable (docker compose -p $CFG_PROJECT logs proton-worker)" ;;
+    esac
+  fi
   if ps=$(app_compose ps --all --format '{{.Service}} {{.State}} {{.Health}}' 2>/dev/null); then
     lines_into PROBLEMS < <(service_problems "${app_services[@]}" <<<"$ps")
   else
     problem "containers: docker compose ps failed for $CFG_PROJECT"
   fi
   if images=$(app_compose ps --all --format '{{.Service}} {{.Image}}' 2>/dev/null); then
-    lines_into PROBLEMS < <(image_problems "$CFG_VERSION" frontend backend tenant-worker <<<"$images")
+    lines_into PROBLEMS < <(image_problems "$CFG_VERSION" frontend backend tenant-worker proton-worker <<<"$images")
   fi
   if [ -n "$services" ]; then
     if ps=$(edge_compose ps --all --format '{{.Service}} {{.State}} {{.Health}}' 2>/dev/null); then
@@ -318,6 +333,8 @@ collect_target() {
   if is_standby; then problem "target: standby server: update.sh refuses it; install.sh --version sets its version"; fi
 
   if [ "${FACT[tenant_worker]}" = 1 ]; then images+=(mailexpert-tenant-worker); fi
+  # The target commit decides, not the running version (lib/proton.sh).
+  if commit_has_proton_worker "$APP_DIR" "$full"; then images+=(mailexpert-proton-worker); fi
   head=$(git -C "$APP_DIR" rev-parse --verify --quiet HEAD 2>/dev/null) || head=''
   changed=''
   if [ -n "$head" ]; then changed=$(git -C "$APP_DIR" diff --name-only "$head" "$full" 2>/dev/null) || changed=''; fi
@@ -402,7 +419,7 @@ resolve_target_channel() {
 report_text() {
   local line key pending
   printf 'MailExpert panel at %s\n' "$OPT_PREFIX"
-  for key in version release install_id checkout running ready tenant_worker edge_services edge_image cf_access cf_access_team updater backup_configured \
+  for key in version release install_id checkout running ready tenant_worker proton_worker edge_services edge_image cf_access cf_access_team updater backup_configured \
     last_backup_at last_dump_bytes free_kb migrations_applied spam_rule channel target target_release target_commit; do
     [ -n "${FACT[$key]+set}" ] || continue
     printf '  %-20s %s\n' "$key" "${FACT[$key]:--}"
@@ -442,6 +459,7 @@ report_json() {
      | {prefix: $prefix, version: $f.version, release: (if ($f.release // "") == "" then null else $f.release end), install_id: (if ($f.install_id // "") == "" then null else $f.install_id end), checkout: ($f.checkout // null),
       checkout_dirty: ($f.checkout_dirty | flag), running: (if ($f.running // "") == "" then null else $f.running end),
       ready: ($f.ready | flag), standby: ($f.standby | flag), tenant_worker: ($f.tenant_worker | flag),
+      proton_worker: ($f.proton_worker // null),
       edge_services: (($f.edge_services // "") | split(",") | map(select(. != ""))),
       edge_image: (if ($f.edge_image // "") == "" then null else $f.edge_image end),
       cf_access: (if $f.cf_access == null then null else

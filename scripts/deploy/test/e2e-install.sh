@@ -134,6 +134,21 @@ install_run --prefix "$PREFIX"
 [ "$(containers_state)" = "$state_before" ] || fail "a rerun recreated or restarted containers"
 pass "rerun is idempotent"
 
+# 4b. The managed Proton worker: isolated in the backend's namespace and idle; recreating the
+# backend container (as an update does) leaves the worker in a stale namespace until install.sh,
+# which every update path runs, checks the actual namespace and recreates it.
+health=$(proton_isolation "$PROJECT")
+[ "$(jq -r .state <<<"$health")" = idle ] || fail "proton worker health: $health"
+app_compose_e2e() {
+  docker compose -p "$PROJECT" --project-directory "$PREFIX/app" --env-file "$PREFIX/.env" \
+    -f "$PREFIX/app/docker-compose.yml" -f "$PREFIX/app/deploy/compose.prod.yml" "$@"
+}
+app_compose_e2e up -d --no-deps --force-recreate backend >/dev/null 2>&1
+install_run --prefix "$PREFIX"
+health=$(proton_isolation "$PROJECT")
+[ "$(jq -r .state <<<"$health")" = idle ] || fail "proton worker health after the backend was recreated: $health"
+pass "proton worker: backend namespace only, nothing published, socket private; follows a recreated backend"
+
 # 5. A lost DB_PASSWORD next to an existing database volume stops the installer.
 cp -p "$PREFIX/.env" "$PREFIX/.env.keep"
 sed -i '/^DB_PASSWORD=/d' "$PREFIX/.env"

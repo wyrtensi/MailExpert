@@ -107,6 +107,9 @@ RUN pip install --no-cache-dir --disable-pip-version-check --require-hashes --on
 RUN groupadd --gid 1000 worker \
     && useradd --uid 1000 --gid 1000 --no-create-home --home-dir /var/lib/mailexpert-proton \
        --shell /usr/sbin/nologin worker
+# Mount points owned by the worker: Docker copies their owner and mode (1000, 0700) into a new
+# empty named volume, whichever container mounted it first (the backend shares proton_runtime).
+RUN install -d -m 0700 -o 1000 -g 1000 /var/lib/mailexpert-proton /run/mailexpert-proton       /run/mailexpert-proton-native
 
 COPY --from=builder /out/bridge /opt/proton-bridge/bridge
 COPY --from=builder /out/LICENSE /opt/proton-bridge/LICENSE

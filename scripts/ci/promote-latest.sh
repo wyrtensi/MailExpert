@@ -4,7 +4,8 @@
 #   1. the commit: the input (a full or short sha, or sha-<12>), or the head of origin/main when
 #      empty; it must be on origin/main;
 #   2. its images must exist: CI's images job publishes ghcr.io/<owner>/mailexpert-<name>:sha-<12>
-#      only after every other job passed;
+#      only after every other job passed; the Proton worker's only for a commit that ships it
+#      (images_for_commit), so an older commit is promoted without it;
 #   3. its version: the x.y.z every package carries at that commit (release-version.sh). A version
 #      already tagged v<x.y.z> on this commit is released (a re-promotion or a rollback: only
 #      `latest` moves, and a GitHub release missing for that tag, say after a failed run, is
@@ -24,6 +25,9 @@
 set -euo pipefail
 
 IMAGES=(mailexpert-backend mailexpert-frontend mailexpert-edge mailexpert-tenant-worker)
+# Published only for commits that ship it (images_for_commit).
+PROTON_WORKER_IMAGE=mailexpert-proton-worker
+PROTON_WORKER_FILE=deploy/proton-worker/Dockerfile
 BUMP_HINT="bump the version in a chore(release) PR first (scripts/ci/release-version.sh bump)"
 
 # shellcheck source=release-version.sh
@@ -79,6 +83,14 @@ newest_release_tag() {
   printf '%s\n' "$newest"
 }
 
+# images_for_commit <commit>: the images CI publishes for <commit>, one per line: the four of every
+# version, and the Proton worker's when that commit ships it. A historical promotion (a rollback of
+# `latest` to a commit before the worker) needs no worker image.
+images_for_commit() {
+  printf '%s\n' "${IMAGES[@]}"
+  if git cat-file -e "$1:$PROTON_WORKER_FILE" 2>/dev/null; then printf '%s\n' "$PROTON_WORKER_IMAGE"; fi
+}
+
 # retag <image ref> <tag> <digest>: crane tag, then the new tag must name the same digest.
 retag() {
   local after
@@ -91,6 +103,7 @@ main() {
   local input=${1:-} ref full tag image digest version vtag previous release existing out start latest_flag
   local crane=${CRANE:-crane} gh=${GH:-gh} prefix=${IMAGE_PREFIX:-} remote=${PUSH_REMOTE:-origin}
   local -A digests=()
+  local -a images=()
   [ -n "$prefix" ] || die "IMAGE_PREFIX is not set (ghcr.io/<owner>)" 2
   ref=$(input_ref "$input") || die "the input must be a commit sha, sha-<12> or empty (the head of main), got '$input'" 2
   git fetch --quiet --tags --force "$remote" '+refs/heads/main:refs/remotes/origin/main'
@@ -98,7 +111,8 @@ main() {
   git merge-base --is-ancestor "$full" refs/remotes/origin/main || die "$full is not on main: only builds of main are promoted" 2
   tag=sha-${full:0:12}
   log "promoting $tag ($full)"
-  for image in "${IMAGES[@]}"; do
+  mapfile -t images < <(images_for_commit "$full")
+  for image in "${images[@]}"; do
     digest=$("$crane" digest "$prefix/$image:$tag" 2>/dev/null) ||
       die "$prefix/$image:$tag does not exist: CI's images job has not published this commit (did CI pass on main?)"
     digests[$image]=$digest
@@ -136,9 +150,9 @@ main() {
     return 0
   fi
   if [ "$release" = new ]; then
-    for image in "${IMAGES[@]}"; do retag "$prefix/$image:$tag" "$version" "${digests[$image]}"; done
+    for image in "${images[@]}"; do retag "$prefix/$image:$tag" "$version" "${digests[$image]}"; done
   fi
-  for image in "${IMAGES[@]}"; do retag "$prefix/$image:$tag" latest "${digests[$image]}"; done
+  for image in "${images[@]}"; do retag "$prefix/$image:$tag" latest "${digests[$image]}"; done
   git tag -f latest "$full" >/dev/null
   if [ "$release" = new ]; then
     git tag -a "$vtag" -m "MailExpert $version" "$full"
@@ -170,7 +184,7 @@ main() {
         printf '`%s` was already the release of this commit.\n\n' "$vtag"
       fi
       printf 'Commit %s. Images:\n\n' "$full"
-      for image in "${IMAGES[@]}"; do printf -- '- `%s/%s:latest` = `%s`\n' "$prefix" "$image" "${digests[$image]}"; done
+      for image in "${images[@]}"; do printf -- '- `%s/%s:latest` = `%s`\n' "$prefix" "$image" "${digests[$image]}"; done
     } >>"$GITHUB_STEP_SUMMARY"
   fi
 }

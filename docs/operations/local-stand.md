@@ -31,6 +31,14 @@ loopback `8080`. Дополнительная установка `mxu` (`/opt/ma
   [deployment-system.md](../architecture/deployment-system.md)): предлагает только продвинутую
   сборку `latest`, новее текущей.
 
+Версии с управляемым Proton (`deploy/proton-worker` в коммите) ставят и контейнер `stage-proton-worker`
+из образа `mailexpert-proton-worker` той же версии: он в сетевом namespace backend стенда, портов
+наружу нет, лимит памяти 1 ГБ из `compose.prod.yml` входит в 8 ГБ `me-stage`. Без подключённых
+ящиков Proton Bridge не запущен (`status.sh`: `proton_worker idle`). Бэкап стенда так же закрывает
+шлюз worker на время дампа ([deployment.md, «Управляемый Proton»](deployment.md)). Проверки сборки
+worker вне стенда используют только собственные имена: образы `me-proton-worker-dev:*`, временные
+контейнеры и тома `me-e2e-proton-*`, никогда `me-stage`.
+
 Панель открывается на `https://localhost` (порт 443, только с этого компьютера). Браузер
 предупреждает о сертификате стенда: это ожидаемо, открыть через «Дополнительно».
 

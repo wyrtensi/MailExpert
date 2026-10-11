@@ -301,3 +301,40 @@ release create v1.0.1 --verify-tag --title v1.0.1 --latest --generate-notes" ]
   [ "$status" -eq 2 ]
   [[ $output == *"not above the newest release v1.0.5"* ]]
 }
+
+# worker_commit: a third commit on main that ships the Proton worker, version 1.0.2.
+worker_commit() {
+  mkdir -p "$W/deploy/proton-worker"
+  : >"$W/deploy/proton-worker/Dockerfile"
+  versions "$W" 1.0.2
+  THREE=$(commit "$W" three)
+  git -C "$W" push -q origin main
+}
+
+@test "promotion_checks_fifth_image: a commit with the Proton worker needs its image and tags all five" {
+  setup_repo
+  worker_commit
+  cd "$W"
+  STUB_MISSING=mailexpert-proton-worker run bash "$SCRIPT" "$THREE"
+  [ "$status" -eq 1 ]
+  [[ $output == *"mailexpert-proton-worker:sha-${THREE:0:12} does not exist"* ]]
+  [ ! -e "$CRANE_TAGGED" ]
+  run bash "$SCRIPT" "$THREE"
+  [ "$status" -eq 0 ]
+  [ "$(grep -c '^tag .* latest$' "$CRANE_LOG")" -eq 5 ]
+  [ "$(grep -c '^tag .* 1\.0\.2$' "$CRANE_LOG")" -eq 5 ]
+  grep -q "^tag ghcr.io/o/mailexpert-proton-worker:sha-${THREE:0:12} latest$" "$CRANE_LOG"
+}
+
+@test "historical_promotion_uses_target_inventory: a commit before the worker is promoted without its image" {
+  setup_repo
+  worker_commit
+  release_tag "$THREE" v1.0.2
+  cd "$W"
+  release_tag "$TWO" v1.0.1
+  GH_RELEASES="v1.0.1 v1.0.2" STUB_MISSING=mailexpert-proton-worker run bash "$SCRIPT" "$TWO"
+  [ "$status" -eq 0 ]
+  [ "$(git -C "$R" rev-parse refs/tags/latest)" = "$TWO" ]
+  [ "$(grep -c '^tag .* latest$' "$CRANE_LOG")" -eq 4 ]
+  ! grep -q 'mailexpert-proton-worker' "$CRANE_LOG"
+}

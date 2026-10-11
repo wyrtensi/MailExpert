@@ -55,6 +55,8 @@ LIB_DIR=$SCRIPT_DIR/lib
 . "$LIB_DIR/status.sh"
 # shellcheck source=lib/channel.sh
 . "$LIB_DIR/channel.sh"
+# shellcheck source=lib/proton.sh
+. "$LIB_DIR/proton.sh"
 exit_on_unexpected_failure
 
 # 1 from the moment install.sh is started: before that every failure leaves the server unchanged
@@ -101,7 +103,8 @@ prune_local_dumps() {
   # shellcheck disable=SC2012 # our own names: pre-update-sha-<hex>.dump
   list=$(ls -1t "$BACKUP_DIR"/pre-update-*.dump 2>/dev/null || true)
   [ -n "$list" ] || return 0
-  while IFS= read -r f; do rm -f -- "$f"; done < <(stale_local_dumps 3 <<<"$list")
+  # The Proton worker state kept with a dump (backup.sh --keep-dump) goes with it.
+  while IFS= read -r f; do rm -rf -- "$f" "$(proton_dump_dir "$f")"; done < <(stale_local_dumps 3 <<<"$list")
 }
 
 # check_index_warning <since>: the backend's warning about an invalid index that a migration
@@ -213,12 +216,11 @@ main() {
     local_compose_warning "$target"
   fi
   check_data_images HEAD "${target#sha-}"
-  ensure_image "$CFG_IMAGE_PREFIX/mailexpert-backend:$target"
-  ensure_image "$CFG_IMAGE_PREFIX/mailexpert-frontend:$target"
-  # The tenant worker runs the same tag; pulled here so that a missing image stops the update
-  # before the backup and before anything is switched, not in the middle of `up`.
+  # Every image of the target commit (the tenant worker with its profile, the Proton worker when
+  # that commit ships it), pulled here so that a missing image stops the update before the backup
+  # and before anything is switched, not in the middle of `up`.
   profiles=$(env_get "$ENV_FILE" COMPOSE_PROFILES) || profiles=''
-  if has_profile "$profiles" tenant; then ensure_image "$CFG_IMAGE_PREFIX/mailexpert-tenant-worker:$target"; fi
+  ensure_target_images "${target#sha-}" "$target" "$profiles"
   # The Caddy image follows the panel when it changes: pulled here, before the backup, like the
   # panel's own images.
   changed=$(git -C "$APP_DIR" diff --name-only HEAD "${target#sha-}")

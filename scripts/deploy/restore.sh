@@ -45,6 +45,8 @@ LIB_DIR=$SCRIPT_DIR/lib
 . "$LIB_DIR/backup.sh"
 # shellcheck source=lib/ops.sh
 . "$LIB_DIR/ops.sh"
+# shellcheck source=lib/proton.sh
+. "$LIB_DIR/proton.sh"
 exit_on_unexpected_failure
 
 WORK=''
@@ -230,7 +232,11 @@ main() {
   place_local_compose "$files"
   restore_secrets "$files"
   restore_database "$files"
+  # Letters queued when the snapshot was made may have gone out since: a person decides.
+  quarantine_restored_sends
   restore_redis "$files"
+  # Before the worker first starts; a snapshot without its state leaves Proton to reconnect.
+  restore_proton_state "$files"
   counts=$(<"$files/counts.json")
   check_restored "$counts"
   rm -rf "$WORK"

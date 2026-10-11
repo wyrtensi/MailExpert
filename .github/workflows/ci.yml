@@ -157,6 +157,59 @@ jobs:
       - name: Tests in the image
         run: docker run --rm --read-only --tmpfs /tmp --entrypoint node local.invalid/mailexpert-tenant-worker:ci --test /app/worker.test.mjs
 
+  # The managed Proton worker (deploy/proton-worker): Proton Bridge built from its pinned commit,
+  # its Python suite inside the image, then a non-root smoke run as docker-compose.yml runs it.
+  # Built without pushing here; the images job publishes it from main only.
+  proton-worker:
+    name: Proton worker
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+
+    steps:
+      - uses: actions/checkout@v6
+
+      - uses: docker/setup-buildx-action@v3
+        with:
+          buildkitd-config: .github/buildkitd.toml
+          driver-opts: image=mirror.gcr.io/moby/buildkit:buildx-stable-1
+
+      - name: Image
+        uses: docker/build-push-action@v6
+        with:
+          context: ./deploy/proton-worker
+          target: runtime
+          platforms: linux/amd64
+          load: true
+          tags: local.invalid/mailexpert-proton-worker:ci
+          provenance: false
+          cache-from: type=gha,scope=proton-worker
+          cache-to: type=gha,mode=max,scope=proton-worker
+
+      - name: Unit tests in the image
+        run: >-
+          docker run --rm --network none --read-only --tmpfs /tmp -v "$PWD/deploy/proton-worker/tests:/tests:ro"
+          --entrypoint python local.invalid/mailexpert-proton-worker:ci -B -m unittest discover -s /tests -t /tests -v
+
+      # uid/gid 1000, read-only root, private socket and an idle /healthz without Bridge running.
+      - name: Non-root smoke
+        run: |
+          set -euo pipefail
+          [ "$(docker run --rm --entrypoint id local.invalid/mailexpert-proton-worker:ci -u)" = 1000 ]
+          docker run -d --name ci-proton-worker --network none --read-only --cap-drop ALL \
+            --security-opt no-new-privileges:true --tmpfs /tmp:mode=1777 \
+            --tmpfs /run/mailexpert-proton-native:uid=1000,gid=1000,mode=0700 \
+            -v ci-proton-state:/var/lib/mailexpert-proton -v ci-proton-runtime:/run/mailexpert-proton \
+            local.invalid/mailexpert-proton-worker:ci
+          for _ in $(seq 30); do
+            if docker exec ci-proton-worker python /opt/mailexpert-proton/worker.py --request GET /healthz; then break; fi
+            sleep 1
+          done
+          docker exec ci-proton-worker python /opt/mailexpert-proton/worker.py --request GET /healthz | grep -q '"state": "idle"'
+          [ "$(docker exec ci-proton-worker stat -c '%u %a' /run/mailexpert-proton /run/mailexpert-proton/worker.sock /var/lib/mailexpert-proton | paste -sd' ')" = "1000 700 1000 600 1000 700" ]
+          [ "$(docker inspect -f '{{len .HostConfig.PortBindings}}' ci-proton-worker)" = 0 ]
+          docker rm -fv ci-proton-worker
+          docker volume rm ci-proton-state ci-proton-runtime
+
   deploy-e2e:
     name: Deploy e2e
     needs: [shellcheck, bats]
@@ -217,12 +270,23 @@ jobs:
           provenance: false
           cache-from: type=gha,scope=edge
 
+      - name: Proton worker image
+        uses: docker/build-push-action@v6
+        with:
+          context: ./deploy/proton-worker
+          target: runtime
+          platforms: linux/amd64
+          load: true
+          tags: local.invalid/mailexpert-proton-worker:${{ steps.image.outputs.tag }}
+          provenance: false
+          cache-from: type=gha,scope=proton-worker
+
       - name: Deploy e2e
         run: scripts/deploy/test/e2e.sh --version "${{ steps.image.outputs.tag }}" --image-prefix local.invalid
 
   images:
     name: Images
-    needs: [backend, frontend, shellcheck, bats, fake-eop, tenant-worker, deploy-e2e]
+    needs: [backend, frontend, shellcheck, bats, fake-eop, tenant-worker, proton-worker, deploy-e2e]
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -315,3 +379,18 @@ jobs:
           provenance: false
           cache-from: type=gha,scope=tenant-worker
           cache-to: type=gha,mode=max,scope=tenant-worker
+
+      # The managed Proton worker: the same tag as the panel; amd64 like the others.
+      - name: Proton worker image
+        uses: docker/build-push-action@v6
+        with:
+          context: ./deploy/proton-worker
+          target: runtime
+          platforms: linux/amd64
+          push: ${{ env.PUSH == 'true' }}
+          tags: ${{ steps.image.outputs.prefix }}/mailexpert-proton-worker:${{ steps.image.outputs.tag }}
+          labels: |
+            org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}
+            org.opencontainers.image.revision=${{ github.sha }}
+          provenance: false
+          cache-from: type=gha,scope=proton-worker

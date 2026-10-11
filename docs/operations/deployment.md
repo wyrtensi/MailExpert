@@ -131,10 +131,10 @@ DinD требует привилегированного контейнера, �
 | systemd (если хостом управляет systemd) | в `/etc/systemd/system`: `mailexpert-backup.service` и `.timer`, `mailexpert-health.service` и `.timer`, `mailexpert-updater.path` и `.service`; с `--project <имя>` — `mailexpert-backup-<имя>.timer`, `mailexpert-health-<имя>.timer`, `mailexpert-updater-<имя>.path` и их `.service`. Включаются и запускаются только эти юниты, плюс общий `systemctl daemon-reload` | `systemctl enable --now docker` |
 | Пакеты | нет | `ca-certificates curl git jq ufw iproute2 util-linux unattended-upgrades`; Docker Engine и Compose (`docker-ce`, `docker-ce-cli`, `containerd.io`, `docker-buildx-plugin`, `docker-compose-plugin`) из download.docker.com, если Compose нет или он старее 2.24.4. Если стоит `docker.io` из Ubuntu со старым Compose — остановка с просьбой удалить его |
 | Файрвол | нет | `ufw`: входящие закрыты (`default deny incoming`), открыты порты SSH и, если работает Caddy, `80/tcp`, `443/tcp`, `443/udp`; `ufw` включается, только если на одном из этих портов SSH действительно слушает, а уже существующие правила для порта SSH не расширяются |
-| Контейнеры | проект `mailexpert`: `mailexpert-frontend`, `-backend`, `-postgres`, `-redis`, `-tenant-worker` (профиль `tenant`) — имена задаёт `container_name` от имени проекта; проект `mailexpert-edge`: `mailexpert-edge-caddy-1`, `mailexpert-edge-cloudflared-1`; временные: `mailexpert-verify-<id>` (проверка восстановлением, сеть `none`), безымянные `--rm` контейнеры restic и образа backend | — |
-| Сети и тома | сеть `mailexpert_mailexpert` (bridge); тома `mailexpert_postgres_data`, `mailexpert_redis_data` и, с Caddy, `mailexpert-edge_caddy_data`, `mailexpert-edge_caddy_config`. Caddy и cloudflared работают в сети хоста | — |
-| Образы | `ghcr.io/wyrtensi/mailexpert-{backend,frontend,edge,tenant-worker}:sha-<12>`, `postgres:16-alpine`, `redis:7-alpine`, `cloudflare/cloudflared:<версия>`, `restic/restic:0.18.0` | — |
-| Порты | `127.0.0.1:8080` (frontend). Caddy (`direct`, `both`): 80/tcp, 443/tcp и 443/udp на всех адресах хоста. cloudflared (`cf`, `both`) входящих портов не открывает, только слушатель метрик в сети хоста ([ports.md, раздел 1](ports.md)). PostgreSQL, Redis и tenant-worker на хост не публикуются | — |
+| Контейнеры | проект `mailexpert`: `mailexpert-frontend`, `-backend`, `-postgres`, `-redis`, `-proton-worker` (управляемый Proton, в версиях, где он есть), `-tenant-worker` (профиль `tenant`) — имена задаёт `container_name` от имени проекта; проект `mailexpert-edge`: `mailexpert-edge-caddy-1`, `mailexpert-edge-cloudflared-1`; временные: `mailexpert-verify-<id>` (проверка восстановлением, сеть `none`), безымянные `--rm` контейнеры restic и образа backend | — |
+| Сети и тома | сеть `mailexpert_mailexpert` (bridge); тома `mailexpert_postgres_data`, `mailexpert_redis_data`, `mailexpert_proton_state` (состояние Proton Bridge, только у `proton-worker`), `mailexpert_proton_runtime` (сокет worker, только у `backend` и `proton-worker`) и, с Caddy, `mailexpert-edge_caddy_data`, `mailexpert-edge_caddy_config`. Caddy и cloudflared работают в сети хоста | — |
+| Образы | `ghcr.io/wyrtensi/mailexpert-{backend,frontend,edge,tenant-worker,proton-worker}:sha-<12>`, `postgres:16-alpine`, `redis:7-alpine`, `cloudflare/cloudflared:<версия>`, `restic/restic:0.18.0` | — |
+| Порты | `127.0.0.1:8080` (frontend). Caddy (`direct`, `both`): 80/tcp, 443/tcp и 443/udp на всех адресах хоста. cloudflared (`cf`, `both`) входящих портов не открывает, только слушатель метрик в сети хоста ([ports.md, раздел 1](ports.md)). PostgreSQL, Redis, tenant-worker и proton-worker на хост не публикуются; proton-worker работает в сетевом namespace backend, его IMAP/SMTP и focus-порт Bridge слушают только 127.0.0.1 внутри этого namespace | — |
 | Проверки | `git curl jq ss sha256sum timeout flock`, Docker доступен, Compose 2.24.4+, чужие объекты в своих compose-проектах, порты (ниже) | Ubuntu 24.04; ресурсы 2 vCPU / 4 ГБ / 20 ГБ свободно (первая установка с нехваткой останавливается, повторная — предупреждает) |
 
 Как юниты с суффиксом уживаются с юнитами под именами по умолчанию —
@@ -167,9 +167,11 @@ DinD требует привилегированного контейнера, �
   сохраняет; применяются следующим `install.sh --prefix <PREFIX>` или `update.sh`. `frontend`, `redis`,
   край и контейнеры бэкапа без ограничения CPU.
 - **Память** (`deploy/compose.prod.yml`): `backend` — `mem_limit` 1536 МБ (куча Node 1024 МБ),
-  `postgres` — 2 ГБ (`shared_buffers=1GB`) плюс `shm_size` 256 МБ, `tenant-worker` — 768 МБ.
-  У `redis` лимита контейнера нет, только `--maxmemory 256mb` с `noeviction`; у `frontend` и края
-  лимитов нет. Итого рассчитывайте на 4-4,5 ГБ под панель.
+  `postgres` — 2 ГБ (`shared_buffers=1GB`) плюс `shm_size` 256 МБ, `tenant-worker` — 768 МБ,
+  `proton-worker` — 1 ГБ. У `redis` лимита контейнера нет, только `--maxmemory 256mb` с
+  `noeviction`; у `frontend` и края лимитов нет. Итого рассчитывайте на 4-4,5 ГБ под панель и
+  ещё до 1 ГБ под управляемый Proton (`install.sh` пишет об этом резерве; без связанных ящиков
+  Proton Bridge не запущен и worker занимает десятки мегабайт).
 - **Ночной бэкап** (03:30 по времени сервера) — самая заметная нагрузка: `pg_dump` в контейнере
   `postgres`, затем restic в отдельном контейнере (без лимитов CPU и памяти) отправляет снимок;
   по воскресеньям ещё временный PostgreSQL (`mailexpert-verify-<id>`) восстанавливает снимок целиком.
@@ -802,7 +804,9 @@ sudo /opt/mailexpert/app/scripts/deploy/update.sh latest          # или sha-<
 Сбой до переключения (образ не скачался, бэкап не удался) — код 3, сервер не менялся; неверный
 ввод или запрещающее состояние — код 2. После неудачи с кодом 1 скрипт пишет, были ли записаны
 миграции: если нет, путь назад — `install.sh --version <old-sha>` без восстановления дампа. С
-профилем `tenant` образ `mailexpert-tenant-worker` той же версии скачивается до бэкапа. После
+профилем `tenant` образ `mailexpert-tenant-worker` той же версии скачивается до бэкапа; образ
+`mailexpert-proton-worker` — тоже, если его содержит целевой коммит (наличие
+`deploy/proton-worker/Dockerfile` в нём, а не в текущей версии). После
 обновления `update.sh` печатает строки `next:` (шаги вне панели: скрипты почтового узла, образ
 Caddy) и `info:` (справка: что `install.sh` сделал сам и `info: migrations:` — были ли применены
 миграции, по числу записей в `schema_migrations` до и после: если нет, путь назад —
@@ -814,7 +818,9 @@ Caddy) и `info:` (справка: что `install.sh` сделал сам и `i
 прочитать не удалось — предупреждает, что миграции неизвестны. Запускать его лучше
 отдельно от SSH-сессии, через `systemd-run` — [README.md, раздел 9](README.md).
 
-Обычное обновление перезапускает только `backend`, `frontend` и `tenant-worker` (новые образы);
+Обычное обновление перезапускает только `backend`, `frontend`, `tenant-worker` и `proton-worker`
+(новые образы; worker пересоздаётся вслед за backend, а `install.sh` проверяет фактический сетевой
+namespace — раздел «Управляемый Proton» ниже);
 `postgres`, `redis` и край compose пересоздаёт, только когда меняется их конфигурация. Так было с
 выпуском 2026-10-09 — ниже.
 
@@ -948,7 +954,9 @@ gh workflow run promote.yml --repo wyrtensi/MailExpert -f sha=<sha или sha-<1
 gh api repos/wyrtensi/MailExpert/git/ref/tags/latest --jq '.object.sha[0:12]'                       # куда указывает latest
 ```
 
-Коммит должен быть на `main`, а его образы `sha-<12>` (backend, frontend, edge, tenant-worker) — в
+Коммит должен быть на `main`, а его образы `sha-<12>` (backend, frontend, edge, tenant-worker и,
+если коммит содержит `deploy/proton-worker`, proton-worker; для более старого коммита пятый образ не
+нужен) — в
 GHCR, то есть CI на `main` для него зелёный; иначе workflow останавливается, ничего не меняя.
 Workflow ставит образам тег `latest` на тот же digest, проверяет его и последним двигает git-тег.
 
@@ -1038,6 +1046,41 @@ mailcow служба двигает только до версии из `deploy/
 `master` официального mailcow — именно этот коммит: штатный `update.sh` mailcow умеет доводить лишь до
 головы `master`. Вышел более новый mailcow — шаг пропускается, mailcow остаётся на своей версии до
 выпуска MailExpert, который подтвердит новую; назад mailcow не откатывается.
+
+### Управляемый Proton (`proton-worker`)
+
+Контейнер `proton-worker` (`deploy/proton-worker`) держит Proton Bridge для ящиков, подключённых
+плиткой Proton в режиме управляемого входа. Как он живёт в установке:
+
+- **Изоляция.** `network_mode: service:backend`: IMAP 1993, SMTP 1465 и focus-порт Bridge (случайный
+  порт на 127.0.0.1) видны только внутри namespace backend. Портов на хост нет, Docker socket нет,
+  UID 1000, корневая ФС только для чтения. После каждого `up` `install.sh` (а значит и `update.sh`,
+  `rollback.sh`, исполнитель обновлений) проверяет по `docker inspect`, что worker в namespace
+  текущего backend, что больше никто туда не вошёл и что ни backend, ни worker не публикуют портов;
+  worker в namespace старого backend пересоздаётся, остальное останавливает установку.
+- **Тома.** `proton_runtime` (`/run/mailexpert-proton`, каталог 0700 и сокет 0600, UID 1000) — общий у
+  backend и worker; `proton_state` (`/var/lib/mailexpert-proton`: хранилище Bridge, ключи `pass`/GPG,
+  журнал контроллера) монтирует только worker.
+- **Готовность.** worker стартует после запуска backend, не дожидаясь его здоровья; `/api/health/ready`
+  панели от Proton не зависит. `status.sh` показывает `proton_worker`: `idle` (Bridge не нужен),
+  `running`, `recovering`, `snapshot` (идёт бэкап), `degraded` или `error` — два последних дают
+  предупреждение; `healthcheck.sh` сообщает о `proton-worker`, если контейнер не работает или
+  нездоров.
+- **Бэкап.** `backup.sh` перед дампом закрывает шлюз worker (`/snapshot/begin`): новые отправки,
+  входы и удаления Proton ждут, отправки в полёте (до 60 с) завершаются, Bridge штатно
+  останавливается, worker дожидается выхода процесса. Затем дамп базы и архив состояния
+  `proton-state.tar` (в снимке рядом с `db.dump`, 0600; в журнале только число файлов), и шлюз
+  открывается — в том числе при любой ошибке. Если отправка или вход не закончились за 60 с, бэкап
+  завершается ошибкой до дампа и шлюз открывается: живую отправку не считают мёртвой по таймауту.
+  `update.sh` хранит состояние рядом с предмиграционным дампом:
+  `backups/pre-update-<версия>.proton/proton-state.tar`.
+- **Восстановление и откат.** `restore.sh` и `rollback.sh` кладут состояние в том до запуска worker
+  и проверяют владельца и права (1000, 0700). В снимке без состояния (версия без worker) оно остаётся
+  пустым: управляемые ящики Proton недоступны, пока их не подключат заново, остальная почта работает.
+  Оба скрипта переводят все восстановленные письма в очереди (`queued`/`running`) в
+  `needs_attention` (`restored_from_backup`): ушли ли они после снимка, неизвестно, повторную
+  отправку решает человек. Согласованный снимок не делает отправку повторяемой — она остаётся «не
+  более одного раза».
 
 ### Откат обновления
 

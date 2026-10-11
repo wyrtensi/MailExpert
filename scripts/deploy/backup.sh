@@ -31,6 +31,8 @@ LIB_DIR=$SCRIPT_DIR/lib
 . "$LIB_DIR/backup.sh"
 # shellcheck source=lib/ops.sh
 . "$LIB_DIR/ops.sh"
+# shellcheck source=lib/proton.sh
+. "$LIB_DIR/proton.sh"
 exit_on_unexpected_failure
 
 # How long to wait for the locks (take_backup_locks): another backup.sh (update.sh's pre-update
@@ -62,6 +64,8 @@ EOF
 # shellcheck disable=SC2317,SC2329 # invoked only through `trap finish EXIT` in main, not called directly
 finish() {
   local status=$?
+  # The Proton worker's gate never stays closed after a backup, whatever stopped it.
+  proton_snapshot_end || true
   if [ -n "$VERIFY_CONTAINER" ]; then docker rm -fv "$VERIFY_CONTAINER" >/dev/null 2>&1 || true; fi
   if [ -n "$VERIFY_DIR" ]; then rm -rf "$VERIFY_DIR"; fi
   if [ -n "$STAGING" ]; then rm -rf "$STAGING"; fi
@@ -286,7 +290,15 @@ main() {
   rm -rf "$STAGING"
   mkdir -m 700 "$STAGING"
   started=$SECONDS
+  # The managed Proton worker: no Proton send in flight and Bridge stopped while the database and
+  # its state are captured, so both describe the same moment (lib/proton.sh). Bounded at 60 s;
+  # a busy worker fails the backup before the dump. Reopened right after the capture, and by
+  # finish whatever happens.
+  proton_snapshot_begin "backup-$(gen_hex 6)" >/dev/null ||
+    die "the Proton worker did not stop for the backup ($PROTON_REFUSAL: a Proton send or sign-in did not finish within 60 s); nothing was dumped, run the backup again later"
   dump_database "$STAGING"
+  stage_proton_state "$STAGING"
+  proton_snapshot_end || true
   seconds=$((SECONDS - started))
   bytes=$(stat -c %s "$STAGING/db.dump")
   counts=$(<"$STAGING/counts.json")
@@ -294,6 +306,7 @@ main() {
   if [ -n "$keep" ]; then
     cp -p "$STAGING/db.dump" "$keep"
     log "dump kept at $keep"
+    keep_proton_state "$STAGING" "$keep"
   fi
   [ "$local_only" = 0 ] || return 0
 

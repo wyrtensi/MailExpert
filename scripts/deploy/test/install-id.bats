@@ -88,13 +88,13 @@ services_without_labels() {
     grep -q '^  io.mailexpert.install: ${MAILEXPERT_INSTALL_ID:-}$' "$file"
     [ -z "$(services_without_labels "$file")" ]
   done
-  [ "$(tr -d '\r' <"$REPO_DIR/deploy/compose.prod.yml" | grep -c '^    labels: \*labels$')" = 5 ]
+  [ "$(tr -d '\r' <"$REPO_DIR/deploy/compose.prod.yml" | grep -c '^    labels: \*labels$')" = 6 ]
   [ "$(tr -d '\r' <"$REPO_DIR/deploy/edge/compose.yml" | grep -c '^    labels: \*labels$')" = 2 ]
   grep -q '^  io.mailexpert.component: panel$' "$REPO_DIR/deploy/compose.prod.yml"
   grep -q '^  io.mailexpert.component: edge$' "$REPO_DIR/deploy/edge/compose.yml"
   # Every service of the base file is in the overlay, so it gets the labels. The base file has none
   # of its own: the parser must find all of them (an empty list would prove nothing).
-  [ "$(services_without_labels "$REPO_DIR/docker-compose.yml" | sort | paste -sd' ' -)" = "backend caddy frontend postgres redis tenant-worker" ]
+  [ "$(services_without_labels "$REPO_DIR/docker-compose.yml" | sort | paste -sd' ' -)" = "backend caddy frontend postgres proton-worker redis tenant-worker" ]
   for service in $(services_without_labels "$REPO_DIR/docker-compose.yml"); do
     [ "$service" = caddy ] && continue # profile "https": dev only, not started by install.sh
     grep -q "^  $service:$" "$REPO_DIR/deploy/compose.prod.yml"

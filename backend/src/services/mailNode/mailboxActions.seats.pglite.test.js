@@ -259,8 +259,7 @@ describe('the read-only filter on the node', () => {
     const seen = [];
     const original = db.transaction.bind(db);
     const spy = vi.spyOn(db, 'transaction').mockImplementation((fn) => original((tx) => fn({
-      pool: { connect: vi.fn(async () => ({query: vi.fn((sql, params) => dbState.db.query(sql, params)), release: vi.fn()})) },
-  query: (sql, params) => { seen.push(sql); return tx.query(sql, params); },
+      query: (sql, params) => { seen.push(sql); return tx.query(sql, params); },
     })));
     try {
       await deactivateNodeMailbox({ accountId: account.id, reason: 'r' }, ACTOR);
@@ -333,8 +332,7 @@ describe('the read-only filter on the node', () => {
     const impls = mocks.map((mock) => mock.getMockImplementation());
     const original = db.transaction.bind(db);
     const spy = vi.spyOn(db, 'transaction').mockImplementation((fn) => original((tx) => fn({
-      pool: { connect: vi.fn(async () => ({query: vi.fn((sql, params) => dbState.db.query(sql, params)), release: vi.fn()})) },
-  query: (sql, params) => { seen.push(`sql:${sql}`); return tx.query(sql, params); },
+      query: (sql, params) => { seen.push(`sql:${sql}`); return tx.query(sql, params); },
     })));
     try {
       mocks.forEach((mock, i) => mock.mockImplementation(async (...args) => { seen.push('node'); return impls[i]?.(...args); }));

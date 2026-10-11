@@ -100,8 +100,8 @@ export function parseNetworkList(value) {
 }
 
 // The stored node settings with the API key decrypted, or null until an administrator saves them.
-export async function getMailNodeConfig() {
-  const { rows } = await query('SELECT config FROM integration_config WHERE provider = $1', [MAIL_NODE_PROVIDER]);
+export async function getMailNodeConfig(db = { query }) {
+  const { rows } = await db.query('SELECT config FROM integration_config WHERE provider = $1', [MAIL_NODE_PROVIDER]);
   const cfg = rows[0]?.config;
   if (!cfg?.mailHost || !cfg?.apiKey) return null;
   return {

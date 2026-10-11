@@ -42,8 +42,9 @@ export async function query(text, params) {
 // Run fn(client) inside a serializable transaction. Commits on success, rolls
 // back on throw. The client exposes a .query(text, params) method identical to
 // the top-level query() helper.
-export async function withTransaction(fn) {
-  const client = await pool.connect();
+// A reserved client may be reused; its caller still owns its release. It must not already be in a transaction.
+export async function withTransaction(fn, reservedClient = null) {
+  const client = reservedClient ?? await pool.connect();
   try {
     await client.query('BEGIN');
     const result = await fn(client);
@@ -53,7 +54,7 @@ export async function withTransaction(fn) {
     await client.query('ROLLBACK');
     throw err;
   } finally {
-    client.release();
+    if (!reservedClient) client.release();
   }
 }
 

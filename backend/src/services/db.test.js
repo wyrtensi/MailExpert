@@ -3,7 +3,7 @@ import { expect, it, vi } from 'vitest';
 vi.mock('pg', () => ({ default: { Pool: class extends EventEmitter {} } }));
 vi.mock('./encryption.js', () => ({ encrypt: vi.fn(), isEncrypted: vi.fn() }));
 vi.mock('./performanceMetrics.js', () => ({ recordDb: vi.fn() }));
-import { pool, withSessionLock } from './db.js';
+import { pool, withSessionLock, withTransaction } from './db.js';
 it('handles an idle connection failure instead of crashing the process', () => {
   const log = vi.spyOn(console, 'error').mockImplementation(() => {});
   try {
@@ -49,4 +49,32 @@ it('withSessionLock unlocks when fn fails and keeps the connection; destroys it 
   client = lockClient({ failUnlock: true });
   expect(await withSessionLock('k', async () => 1)).toBe(1);
   expect(client.release).toHaveBeenCalledWith(true);
+});
+
+
+it('withTransaction reuses a reserved client without releasing its caller-owned session', async () => {
+  const client = lockClient();
+  expect(await withTransaction(async (connection) => {
+    expect(connection).toBe(client);
+    return 42;
+  }, client)).toBe(42);
+  expect(client.calls).toEqual([['BEGIN'], ['COMMIT']]);
+  expect(pool.connect).not.toHaveBeenCalled();
+  expect(client.release).not.toHaveBeenCalled();
+});
+
+it('withTransaction rolls back a reserved client on failure and preserves ownership', async () => {
+  const client = lockClient();
+  await expect(withTransaction(async () => { throw new Error('insert failed'); }, client)).rejects.toThrow('insert failed');
+  expect(client.calls).toEqual([['BEGIN'], ['ROLLBACK']]);
+  expect(pool.connect).not.toHaveBeenCalled();
+  expect(client.release).not.toHaveBeenCalled();
+});
+
+it('withTransaction still acquires and releases its own client for existing callers', async () => {
+  const client = lockClient();
+  expect(await withTransaction(async () => 7)).toBe(7);
+  expect(pool.connect).toHaveBeenCalledOnce();
+  expect(client.calls).toEqual([['BEGIN'], ['COMMIT']]);
+  expect(client.release).toHaveBeenCalledOnce();
 });

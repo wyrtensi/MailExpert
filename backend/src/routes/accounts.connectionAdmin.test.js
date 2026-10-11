@@ -172,3 +172,39 @@ it('managed mailbox metadata remains editable by an employee',async()=>{
  const res=await fetch(`${base}/api/accounts/${ID}`,{method:'PUT',headers:{'Content-Type':'application/json'},body:JSON.stringify({name:'Team'})});
  expect(res.status).toBe(200);expect(query.mock.calls.some(([sql])=>sql.startsWith('UPDATE'))).toBe(true);
 });
+
+describe('the explicit IMAP TLS mode under an administrator edit', () => {
+  const updateCall = () => query.mock.calls.find(([sql]) => /^\s*UPDATE email_accounts/.test(sql));
+
+  it('re-derives a verified mailbox mode from a new port and stores it with imap_tls', async () => {
+    isAdmin = true;
+    stored = { ...STORED, imap_tls_mode: 'implicit' };
+    const res = await put({ imap_port: 143 });
+    expect(res.status).toBe(200);
+    const [sql, values] = updateCall();
+    expect(sql).toMatch(/imap_port = \$\d+.*imap_tls = \$\d+/);
+    const columns = [...sql.matchAll(/(\w+) = \$\d+/g)].map(match => match[1]);
+    expect(values[columns.indexOf('imap_tls_mode')]).toBe('starttls');
+    expect(values[columns.indexOf('imap_tls')]).toBe(false);
+    await settle();
+    expect(imapManager.connectAccount).toHaveBeenCalled();
+  });
+
+  it('refuses an unknown mode before writing', async () => {
+    isAdmin = true;
+    stored = { ...STORED, imap_tls_mode: 'implicit' };
+    const res = await put({ imap_tls_mode: 'plaintext' });
+    expect(res.status).toBe(400);
+    expect(wrote()).toBe(false);
+  });
+
+  it('leaves a legacy mailbox without a mode', async () => {
+    isAdmin = true;
+    stored = { ...STORED, imap_tls_mode: null };
+    expect((await put({ imap_port: 143, imap_tls_mode: null })).status).toBe(200);
+    const [sql, values] = updateCall();
+    expect(sql).not.toMatch(/imap_tls_mode/);
+    const columns = [...sql.matchAll(/(\w+) = \$\d+/g)].map(match => match[1]);
+    expect(values[columns.indexOf('imap_tls')]).toBe(false);
+  });
+});

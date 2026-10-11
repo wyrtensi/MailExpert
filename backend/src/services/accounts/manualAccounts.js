@@ -7,7 +7,7 @@ import { auditOf } from '../actor.js';
 import { computeAccountHealth } from '../accountHealth.js';
 import { hasHeaderInjectionChars } from '../accountAliases.js';
 import {
-  CONNECTION_FIELDS, RECONNECT_FIELDS, changedConnectionFields, changedServersError, impliedImapTls, newServersError,
+  CONNECTION_FIELDS, RECONNECT_FIELDS, applyImapTlsMode, changedConnectionFields, changedServersError, impliedImapTls, newServersError,
   storedColumnValue, withAccountAddressLock,
 } from './connection.js';
 
@@ -172,7 +172,8 @@ export async function updateAccountConnection(id, updates, actor) {
   const policy = await getConnectionPolicy();
   const serversError = await changedServersError(given, policy);
   if (serversError) return { error: 'servers_refused', message: serversError };
-  if ('imap_port' in given) given.imap_tls = impliedImapTls(given.imap_port);
+  const tlsModeError = applyImapTlsMode(stored, given);
+  if (tlsModeError) return { error: 'servers_refused', message: tlsModeError };
 
   const keys = CONNECTION_FIELDS.filter((key) => key in given);
   const { rows: [account] } = await query(

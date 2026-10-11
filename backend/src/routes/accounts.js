@@ -29,7 +29,7 @@ import { routeActor } from '../services/actor.js';
 import { mailNodeFailure, onOtherMailHost, refuse as refuseMailNode } from './mailNode.js';
 import { failJobsOfDeletedAccount } from '../services/jobQueue.js';
 import {
-  CONNECTION_FIELDS, changedConnectionFields, changedServersError, impliedImapTls,
+  CONNECTION_FIELDS, applyImapTlsMode, changedConnectionFields, changedServersError,
   reconnectAccount, reconnectQueue, storedColumnValue,
 } from '../services/accounts/connection.js';
 import {
@@ -192,7 +192,8 @@ router.put('/:id', async (req, res) => {
   const serversError = await changedServersError(updates, policy);
   if (serversError) return res.status(400).json({ error: serversError });
 
-  if ('imap_port' in updates) updates.imap_tls = impliedImapTls(updates.imap_port);
+  const tlsModeError = applyImapTlsMode(stored, updates);
+  if (tlsModeError) return res.status(400).json({ error: tlsModeError });
 
   // Let plugins validate the settings fields they own (GTD owns gtd_enabled/gtd_folders) before we
   // touch anything. A plugin may hard-reject the change (return an error response), report per-field
@@ -213,7 +214,7 @@ router.put('/:id', async (req, res) => {
     if (r.requiresReconnect) pluginRequiresReconnect = true;
   }
 
-  const allowed = ['name', 'sender_name', 'color', 'enabled', 'auth_user', 'auth_pass', 'sort_order', 'imap_host', 'imap_port', 'imap_tls', 'imap_skip_tls_verify', 'smtp_host', 'smtp_port', 'smtp_tls', 'smtp_auth_user', 'smtp_auth_pass', 'folder_mappings', 'signature', 'categorization_enabled'];
+  const allowed = ['name', 'sender_name', 'color', 'enabled', 'auth_user', 'auth_pass', 'sort_order', 'imap_host', 'imap_port', 'imap_tls_mode', 'imap_tls', 'imap_skip_tls_verify', 'smtp_host', 'smtp_port', 'smtp_tls', 'smtp_auth_user', 'smtp_auth_pass', 'folder_mappings', 'signature', 'categorization_enabled'];
   const sets = [];
   const values = [];
   let i = 1;

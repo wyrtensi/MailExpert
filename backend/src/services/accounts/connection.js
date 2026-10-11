@@ -92,6 +92,37 @@ export async function changedServersError(updates, policy) {
 // IMAP over TLS is implied by the port: 993 (or x993).
 export const impliedImapTls = (port) => Number(port) % 1000 === 993;
 
+const IMAP_TLS_MODES = new Set(['implicit', 'starttls']);
+const changedValue = (stored, updates, key) => key in updates && String(updates[key] ?? '') !== String(stored[key] ?? '');
+
+// Keeps imap_tls_mode and imap_tls consistent on a server edit (admin PUT /:id, the CLI's
+// updateAccountConnection). Mutates `updates`; answers the error text or null.
+// - A mode the edit names is validated (implicit|starttls) and decides imap_tls; a verified row
+//   cannot be sent back to the NULL legacy mode. Resending the stored value is not a change.
+// - A verified (explicit) row whose host or port really changes gets its mode re-derived from the
+//   final port, so an old explicit mode never outlives the server it was chosen for.
+// - A NULL-mode legacy row keeps the old rule: the port implies imap_tls, the mode stays NULL.
+export function applyImapTlsMode(stored, updates) {
+  if ('imap_tls_mode' in updates && (updates.imap_tls_mode ?? null) === (stored.imap_tls_mode ?? null)) {
+    delete updates.imap_tls_mode;
+  }
+  if ('imap_tls_mode' in updates) {
+    if (!IMAP_TLS_MODES.has(updates.imap_tls_mode)) return 'IMAP TLS mode must be implicit or starttls';
+  } else if (stored.imap_tls_mode != null) {
+    if (changedValue(stored, updates, 'imap_host') || changedValue(stored, updates, 'imap_port')) {
+      const port = 'imap_port' in updates ? updates.imap_port : stored.imap_port;
+      updates.imap_tls_mode = impliedImapTls(port) ? 'implicit' : 'starttls';
+    }
+  } else {
+    if ('imap_port' in updates) updates.imap_tls = impliedImapTls(updates.imap_port);
+    return null;
+  }
+  if ('imap_tls_mode' in updates || 'imap_tls' in updates || 'imap_port' in updates) {
+    updates.imap_tls = (updates.imap_tls_mode ?? stored.imap_tls_mode) === 'implicit';
+  }
+  return null;
+}
+
 // A settings column's value as it is stored: passwords encrypted, an empty SMTP login or password
 // as null, the signature sanitized.
 export function storedColumnValue(key, value) {

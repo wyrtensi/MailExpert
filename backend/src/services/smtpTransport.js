@@ -5,7 +5,8 @@ import { domainToASCII } from 'node:url';
 import { decrypt } from './encryption.js';
 import { currentAuthPass } from './mailNode/currentPassword.js';
 import { getConnectionPolicy } from './connectionPolicy.js';
-import { resolveForConnection } from './hostValidation.js';
+import { resolveMailEndpoint } from './accounts/mailEndpoint.js';
+import { MANAGED_PROTON_ENDPOINT } from './proton/mailEndpoint.js';
 import { ensureFreshOAuthAccount } from './oauth/tokenManager.js';
 import { OAUTH_SEND_FAILURES, isOAuthAccount } from './oauth/constants.js';
 
@@ -217,33 +218,29 @@ export async function createAccountSmtpTransport(inputAccount) {
     auth = { user: account.smtp_auth_user || account.auth_user, pass };
   }
 
-  const policy = await getConnectionPolicy();
-  const resolved = await resolveForConnection(account.smtp_host, {
-    allowPrivate: policy.allowPrivateHosts,
-  });
-  const plain = account.smtp_tls !== 'STARTTLS' && account.smtp_tls !== 'SSL';
-  if (!policy.allowInsecureTls && plain) {
-    return {
-      status: 403,
-      error: 'Plain-text SMTP is not allowed: admin must enable "Allow insecure TLS"',
-    };
+  // An ordinary mailbox keeps the policy, DNS and TLS rules; a managed Proton mailbox gets the
+  // fixed loopback endpoint of its database link, trusting only Bridge's certificate.
+  const resolved = await resolveMailEndpoint(account, 'smtp');
+  if (!resolved[MANAGED_PROTON_ENDPOINT]) {
+    const policy = await getConnectionPolicy();
+    const plain = account.smtp_tls !== 'STARTTLS' && account.smtp_tls !== 'SSL';
+    if (!policy.allowInsecureTls && plain) {
+      return {
+        status: 403,
+        error: 'Plain-text SMTP is not allowed: admin must enable "Allow insecure TLS"',
+      };
+    }
   }
 
-  const tls = {
-    rejectUnauthorized: !(policy.allowInsecureTls && account.imap_skip_tls_verify),
-  };
-  if (resolved.servername) tls.servername = resolved.servername;
-  const secure = account.smtp_tls === 'SSL'
-    || (account.smtp_tls !== 'none' && account.smtp_port === 465);
   const transportOptions = {
-    port: account.smtp_port,
-    secure,
-    ...(account.smtp_tls === 'none' ? { ignoreTLS: true } : {}),
+    port: resolved.port,
+    secure: resolved.secure,
+    ...(resolved.ignoreTLS ? { ignoreTLS: true } : {}),
     // Without requireTLS nodemailer sends in plaintext when the server does not offer STARTTLS,
     // so anyone able to strip that capability from the greeting would read the credentials.
-    ...(account.smtp_tls === 'STARTTLS' && !secure ? { requireTLS: true } : {}),
+    ...(resolved.requireTLS ? { requireTLS: true } : {}),
     auth,
-    tls,
+    tls: resolved.tls,
   };
   const transport = isOAuth
     ? createOAuthSmtpTransport(account, resolved, transportOptions)

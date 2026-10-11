@@ -5,7 +5,8 @@ vi.mock('nodemailer', () => ({ default: { createTransport: vi.fn() } }));
 vi.mock('./oauth/tokenManager.js', () => ({ ensureFreshOAuthAccount: vi.fn(async account => account) }));
 vi.mock('./encryption.js', () => ({ decrypt: vi.fn(v => v) }));
 vi.mock('./connectionPolicy.js', () => ({ getConnectionPolicy: vi.fn() }));
-vi.mock('./hostValidation.js', () => ({ resolveForConnection: vi.fn() }));
+vi.mock('./hostValidation.js', () => ({ resolveForConnection: vi.fn(), createPinnedLookup: vi.fn(() => () => {}) }));
+vi.mock('./proton/mailEndpoint.js', async importOriginal => ({ ...(await importOriginal()), resolveProtonEndpoint: vi.fn() }));
 
 const nodemailer = (await import('nodemailer')).default;
 const { ensureFreshOAuthAccount } = await import('./oauth/tokenManager.js');
@@ -18,6 +19,8 @@ const {
   smtpClientName,
 } = await import('./smtpTransport.js');
 const { noteRestoredPassword } = await import('./mailNode/currentPassword.js');
+const { resolveProtonEndpoint, trustedProtonEndpoint } = await import('./proton/mailEndpoint.js');
+const { loopbackCertificate, workerFingerprint } = await import('./proton/mailEndpoint.fixtures.js');
 
 const resolved = {
   host: '203.0.113.10',
@@ -428,5 +431,55 @@ describe('createAccountSmtpTransport', () => {
       error: 'Plain-text SMTP is not allowed: admin must enable "Allow insecure TLS"',
     });
     expect(nodemailer.createTransport).not.toHaveBeenCalled();
+  });
+});
+
+describe('managed Proton SMTP trust', () => {
+  let bridgeCertificate;
+  const managedAccount = {
+    id: 'proton-1', mail_provider: 'proton', connection_mode: 'managed', imap_tls_mode: 'implicit',
+    // The stored server and TLS choices are ignored: the managed link decides where SMTP goes.
+    smtp_host: 'smtp.attacker.example', smtp_port: 25, smtp_tls: 'none', imap_skip_tls_verify: true,
+    auth_user: 'box@proton.me', auth_pass: 'bridge-password',
+  };
+
+  beforeEach(() => {
+    vi.clearAllMocks();
+    bridgeCertificate ??= loopbackCertificate().cert;
+    getConnectionPolicy.mockResolvedValue({ allowPrivateHosts: true, allowInsecureTls: true });
+    resolveForConnection.mockResolvedValue(resolved);
+    resolveProtonEndpoint.mockImplementation(async (_id, protocol) => trustedProtonEndpoint({
+      certificatePem: bridgeCertificate, certificateFingerprint: workerFingerprint(bridgeCertificate), tlsServername: '127.0.0.1',
+    }, protocol));
+    nodemailer.createTransport.mockReturnValue({ sendMail: vi.fn().mockResolvedValue({ accepted: ['user@example.com'] }), close: vi.fn() });
+  });
+
+  it('all_proton_clients_verify_certificate_and_hostname', async () => {
+    const result = await createAccountSmtpTransport(managedAccount);
+    await result.transport.sendMail({ from: 'box@proton.me', to: 'user@example.com' });
+    expect(resolveProtonEndpoint).toHaveBeenCalledWith('proton-1', 'smtp', expect.anything());
+    expect(resolveForConnection).not.toHaveBeenCalled();
+    const options = nodemailer.createTransport.mock.calls[0][0];
+    expect(options).toMatchObject({ host: '127.0.0.1', port: 1465, secure: true, auth: { user: 'box@proton.me', pass: 'bridge-password' } });
+    expect(options.tls).toEqual({ rejectUnauthorized: true, ca: bridgeCertificate });
+    expect(options.ignoreTLS).toBeUndefined();
+    expect(options.requireTLS).toBeUndefined();
+  });
+
+  it('managed_link_is_required_for_loopback_exception', async () => {
+    resolveProtonEndpoint.mockRejectedValueOnce(Object.assign(new Error('proton_link_missing'), { code: 'proton_link_missing' }));
+    await expect(createAccountSmtpTransport(managedAccount)).rejects.toMatchObject({ code: 'proton_link_missing' });
+    expect(resolveForConnection).not.toHaveBeenCalled();
+    expect(nodemailer.createTransport).not.toHaveBeenCalled();
+  });
+
+  it('forged_mail_provider_has_no_private_access', async () => {
+    const result = await createAccountSmtpTransport({
+      ...managedAccount, connection_mode: 'manual', smtp_host: '127.0.0.1', smtp_port: 1465, smtp_tls: 'SSL', imap_skip_tls_verify: false,
+    });
+    await result.transport.sendMail({ to: 'user@example.com' });
+    expect(resolveProtonEndpoint).not.toHaveBeenCalled();
+    expect(resolveForConnection).toHaveBeenCalledWith('127.0.0.1', { allowPrivate: true });
+    expect(nodemailer.createTransport.mock.calls[0][0].tls.ca).toBeUndefined();
   });
 });

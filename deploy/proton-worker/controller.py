@@ -22,6 +22,9 @@ from pathlib import Path
 LOGIN_TTL_SECONDS = 600
 REMOVAL_RETRY_SECONDS = 120
 MAX_REMOVAL_RECOVERIES = 2
+MAX_RECONCILE_FAILURES = 5
+RECONCILE_BACKOFF_CAP = 60
+RECOVERY_BACKOFF_CAP = 300
 CONNECTED = 2
 ACTIVE_STATES = {'starting', 'authenticating', 'needs_2fa', 'needs_second_password', 'checking'}
 TERMINAL_STATES = {'connected', 'failed', 'cancelled', 'expired'}
@@ -94,6 +97,11 @@ class BridgeController:
         self.recovering = False
         self.closed = False
         self.next_start_at = 0
+        self.reconcile_failures = 0
+        self.next_reconcile_at = 0
+        self.recovery_streak = 0
+        self.last_recovery_at = None
+        self.next_recovery_at = 0
         self._journal_text = None
         self._load()
 
@@ -379,7 +387,8 @@ class BridgeController:
             now = self.clock()
             self._expire(now)
             if not self.recovering:
-                recover = self._removal_timers(now)
+                can_recover = now >= self.next_recovery_at
+                recover = self._removal_timers(now, can_recover)
                 holder = self.operations.get(self.slot)
                 if (holder is not None and holder.state in TERMINAL_STATES and
                         holder.ended_at is not None and
@@ -399,6 +408,14 @@ class BridgeController:
                         self._ensure_started()
                     except WorkerError:
                         self.next_start_at = now + self.recovery_seconds
+                if (not recover and self._alive() and self._reconcile_pending() and
+                        now >= self.next_reconcile_at):
+                    # A failed GetUserList must not leave logins blocked while Bridge lives.
+                    if (not self._reconcile_all() and
+                            self.reconcile_failures >= MAX_RECONCILE_FAILURES):
+                        recover = True
+                if recover and not can_recover:
+                    recover = False
             self._prune(now)
             if recover:
                 self.recovering = True
@@ -416,7 +433,7 @@ class BridgeController:
                 if operation.createdByAttempt:
                     self._begin_removal(operation.userId, 'attempt')
 
-    def _removal_timers(self, now):
+    def _removal_timers(self, now, can_recover=True):
         """Retry removals; a stuck attempt removal gets bounded process recoveries."""
         recover = False
         for user_id, item in list(self.pending_removals.items()):
@@ -424,6 +441,8 @@ class BridgeController:
                 continue
             if item['reason'] == 'attempt' and not item.get('stuck'):
                 if item['recoveries'] < MAX_REMOVAL_RECOVERIES:
+                    if not can_recover:
+                        continue
                     item['recoveries'] += 1
                     item['since'] = now
                     recover = True
@@ -442,6 +461,15 @@ class BridgeController:
 
     def _recover(self):
         _log('native_recovery')
+        now = self.clock()
+        if self.last_recovery_at is not None and now - self.last_recovery_at < RECOVERY_BACKOFF_CAP:
+            self.recovery_streak += 1
+        else:
+            self.recovery_streak = 0
+        self.last_recovery_at = now
+        # Back off restarts of a Bridge that keeps dying: recovery_seconds, doubled per streak.
+        self.next_recovery_at = now + min(self.recovery_seconds * 2 ** self.recovery_streak,
+                                          RECOVERY_BACKOFF_CAP)
         try:
             self.native.recover(self._on_event)
             ok = True
@@ -463,6 +491,15 @@ class BridgeController:
     def _after_restart(self):
         """Reconcile users a lost terminal event may have left, then free the slot."""
         earlier_removals = list(self.pending_removals)
+        self.reconcile_failures = 0
+        self.next_reconcile_at = 0
+        self._reconcile_all()
+        # A restarted process forgot in-flight deletions: re-issue the earlier ones.
+        for user_id in earlier_removals:
+            self._retry_removal(user_id)
+
+    def _reconcile_all(self):
+        """Reconcile pending ops; on failure schedule a retry with exponential backoff."""
         reconciled = True
         for operation in list(self.operations.values()):
             if operation.reconcile:
@@ -472,9 +509,13 @@ class BridgeController:
             self.slot = None
         elif holder is not None:
             holder.ended_at = self.clock()
-        # A restarted process forgot in-flight deletions: re-issue the earlier ones.
-        for user_id in earlier_removals:
-            self._retry_removal(user_id)
+        if reconciled:
+            self.reconcile_failures = 0
+        else:
+            self.reconcile_failures += 1
+            self.next_reconcile_at = self.clock() + min(2 ** self.reconcile_failures,
+                                                        RECONCILE_BACKOFF_CAP)
+        return reconciled
 
     def _reconcile_orphans(self, operation):
         try:

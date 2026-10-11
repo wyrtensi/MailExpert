@@ -492,3 +492,81 @@ class ControllerTests(unittest.TestCase):
         result = restarted.credentials('user-a', generation='generation-a', email='mail@example.com')
         self.assertEqual(result['userId'], 'user-a')
         self.assertEqual(self.native.removed_users, ['user-b'])
+
+    # -- fix round 3 -------------------------------------------------------------------
+
+    def failing_list_users(self, times):
+        original = self.native.list_users
+        state = {'left': times}
+
+        def list_users():
+            if state['left'] > 0:
+                state['left'] -= 1
+                raise RuntimeError('deadline exceeded')
+            return original()
+        self.native.list_users = list_users
+
+    def crashed_attempt(self):
+        self.native.add_user('user-old', addresses=['old@example.com'], split=True)
+        self.start()
+        self.native.add_user()
+        return BridgeController(self.native, Path(self.temp.name), clock=lambda: self.clock,
+                                recovery_seconds=5)
+
+    def test_failed_reconcile_is_retried_while_bridge_is_alive(self):
+        # R2-I1: the first GetUserList fails; tick retries and logins unblock without a restart.
+        restarted = self.crashed_attempt()
+        self.addCleanup(restarted.shutdown)
+        self.failing_list_users(1)
+        restarted.boot()
+        with self.assertRaisesRegex(WorkerError, '^login_busy$'):
+            restarted.start_connection('attempt-b', 'mail@example.com', 'secret-sentinel')
+        for _ in range(5):
+            self.clock += 1
+            restarted.tick()
+        self.assertEqual(self.native.removed_users, ['user-a'])
+        del self.native.users['user-a']
+        self.native.event('user_changed', userId='user-a')
+        self.assertEqual(restarted.start_connection(
+            'attempt-b', 'mail@example.com', 'secret-sentinel').state, 'authenticating')
+        self.assertEqual(self.native.recoveries, 0)
+
+    def test_reconcile_retries_back_off_then_recover(self):
+        # R2-I1: retries are spaced out and bounded; after the bound a controlled recovery runs.
+        restarted = self.crashed_attempt()
+        self.addCleanup(restarted.shutdown)
+        calls = []
+        original = self.native.list_users
+
+        def list_users():
+            calls.append(self.clock)
+            if self.native.recoveries == 0:
+                raise RuntimeError('deadline exceeded')
+            return original()
+        self.native.list_users = list_users
+        restarted.boot()
+        for _ in range(120):
+            self.clock += 1
+            restarted.tick()
+        self.assertEqual(self.native.recoveries, 1)
+        failing = [t for t in calls if t < calls[-1]]
+        gaps = [b - a for a, b in zip(failing, failing[1:])]
+        self.assertEqual(gaps, sorted(gaps))
+        self.assertLess(len(failing), 10)
+        self.assertEqual(self.native.removed_users, ['user-a'])
+
+    def test_recovery_loop_backs_off(self):
+        # R1-M2/M3: a Bridge that dies right after each restart is not restarted every tick.
+        self.commit()
+        self.native.alive = False
+        original = self.native.recover
+
+        def recover(callback):
+            original(callback)
+            self.native.alive = False
+        self.native.recover = recover
+        for _ in range(60):
+            self.clock += 1
+            self.controller.tick()
+        self.assertGreaterEqual(self.native.recoveries, 2)
+        self.assertLessEqual(self.native.recoveries, 5)

@@ -265,6 +265,14 @@ router.post('/register', registerLimiter, async (req, res) => {
   }
 });
 
+// The sign-in of a disabled user ends here, with the answer requireAuth gives such a user.
+function refuseDisabledSignIn(req, res) {
+  delete req.session.pendingUserId;
+  delete req.session.pendingTOTPExpiry;
+  delete req.session.pendingMFAEnrollment;
+  return res.status(403).json({ error: 'user_disabled', code: 'user_disabled' });
+}
+
 router.post('/login', loginLimiter, async (req, res) => {
   const { username, password } = req.body;
   if (!username || !password) return res.status(400).json({ error: 'Username and password required' });
@@ -303,6 +311,12 @@ router.post('/login', loginLimiter, async (req, res) => {
 
     // The password is right: whatever step follows (2FA, enrollment), this was no guess.
     res.locals.resetRateLimit?.();
+
+    // A disabled user gets no session and no second factor (requireAuth refuses the same way).
+    if (user.disabled_at) {
+      logAuthEvent('login_fail', { username: user.username, userId: user.id, ip: req.ip, success: false });
+      return refuseDisabledSignIn(req, res);
+    }
 
     // Regenerate session ID before storing any auth state to prevent session fixation
     await new Promise((resolve, reject) => req.session.regenerate(err => err ? reject(err) : resolve()));
@@ -405,6 +419,7 @@ router.post('/2fa/challenge', twoFactorLimiter, async (req, res) => {
     logAuthEvent('totp_fail', { userId: req.session.pendingUserId, ip: req.ip, success: false });
     return res.status(401).json({ error: 'Authentication failed' });
   }
+  if (user.disabled_at) return refuseDisabledSignIn(req, res);
 
   const normalizedCode = String(code).replace(/\s/g, '');
   if (!(await verifyTotp(normalizedCode, decrypt(user.totp_secret)))) {
@@ -543,6 +558,7 @@ router.post('/2fa/verify-email-otp', twoFactorLimiter, async (req, res) => {
   const userResult = await query('SELECT * FROM users WHERE id = $1', [uid]);
   const user = userResult.rows[0];
   if (!user) return res.status(401).json({ error: 'Authentication failed' });
+  if (user.disabled_at) return refuseDisabledSignIn(req, res);
 
   await new Promise((resolve, reject) => req.session.regenerate(err => err ? reject(err) : resolve()));
   req.session.userId = user.id;
@@ -616,6 +632,7 @@ router.post('/2fa/enrollment/enable', twoFactorLimiter, async (req, res) => {
   const userResult = await query('SELECT * FROM users WHERE id = $1', [uid]);
   const user = userResult.rows[0];
   if (!user) return res.status(401).json({ error: 'Authentication failed' });
+  if (user.disabled_at) return refuseDisabledSignIn(req, res);
 
   await new Promise((resolve, reject) => req.session.regenerate(err => err ? reject(err) : resolve()));
   req.session.userId = user.id;

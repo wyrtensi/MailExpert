@@ -31,7 +31,6 @@ const { recordAudit } = await import('../auditLog.js');
 const { deleteAccount } = await import('../accounts/deleteAccount.js');
 const { clearProtonLinkStatus } = await import('./reconcile.js');
 const { reset } = await import('../rateLimiter.js');
-const { closeCreationAdmission, reopenCreationAdmission } = await import('../accounts/accountCreation.js');
 const {
   startProtonConnection, getProtonConnection, continueProtonConnection, cancelProtonConnection,
   reconcileProtonConnectionsAtStartup, protonConnectionWork, setProtonMailEngine, PROTON_CONNECTION_TTL_MS,
@@ -93,7 +92,7 @@ beforeEach(async () => {
   isProtonApiReachable.mockResolvedValue(true);
   probeConnection.mockImplementation(async c => ({ imapLogin: c.auth_user, smtpLogin: c.smtp_auth_user }));
 });
-afterEach(async () => { reopenCreationAdmission(); await protonConnectionWork(); vi.useRealTimers(); });
+afterEach(async () => { await protonConnectionWork(); vi.useRealTimers(); });
 
 describe('Proton connection operations', () => {
   it('login_operation_is_bound_to_actor', async () => {
@@ -337,23 +336,21 @@ describe('Proton connection operations', () => {
     expect(fake.paths('/cancel')).toHaveLength(0);
   });
 
-  it('snapshot_waits_for_sql_commit_reconcile', async () => {
-    const gate = deferred();
-    fake.commitGate = gate.promise;
+  it('a worker commit refused by the snapshot gate keeps the mailbox and commits on the next poll', async () => {
+    // The worker holds a backup's gate until this finalize commits; a commit that still meets the
+    // closed gate (maintenance_busy) is not lost: the row stays committing and the next poll retries.
     const started = await start();
     fake.connect(started.id, NATIVE);
-    await getProtonConnection(started.id, owner);
-    await vi.waitFor(() => expect(fake.paths('/commit')).toHaveLength(1));
+    fake.commitRefusals = ['maintenance_busy'];
+    await poll(started.id);
     expect((await row(started.id)).state).toBe('committing');
-    let drained = false;
-    const drain = closeCreationAdmission().then(() => { drained = true; });
-    await new Promise(resolve => setTimeout(resolve, 20));
-    expect(drained).toBe(false);
-    expect(await start({ email: 'later@proton.me' })).toEqual({ error: 'proton_unavailable', code: 'proton_unavailable' });
-    gate.resolve();
-    await drain;
-    expect((await row(started.id)).state).toBe('connected');
-    expect(fake.logins).toBe(1);
+    expect(await count('email_accounts')).toBe(1);
+    expect(fake.paths('/commit')).toHaveLength(1);
+    expect(deleteAccount).not.toHaveBeenCalled();
+    expect(await poll(started.id)).toMatchObject({ id: started.id, state: 'connected' });
+    expect(fake.paths('/commit')).toHaveLength(2);
+    expect(await count('email_accounts')).toBe(1);
+    expect(fake.paths('/cancel')).toHaveLength(0);
   });
 
   it('bad_password with an unreachable Proton API is a connection failure', async () => {

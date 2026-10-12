@@ -164,6 +164,73 @@ class SnapshotGateTests(unittest.TestCase):
         with self.assertRaisesRegex(WorkerError, '^snapshot_busy$'):
             self.controller.snapshot_begin('snap-1')
 
+    # -- final review I1: the backend's finalize (probe, SQL commit, worker commit) ------
+    def signed_in(self):
+        """An attempt Bridge finished (split confirmed) that the backend has not committed."""
+        self.controller.start_connection('attempt-a', 'mail@example.com', 'secret-sentinel')
+        self.native.add_user()
+        self.native.event('finished', userId='user-a')
+        self.native.users['user-a']['splitMode'] = True
+        self.native.event('user_changed', userId='user-a')
+        self.assertEqual(self.controller.connection_status('attempt-a').state, 'connected')
+
+    def test_sql_commit_reconcile_drains_before_quit(self):
+        # The gate closes while the backend probes and commits: its credentials call and its
+        # worker commit are still admitted, and Bridge stops only after that commit.
+        self.signed_in()
+        self.controller.snapshot_wait_seconds = 5
+        seen = {}
+
+        def finalize():
+            try:
+                self.controller.credentials('user-a', operation_id='attempt-a')
+                seen['stopped_before_commit'] = self.native.exit_confirmed
+                self.controller.commit_connection('attempt-a', 'user-a', 'gen-1')
+            except Exception as error:  # noqa: BLE001
+                seen['error'] = error
+
+        timer = threading.Timer(0.2, finalize)
+        timer.start()
+        self.addCleanup(timer.cancel)
+        self.assertEqual(self.controller.snapshot_begin('snap-1')['state'], 'snapshot')
+        timer.join()
+        self.assertNotIn('error', seen)
+        self.assertEqual(seen['stopped_before_commit'], 0)
+        self.assertEqual(self.native.exit_confirmed, 1)
+        self.assertEqual(self.controller.health()['linkedAddresses'], 1)
+
+    def test_uncommitted_sign_in_makes_snapshot_busy(self):
+        self.signed_in()
+        with self.assertRaisesRegex(WorkerError, '^snapshot_busy$'):
+            self.controller.snapshot_begin('snap-1')
+        self.assertEqual(self.native.exit_confirmed, 0)
+        # The gate is open again: the backend commits as usual.
+        self.controller.commit_connection('attempt-a', 'user-a', 'gen-1')
+        self.assertEqual(self.controller.snapshot_begin('snap-2')['state'], 'snapshot')
+
+    def test_cancelled_sign_in_releases_the_snapshot(self):
+        self.signed_in()
+        self.controller.snapshot_wait_seconds = 5
+
+        def cancel():
+            # The backend gives up; the native user the attempt created goes with it.
+            self.controller.cancel_connection('attempt-a')
+            del self.native.users['user-a']
+            self.native.event('user_changed', userId='user-a')
+
+        timer = threading.Timer(0.2, cancel)
+        timer.start()
+        self.addCleanup(timer.cancel)
+        self.assertEqual(self.controller.snapshot_begin('snap-1')['state'], 'snapshot')
+
+    def test_expired_sign_in_does_not_hold_the_snapshot(self):
+        # tick() does not run while the gate is closed: the lifetime is checked by the gate itself.
+        self.signed_in()
+        self.clock += self.controller.ttl_seconds
+        self.assertEqual(self.controller.snapshot_begin('snap-1')['state'], 'snapshot')
+        with self.assertRaisesRegex(WorkerError, '^maintenance_busy$'):
+            self.controller.commit_connection('attempt-a', 'user-a', 'gen-1')
+
     def test_orphan_lease_cleared_only_after_old_backend_stopped(self):
         # Leases live in memory only: a timeout never frees them, a controlled worker
         # recreation (after the old backend stopped) does.

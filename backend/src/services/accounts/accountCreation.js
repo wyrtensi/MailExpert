@@ -77,15 +77,11 @@ export async function pruneFinishedCreationRequests({ graceMs = CREATION_REQUEST
 
 const running = new Map();
 let total = 0;
-let closed = false;
-let drainWaiters = [];
 // Shared with managed onboarding: admission is released only once the owned work has cleaned up.
 // A secret attempt (a password, a challenge) spends the per-employee bucket; follow-up work of an
 // attempt already admitted (probe, SQL commit, worker commit reconciliation) holds a slot only.
 export async function withCreationAdmission(actor, fn, { spendAttempt = true } = {}) {
-  if (closed) return { error: 'admission_closed', code: 'admission_closed' };
   const rate = spendAttempt ? await consume(`account-create:${actor.userId}`, 5, 60000) : { limited: false };
-  if (closed) return { error: 'admission_closed', code: 'admission_closed' };
   if (rate.limited || (running.get(actor.userId) || 0) >= 2 || total >= 8) return { error: 'rate_limited', code: 'rate_limited' };
   running.set(actor.userId, (running.get(actor.userId) || 0) + 1); total++;
   try { return await fn(); }
@@ -93,17 +89,5 @@ export async function withCreationAdmission(actor, fn, { spendAttempt = true } =
     total--;
     const count = running.get(actor.userId) - 1;
     if (count) running.set(actor.userId, count); else running.delete(actor.userId);
-    if (!total) { const waiters = drainWaiters; drainWaiters = []; waiters.forEach(resolve => resolve()); }
   }
-}
-
-// Snapshot gate (Task 9): refuses new creation work and resolves once every admitted piece of
-// work, including a pending SQL commit and its worker reconciliation, has finished.
-export function closeCreationAdmission() {
-  closed = true;
-  return total ? new Promise(resolve => drainWaiters.push(resolve)) : Promise.resolve();
-}
-
-export function reopenCreationAdmission() {
-  closed = false;
 }

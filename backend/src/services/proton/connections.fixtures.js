@@ -14,6 +14,8 @@ export function createFakeWorker() {
     busy: false,
     down: false,
     commitGate: null,
+    // Codes the next commits answer with, in order (for example maintenance_busy from a closed gate).
+    commitRefusals: [],
     certificatePem,
     credentialsEmail: null,
     credentials(operation) {
@@ -55,6 +57,7 @@ export function createFakeWorker() {
       if ((match = /^\/connections\/([^/]+)\/commit$/.exec(path))) {
         const operation = get(match[1]);
         if (fake.commitGate) await fake.commitGate;
+        if (fake.commitRefusals.length) throw failure(fake.commitRefusals.shift());
         if (operation.state !== 'connected' || operation.userId !== body.userId) throw failure('not_connected');
         operation.committed = true;
         return view(operation);

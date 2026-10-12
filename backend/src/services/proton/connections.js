@@ -285,8 +285,10 @@ async function beginFinalize(row, nativeUserId) {
   return row;
 }
 
-// Probe and commit under the owner's creation admission (no attempt spent): the snapshot gate
-// waits for it. A refused admission leaves the attempt as it is; the next poll tries again.
+// Probe and commit under the owner's creation admission (no attempt spent). A backup's snapshot
+// gate (deploy/proton-worker controller.py) waits for this finalize: until the worker commit,
+// cancel or expiry of the operation it still admits the credentials and commit calls, and only
+// then stops Bridge. A refused admission leaves the attempt as it is; the next poll tries again.
 function finalize(row, nativeUserId) {
   return withCreationAdmission(auditActor(row), async () => {
     // The operation's native user must exist as a row before the operation names it (FK).

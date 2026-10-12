@@ -307,6 +307,7 @@ class BridgeController:
             if operation.state == 'connected' and not operation.committed:
                 self._end(operation, 'cancelled')
                 self._drop_attempt_user(operation)
+                self.drained.notify_all()
             elif operation.state in ACTIVE_STATES:
                 self._stop_attempt(operation, 'cancelled')
             self._persist()
@@ -320,8 +321,8 @@ class BridgeController:
         _safe_id(user_id)
         _safe_id(generation)
         with self.lock:
-            self._admit()
             operation = self._operation(operation_id)
+            self._admit(operation)
             if operation.state != 'connected' or operation.userId != user_id:
                 raise WorkerError('not_connected')
             if user_id in self.pending_removals:
@@ -335,21 +336,23 @@ class BridgeController:
             if not operation.committed:
                 operation.committed = True
                 operation.ended_at = self.clock()
+                self.drained.notify_all()
             self._persist()
             return operation
 
     def credentials(self, user_id, operation_id=None, generation=None, email=None):
         _safe_id(user_id)
         with self.lock:
-            self._admit()
             if (operation_id is None) == (generation is None):
                 raise WorkerError('worker_invalid_request')
             if operation_id is not None:
                 operation = self._operation(operation_id)
+                self._admit(operation)
                 if operation.state != 'connected' or operation.userId != user_id:
                     raise WorkerError('not_connected')
                 email = operation.email
             else:
+                self._admit()
                 link = self.links.get((user_id, _safe_email(email).lower()))
                 if link is None:
                     raise WorkerError('not_found')
@@ -405,12 +408,25 @@ class BridgeController:
             return {'userId': user_id, 'state': state}
 
     # -- snapshot gate and send leases ------------------------------------------------
-    def _admit(self):
-        if self.snapshot is not None:
+    def _admit(self, operation=None):
+        """Refuse lifecycle work while a snapshot holds the gate.
+
+        The one exception is the backend's finalize of a sign-in the snapshot is draining
+        (_finalizing): its credentials and worker commit go on until Bridge stops.
+        """
+        if self.snapshot is not None and not (operation is not None and self._finalizing(operation)):
             raise WorkerError('maintenance_busy')
+
+    def _finalizing(self, operation):
+        """A sign-in Bridge finished that the backend has not committed yet (probe, SQL commit,
+        worker commit), within its lifetime. tick() does not expire it while the gate is closed,
+        so the lifetime is checked here."""
+        return (operation.state == 'connected' and not operation.committed and
+                self.clock() - operation.created_at < self.ttl_seconds)
 
     def _login_active(self):
         return (self.slot is not None or self.recovering or
+                any(self._finalizing(op) for op in list(self.operations.values())) or
                 any(item['reason'] == 'attempt' and not item.get('stuck')
                     for item in list(self.pending_removals.values())))
 
@@ -448,7 +464,8 @@ class BridgeController:
             return {'released': released}
 
     def snapshot_begin(self, snapshot_id):
-        """Close the gate, drain sends and logins, then stop Bridge and wait for its exit.
+        """Close the gate, drain sends, logins and the backend's finalize of a finished sign-in
+        (probe, SQL commit, worker commit), then stop Bridge and wait for its exit.
 
         Bounded by snapshot_wait_seconds: a live sender that does not finish in time makes
         the snapshot busy and the gate opens again. A lease is never presumed dead.
@@ -587,6 +604,7 @@ class BridgeController:
             elif expired and operation.state == 'connected' and not operation.committed:
                 self._end(operation, 'expired')
                 self._drop_attempt_user(operation)
+                self.drained.notify_all()
 
     def _removal_timers(self, now, can_recover=True):
         """Retry removals; a stuck attempt removal gets bounded process recoveries."""

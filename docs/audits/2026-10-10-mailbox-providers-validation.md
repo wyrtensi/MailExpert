@@ -43,7 +43,7 @@
 ## Что остаётся обязательным
 
 1. Draft PR #241 создан от владельца и прикреплён. CI `34cab4da`: все 10 checks SUCCESS. Последующий push отчёта требует проверки состояния PR перед merge; feature merge не согласован.
-2. Живой Proton Free: запуск отдельной восстановленной installation с историческим snapshot без автоматической отправки, а также timeout во время фактической SMTP передачи остаются. Restic restore в scratch БД, блокировка настоящей worker send lease, восстановление gate, отсутствие нового send job, доставка/ответ/headers, draft edit и flags/folders/trash проверены ниже. Много native users/адресов и 2FA требуют дополнительных аккаунтов. Другие провайдеры требуют предоставленных аккаунтов; реальные AUTH ещё не проверены.
+2. Живой Proton Free: исправление/повторная проверка отказа IMAP AUTH после полного restore, а также timeout во время фактической SMTP передачи остаются. Исторический send quarantined до старта восстановленной installation, попыток0. Остальные функциональные проверки и scratch restore прошли ниже. Много native users/адресов и 2FA требуют дополнительных аккаунтов. Другие провайдеры требуют предоставленных аккаунтов; реальные AUTH ещё не проверены.
 3. Отдельный живой стенд согласован и установлен штатным installer из exact-tag images проверяемого кода. Штатный `stage.sh panel` по-прежнему требует опубликованные образы main; CI PR их только собирает. Существующий стенд не менялся. Restic off-site и restore связанного snapshot не засчитаны.
 4. Для обновления существующего стенда: видимость опубликованного пакета worker, read-only status и отдельный план/согласование rollout с миграцией `0099`, backup и возвратом по `mailexpert-rollout`.
 
@@ -94,4 +94,16 @@
 Post-check: `healthcheck.sh` **exit 0**, healthy. Worker HTTP 200/running, linkedAddresses=1, sendLeases=0, snapshotId=null, pending/stuck removals=0. Свежий last_sync, sync_error NULL, imap_skip_tls_verify=false; в очереди тот же единственный done send_message. Повторный fetch attachment из одной Sent копии: 10485760 байт, прежний SHA-256, matches=true, exit 0. Повторных писем после verification не возникло.
 
 Это проверенный encrypted backup/DB restore в локальном test S3. Он не обеспечивает off-site защиту и не доказывает запуск исторической копии с работающим job worker или восстановление native Bridge state в другой installation. Для последнего нужен отдельный согласованный first-install/restore rehearsal; `restore.sh` штатно отказывается работать рядом с существующей БД. Не обходить этот guard и не заменять реставрацию ручным pg_restore.
+
+### Полное восстановление: найденный сбой
+
+Для rehearsal штатный installer подготовил вторую installation в том же изолированном Docker daemon с `--no-start`, exit0, standby=true, без запущенного backend. На запрос restore владелец уточнил, что нужен один рабочий стенд. Проверка выполнена с временным переключением: A остановлен до старта B, после теста A возвращён; все контейнеры B остановлены. Дополнительных host ports нет, private state/volumes не удалены.
+
+Через установленный enqueueOutgoingSend создан job2 на+24h с отдельным test dedupe key. Штатный backup сохранил snapshot `207bfe86`, dump2566713bytes, 38 worker files; затем cancelScheduled подтвердил cancelled на A. Штатный restore.sh восстановил новую DB, keys и 37 worker files, counts99migrations/user1/mailbox1, verifier decrypted2/failed0. До запуска backend historical job2 стал `needs_attention`, `error_code=restored_from_backup`, attempts0. B ready=true, worker running/linked1, TLS verification не отключалась.
+
+Однако установленный ImapManager.fetchAttachment на B получил IMAP authentication rejection и не восстановился за бюджет60s: **rehearsal runner exit1**. Root cause пока не установлен; нельзя выдавать это за успешное восстановление почтового подключения. CLI probe на ошибке также пишет предупреждение из-за headless `ImapManager(null)`; это недостаток harness, отдельно от наблюдаемого IMAP AUTH rejection. Не менять пароль/worker state вручную и не маскировать результат bypass TLS или monkey-patching.
+
+Finally остановил B backend/worker и запустил A; далее все остальные контейнеры B также остановлены по уточнению владельца об одном стенде. На A healthcheck exit0/healthy, last_sync свежий, sync_error NULL, исходный job2 cancelled, attachment hash совпал из одной Sent копии, exit0. Работа владельца осталась на исходном локальном stand. SMTP fault test не запускался: по правилу владельца о неуспехе прямого пути дальнейшее выполнение остановлено с отчётом.
+
+Первый запуск harness остановился до enqueue/изменения БД из-за CRLF в destination на stdin; SQL подтвердил отсутствие test job и healthy A. Исправлено чтение CR в одноразовом runner, не в продукте; повтор начал описанный выше rehearsal. Это не замена failing product checks.
 

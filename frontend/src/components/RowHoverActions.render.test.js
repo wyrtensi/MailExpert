@@ -129,3 +129,25 @@ describe('RowHoverActions — configurable set (#440)', () => {
     assert.deepEqual(titlesIn(host), []);
   });
 });
+
+describe('RowHoverActions — snoozed folders', () => {
+  // The server refuses a snooze from where snoozed letters already sit (routes/mail.js): the plain
+  // Snoozed folder and the Folders/Snoozed path of a managed Proton mailbox, as the context menu does.
+  for (const folder of ['Snoozed', 'Folders/Snoozed']) {
+    test(`no hover Snooze for a letter in ${folder}`, async () => {
+      const host = await mount({
+        message: { ...MESSAGE, folder }, isRead: false,
+        actions: ['archive', 'snooze'], onArchive: () => {}, onSnooze: () => {},
+      });
+      assert.deepEqual(titlesIn(host), ['shortcuts.actions.archive.label']);
+    });
+  }
+
+  test('a letter in any other folder keeps its hover Snooze', async () => {
+    const host = await mount({
+      message: { ...MESSAGE, folder: 'INBOX' }, isRead: false,
+      actions: ['snooze'], onSnooze: () => {},
+    });
+    assert.deepEqual(titlesIn(host), ['contextMenu.snooze.label']);
+  });
+});

@@ -1405,7 +1405,7 @@
             "yahooAuth": "Yahoo accepts only an app password here, not the password you use on the Yahoo website. Create one with the steps above and paste it.",
             "yandexAuth": "Yandex needs an app password of the type Mail and IMAP access turned on in Yandex Mail settings (Mail clients). A new app password may take a while to start working.",
             "mailruAuth": "Mail.ru accepts only a password for external apps with the access type Full access to Mail. The password of the Mail.ru website does not work here.",
-            "icloudAuth": "iCloud accepts only an app-specific password, which needs two-factor authentication on the Apple Account. For an address on your own domain, enter the main iCloud address as the sign-in name below.",
+            "icloudAuth": "iCloud accepts only an app-specific password, which needs two-factor authentication on the Apple Account. For an address on your own domain, enter the main iCloud address in the sign-in name field above.",
             "otherAuth": "Check the sign-in name and the password. Many mail services also need an app password, or IMAP access turned on in their own settings."
           }
         },

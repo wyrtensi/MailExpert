@@ -1220,10 +1220,14 @@ router.post('/folders/delete', async (req, res) => {
   if (!isValidFolderName(path)) return res.status(400).json({ error: 'Invalid folder path' });
   const check = await query('SELECT * FROM email_accounts WHERE id = $1', [accountId]);
   if (!check.rows.length) return res.status(404).json({ error: 'Account not found' });
+  const folderRow = (await query('SELECT delimiter, special_use FROM folders WHERE account_id = $1 AND path = $2', [accountId, path])).rows[0];
+  if (isSpecialFolder(path, folderRow?.special_use, check.rows[0].folder_mappings)) {
+    return res.status(400).json({ error: 'Special folders cannot be deleted', code: 'special_folder' });
+  }
 
   // A queued move into or out of the folder (or its subfolders) would lose its letter or its
   // destination: the delete waits for them. The hold keeps new ones from starting meanwhile.
-  const delim = (await query('SELECT delimiter FROM folders WHERE account_id = $1 AND path = $2', [accountId, path])).rows[0]?.delimiter || '/';
+  const delim = folderRow?.delimiter || '/';
   const release = imapManager.moveQueue.holdFolder(accountId, path, { kind: 'delete', delimiter: delim });
   try {
     if (await movesTouchFolder(accountId, path, delim)) return sendMovePending(res);
@@ -1235,12 +1239,30 @@ router.post('/folders/delete', async (req, res) => {
       return res.status(500).json({ error: 'Failed to delete folder on server' });
     }
     await query('DELETE FROM folders WHERE account_id = $1 AND path = $2', [accountId, path]);
-    await query('DELETE FROM messages WHERE account_id = $1 AND folder = $2', [accountId, path]);
+    // The server deleted the folder with its letters: journal each one, as emptying a folder does.
+    const removed = await query(
+      'DELETE FROM messages WHERE account_id = $1 AND folder = $2 RETURNING message_id, from_email',
+      [accountId, path],
+    );
+    recordAudit(deletedMessageEntries(
+      req.session.userId,
+      (removed.rows ?? []).map((m) => ({ ...m, account_id: accountId, folder: path })),
+      true,
+    ));
     res.json({ ok: true });
   } finally {
     release();
   }
 });
+
+// Special-use folders (and the ones an account maps to a role) the API never deletes; the
+// sidebar hides the action for the same set (isProtectedFolder in Sidebar.jsx).
+const PROTECTED_SPECIAL_USE = new Set(['\\sent', '\\drafts', '\\trash', '\\junk', '\\archive', '\\all', '\\flagged']);
+function isSpecialFolder(path, specialUse, folderMappings) {
+  if (String(path).toUpperCase() === 'INBOX') return true;
+  if (specialUse && PROTECTED_SPECIAL_USE.has(String(specialUse).toLowerCase())) return true;
+  return !!folderMappings && typeof folderMappings === 'object' && Object.values(folderMappings).includes(path);
+}
 
 // Whether a DB-first move (services/moveQueue.js) goes into or out of `path` or its subtree.
 // states: only moves in these states (default: any).

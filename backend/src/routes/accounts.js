@@ -1,15 +1,17 @@
 import { publicFolderCounts } from '../services/folderStatus.js';
 import { Router } from 'express';
+import { handleAccountCreate } from './accountProviders.js';
+import { requireCsrfHeader } from '../middleware/csrf.js';
 import { query } from '../services/db.js';
 import { isAdminRequest, requireAuth, requireAdmin } from '../middleware/auth.js';
 import { imapManager } from '../index.js';
 import { providerProfile } from '../services/imapManager.js';
 import { decrypt } from '../services/encryption.js';
-import { revokeGoogleToken } from '../services/oauth/googleOAuth.js';
 import { redactEmail } from '../utils/redact.js';
 import { sanitizeSignature } from '../services/emailSanitizer.js';
 import { getConnectionPolicy } from '../services/connectionPolicy.js';
 import { computeAccountHealth } from '../services/accountHealth.js';
+import { protonLinkStatus } from '../services/proton/reconcile.js';
 import { pluginRegistry } from '../plugins/registry.js';
 import { recordAudit } from '../services/auditLog.js';
 import { uuidParam } from '../utils/uuid.js';
@@ -25,13 +27,13 @@ import {
 } from '../services/mailNode/mailboxActions.js';
 import { routeActor } from '../services/actor.js';
 import { mailNodeFailure, onOtherMailHost, refuse as refuseMailNode } from './mailNode.js';
-import { failJobsOfDeletedAccount } from '../services/jobQueue.js';
+import { deleteAccount } from '../services/accounts/deleteAccount.js';
 import {
-  CONNECTION_FIELDS, changedConnectionFields, changedServersError, impliedImapTls,
+  CONNECTION_FIELDS, applyImapTlsMode, changedConnectionFields, changedServersError,
   reconnectAccount, reconnectQueue, storedColumnValue,
 } from '../services/accounts/connection.js';
 import {
-  ACCOUNT_ERRORS, createManualAccount, resetOAuthSubject, safeAccount,
+  resetOAuthSubject, safeAccount,
 } from '../services/accounts/manualAccounts.js';
 
 const THREAD_MODES = new Set([THREAD_MODE_RFC, THREAD_MODE_GMAIL]);
@@ -47,6 +49,8 @@ router.get('/', async (req, res) => {
   const result = await query(
     `SELECT id, name, sender_name, email_address, color, protocol, imap_host, imap_port, imap_tls, imap_skip_tls_verify,
             smtp_host, smtp_port, smtp_tls, auth_user, smtp_auth_user, oauth_provider, oauth_reconnect_required, enabled,
+            mail_provider, connection_mode, imap_tls_mode,
+            EXISTS (SELECT 1 FROM proton_mailbox_links l WHERE l.account_id = email_accounts.id) AS proton_managed_link,
             include_in_unified_inbox,
             last_sync, sync_error, sort_order, folder_mappings, signature, created_at,
             categorization_enabled, thread_mode, mail_node,
@@ -59,6 +63,8 @@ router.get('/', async (req, res) => {
      FROM email_accounts
      ORDER BY sort_order, created_at`
   );
+
+  const isManagedProton = a => a.mail_provider === 'proton' && a.connection_mode === 'managed' && a.proton_managed_link === true;
 
   // Attach aliases to each account in one query
   const accountIds = result.rows.map(a => a.id);
@@ -88,12 +94,20 @@ router.get('/', async (req, res) => {
   // columns) so the client sees them as before. Each enrichAccount handler returns a field patch.
   const enriched = await Promise.all(result.rows.map(async (a) => {
     const patches = await pluginRegistry.collectHook('enrichAccount', { account: a });
+    const publicAccount = { ...a };
+    delete publicAccount.added_by;
+    delete publicAccount.proton_managed_link;
+    // A managed Proton link that is not usable right now (services/proton/reconcile.js): a safe
+    // code only, applied to that mailbox alone.
+    const protonStatus = isManagedProton(a) ? protonLinkStatus(a.id)?.code ?? null : null;
     return {
-      ...a,
+      ...publicAccount,
       ...Object.assign({}, ...patches),
+      can_reconnect_proton: isManagedProton(a),
+      proton_status: protonStatus,
       signature: a.signature ? sanitizeSignature(a.signature) : a.signature,
       // Stable code only (see services/accountHealth.js); sync_error stays the sole error text.
-      health: computeAccountHealth(a, now),
+      health: computeAccountHealth({ ...a, proton_status: protonStatus }, now),
       provider_ids_backfill: providerIdStates.get(a.id) ?? null,
       thread_recompute: recomputeStates.get(a.id) ?? null,
       aliases: (aliasMap[a.id] || []).map(alias => ({
@@ -107,7 +121,7 @@ router.get('/', async (req, res) => {
 
 // Server and credential settings (services/accounts/connection.js, CONNECTION_FIELDS): their
 // change is the audit log's (by name only) and an administrator's alone. Nothing else writes these
-// columns from a request: a new manual mailbox is admin-only (POST /), the OAuth callbacks set
+// columns from a request: new manual mailboxes are verified before creation; OAuth callbacks set
 // their provider's fixed servers, a node mailbox takes the node's.
 
 // A mailbox on the mail node, open to everyone signed in: the server picks the host, the ports and
@@ -132,29 +146,10 @@ function refuseMailbox(res, code) {
   return res.status(status).json({ error, code });
 }
 
-// Manual server setup is an admin task: an ordinary user adds Gmail through the Google flow or a
-// mailbox on the mail node (`kind: 'domain'`).
+// Verified manual creation is shared by all approved employees.
 router.post('/', (req, res, next) => (
   req.body?.kind === 'domain' ? createDomainMailbox(req, res) : next()
-), requireAdmin, async (req, res) => {
-  // services/accounts/manualAccounts.js holds the checks, shared with the panel CLI.
-  let result;
-  try {
-    result = await createManualAccount(req.body, routeActor(req));
-  } catch (err) {
-    console.error(err);
-    return res.status(500).json({ error: 'Failed to add account' });
-  }
-  if (result.error) {
-    return res.status(400).json({ error: result.message ?? ACCOUNT_ERRORS[result.error][1] });
-  }
-  const { account } = result;
-  // Immediately try to connect — needs full credentials from DB row
-  if (account.protocol === 'imap') {
-    imapManager.connectAccount(account).catch(console.error);
-  }
-  res.json(safeAccount(account));
-});
+), requireCsrfHeader, (req, res) => handleAccountCreate(req, res));
 
 router.put('/:id', async (req, res) => {
   const { id } = req.params;
@@ -168,6 +163,9 @@ router.put('/:id', async (req, res) => {
   // The server and the password of a mail node mailbox belong to the node settings: pointing it at
   // another host would hand the generated password to that host. The form resends unchanged
   // values, so only a real change is refused.
+  if (stored.mail_provider === 'proton' && stored.connection_mode === 'managed' && changedConnectionFields(stored, updates).length) {
+    return res.status(400).json({ error: 'Managed mailbox connection settings cannot be changed', code: 'managed_connection_locked' });
+  }
   if (stored.mail_node && changedConnectionFields(stored, updates).length) {
     return res.status(400).json({ error: 'The server settings of a mail node mailbox cannot be changed', code: 'mail_node_connection_locked' });
   }
@@ -198,7 +196,8 @@ router.put('/:id', async (req, res) => {
   const serversError = await changedServersError(updates, policy);
   if (serversError) return res.status(400).json({ error: serversError });
 
-  if ('imap_port' in updates) updates.imap_tls = impliedImapTls(updates.imap_port);
+  const tlsModeError = applyImapTlsMode(stored, updates);
+  if (tlsModeError) return res.status(400).json({ error: tlsModeError });
 
   // Let plugins validate the settings fields they own (GTD owns gtd_enabled/gtd_folders) before we
   // touch anything. A plugin may hard-reject the change (return an error response), report per-field
@@ -219,7 +218,7 @@ router.put('/:id', async (req, res) => {
     if (r.requiresReconnect) pluginRequiresReconnect = true;
   }
 
-  const allowed = ['name', 'sender_name', 'color', 'enabled', 'auth_user', 'auth_pass', 'sort_order', 'imap_host', 'imap_port', 'imap_tls', 'imap_skip_tls_verify', 'smtp_host', 'smtp_port', 'smtp_tls', 'smtp_auth_user', 'smtp_auth_pass', 'folder_mappings', 'signature', 'categorization_enabled'];
+  const allowed = ['name', 'sender_name', 'color', 'enabled', 'auth_user', 'auth_pass', 'sort_order', 'imap_host', 'imap_port', 'imap_tls_mode', 'imap_tls', 'imap_skip_tls_verify', 'smtp_host', 'smtp_port', 'smtp_tls', 'smtp_auth_user', 'smtp_auth_pass', 'folder_mappings', 'signature', 'categorization_enabled'];
   const sets = [];
   const values = [];
   let i = 1;
@@ -290,6 +289,7 @@ router.put('/:id', async (req, res) => {
     'imap_host' in updates ||
     'imap_port' in updates ||
     'imap_tls' in updates ||
+    'imap_tls_mode' in updates ||
     'imap_skip_tls_verify' in updates ||
     pluginRequiresReconnect
   );
@@ -441,34 +441,8 @@ router.delete('/:id', async (req, res) => {
       }
     }
 
-    // Delete from DB first (cascades to messages and folders immediately).
-    // Disconnect IMAP afterward — fire-and-forget so a slow server logout
-    // doesn't block the response.
-    // Letters waiting to be sent from it fail first, so their authors hear of them (jobQueue.js).
-    await failJobsOfDeletedAccount(id);
-    // Revoked before the row goes, and awaited: Google revokes the person's access to the whole
-    // project, so a revoke answered after the row is gone could also cut a grant the same address
-    // got by being added again meanwhile. While the row exists, adding the address is refused
-    // (already_connected). revokeGoogleToken never throws and times out on its own
-    // (PROVIDER_FETCH_TIMEOUT_MS), so the deletion waits at most that long and never fails on it.
-    // The grant journal (google_oauth_grants) is left untouched, same as every other revoke path
-    // in this codebase — it is a lifetime record for the app's Google user cap, not a list of live
-    // grants, and a revoked user still counts against that cap.
-    if (googleRevokeToken) {
-      const revoked = await revokeGoogleToken(googleRevokeToken).catch(() => false);
-      console.log(`Google OAuth grant ${revoked ? 'revoked' : 'revoke failed'} for removed mailbox ${redactEmail(check.rows[0].email_address)}`);
-    }
-    await query('DELETE FROM email_accounts WHERE id = $1', [id]);
-    // The row is gone, so the entry names the mailbox by the address read above.
-    recordAudit({
-      actorUserId: req.session.userId,
-      accountEmail: check.rows[0].email_address,
-      action: 'mailbox.deleted',
-      details: { mailNode: false },
-    });
-    imapManager.disconnectAccount(id).catch(err =>
-      console.error(`Disconnect error after delete for ${id}:`, err.message)
-    );
+    // Shared with an abandoned managed Proton commit (services/accounts/deleteAccount.js).
+    await deleteAccount(check.rows[0], { actor: routeActor(req), googleRevokeToken, engine: imapManager });
     res.json({ ok: true });
   } catch (err) {
     console.error('Account delete error:', err);

@@ -1,0 +1,5 @@
+# Build-stage only: generate Python bindings from Bridge's bridge.proto.
+# Never installed in the runtime image. Lock: requirements-codegen.lock.
+grpcio==1.84.0
+grpcio-tools==1.84.0
+protobuf==7.36.2

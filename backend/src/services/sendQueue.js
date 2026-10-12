@@ -13,11 +13,15 @@ import {
   JOB_KEPT_FAILED_MS, cancelJob, enqueueJob, getJob, registerJobKind, rescheduleJob, JobError,
 } from './jobQueue.js';
 import { deliverOutgoingMessage } from './sendDelivery.js';
+import { ProtonMaintenanceError, withProtonSendLease } from './proton/maintenance.js';
 import { fromHeaderAddress, isDisabledMailbox, isForeignNodeAliasAddress, isReadOnlyNodeMailbox } from '../utils/senderNames.js';
 
 export const SEND_JOB_KIND = 'send_message';
 // The undo window after Send: fixed by the owner at five seconds.
 export const SEND_UNDO_WINDOW_MS = 5000;
+// A send of a managed Proton mailbox that met a backup's snapshot gate (or no worker) runs again
+// this much later; nothing was handed to the mail server.
+export const PROTON_MAINTENANCE_RETRY_MS = 60 * 1000;
 // How far ahead a letter can be scheduled.
 export const SEND_LATER_MAX_MS = 366 * 24 * 60 * 60 * 1000;
 export const SEND_MAX_ATTEMPTS = 5;
@@ -434,38 +438,51 @@ async function handleSendJob(job, ctx, imapManager) {
       );
     }
   });
-  const sent = await deliverOutgoingMessage({
-    account,
-    mail,
-    actorUserId: job.created_by,
-    imapManager,
-    detachPostSend: true,
-    markEffectStarted: () => ctx.markEffectStarted(),
-    onDelivered: async (_messageId, outcome = {}) => {
-      delivered = true;
-      rejected = Array.isArray(outcome.rejected) ? outcome.rejected : [];
-      // Recorded first, apart from the job's completion: should the worker stop before the job is
-      // done, the sweep labels it delivered_unrecorded, never an uncertain send to offer again.
-      await ctx.markEffectDone(DELIVERED_UNRECORDED);
-      completed = await complete();
-      if (!completed) settledRow = await settleSweptDelivery(job.id, rejected);
-    },
-  });
-  // The server took the letter but recording it failed (deliverOutgoingMessage logged why): one
-  // more try, then the job is settled as delivered-unrecorded rather than an uncertain send, so
-  // nobody is offered to send a delivered letter again.
-  if (delivered && !completed && !settledRow) {
-    try {
-      completed = await complete();
-      if (!completed) settledRow = await settleSweptDelivery(job.id, rejected);
-    } catch (err) {
-      console.error(`[send] Recording delivered job ${job.id} failed again:`, err?.message);
-      throw new JobError('The mail server accepted the letter, but recording it as sent failed. Do not send it again.', {
-        outcome: 'needs_attention', code: DELIVERED_UNRECORDED,
-      });
+  // A managed Proton mailbox sends inside the worker's send lease (proton/maintenance.js): taken
+  // before markEffectStarted, given back after the completion below committed, so a backup's
+  // snapshot drains the whole send. A closed gate retries the job before any effect.
+  const send = async () => {
+    const sent = await deliverOutgoingMessage({
+      account,
+      mail,
+      actorUserId: job.created_by,
+      imapManager,
+      detachPostSend: true,
+      markEffectStarted: () => ctx.markEffectStarted(),
+      onDelivered: async (_messageId, outcome = {}) => {
+        delivered = true;
+        rejected = Array.isArray(outcome.rejected) ? outcome.rejected : [];
+        // Recorded first, apart from the job's completion: should the worker stop before the job is
+        // done, the sweep labels it delivered_unrecorded, never an uncertain send to offer again.
+        await ctx.markEffectDone(DELIVERED_UNRECORDED);
+        completed = await complete();
+        if (!completed) settledRow = await settleSweptDelivery(job.id, rejected);
+      },
+    });
+    // The server took the letter but recording it failed (deliverOutgoingMessage logged why): one
+    // more try, then the job is settled as delivered-unrecorded rather than an uncertain send, so
+    // nobody is offered to send a delivered letter again.
+    if (delivered && !completed && !settledRow) {
+      try {
+        completed = await complete();
+        if (!completed) settledRow = await settleSweptDelivery(job.id, rejected);
+      } catch (err) {
+        console.error(`[send] Recording delivered job ${job.id} failed again:`, err?.message);
+        throw new JobError('The mail server accepted the letter, but recording it as sent failed. Do not send it again.', {
+          outcome: 'needs_attention', code: DELIVERED_UNRECORDED,
+        });
+      }
     }
+    return { ...sent, rejected, completed, settledRow };
+  };
+  try {
+    return await withProtonSendLease(account, send);
+  } catch (err) {
+    if (err instanceof ProtonMaintenanceError) {
+      throw new JobError(err.message, { outcome: 'retry', code: 'proton_maintenance', delayMs: PROTON_MAINTENANCE_RETRY_MS });
+    }
+    throw err;
   }
-  return { ...sent, rejected, completed, settledRow };
 }
 
 // Tells the author (their open tabs) how the letter ended, and the tabs to refresh their list. A

@@ -25,12 +25,17 @@ import { usePluginSlot, PluginRuntime } from '../plugins/PluginSlot.jsx';
 import { isDemoMode } from '../demo/mode.js';
 import LanguagePicker from './LanguagePicker.jsx';
 import { requestComposeClose } from '../utils/composeCloseRequest.js';
+import { reconcileAccounts } from '../utils/accountsReconcile.js';
+import { appOAuthReturnWatch } from '../utils/appOAuthReturn.js';
+import { isAttemptId } from '../utils/addAccountFlow.js';
+import { isModalOpen } from '../utils/modalGate.js';
 
 const ContactsPage = lazy(() => import('./ContactsPage.jsx'));
 const WindowLayer  = lazy(() => import('./WindowLayer.jsx'));
 
 const ComposeModal = lazy(() => import('./ComposeModal.jsx'));
 const AdminPanel   = lazy(() => import('./AdminPanel.jsx'));
+const AddAccountDialog = lazy(() => import('./AddAccountDialog.jsx'));
 const ElectronNotificationBridge = lazy(() => import('./ElectronNotificationBridge.jsx'));
 
 // Read + atomically clear the deep-link the service worker persisted on a
@@ -70,7 +75,7 @@ const lazyFallback = (
 export default function MailApp() {
   const { t } = useTranslation();
   const {
-    setAccounts, setUnreadCounts, showAdmin,
+    setAccounts, setUnreadCounts, showAdmin, showAddAccountDialog, closeAddAccount,
     setShowAdmin, setAdminTab, composing, sidebarCollapsed, layout,
     unreadCounts, selectedAccountId, openCompose, setSelectedAccount,
     shortcuts, selectedMessageId, setSelectedMessage,
@@ -294,7 +299,13 @@ export default function MailApp() {
       history.pushState({ mailexpert: 'guard' }, '', '/');
     }
     const handler = (event) => {
-      if (selectedMessageIdRef.current) setSelectedMessage(null);
+      // A back gesture with the dialog open closes the dialog, not the letter behind it.
+      if (useStore.getState().showAddAccountDialog) {
+        useStore.getState().closeAddAccount();
+        if (selectedMessageIdRef.current) history.pushState({ mailexpert: 'message' }, '', '/');
+      } else if (selectedMessageIdRef.current) {
+        setSelectedMessage(null);
+      }
       // Backing out of a message lands on the existing guard entry. Re-pushing
       // during that popstate can make iOS PWA history gestures temporarily stop
       // delivering taps, so only re-arm when the user has backed past the guard.
@@ -542,6 +553,12 @@ export default function MailApp() {
 
   useEffect(() => {
     window.__mailexpertHandleAndroidBack = () => {
+      // The add-account dialog is the topmost layer: Back closes it first.
+      if (useStore.getState().showAddAccountDialog) {
+        useStore.getState().closeAddAccount();
+        return true;
+      }
+
       if (composingRef.current) {
         // The composer runs its unsaved-changes check; only an unmounted one is closed here.
         if (!requestComposeClose()) useStore.getState().closeCompose();
@@ -602,6 +619,8 @@ export default function MailApp() {
     const handler = (e) => {
       // Never intercept when the compose modal or admin panel is open, or an input is focused
       if (composingRef.current || showAdminRef.current) return;
+      // The add-account dialog is modal: nothing behind it reacts to keys.
+      if (isModalOpen(useStore.getState())) return;
       const tag = e.target.tagName;
       if (tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT' || e.target.isContentEditable) return;
       // Modifier combos: emit registered actions, pass everything else through
@@ -701,6 +720,7 @@ export default function MailApp() {
     const handler = (e) => {
       if ((e.metaKey || e.ctrlKey) && e.key === 'k') {
         e.preventDefault();
+        if (isModalOpen(useStore.getState())) return;
         setPaletteOpen(v => !v);
       }
     };
@@ -739,11 +759,13 @@ export default function MailApp() {
       if (deviceReconnect) useStore.getState().requestMsDeviceReconnect(deviceReconnect);
     } else if (provider) {
       window.history.replaceState({}, '', '/');
-      api.getAccounts()
-        .then(accounts => { setAccounts(accounts); })
-        .catch(console.error);
-      setAdminTab('accounts');
-      setShowAdmin(true);
+      reconcileAccounts();
+      // A Google mailbox is added from the dialog over the current mail view, which is kept; the
+      // other providers still land on the accounts settings.
+      if (provider !== 'google') {
+        setAdminTab('accounts');
+        setShowAdmin(true);
+      }
     } else if (oidcSuccess) {
       window.history.replaceState({}, '', '/');
       if (oidcSuccess === 'linked') {
@@ -770,6 +792,8 @@ export default function MailApp() {
       }
       const result = parseOAuthResult(oauthMessageToSearchParams(e.data));
       if (result?.provider !== 'google') return;
+      // The attempt has its answer: an external-return wait for it (a dialog closed meanwhile) ends.
+      if (isAttemptId(e.data?.attempt)) appOAuthReturnWatch().forget(e.data.attempt);
       addNotification({
         type: result.status === 'error' ? 'error' : 'info',
         title: t('admin.integrations.google.title'),
@@ -779,12 +803,12 @@ export default function MailApp() {
         addNotification({ type: 'info', title: t('admin.integrations.google.title'), body: t(result.noticeKey) });
       }
       if (result.status === 'success') {
-        api.getAccounts().then(setAccounts).catch(console.error);
+        reconcileAccounts();
       }
     };
     window.addEventListener('message', handleMessage);
     return () => window.removeEventListener('message', handleMessage);
-  }, [addNotification, setAccounts, t]);
+  }, [addNotification, t]);
 
   return (
     <div style={{
@@ -956,6 +980,7 @@ export default function MailApp() {
 
       <Suspense fallback={lazyFallback}>{composing && <ComposeModal />}</Suspense>
       <Suspense fallback={lazyFallback}>{showAdmin && <AdminPanel />}</Suspense>
+      <Suspense fallback={null}>{showAddAccountDialog && <AddAccountDialog onClose={closeAddAccount} />}</Suspense>
       {/* Detached message windows (#219) — desktop only. */}
       {!isMobile && <Suspense fallback={null}><WindowLayer /></Suspense>}
       <Suspense fallback={null}>{hasNativeBridge && <ElectronNotificationBridge />}</Suspense>

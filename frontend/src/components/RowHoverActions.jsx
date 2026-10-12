@@ -2,6 +2,7 @@ import { useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import { PluginSlot } from '../plugins/PluginSlot.jsx';
 import { DEFAULT_HOVER_ACTIONS } from '../utils/hoverActions.js';
+import { isSnoozedFolder } from '../utils/snoozedFolder.js';
 
 export { HOVER_ACTION_KEYS, DEFAULT_HOVER_ACTIONS } from '../utils/hoverActions.js';
 
@@ -58,7 +59,8 @@ export default function RowHoverActions({ message, isRead, background, deleteTit
         </svg>
       </ActionBtn>
     ),
-    snooze: onSnooze && (
+    // A letter already in a Snoozed folder cannot be snoozed again (the server refuses it).
+    snooze: onSnooze && !isSnoozedFolder(message?.folder) && (
       <ActionBtn key="snooze" title={t('contextMenu.snooze.label')} onClick={e => onSnooze(e, message)}>
         <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.75">
           <circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/>

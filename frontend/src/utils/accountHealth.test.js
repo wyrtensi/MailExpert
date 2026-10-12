@@ -31,8 +31,8 @@ describe('computeAccountHealth parity with the backend rule', () => {
     assert.equal(fixture.staleAfterMs, STALE_AFTER_MS);
   });
 
-  it('knows exactly the five stable codes', () => {
-    assert.deepEqual([...ACCOUNT_HEALTH_CODES].sort(), ['disabled', 'failed', 'healthy', 'oauth_reconnect_required', 'stale']);
+  it('knows exactly the seven stable codes', () => {
+    assert.deepEqual([...ACCOUNT_HEALTH_CODES].sort(), ['disabled', 'failed', 'healthy', 'oauth_reconnect_required', 'proton_reconnect_required', 'proton_unavailable', 'stale']);
   });
 
   for (const testCase of fixture.cases) {
@@ -66,6 +66,8 @@ describe('withProvisionalHealth', () => {
     assert.equal(withProvisionalHealth(base, { sync_error: 'oauth_reconnect_required' }, now).health, 'oauth_reconnect_required');
     assert.equal(withProvisionalHealth({ ...base, sync_error: 'x', health: 'failed' }, { sync_error: null }, now).health, 'healthy');
     assert.equal(withProvisionalHealth(base, { enabled: false }, now).health, 'disabled');
+    assert.equal(withProvisionalHealth(base, { sync_error: 'proton_reconnect_required' }, now).health, 'proton_reconnect_required');
+    assert.equal(withProvisionalHealth(base, { proton_status: 'proton_unavailable' }, now).health, 'proton_unavailable');
   });
 
   it('keeps the server code when the patch does not touch a health field', () => {
@@ -87,7 +89,7 @@ describe('withProvisionalHealth', () => {
   });
 
   it('lists the fields the rule reads', () => {
-    assert.deepEqual([...HEALTH_FIELDS].sort(), ['enabled', 'last_sync', 'oauth_reconnect_required', 'sync_error']);
+    assert.deepEqual([...HEALTH_FIELDS].sort(), ['enabled', 'last_sync', 'oauth_reconnect_required', 'proton_status', 'sync_error']);
   });
 });
 
@@ -122,6 +124,8 @@ describe('accountEventPatch', () => {
     assert.deepEqual(accountEventPatch('account_error', { error: 'Connection refused' }), { sync_error: 'Connection refused' });
     assert.deepEqual(accountEventPatch('account_error', { error: 'oauth_reconnect_required' }),
       { sync_error: 'oauth_reconnect_required', oauth_reconnect_required: true });
+    // A lost managed Proton session is no OAuth grant: the code rides sync_error only.
+    assert.deepEqual(accountEventPatch('account_error', { error: 'proton_reconnect_required' }), { sync_error: 'proton_reconnect_required' });
   });
 
   it('returns null for unrelated events', () => {
@@ -153,11 +157,40 @@ describe('reconnectMenuAction', () => {
   });
 });
 
+// A managed Proton mailbox whose Bridge session is gone needs a new Proton sign-in. Mailboxes are
+// shared: every approved employee may start it, seeded with the mailbox's own account and address.
+describe('reconnectMenuAction for a lost Proton session', () => {
+  const lost = { id: 'acc-3', email_address: 'box@proton.me', mail_provider: 'proton', connection_mode: 'managed', can_reconnect_proton: true, health: 'proton_reconnect_required' };
+
+  it('offers the Proton sign-in to every employee, seeded with the account and its address', () => {
+    for (const isAdmin of [false, true]) {
+      assert.deepEqual(reconnectMenuAction(lost, { isAdmin }), { kind: 'proton', accountId: 'acc-3', email: 'box@proton.me' });
+    }
+    assert.deepEqual(reconnectMenuAction(lost), { kind: 'proton', accountId: 'acc-3', email: 'box@proton.me' });
+  });
+
+  it('needs the server capability; without it the IMAP reconnect stays', () => {
+    assert.deepEqual(reconnectMenuAction({ ...lost, can_reconnect_proton: false }), { kind: 'imap' });
+    assert.deepEqual(reconnectMenuAction({ ...lost, can_reconnect_proton: undefined }), { kind: 'imap' });
+    // An offline Proton service is waited out, not signed in again.
+    assert.deepEqual(reconnectMenuAction({ ...lost, health: 'proton_unavailable' }), { kind: 'imap' });
+  });
+});
+
 describe('canReconnectOAuth', () => {
   it('lets only an administrator reconnect a Microsoft mailbox', () => {
     assert.equal(canReconnectOAuth({ oauth_provider: 'microsoft' }, { isAdmin: true }), true);
     assert.equal(canReconnectOAuth({ oauth_provider: 'microsoft' }, { isAdmin: false }), false);
     assert.equal(canReconnectOAuth({ oauth_provider: 'microsoft' }), false);
     assert.equal(canReconnectOAuth({ oauth_provider: 'google' }, { isAdmin: false }), true);
+  });
+});
+
+describe('HEALTH_COLORS', () => {
+  it('has a theme colour for every health code, the Proton codes included', async () => {
+    const { HEALTH_COLORS, ACCOUNT_HEALTH_CODES } = await import('./accountHealth.js');
+    for (const code of ACCOUNT_HEALTH_CODES) assert.match(HEALTH_COLORS[code], /^var\(--/, code);
+    assert.equal(HEALTH_COLORS.proton_reconnect_required, 'var(--red)');
+    assert.equal(HEALTH_COLORS.proton_unavailable, 'var(--amber)');
   });
 });

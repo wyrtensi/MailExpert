@@ -21,6 +21,7 @@ import { defaultAddressBookId } from './addressBooks.js';
 import { recordAudit } from './auditLog.js';
 import { createAccountSendTransport } from './mailSendTransport.js';
 import { gmailThreadIdFromProviderThreadId } from './gmailApiSender.js';
+import { hasManagedProtonLink } from './proton/mailEndpoint.js';
 import { pluginRegistry } from '../plugins/registry.js';
 import { OAUTH_SEND_FAILURES } from './oauth/constants.js';
 import { smtpFailureIsDefinite, sendFailureIsDefinite, smtpConnectionFailure } from './smtpErrors.js';
@@ -268,8 +269,9 @@ export async function deliverOutgoingMessage({
 
   // A server that saves the Sent copy itself: skip APPEND and sync after a delay. All other
   // accounts use direct IMAP APPEND so sent mail reliably appears regardless of what the SMTP
-  // server does.
-  const serverAutoSaves = serverSavesSentCopy(account);
+  // server does. Proton Bridge files the copy of a letter sent through it; only a managed mailbox
+  // with its database link counts, never the provider columns alone.
+  const serverAutoSaves = serverSavesSentCopy(account) || await hasManagedProtonLink(account);
 
   // For servers that don't auto-save, generate the raw MIME now so we can APPEND it.
   // Use CRLF newlines ('windows'): RFC 5322 / IMAP APPEND require CRLF. A bare-LF message is

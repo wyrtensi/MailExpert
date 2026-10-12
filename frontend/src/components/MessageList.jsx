@@ -57,6 +57,8 @@ import { splitByConfirmed, unreadByAccount } from '../utils/optimisticRemoval.js
 import { searchScopeKey } from '../utils/searchScope.js';
 import { unreadAfterHeadRead } from '../utils/threadUnread.js';
 import { snapshotFlag } from '../utils/flagSnapshot.js';
+import AddAccountButton from './addAccount/AddAccountButton.jsx';
+import { isModalOpen } from '../utils/modalGate.js';
 
 // Folder icon for move picker
 function FolderIcon({ specialUse, size = 13 }) {
@@ -135,7 +137,7 @@ export default function MessageList() {
     searchQuery, setSearchQuery, isSearching, setIsSearching,
     searchResults, setSearchResults, openCompose, accountsReady, accounts,
     messagesRefreshToken, layout, setLayout, pageSize, setPageSize, scrollMode,
-    setMobileSidebarOpen, unreadCounts, showContacts, setShowContacts,
+    setMobileSidebarOpen, unreadCounts,
     threadedView, expandedThreadId, setExpandedThreadId,
     threadMessages, setThreadMessages, clearThreadMessages, loadingThread, setLoadingThread,
     hoverQuickActions, hoverActionSet, showMobileAvatars, showMessagePreviews,
@@ -369,7 +371,8 @@ export default function MessageList() {
   // Escape clears selection; click-outside closes folder picker
   useEffect(() => {
     const onKey = (e) => {
-      if (e.key === 'Escape') {
+      // The add-account dialog owns Escape while it is open; the list behind it keeps its state.
+      if (e.key === 'Escape' && !isModalOpen(useStore.getState())) {
         setShowFolderPicker(false);
         setShowLayoutPicker(false);
         setSelectedIds(new Set());
@@ -2826,10 +2829,12 @@ export default function MessageList() {
 
       {/* ── Mobile header ───────────────────────────────────────────────── */}
       {isMobile && (
-        <div style={{
-          display: 'flex', alignItems: 'center', gap: 4,
+        <div data-mobile-list-header style={{
+          // One row down to 320 px: every control is a 44 px icon, the title takes what is left
+          // (minimum 64 px), and Contacts lives in the sidebar drawer on a phone.
+          display: 'flex', alignItems: 'center', gap: 2, flexWrap: 'nowrap',
           paddingTop: 'calc(var(--sat) + 10px)',
-          paddingBottom: 10, paddingLeft: 12, paddingRight: 12,
+          paddingBottom: 10, paddingLeft: 8, paddingRight: 8,
           borderBottom: '1px solid var(--border-subtle)',
           boxShadow: listScrolled ? '0 1px 10px rgba(0,0,0,0.2)' : 'none',
           transition: 'box-shadow 0.2s ease',
@@ -2852,7 +2857,7 @@ export default function MessageList() {
           </button>
 
           {/* Folder / account title + unread count */}
-          <div style={{ flex: 1, minWidth: 0, display: 'flex', alignItems: 'center', gap: 8, overflow: 'hidden' }}>
+          <div data-mobile-list-title style={{ flex: '1 1 0', minWidth: 64, display: 'flex', alignItems: 'center', gap: 8, overflow: 'hidden' }}>
             <h2 style={{
               margin: 0, fontSize: 16, fontWeight: 600,
               color: 'var(--text-primary)', overflow: 'hidden',
@@ -2883,20 +2888,28 @@ export default function MessageList() {
             )}
           </div>
 
+          <AddAccountButton />
+
           {/* Unread filter */}
           <button
             onClick={() => setUnreadOnly(!unreadOnly)}
             title={unreadOnly ? t('messageList.showAll') : t('messageList.unreadOnly')}
+            aria-label={unreadOnly ? t('messageList.showAll') : t('messageList.unreadOnly')}
+            aria-pressed={unreadOnly}
             style={{
               background: unreadOnly ? 'var(--accent-dim)' : 'none',
-              border: `1px solid ${unreadOnly ? 'var(--accent)' : 'transparent'}`,
-              borderRadius: 6, padding: '5px 7px',
+              border: 'none',
+              borderRadius: 7, padding: 0, flexShrink: 0,
               color: unreadOnly ? 'var(--accent)' : 'var(--text-tertiary)',
-              cursor: 'pointer', fontSize: 11, fontWeight: 500,
-              minHeight: 44, display: 'flex', alignItems: 'center',
+              cursor: 'pointer',
+              minWidth: 44, minHeight: 44, display: 'flex', alignItems: 'center', justifyContent: 'center',
             }}
           >
-            {t('messageList.unread')}
+            <svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.75" aria-hidden="true">
+              <path d="M4 4h16a2 2 0 012 2v12a2 2 0 01-2 2H4a2 2 0 01-2-2V6a2 2 0 012-2z" />
+              <polyline points="22,6 12,13 2,6" />
+              <circle cx="19" cy="6" r="3.2" fill="currentColor" stroke="none" />
+            </svg>
           </button>
 
           {/* Sync */}
@@ -2921,39 +2934,24 @@ export default function MessageList() {
             </svg>
           </button>
 
-          {/* Contacts */}
-          <button
-            onClick={() => setShowContacts(!showContacts)}
-            aria-label={t('contacts.title')}
-            style={{
-              background: showContacts ? 'var(--bg-hover)' : 'none', border: 'none',
-              color: showContacts ? 'var(--accent)' : 'var(--text-tertiary)',
-              cursor: 'pointer', padding: 0, borderRadius: 7, display: 'flex',
-              alignItems: 'center', justifyContent: 'center',
-              minWidth: 44, minHeight: 44,
-            }}
-          >
-            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.75">
-              <path d="M17 21v-2a4 4 0 00-4-4H5a4 4 0 00-4 4v2"/>
-              <circle cx="9" cy="7" r="4"/>
-              <path d="M23 21v-2a4 4 0 00-3-3.87"/>
-              <path d="M16 3.13a4 4 0 010 7.75"/>
-            </svg>
-          </button>
-
           {/* Select / Cancel — replaces compose button; FAB is the primary compose affordance */}
           {selectionMode ? (
+            // An icon like its neighbours: the word ("Отмена") did not fit the one-row header at 320 px.
             <button
               onClick={clearSelection}
+              aria-label={t('common.cancel')}
+              title={t('common.cancel')}
               style={{
                 background: 'none', border: 'none',
                 color: 'var(--accent)', cursor: 'pointer',
-                fontSize: 14, fontWeight: 500,
-                padding: '0 4px', minWidth: 52, minHeight: 44,
-                display: 'flex', alignItems: 'center',
+                padding: 0, borderRadius: 7,
+                display: 'flex', alignItems: 'center', justifyContent: 'center',
+                minWidth: 44, minHeight: 44,
               }}
             >
-              {t('common.cancel')}
+              <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" aria-hidden="true">
+                <line x1="18" y1="6" x2="6" y2="18" /><line x1="6" y1="6" x2="18" y2="18" />
+              </svg>
             </button>
           ) : (
             <button

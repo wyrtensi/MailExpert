@@ -184,8 +184,8 @@ export function eopSettingsConflict(settings) {
 }
 
 // The stored settings over the defaults.
-export async function getEopSettings() {
-  const { rows } = await query('SELECT config FROM integration_config WHERE provider = $1', [EOP_PROVIDER]);
+export async function getEopSettings(db = { query }) {
+  const { rows } = await db.query('SELECT config FROM integration_config WHERE provider = $1', [EOP_PROVIDER]);
   const stored = rows[0]?.config ?? {};
   return Object.fromEntries(EOP_FIELDS.map((field) => [field, stored[field] ?? EOP_DEFAULTS[field]]));
 }

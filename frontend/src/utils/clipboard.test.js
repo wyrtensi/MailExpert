@@ -145,3 +145,46 @@ describe('selectElementText', () => {
     assert.equal(selectElementText({}), false);
   });
 });
+
+describe('copyToClipboard: inside a modal dialog', () => {
+  // The dialog makes every other child of the body inert and traps focus: a scratch field added to
+  // the body could not take focus, so the legacy copy would fail. With a container the field lives
+  // inside the dialog, and focus never leaves it.
+  test('clipboard_fallback_keeps_dialog_focus', async () => {
+    const dialog = window.document.createElement('div');
+    dialog.setAttribute('role', 'dialog');
+    const button = window.document.createElement('button');
+    dialog.appendChild(button);
+    window.document.body.appendChild(dialog);
+    button.focus();
+    const focusedOutside = [];
+    const onFocusIn = (e) => { if (!dialog.contains(e.target)) focusedOutside.push(e.target.tagName); };
+    window.document.addEventListener('focusin', onFocusIn);
+    let parent = null;
+    window.document.execCommand = (cmd) => {
+      const active = window.document.activeElement;
+      parent = active?.parentNode ?? null;
+      execCalls.push({ cmd, value: active && 'value' in active ? active.value : null });
+      return true;
+    };
+    const res = await copyToClipboard('https://example.com/app-passwords', { container: dialog });
+    window.document.removeEventListener('focusin', onFocusIn);
+    assert.deepEqual(res, { ok: true, method: 'execCommand' });
+    assert.equal(parent, dialog, 'the scratch field is mounted inside the dialog');
+    assert.deepEqual(focusedOutside, []);
+    assert.equal(window.document.activeElement, button, 'focus returns to the control that was used');
+    dialog.remove();
+  });
+
+  test('without a container the field still goes to the body, as before', async () => {
+    let parent = null;
+    window.document.execCommand = () => { parent = window.document.activeElement?.parentNode ?? null; return true; };
+    await copyToClipboard('x');
+    assert.equal(parent, window.document.body);
+  });
+
+  test('a detached container is ignored rather than failing the copy', async () => {
+    const res = await copyToClipboard('x', { container: window.document.createElement('div') });
+    assert.equal(res.ok, true);
+  });
+});

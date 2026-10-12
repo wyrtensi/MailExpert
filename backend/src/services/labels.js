@@ -52,20 +52,27 @@ export async function resolveLabelCopyUid(message, folder) {
 
 // Apply a label: ensure the label folder exists, then COPY the message into it (leaving the
 // original in place). imapManager.copyMessage also emits the section-refresh event. No-op when
-// the message already lives in the label folder. `message` needs { uid, folder }.
+// the message already lives in the label folder. `message` needs { uid, folder }. `folder` in the
+// result is the server path the label lives at: ensureFolder may answer another path than the one
+// asked for (a prefixed namespace, a managed Proton mailbox's Folders/), and the COPY goes there.
 export async function applyLabel(imapManager, account, message, labelFolder) {
   if (message.folder === labelFolder) {
-    return { applied: false, uid: message.uid, reason: 'already-there' };
+    return { applied: false, uid: message.uid, reason: 'already-there', folder: labelFolder };
   }
   const existingUid = await resolveLabelCopyUid(message, labelFolder);
   if (existingUid != null) {
-    return { applied: false, uid: existingUid, reason: 'already-labelled' };
+    return { applied: false, uid: existingUid, reason: 'already-labelled', folder: labelFolder };
   }
   // The COPY is sent from the message's uid, which a pending move has replaced by a placeholder.
   if (pendingUid(message.uid)) throw movePendingError();
-  await imapManager.ensureFolder(account, labelFolder);
-  const uid = await imapManager.copyMessage(account.id, message.uid, message.folder, labelFolder);
-  return { applied: true, uid: uid ?? null };
+  const { path: folder } = await imapManager.ensureFolder(account, labelFolder, { resolvePath: true });
+  if (folder !== labelFolder) {
+    if (message.folder === folder) return { applied: false, uid: message.uid, reason: 'already-there', folder };
+    const translatedUid = await resolveLabelCopyUid(message, folder);
+    if (translatedUid != null) return { applied: false, uid: translatedUid, reason: 'already-labelled', folder };
+  }
+  const uid = await imapManager.copyMessage(account.id, message.uid, message.folder, folder);
+  return { applied: true, uid: uid ?? null, folder };
 }
 
 // Remove one exact label copy only when it still carries the source message's RFC Message-ID.

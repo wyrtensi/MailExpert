@@ -185,4 +185,21 @@ docker run --rm --network none -e DNS_API_TOKEN="$(gen_hex 20)" -v "$RENDER/both
   fail "caddy rejected the DNS-01 Caddyfile"
 pass "cf and both edges render and parse"
 
+# 8. The managed Proton worker: isolated in the backend's namespace and idle; recreating the
+# backend container (as an update does) leaves the worker in a stale namespace until install.sh,
+# which every update path runs, checks the actual namespace and recreates it.
+health=$(proton_isolation "$PROJECT")
+[ "$(jq -r .state <<<"$health")" = idle ] || fail "proton worker health: $health"
+app_compose_e2e() {
+  docker compose -p "$PROJECT" --project-directory "$PREFIX/app" --env-file "$PREFIX/.env" \
+    -f "$PREFIX/app/docker-compose.yml" -f "$PREFIX/app/deploy/compose.prod.yml" "$@"
+}
+app_compose_e2e up -d --no-deps --force-recreate backend >/dev/null 2>&1
+[ "$(docker inspect -f '{{.HostConfig.NetworkMode}}' "$PROJECT-proton-worker")" != "container:$(docker inspect -f '{{.Id}}' "$PROJECT-backend")" ] ||
+  fail "the worker followed a backend recreated without it: the check below would prove nothing"
+install_run --prefix "$PREFIX"
+health=$(proton_isolation "$PROJECT")
+[ "$(jq -r .state <<<"$health")" = idle ] || fail "proton worker health after the backend was recreated: $health"
+pass "proton worker: backend namespace only, nothing published, socket private; follows a recreated backend"
+
 pass "install e2e passed"

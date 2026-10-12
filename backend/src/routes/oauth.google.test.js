@@ -120,7 +120,7 @@ function installDb({ existing = null, appStatus = 'active' } = {}) {
   const client = {
     query: vi.fn(async (sql, params) => {
       dbState.calls.push([sql, params]);
-      if (/pg_advisory_xact_lock/.test(sql)) return { rows: [] };
+      if (/pg_try_advisory_xact_lock/.test(sql)) return { rows: [{ acquired: true }] };
       if (MAILBOX_LOOKUP.test(sql)) {
         return { rows: dbState.existing ? [dbState.existing] : [] };
       }
@@ -176,6 +176,7 @@ const existingMailbox = (extra = {}) => ({
 
 const callback = (params, opts) => get(`/oauth/google/callback?${new URLSearchParams(params)}`, opts);
 const errorLocation = (code) => `/?oauth_error=${code}&oauth_provider=google`;
+const ATTEMPT = 'a1b2c3d4-0000-4000-8000-0123456789ab';
 
 let logSpies;
 beforeEach(() => {
@@ -322,11 +323,13 @@ describe('GET /oauth/google/callback', () => {
     });
     expect(verifyGoogleIdToken).toHaveBeenCalledWith({ idToken: 'id-tok', clientId: CLIENT_ID });
 
-    const lock = sqlCall(/pg_advisory_xact_lock/);
+    const lock = sqlCall(/pg_try_advisory_xact_lock/);
     expect(lock[0]).toMatch(/hashtext\(\$1\)/);
-    expect(lock[1]).toEqual([`oauth-account:user@gmail.com`]);
+    expect(lock[1]).toEqual([`account-address:user@gmail.com`]);
 
     const [insertSql, insertParams] = sqlCall(/^\s*INSERT INTO email_accounts/);
+    expect(insertSql).toMatch(/mail_provider, connection_mode, imap_tls_mode/);
+    expect(insertSql).toMatch(/'gmail', 'managed', 'implicit'/);
     expect(insertSql).toMatch(/'imap\.gmail\.com', 993, true/);
     expect(insertSql).toMatch(/'smtp\.gmail\.com', 465, 'SSL'/);
     expect(insertSql).toMatch(/'google'/);
@@ -393,9 +396,9 @@ describe('GET /oauth/google/callback', () => {
     const res = await callback({ code: 'c', state });
 
     expect(res.headers.get('location')).toBe('/?oauth_success=google&oauth_result=updated');
-    const lock = sqlCall(/pg_advisory_xact_lock/);
-    expect(lock[1]).toEqual([`oauth-account:user@gmail.com`]);
-    expect(sqlCall(MAILBOX_LOOKUP)[0]).toMatch(/lower\(email_address\) = lower\(\$1\)/);
+    const lock = sqlCall(/pg_try_advisory_xact_lock/);
+    expect(lock[1]).toEqual([`account-address:user@gmail.com`]);
+    expect(sqlCall(MAILBOX_LOOKUP)[0]).toMatch(/lower\(btrim\(email_address\)\) = lower\(btrim\(\$1\)\)/);
     const [updateSql, updateParams] = sqlCall(/^\s*UPDATE email_accounts/);
     expect(updateSql).toMatch(/oauth_refresh_token = COALESCE\(\$2, oauth_refresh_token\)/);
     expect(updateSql).toMatch(/oauth_reconnect_required = false/);
@@ -479,6 +482,25 @@ describe('GET /oauth/google/callback', () => {
     const res = await callback({ code: 'c', state });
     expect(res.headers.get('location')).toBe(errorLocation('missing_refresh_token'));
     expect(sqlCall(/^\s*UPDATE email_accounts/)).toBeUndefined();
+  });
+
+  it('hands the attempt id of the flow back on success, so the dialog knows whose result it is', async () => {
+    mockSuccessfulGoogle();
+    const { state } = await seedAddState('user@gmail.com', { attemptId: ATTEMPT });
+    const res = await callback({ code: 'auth-code-xyz', state });
+    expect(res.headers.get('location')).toBe(`/?oauth_success=google&oauth_result=created&oauth_attempt=${ATTEMPT}`);
+  });
+
+  it('hands the attempt id back on a refusal as well', async () => {
+    const { state } = await seedAddState('user@gmail.com', { attemptId: ATTEMPT });
+    const res = await callback({ error: 'access_denied', state });
+    expect(res.headers.get('location')).toBe(`${errorLocation('access_denied')}&oauth_attempt=${ATTEMPT}`);
+  });
+
+  it('adds nothing when the state carried no attempt id, and never for an unknown state', async () => {
+    const { state } = await seedAddState();
+    expect((await callback({ error: 'access_denied', state })).headers.get('location')).toBe(errorLocation('access_denied'));
+    expect((await callback({ code: 'c', state: 'Z'.repeat(43) })).headers.get('location')).toBe(errorLocation('invalid_state'));
   });
 
   it('maps a user cancellation to access_denied and burns the state', async () => {

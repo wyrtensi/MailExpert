@@ -2,7 +2,12 @@
 // ports, TLS, sign-in) are an administrator's to change (backend routes/accounts.js refuses them
 // from anyone else), so for other users the form leaves them out entirely: a resent null SMTP
 // password would count as clearing the stored one.
-export function accountUpdateFromForm(form, { isAdmin = false } = {}) {
+// A managed Proton or mail node mailbox keeps its connection fixed (the server answers 400 to a change),
+// so its form sends metadata only, whoever saves it.
+export const hasLockedConnection = (account) => account?.mail_node === true
+  || (account?.mail_provider === 'proton' && account?.connection_mode === 'managed');
+
+export function accountUpdateFromForm(form, { isAdmin = false, account = null } = {}) {
   const updates = {
     name: form.name,
     sender_name: form.sender_name || null,
@@ -10,7 +15,7 @@ export function accountUpdateFromForm(form, { isAdmin = false } = {}) {
     signature: form.signature || null,
     categorization_enabled: !!form.categorization_enabled,
   };
-  if (!isAdmin) return updates;
+  if (!isAdmin || hasLockedConnection(account)) return updates;
   Object.assign(updates, {
     imap_host: form.imap_host, imap_port: form.imap_port, imap_skip_tls_verify: !!form.imap_skip_tls_verify,
     smtp_host: form.smtp_host, smtp_port: form.smtp_port, smtp_tls: form.smtp_tls,

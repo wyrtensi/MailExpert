@@ -15,7 +15,9 @@
 // Legacy synchronous copy. Deprecated, but it still works in non-secure contexts in
 // every current browser, and removing it would break a large part of the web. Kept as
 // tier 2 rather than tier 1 so we use the modern API wherever it is actually available.
-function execCommandCopy(value) {
+// `container` is where the scratch field is mounted: inside a modal dialog it must be the dialog,
+// because the rest of the page is inert there and an element outside cannot take focus.
+function execCommandCopy(value, container) {
   const doc = globalThis.document;
   if (!doc?.body || typeof doc.execCommand !== 'function') return false;
 
@@ -28,7 +30,8 @@ function execCommandCopy(value) {
   el.style.top = '0';
   el.style.left = '-9999px';
   el.style.opacity = '0';
-  doc.body.appendChild(el);
+  const host = container && container.isConnected && typeof container.appendChild === 'function' ? container : doc.body;
+  host.appendChild(el);
 
   const previouslyFocused = doc.activeElement;
   try {
@@ -65,9 +68,10 @@ function execCommandCopy(value) {
  *
  * Returns { ok, method }. Callers MUST act on `ok`: the original bug was not only that
  * copying failed but that every call site assumed it could not, so the button gave no
- * feedback at all. `method` is 'async' or 'execCommand' on success, null on failure.
+ * feedback at all. `container` (optional) is the element the legacy path mounts its scratch field in;
+ * a modal dialog passes itself so focus never leaves it. `method` is 'async' or 'execCommand' on success, null on failure.
  */
-export async function copyToClipboard(text) {
+export async function copyToClipboard(text, { container } = {}) {
   const value = text == null ? '' : String(text);
 
   try {
@@ -81,7 +85,7 @@ export async function copyToClipboard(text) {
   }
 
   try {
-    if (execCommandCopy(value)) return { ok: true, method: 'execCommand' };
+    if (execCommandCopy(value, container)) return { ok: true, method: 'execCommand' };
   } catch { /* fall through to the failure result */ }
 
   return { ok: false, method: null };

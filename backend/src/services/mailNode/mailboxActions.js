@@ -1,3 +1,4 @@
+import { withAccountAddressLock } from '../accounts/connection.js';
 import { query, withSessionLock, withTransaction } from '../db.js';
 import { encrypt } from '../encryption.js';
 import { recordAudit } from '../auditLog.js';
@@ -180,10 +181,30 @@ const domainCreateQueue = createKeyedSerializer();
 // an enabled mailbox it does not hold within 90 seconds). Answers { account, aliases, tenantPending }.
 export async function createNodeMailbox(input, actor, { onCreated = null } = {}) {
   const email = `${parseLocalPart(input?.localPart)}@${parseHostName(input?.domain)}`;
-  return domainCreateQueue(email, () => createNodeMailboxNow(input, actor, onCreated));
+  return domainCreateQueue(email, async () => {
+    const result = await withAccountAddressLock(email, (client) => createNodeMailboxNow(input, actor, client));
+    if (result.error) return result;
+    const { account, secondName, panelDomain, domain, reused, seat } = result;
+    // Release the reserved connection before callbacks or tenant jobs may use the pool.
+    recordAudit(auditOf(actor, {
+      accountId: account.id,
+      action: 'mailbox.added',
+      details: { protocol: 'imap', oauthProvider: null, mailNode: true, reused, seat },
+    }));
+    if (onCreated) onCreated(account);
+    // R-32 with DBEB: the tenant gets the mailbox's recipient (services/tenant/tenantDomains.js). In an
+    // Authoritative domain EOP rejects the address until then, so the mailbox shows it.
+    // Awaited: the CLI ends its database pool right after the answer, which would lose the job.
+    if (MIRRORED_STATES.includes(panelDomain.state)) await kickDomainSync(domain, jobBy(actor));
+    return {
+      account: withoutSecrets(account),
+      aliases: secondName ? [secondName] : [],
+      tenantPending: panelDomain.state === 'authoritative',
+    };
+  });
 }
 
-async function createNodeMailboxNow(input, actor, onCreated) {
+async function createNodeMailboxNow(input, actor, client) {
   const localPart = parseLocalPart(input?.localPart);
   if (!localPart) return { error: 'local_part_invalid' };
   const domain = parseHostName(input?.domain);
@@ -194,28 +215,28 @@ async function createNodeMailboxNow(input, actor, onCreated) {
   // The form asks for the sender name; a caller without one sends under the mailbox name.
   const names = parseSenderNames(input);
   if (names.error) return { error: 'sender_name_invalid' };
-  const cfg = await getMailNodeConfig();
+  const cfg = await getMailNodeConfig(client);
   if (!cfg) return { error: 'mail_node_not_configured' };
 
-  const taken = await query('SELECT delete_after FROM email_accounts WHERE lower(email_address) = $1 LIMIT 1', [email]);
+  const taken = await client.query('SELECT delete_after FROM email_accounts WHERE lower(btrim(email_address)) = $1 LIMIT 1', [email]);
   if (taken.rows[0]?.delete_after) return { error: 'mailbox_pending_deletion' };
   if (taken.rows.length) return { error: 'mailbox_exists' };
   // Only a domain whose onboarding is done takes mailboxes; an unknown one (no row) never does. A
   // node creation time other than the one the row is bound to is only a warning for administrators
   // (services/mailNode/domains.js isRecreated) and does not stop it.
-  const panelDomain = await getDomainRow(domain);
+  const panelDomain = await getDomainRow(domain, client);
   if (!canCreateMailboxes(panelDomain?.state)) return { error: 'domain_not_ready' };
 
   const onNode = (await listDomains(cfg)).find((d) => d.domain === domain);
   if (!onNode?.active) return { error: 'domain_unknown' };
   // The send limit a mailbox of the domain gets (R-10): the domain's, else the EOP settings'.
-  const rateLimit = await newMailboxRateLimit(domain);
+  const rateLimit = await newMailboxRateLimit(domain, client);
   // An EOP seat (services/mailNode/eopSeats.js), taken under the seats lock before the node is
   // asked, so two creations never share the last one. Every failure below gives it back; the insert
   // confirms it in the same transaction as the row.
-  const seat = await reserveSeat(email);
+  const seat = await reserveSeat(email, client);
   if (seat.error) return { error: seat.error };
-  const giveBack = () => dropPendingSeat(seat.assignmentId)
+  const giveBack = () => dropPendingSeat(seat.assignmentId, client)
     .catch((e) => console.error(`EOP seat of ${email} was not given back: ${e.message}`));
   let created;
   try {
@@ -231,17 +252,18 @@ async function createNodeMailboxNow(input, actor, onCreated) {
     ({ account, secondName } = await withTransaction(async (client) => {
       const result = await client.query(`
         INSERT INTO email_accounts (
+          mail_provider, connection_mode, imap_tls_mode,
           added_by, name, email_address, protocol,
           imap_host, imap_port, imap_tls, imap_skip_tls_verify, smtp_host, smtp_port, smtp_tls,
           auth_user, auth_pass, mail_node, sender_name
-        ) VALUES ($1,$2,$3,'imap',$4,993,true,false,$4,587,'STARTTLS',$3,$5,true,$6)
+        ) VALUES ('domain','managed','implicit',$1,$2,$3,'imap',$4,993,true,false,$4,587,'STARTTLS',$3,$5,true,$6)
         RETURNING *
       `, [actor?.userId ?? null, name, email, cfg.mailHost, encrypt(created.password), names.senderName]);
       const row = result.rows[0];
       // The reservation is gone (it expired): the creation fails and rolls back, see the catch below.
       if (!await confirmSeat(seat.assignmentId, row.id, client)) throw new Error('The EOP seat reservation expired');
       return { account: row, secondName: await addSecondSenderName(client, { accountId: row.id, email, senderNameAlt: names.senderNameAlt }) };
-    }));
+    }, client));
   } catch (err) {
     console.error('Domain mailbox insert error:', err);
     // Nobody else knows the new password. A mailbox made just now is deleted again, so the address
@@ -255,21 +277,7 @@ async function createNodeMailboxNow(input, actor, onCreated) {
     return { error: 'mailbox_create_failed' };
   }
 
-  recordAudit(auditOf(actor, {
-    accountId: account.id,
-    action: 'mailbox.added',
-    details: { protocol: 'imap', oauthProvider: null, mailNode: true, reused: created.reused, seat: seat.seat },
-  }));
-  if (onCreated) onCreated(account);
-  // R-32 with DBEB: the tenant gets the mailbox's recipient (services/tenant/tenantDomains.js). In an
-  // Authoritative domain EOP rejects the address until then, so the mailbox shows it.
-  // Awaited: the CLI ends its database pool right after the answer, which would lose the job.
-  if (MIRRORED_STATES.includes(panelDomain.state)) await kickDomainSync(domain, jobBy(actor));
-  return {
-    account: withoutSecrets(account),
-    aliases: secondName ? [secondName] : [],
-    tenantPending: panelDomain.state === 'authoritative',
-  };
+  return { account, secondName, panelDomain, domain, reused: created.reused, seat: seat.seat };
 }
 
 // --- names ----------------------------------------------------------------------------------------

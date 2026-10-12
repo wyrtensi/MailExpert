@@ -1,3 +1,4 @@
+import { withAccountAddressLock } from '../services/accounts/connection.js';
 import { randomBytes } from 'crypto';
 import { Router } from 'express';
 import { createRemoteJWKSet, jwtVerify } from 'jose';
@@ -235,8 +236,7 @@ async function processMicrosoftTokens(userId, tokens, { tenantId, clientId, publ
   // lock. Two OAuth callbacks racing for the same mailbox would otherwise both miss the SELECT
   // and each INSERT, producing duplicate account rows. Mailboxes are shared, so the address alone
   // names one.
-  const { account, created } = await withTransaction(async (client) => {
-    await client.query('SELECT pg_advisory_xact_lock(hashtext($1))', [`oauth-account:${email}`]);
+  const { account, created } = await withTransaction(client => withAccountAddressLock(email, async () => {
 
     // A reconnect reads the mailbox it names, by id, and compares its address; an add looks for
     // any mailbox with the address.
@@ -247,7 +247,7 @@ async function processMicrosoftTokens(userId, tokens, { tenantId, clientId, publ
       )
       : await client.query(
         `SELECT id, email_address, oauth_provider, oauth_subject, mail_node FROM email_accounts
-          WHERE lower(email_address) = lower($1) ORDER BY created_at LIMIT 1`,
+          WHERE lower(btrim(email_address)) = lower(btrim($1)) ORDER BY created_at LIMIT 1`,
         [email],
       );
     const row = existing.rows[0] || null;
@@ -256,7 +256,7 @@ async function processMicrosoftTokens(userId, tokens, { tenantId, clientId, publ
     if (mode === 'reconnect') {
       if (!row || row.oauth_provider !== PROVIDER || row.mail_node) throw new MicrosoftOAuthError('invalid_state');
       // The person picked another account on Microsoft's page than the mailbox being reconnected.
-      if (String(row.email_address).toLowerCase() !== email) throw new MicrosoftOAuthError('account_mismatch');
+      if (String(row.email_address).trim().toLowerCase() !== email) throw new MicrosoftOAuthError('account_mismatch');
       // Same address, other Microsoft user (another tenant claiming the domain, or a recreated
       // account): never hand it this mailbox. A mailbox connected before the subject was stored
       // takes the subject of its first verified reconnect.
@@ -267,6 +267,7 @@ async function processMicrosoftTokens(userId, tokens, { tenantId, clientId, publ
       // The WHERE repeats the checks above, so a row changed meanwhile is left alone.
       const updated = await client.query(`
         UPDATE email_accounts SET
+          mail_provider = 'microsoft', connection_mode = 'managed', imap_tls_mode = 'implicit',
           oauth_access_token = $1, oauth_refresh_token = COALESCE($2, oauth_refresh_token), oauth_token_expiry = $3,
           oauth_public_client = $4, oauth_subject = $5,
           auth_user = email_address,
@@ -284,13 +285,14 @@ async function processMicrosoftTokens(userId, tokens, { tenantId, clientId, publ
       const color = colors[Math.floor(Math.random() * colors.length)];
       const result = await client.query(`
         INSERT INTO email_accounts (
+          mail_provider, connection_mode, imap_tls_mode,
           added_by, name, email_address, color, protocol,
           imap_host, imap_port, imap_tls,
           smtp_host, smtp_port, smtp_tls,
           auth_user,
           oauth_provider, oauth_access_token, oauth_refresh_token, oauth_token_expiry,
           oauth_public_client, oauth_subject
-        ) VALUES ($1,$2,$3,$4,'imap',
+        ) VALUES ('microsoft', 'managed', 'implicit', $1,$2,$3,$4,'imap',
           'outlook.office365.com', 993, true,
           'smtp.office365.com', 587, 'STARTTLS',
           $3,
@@ -303,7 +305,7 @@ async function processMicrosoftTokens(userId, tokens, { tenantId, clientId, publ
 
     const accountResult = await client.query('SELECT * FROM email_accounts WHERE id = $1', [id]);
     return { account: accountResult.rows[0], created: mode !== 'reconnect' };
-  });
+  }, { client }));
 
   recordAudit({
     actorUserId: userId,

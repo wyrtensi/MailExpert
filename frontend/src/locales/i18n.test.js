@@ -126,7 +126,21 @@ const SAME_VALUE_ALLOWED = {
   'admin.categories.gtdReveal':             'any', // "GTD" — brand-like acronym, same everywhere
   'admin.accounts.imapHostPh':              'any', // imap.gmail.com
   'admin.accounts.add.emailPh':              'any', // name@gmail.com
-  'admin.accounts.add.gmailTitle':           'any', // Gmail — the tab of "Add account", a product name
+  'admin.accounts.add.gmailTitle':           'any', // Gmail — a tile of "Add account", a product name
+  'admin.accounts.add.protonTitle':          'any', // Proton — a tile of "Add account", a product name
+  'admin.accounts.add.yahooTitle':           'any', // Yahoo — a tile of "Add account", a product name
+  'admin.accounts.add.mailruTitle':          'any', // Mail.ru — a tile of "Add account", a product name
+  'admin.accounts.add.icloudTitle':          'any', // iCloud — a tile of "Add account", a product name
+  'admin.accounts.provider.gmail':            'any', // product name, same in both languages
+  'admin.accounts.provider.microsoft':        'any', // product name, same in both languages
+  'admin.accounts.provider.proton':           'any', // product name, same in both languages
+  'admin.accounts.provider.yahoo':            'any', // product name, same in both languages
+  'admin.accounts.provider.mailru':           'any', // product name, same in both languages
+  'admin.accounts.provider.icloud':           'any', // product name, same in both languages
+  'admin.accounts.add.addressPh':            'any', // name@example.com
+  'admin.accounts.add.protonAddressPh':      'any', // name@proton.me
+  'admin.accounts.add.securityImplicit':     'any', // SSL/TLS — protocol names
+  'admin.accounts.add.securityStarttls':     'any', // STARTTLS — protocol name
   'admin.accounts.presetIcloud':            'any', // iCloud
   'admin.accounts.presetYahoo':             'any', // Yahoo Mail
   'admin.accounts.smtpHostPh':              'any', // smtp.gmail.com
@@ -315,7 +329,7 @@ function looksLikeUserText(str) {
 }
 
 function scanHardcodedStrings() {
-  const srcRoot = resolve(dir, '../..');
+  const srcRoot = resolve(dir, '..');
   const violations = [];
 
   function walk(d) {
@@ -390,7 +404,7 @@ function baseKey(key) {
 }
 
 function loadSourceText() {
-  const srcRoot = resolve(dir, '../..');
+  const srcRoot = resolve(dir, '..');
   const out = [];
   function walk(d) {
     for (const entry of readdirSync(d, { withFileTypes: true })) {
@@ -408,7 +422,7 @@ function loadSourceText() {
 }
 
 function loadLiteralSourceTranslationKeys(prefix) {
-  const srcRoot = resolve(dir, '../..');
+  const srcRoot = resolve(dir, '..');
   const keys = new Set();
   const literalTranslationCall = /(?<![\w$.])t\(\s*['"]([^'"]+)['"]/g;
 
@@ -681,7 +695,7 @@ describe('i18n locale files', () => {
     it('every key used by the add-account dialog exists in every locale', () => {
       // Option, badge and error keys come from utils/addAccount.js and reach t() through a
       // variable, so every quoted literal of the dialog files is collected.
-      const source = ['../components/AddAccountTabs.jsx', '../components/GmailAddForm.jsx', '../components/DomainMailboxAddForm.jsx', '../utils/addAccount.js']
+      const source = ['../components/AddAccountDialog.jsx', '../components/addAccount/ProviderPicker.jsx', '../components/GmailAddForm.jsx', '../components/DomainMailboxAddForm.jsx', '../utils/addAccount.js', '../utils/providerConnection.js', '../components/addAccount/ImapProviderAddForm.jsx', '../components/addAccount/ManualAccountAddForm.jsx', '../components/addAccount/ProtonAddForm.jsx', '../components/addAccount/AdvancedConnectionFields.jsx', '../components/addAccount/AppPasswordHelp.jsx']
         .map(file => readFileSync(resolve(dir, file), 'utf8')).join('\n');
       const keys = [...new Set([...source.matchAll(/'((?:admin\.accounts\.add|admin\.integrations\.google)\.[\w.]+)'/g)].map(m => m[1]))];
       assert.ok(keys.length >= 20, `expected the add-account keys, found ${keys.length}`);

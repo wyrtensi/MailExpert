@@ -20,7 +20,7 @@ describe('recordAudit', () => {
       'mailbox.added', 'mailbox.reconnected', 'mailbox.deleted', 'mailbox.connection_changed',
       'mailbox.enabled', 'mailbox.disabled', 'mailbox.threading_changed', 'mailbox.password_restored',
       'mailbox.quota_changed', 'mailbox.rate_limit_changed', 'mailbox.deletion_requested', 'mailbox.deletion_cancelled', 'mailbox.deactivated', 'mailbox.activated',
-      'mailbox.oauth_subject_reset',
+      'mailbox.oauth_subject_reset', 'mailbox.connection_failed',
       'message.sent', 'message.deleted', 'message.move_reverted',
       'message.send_queued', 'message.send_cancelled', 'message.send_rescheduled', 'message.send_failed',
       'user.added', 'user.deleted', 'user.enabled', 'user.disabled', 'user.admin_changed',
@@ -115,4 +115,11 @@ describe('recordAudit', () => {
     await expect(recordAudit({ action: 'mailbox.deleted' })).resolves.toBeUndefined();
     expect(errorSpy).toHaveBeenCalledWith('[audit] Failed to record entries:', 'TypeError');
   });
+});
+
+it('failed_probe_audit_action_registered: writes a safe failure instead of dropping it',async()=>{
+ query.mockResolvedValue({rowCount:1});
+ await recordAudit({actorUserId:'u1',accountEmail:'team@example.com',action:'mailbox.connection_failed',details:{code:'smtp_auth_failed',provider:'yahoo',mode:'preset'}});
+ expect(insertedRows()[0]).toMatchObject({action:'mailbox.connection_failed',details:{code:'smtp_auth_failed',provider:'yahoo',mode:'preset'}});
+ expect(errorSpy).not.toHaveBeenCalled();
 });

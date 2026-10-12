@@ -7,7 +7,7 @@ import { filterAccounts } from '../utils/accountFilter.js';
 import { useStableAccountOrder } from '../hooks/useStableAccountOrder.js';
 import { useRovingRows } from '../hooks/useRovingRows.js';
 import { manualMoveNeighbour, movePinnedId, prunePinnedIds } from '../utils/accountOrder.js';
-import { HEALTH_LABEL_KEYS, canReconnectOAuth, computeAccountHealth, reconnectMenuAction, reconnectUrlFor } from '../utils/accountHealth.js';
+import { HEALTH_COLORS, HEALTH_LABEL_KEYS, canReconnectOAuth, computeAccountHealth, reconnectMenuAction, reconnectUrlFor } from '../utils/accountHealth.js';
 import { openOAuthWindow } from '../utils/oauthWindow.js';
 import { api } from '../utils/api.js';
 import { noticeVersion } from '../utils/panelUpdate.js';
@@ -336,22 +336,13 @@ function CtxMenuItem({ icon, label, onClick, danger, disabled }) {
 // The longest the account list stays frozen for one drag (see dragInProgress in Sidebar).
 const DRAG_FREEZE_LIMIT_MS = 60000;
 
-// Theme variables per health code, so the indicator follows light and dark themes.
-const HEALTH_COLORS = {
-  healthy: 'var(--green)',
-  stale: 'var(--amber)',
-  failed: 'var(--red)',
-  oauth_reconnect_required: 'var(--red)',
-  disabled: 'var(--text-tertiary)',
-};
-
 // ─── Main Sidebar ─────────────────────────────────────────────────────────────
 export default function Sidebar() {
   const { t } = useTranslation();
   const uiScale = useUiScale();
   const {
     accounts, unreadCounts, selectedAccountId, selectedFolder,
-    setSelectedAccount, setShowAdmin, setAdminTab, openCompose, openAddAccount, openAccountSettings,
+    setSelectedAccount, setShowAdmin, setAdminTab, openCompose, openAddAccount, openProtonReconnect, openAccountSettings,
     folders, setFolders, setAccounts, user, setUser, lockScreen, sidebarCollapsed: sidebarCollapsedPref, toggleSidebar,
     blockRemoteImages, setBlockRemoteImages, setMobileSidebarOpen, addNotification,
     searchAllFolders, setSearchAllFolders,
@@ -1009,6 +1000,7 @@ export default function Sidebar() {
         icon: <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.75"><polyline points="23 4 23 10 17 10"/><polyline points="1 20 1 14 7 14"/><path d="M3.51 9a9 9 0 0114.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0020.49 15"/></svg>,
         action: () => {
           if (reconnect.kind === 'oauth') openOAuthWindow(reconnect.url);
+          else if (reconnect.kind === 'proton') openProtonReconnect(account);
           else api.reconnectAccount(account.id).catch((err) => notifyActionFailed('common.actionFailed.reconnect', err));
         },
       }]),
@@ -1126,6 +1118,15 @@ export default function Sidebar() {
           active={showContacts}
           collapsed={sidebarCollapsed}
           onClick={() => { setShowContacts(!showContacts); if (isMobile) setMobileSidebarOpen(false); }}
+        />
+        {/* Always here, whatever the number of mailboxes and whether the sidebar is collapsed or the
+            mailbox filter is shown: it opens the add-account dialog (store.openAddAccount). */}
+        <NavItem
+          icon={ICONS.addAccount}
+          label={t('sidebar.addAccount')}
+          active={false}
+          collapsed={sidebarCollapsed}
+          onClick={() => { openAddAccount(); if (isMobile) setMobileSidebarOpen(false); }}
         />
         {scheduledSummary.count > 0 && (
           <NavItem
@@ -1361,8 +1362,8 @@ export default function Sidebar() {
 
         {/* Mailbox filter: narrows only the rendered rows below, never the store's accounts,
             the selection or unread counts. The "+" next to it is a second, more discoverable
-            entry point into the same add-account flow the user menu's "Add account" triggers
-            (openAddAccount sets addAccountRequested, which AdminPanel's AccountsTab consumes). */}
+            entry point into the same add-account dialog the fixed "Add account" item above and the
+            user menu trigger (store.openAddAccount; it changes nothing else). */}
         {/* Sticky: the filter stays in reach while the list of mailboxes scrolls under it. It runs
             to the nav's edges (the negative margins undo its padding) so rows do not show through. */}
         {showAccountFilter && (
@@ -1439,7 +1440,8 @@ export default function Sidebar() {
           // backend) falls back to the same rule computed locally.
           const health = HEALTH_LABEL_KEYS[account.health] ? account.health : computeAccountHealth(account);
           const needsReconnect = health === 'oauth_reconnect_required';
-          const hasProblem = health === 'failed' || needsReconnect;
+          const protonProblem = health === 'proton_reconnect_required' || health === 'proton_unavailable';
+          const hasProblem = health === 'failed' || needsReconnect || protonProblem;
           const reconnectAllowed = canReconnectOAuth(account, { isAdmin: !!user?.isAdmin });
           const reconnectUrl = needsReconnect && reconnectAllowed ? reconnectUrlFor(account) : null;
           // A Microsoft mailbox an ordinary user may not reconnect: the state plus who to ask.
@@ -1555,10 +1557,10 @@ export default function Sidebar() {
                       <TenantPendingLine account={account} />
                       {hasProblem && (
                         <div style={{
-                          fontSize: 11, color: 'var(--red)',
+                          fontSize: 11, color: protonProblem ? HEALTH_COLORS[health] : 'var(--red)',
                           whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis',
                         }}>
-                          {needsReconnect ? healthLabel : t('sidebar.connectionError')}
+                          {needsReconnect || protonProblem ? healthLabel : t('sidebar.connectionError')}
                         </div>
                       )}
                     </div>

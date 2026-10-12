@@ -87,7 +87,7 @@ describe('AccountsTab opened for one account (sidebar "Account settings")', () =
     await React.act(async () => root.render(null));
     useStore.setState({
       accounts: ACCOUNTS, accountsReady: true, user: { id: 'u1', isAdmin: true },
-      showAdmin: false, adminTab: 'appearance', accountSettingsRequested: null, addAccountRequested: false,
+      showAdmin: false, adminTab: 'appearance', accountSettingsRequested: null, showAddAccountDialog: false,
     });
   });
 
@@ -147,12 +147,13 @@ describe('AccountsTab opened for one account (sidebar "Account settings")', () =
     assert.equal(nameField().value, 'Operations', 'the fields are the second account\'s, not the first one\'s');
   });
 
-  test('closing the settings drops a request that has not been taken yet', async () => {
+  test('closing the settings drops a request that has not been taken yet, but not the add-account dialog', async () => {
     useStore.getState().openAccountSettings('a2');
-    useStore.setState({ addAccountRequested: true });
+    useStore.getState().openAddAccount();
     useStore.getState().setShowAdmin(false);
     assert.equal(useStore.getState().accountSettingsRequested, null);
-    assert.equal(useStore.getState().addAccountRequested, false);
+    assert.equal(useStore.getState().showAddAccountDialog, true);
+    useStore.getState().closeAddAccount();
     await React.act(async () => { root.render(React.createElement(AccountsTab)); });
     await settle();
     assert.ok(showsList(), 'nothing opens later');
@@ -256,9 +257,114 @@ describe('AccountsTab search', () => {
     assert.deepEqual(shown(), ['sales@', 'ops@', 'support@']);
   });
 
-  test('is not offered for a single account', async () => {
+  test('settings_opens_same_dialog_and_keeps_filter: the add button opens the store dialog, the list and the filter stay', async () => {
+    await type('ops');
+    assert.deepEqual(shown(), ['ops@']);
+    const before = useStore.getState();
+    const addButton = [...host.querySelectorAll('button')].find(b => b.textContent.includes('admin.accounts.addButton'));
+    await React.act(async () => { addButton.click(); });
+    const after = useStore.getState();
+    assert.equal(after.showAddAccountDialog, true);
+    assert.equal(after.showAdmin, before.showAdmin);
+    assert.equal(after.adminTab, before.adminTab);
+    assert.equal(searchBox().value, 'ops', 'the filter is not reset');
+    assert.deepEqual(shown(), ['ops@'], 'the list under the dialog is the same');
+    assert.ok(!host.textContent.includes('admin.accounts.addTitle'), 'no add sub-view inside the settings any more');
+    assert.equal(after.accounts, before.accounts, 'the shared list is untouched');
+  });
+
+  test('search_is_visible_with_empty_single_and_many_accounts', async () => {
+    for (const accounts of [[], [ACCOUNTS[0]], ACCOUNTS]) {
+      await React.act(async () => { useStore.setState({ accounts }); });
+      await settle();
+      assert.ok(searchBox(), `the search field is there with ${accounts.length} accounts`);
+    }
+  });
+
+  test('with one account the search still narrows it and says when nothing matches', async () => {
     await React.act(async () => { useStore.setState({ accounts: [ACCOUNTS[0]] }); });
     await settle();
-    assert.equal(searchBox(), null);
+    await type('zzz-nothing');
+    assert.ok(host.textContent.includes('admin.accounts.search.noMatch'));
+    await type('sales');
+    assert.deepEqual(shown(), ['sales@']);
+  });
+
+  test('opening_dialog_retains_query_and_selection: the dialog changes neither the unread counts nor the list order', async () => {
+    const unread = { a1: 3, a2: 0 };
+    await React.act(async () => { useStore.setState({ unreadCounts: unread, selectedAccountId: 'a2' }); });
+    await type('ops');
+    const accounts = useStore.getState().accounts;
+    const addButton = [...host.querySelectorAll('button')].find(b => b.textContent.includes('admin.accounts.addButton'));
+    await React.act(async () => { addButton.click(); });
+    assert.equal(useStore.getState().unreadCounts, unread);
+    assert.equal(useStore.getState().accounts, accounts);
+    assert.equal(useStore.getState().selectedAccountId, 'a2');
+    assert.equal(searchBox().value, 'ops');
+  });
+});
+
+describe('AccountsTab provider details', () => {
+  let host, root;
+  before(() => {
+    host = dom.window.document.createElement('div');
+    dom.window.document.body.appendChild(host);
+    root = createRoot(host);
+    // An ordinary user also gets the quarantine card, which reads an empty list.
+    globalThis.fetch = async () => ({ ok: true, status: 200, json: async () => ({ items: [], total: 0, historyRead: true, spamInHistory: 0 }), text: async () => '' });
+  });
+  after(async () => {
+    await React.act(async () => root.unmount());
+    host.remove();
+  });
+  const mount = async (accounts, user = { id: 'u1', isAdmin: false }) => {
+    await React.act(async () => root.render(null));
+    useStore.setState({ accounts, accountsReady: true, user, accountSettingsRequested: null, showAddAccountDialog: false, addAccountSeed: null });
+    await React.act(async () => { root.render(React.createElement(AccountsTab)); });
+    await settle();
+  };
+  const PROTON = { ...account('p1', 'Proton box', 'team@proton.example'), mail_provider: 'proton', connection_mode: 'managed',
+    can_reconnect_proton: true, proton_status: 'proton_reconnect_required', health: 'proton_reconnect_required', imap_host: '127.0.0.1', imap_port: 1993 };
+  const MANUAL = { ...account('m1', 'Manual box', 'manual@example.invalid'), mail_provider: 'other', connection_mode: 'manual' };
+
+  test('manual_override_card_shows_mode: the card names the provider and the connection mode', async () => {
+    await mount([MANUAL, PROTON]);
+    assert.ok(host.textContent.includes('admin.accounts.provider.other'));
+    assert.ok(host.textContent.includes('admin.accounts.mode.manual'));
+    assert.ok(host.textContent.includes('admin.accounts.provider.proton'));
+    assert.ok(host.textContent.includes('admin.accounts.mode.managed'));
+  });
+
+  test('a Proton mailbox that lost its session offers the Proton sign-in to an ordinary employee', async () => {
+    await mount([PROTON], { id: 'u2', isAdmin: false });
+    assert.ok(host.textContent.includes('sidebar.health.protonReconnectRequired'));
+    const button = host.querySelector('button[title="admin.accounts.protonReconnect"]');
+    assert.ok(button, 'the reconnect button is on the card');
+    await React.act(async () => { button.click(); });
+    const state = useStore.getState();
+    assert.equal(state.showAddAccountDialog, true);
+    assert.deepEqual(state.addAccountSeed, { id: 'p1', email_address: 'team@proton.example' });
+  });
+
+  test('a managed mailbox offers no plain IMAP reconnect and an ordinary mailbox no Proton one', async () => {
+    await mount([{ ...PROTON, sync_error: 'boom' }, { ...MANUAL, sync_error: 'boom' }]);
+    const reconnects = [...host.querySelectorAll('button[title="sidebar.accountMenu.reconnect"]')];
+    assert.equal(reconnects.length, 1, 'only the manual mailbox keeps the IMAP reconnect');
+    assert.equal(host.querySelectorAll('button[title="admin.accounts.protonReconnect"]').length, 1);
+  });
+
+  test('oauth_reconnect_reset_device_actions_remain: a Google mailbox keeps its reconnect and sign-in reset', async () => {
+    const google = { ...account('g1', 'Gmail box', 'g@example.invalid'), oauth_provider: 'google', oauth_reconnect_required: true, health: 'oauth_reconnect_required' };
+    await mount([google], { id: 'u1', isAdmin: true });
+    assert.ok(host.textContent.includes('admin.accounts.reconnectGmail'));
+    assert.ok(host.textContent.includes('admin.accounts.oauthSubjectReset'));
+  });
+
+  test('the edit form of a managed mailbox shows a note instead of the server fields, for an administrator too', async () => {
+    await mount([PROTON], { id: 'u1', isAdmin: true });
+    await React.act(async () => { useStore.getState().openAccountSettings('p1'); });
+    await settle();
+    assert.ok(host.textContent.includes('admin.accounts.managedServerNote'));
+    assert.equal(host.querySelector('input[placeholder="admin.accounts.imapHostPh"]'), null);
   });
 });

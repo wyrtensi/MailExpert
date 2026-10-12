@@ -104,8 +104,8 @@ export async function listDomainRows() {
 }
 
 // The row's state and the node identity it is bound to, or null when the panel has no row.
-export async function getDomainRow(domain) {
-  const { rows } = await query('SELECT state, node_created FROM mail_node_domains WHERE domain = $1', [domain]);
+export async function getDomainRow(domain, db = { query }) {
+  const { rows } = await db.query('SELECT state, node_created FROM mail_node_domains WHERE domain = $1', [domain]);
   return rows[0] ? { state: rows[0].state, nodeCreated: rows[0].node_created ?? null } : null;
 }
 

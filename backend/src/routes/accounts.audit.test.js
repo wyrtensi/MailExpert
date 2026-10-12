@@ -1,6 +1,8 @@
 import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 
-vi.mock('../services/db.js', () => ({ query: vi.fn() }));
+vi.mock('../services/db.js', () => {const query=vi.fn();return {query,pool:{connect:async()=>({query,release(){}})}};});
+vi.mock('../services/accounts/connectionProbe.js',()=>({probeConnection:async c=>({imapLogin:c.auth_user,smtpLogin:c.smtp_auth_user})}));
+vi.mock('../services/redis.js',()=>({redisClient:{incr:async()=>1,pExpire:async()=>{}}}));
 vi.mock('../middleware/auth.js', () => ({
   isAdminRequest: async () => true,
   requireAuth: (req, _res, next) => { req.session = { userId: 'user-2' }; next(); },
@@ -50,7 +52,9 @@ beforeEach(() => {
   vi.clearAllMocks();
   stored = { ...STORED };
   query.mockReset().mockImplementation(async (sql) => {
-    if (/^\s*INSERT INTO email_accounts/.test(sql)) return { rows: [{ ...STORED }] };
+    if (/pg_try_advisory_lock/.test(sql)) return {rows:[{acquired:true}]};
+    if (/SELECT \* FROM account_creation_requests/.test(sql)) return {rows:[{requested_email:'team@example.com',provider:'other',mode:'manual'}]};
+    if (/^\s*INSERT INTO email_accounts/.test(sql)) return { rows: [{ ...STORED,protocol:'imap' }] };
     if (/^\s*UPDATE email_accounts/.test(sql)) return { rows: [stored] };
     if (sql === 'SELECT id, email_address, mail_node, imap_host, oauth_provider, oauth_refresh_token, oauth_access_token FROM email_accounts WHERE id = $1') {
       return { rows: stored ? [{ id: ID, email_address: stored.email_address, mail_node: false, oauth_provider: stored.oauth_provider ?? null, oauth_refresh_token: null, oauth_access_token: null }] : [] };
@@ -61,15 +65,15 @@ beforeEach(() => {
 });
 
 const send = (method, path, body) => fetch(`${base}/api/accounts${path}`, {
-  method, headers: { 'Content-Type': 'application/json' }, body: body === undefined ? undefined : JSON.stringify(body),
+  method, headers: { 'Content-Type': 'application/json','X-Requested-With':'MailExpert','Idempotency-Key':'10000000-0000-4000-8000-000000000099' }, body: body === undefined ? undefined : JSON.stringify(body),
 });
 
 describe('mailbox actions are journaled', () => {
   it('records a new mailbox', async () => {
-    const res = await send('POST', '', { name: 'Team', email_address: 'team@example.com', protocol: 'pop3' });
+    const res = await send('POST', '', {name:'Team',email_address:'team@example.com',imap_host:'imap.example.com',smtp_host:'smtp.example.com',auth_pass:'secret'});
     expect(res.status).toBe(200);
     expect(recordAudit).toHaveBeenCalledWith({
-      actorUserId: 'user-2', accountId: ID, action: 'mailbox.added', details: { protocol: 'pop3', oauthProvider: null },
+      actorUserId: 'user-2', accountId: ID, action: 'mailbox.added', details: {protocol:'imap',provider:'other',mode:'manual'},
     });
   });
 

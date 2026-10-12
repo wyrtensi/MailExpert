@@ -580,10 +580,11 @@ test('the demo threading diagnostics reject like the real 404 for an unknown mes
   );
 });
 
-test('the demo holds 50 mailboxes: Gmail ones in gmail mode and node ones on several domains', async () => {
+test('the demo holds 51 mailboxes: Gmail ones in gmail mode, node ones on several domains, one managed Proton', async () => {
   const accounts = await demoRequest('GET', '/accounts');
-  assert.equal(accounts.length, 50);
-  assert.equal(new Set(accounts.map(a => a.email_address)).size, 50);
+  assert.equal(accounts.length, 51);
+  assert.equal(new Set(accounts.map(a => a.email_address)).size, 51);
+  assert.equal(accounts.filter(a => a.mail_provider === 'proton' && a.connection_mode === 'managed').length, 1);
   assert.equal(accounts.filter(a => a.thread_mode === 'gmail' && a.oauth_provider === 'google').length, 24);
   const nodeDomains = new Set(accounts.filter(a => a.mail_node).map(a => a.email_address.split('@')[1]));
   assert.ok(nodeDomains.size >= 3);
@@ -791,4 +792,40 @@ test('a node mailbox keeps its address on its aliases and does not send from an 
   const gmail = accounts.find((a) => a.mail_node !== true && a.oauth_provider === 'google');
   const other = await demoRequest('POST', `/accounts/${gmail.id}/aliases`, { name: 'Work', email: 'work@example.org' });
   assert.equal(other.email, 'work@example.org');
+});
+
+test('the demo status lists the four fixed providers, a ready Proton worker and the manual policy', async () => {
+  const status = await demoRequest('GET', '/integrations/status');
+  assert.deepEqual(status.mailProviders.map(p => p.id), ['yahoo', 'yandex', 'mailru', 'icloud']);
+  assert.deepEqual(status.proton, { configured: true, available: true, code: null });
+  assert.deepEqual(status.manual, { allowPrivateHosts: false, allowNonstandardPorts: false });
+});
+
+test('the demo refuses a provider mailbox twice and a malformed request, and never keeps the password', async () => {
+  const body = { provider: 'icloud', email: 'Pat@iCloud.com', appPassword: 'secret-sentinel' };
+  const created = await demoRequest('POST', '/accounts/provider', body);
+  assert.equal(created.email_address, 'pat@icloud.com');
+  assert.equal(JSON.stringify(created).includes('secret-sentinel'), false);
+  assert.equal(JSON.stringify(await demoRequest('GET', '/accounts')).includes('secret-sentinel'), false);
+  await assert.rejects(() => demoRequest('POST', '/accounts/provider', body), err => err.code === 'already_connected');
+  await assert.rejects(() => demoRequest('POST', '/accounts/provider', { provider: 'other', email: 'a@b.co', appPassword: 'x' }), err => err.code === 'invalid_request');
+  await assert.rejects(() => demoRequest('POST', '/accounts/provider', { provider: 'yahoo', email: 'a@yahoo.com', appPassword: '' }), err => err.code === 'invalid_request');
+  await demoRequest('DELETE', `/accounts/${created.id}`);
+});
+
+test('the demo Proton connection: refusals, a human check, a replay and a cancel', async () => {
+  const start = (email, requestId) => demoRequest('POST', '/accounts/proton/connect', { email, password: 'secret-sentinel', requestId });
+  const bad = await start('bad-login@proton.me', 'r-bad-0000000000001');
+  assert.equal((await demoRequest('GET', `/accounts/proton/connect/${bad.id}`)).errorCode, 'invalid_credentials');
+  const hv = await start('hv-login@proton.me', 'r-hv-00000000000001');
+  assert.equal((await demoRequest('GET', `/accounts/proton/connect/${hv.id}`)).errorCode, 'verification_required');
+  const first = await start('plain-login@proton.me', 'r-plain-0000000001');
+  const replay = await start('plain-login@proton.me', 'r-plain-0000000001');
+  assert.equal(replay.id, first.id, 'the same attempt id answers the same attempt');
+  assert.equal((await demoRequest('POST', `/accounts/proton/connect/${first.id}/cancel`)).state, 'cancelled');
+  assert.equal((await demoRequest('GET', `/accounts/proton/connect/${first.id}`)).state, 'cancelled');
+  await assert.rejects(() => demoRequest('GET', '/accounts/proton/connect/unknown'), err => err.code === 'not_found');
+  const challenge = await start('second-login@proton.me', 'r-second-000000001');
+  assert.equal((await demoRequest('GET', `/accounts/proton/connect/${challenge.id}`)).state, 'needs_second_password');
+  await assert.rejects(() => demoRequest('POST', `/accounts/proton/connect/${challenge.id}/continue`, { challenge: '2fa', secret: 'x' }), err => err.code === 'invalid_challenge');
 });

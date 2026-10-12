@@ -35,3 +35,20 @@ describe('accountUpdateFromForm', () => {
     assert.equal('smtp_auth_pass' in updates, false);
   });
 });
+
+describe('managed mailboxes', () => {
+  const MANAGED = { mail_provider: 'proton', connection_mode: 'managed' };
+  it('managed_employee_edit_sends_only_metadata: even an administrator sends no connection fields', () => {
+    for (const isAdmin of [false, true]) {
+      const updates = accountUpdateFromForm(FORM, { isAdmin, account: MANAGED });
+      assert.deepEqual(updates, { name: 'Team', sender_name: null, color: '#000000', signature: null, categorization_enabled: true });
+    }
+  });
+  it('a mail node mailbox is metadata-only as well', () => {
+    assert.equal('imap_host' in accountUpdateFromForm(FORM, { isAdmin: true, account: { mail_node: true } }), false);
+  });
+  it('an ordinary mailbox is unchanged for an administrator', () => {
+    const updates = accountUpdateFromForm(FORM, { isAdmin: true, account: { mail_provider: 'yandex', connection_mode: 'preset' } });
+    assert.equal(updates.imap_host, 'imap.example.com');
+  });
+});

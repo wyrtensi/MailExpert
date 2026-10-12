@@ -1,7 +1,8 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import { api } from '../utils/api.js';
 import MailNodeSeats from './MailNodeSeats.jsx';
+import AdvancedConnectionFields from './addAccount/AdvancedConnectionFields.jsx';
 import {
   domainMailboxFormError,
   domainMailboxTaken,
@@ -15,14 +16,15 @@ import {
   seatsView,
 } from '../utils/mailNode.js';
 
+// Touch-sized (44 px) like the other add-account forms; also used by MailNodeForeignAliases.
 const inputStyle = {
-  width: '100%', padding: '9px 12px', background: 'var(--bg-tertiary)', border: '1px solid var(--border)',
+  width: '100%', minWidth: 0, minHeight: 44, padding: '9px 12px', background: 'var(--bg-tertiary)', border: '1px solid var(--border)',
   borderRadius: 7, color: 'var(--text-primary)', fontSize: 13, outline: 'none', boxSizing: 'border-box',
 };
 const labelStyle = { display: 'block', fontSize: 12, color: 'var(--text-secondary)', marginBottom: 5 };
 const hintStyle = { marginTop: 5, fontSize: 11, color: 'var(--text-tertiary)', lineHeight: 1.5 };
 const buttonStyle = (primary, enabled = true) => ({
-  padding: '9px 16px', borderRadius: 7, fontSize: 13, fontWeight: 500, cursor: enabled ? 'pointer' : 'default',
+  minHeight: 44, padding: '9px 16px', borderRadius: 7, fontSize: 13, fontWeight: 500, cursor: enabled ? 'pointer' : 'default',
   opacity: enabled ? 1 : 0.5,
   ...(primary
     ? { border: 'none', background: 'var(--accent)', color: 'var(--accent-text)' }
@@ -39,11 +41,17 @@ const buttonStyle = (primary, enabled = true) => ({
 // administrator turns an alias with another address into its own mailbox (D-16); a domain the node
 // cannot take mailboxes in is not chosen, and the form says why: a node domain not ready yet, or a
 // domain that is not on the node at all (gmail.com, say). `onCancel` adds a Cancel button.
-export default function DomainMailboxAddForm({ accounts = [], onCreated, initial = null, onCancel = null }) {
+// Inside the add-account dialog the form also takes `initialEmail` (its part before @ starts the
+// name field), `onEmailChange` (told the address as it is typed), `signal` (aborted when the
+// dialog leaves the form: a late answer changes nothing here) and `onAttemptStart` (told when the
+// create request is sent).
+export default function DomainMailboxAddForm({
+  accounts = [], onCreated, initial = null, onCancel = null, initialEmail = '', onEmailChange, signal, onAttemptStart,
+}) {
   const { t } = useTranslation();
   const [domains, setDomains] = useState(null);
   const [loadError, setLoadError] = useState(null);
-  const [localPart, setLocalPart] = useState(initial?.localPart ?? '');
+  const [localPart, setLocalPart] = useState(initial?.localPart ?? (initialEmail.split('@')[0] || ''));
   const [domain, setDomain] = useState('');
   const [initialDomainProblem, setInitialDomainProblem] = useState(null); // null | 'notReady' | 'notNode'
   const [senderName, setSenderName] = useState(initial?.senderName ?? '');
@@ -90,6 +98,14 @@ export default function DomainMailboxAddForm({ accounts = [], onCreated, initial
   const noSeat = !!seatsBlock && !seatsBlock.canTake;
   const canContinue = !busy && !formError && !noSeat;
   const email = `${normalizeLocalPart(localPart)}@${domain}`;
+  // Only an address the user typed here is reported: the prefilled name before @ joined to a node
+  // domain is not one, and reporting it would replace an address typed for another tile.
+  const typedRef = useRef(false);
+  useEffect(() => {
+    if (onEmailChange && localPart && typedRef.current) onEmailChange(email);
+    // The callback's identity does not matter.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [email]);
   const names = senderNamesPayload({ senderName, senderNameAlt });
   // The mailbox list shows the sender name unless another name is given.
   const listName = name.trim() || names.senderName || email;
@@ -105,10 +121,14 @@ export default function DomainMailboxAddForm({ accounts = [], onCreated, initial
     if (!canContinue) return;
     setBusy(true);
     setError(null);
+    onAttemptStart?.();
     try {
       const account = await api.addDomainMailbox({ localPart: normalizeLocalPart(localPart), domain, name: listName, ...names });
+      // The mailbox exists on the server whatever the form is doing: the caller decides what to do
+      // with a result that arrives after the form was left.
       onCreated(account);
     } catch (err) {
+      if (signal?.aborted) return;
       setError({ key: mailNodeErrorKey(err?.code), detail: mailNodeErrorDetail(err) });
       if (err?.code === 'no_free_seats' || err?.code === 'seats_unknown') loadSeats();
       setConfirming(false);
@@ -181,17 +201,20 @@ export default function DomainMailboxAddForm({ accounts = [], onCreated, initial
         <input
           id="domain-add-local"
           autoComplete="off"
+          autoCapitalize="none"
+          autoCorrect="off"
+          spellCheck={false}
           value={localPart}
           placeholder={t('admin.accounts.add.domainLocalPartPh')}
           aria-invalid={!!(localPart && addressError)}
-          onChange={edit(setLocalPart)}
+          onChange={(e) => { typedRef.current = true; edit(setLocalPart)(e); }}
           style={{ ...inputStyle, flex: 1 }}
         />
         <span style={{ color: 'var(--text-tertiary)', fontSize: 13 }}>@</span>
         <select
           aria-label={t('admin.accounts.add.domainDomainLabel')}
           value={domain}
-          onChange={edit(setDomain)}
+          onChange={(e) => { typedRef.current = true; edit(setDomain)(e); }}
           style={{ ...inputStyle, flex: 1 }}
         >
           {domains.map((d) => <option key={d} value={d}>{d}</option>)}
@@ -218,25 +241,27 @@ export default function DomainMailboxAddForm({ accounts = [], onCreated, initial
       />
       <div style={hintStyle}>{t('admin.accounts.add.senderNameHint')}</div>
 
-      <label htmlFor="domain-add-sender-alt" style={{ ...labelStyle, marginTop: 14 }}>{t('admin.accounts.add.senderNameAltLabel')}</label>
-      <input
-        id="domain-add-sender-alt"
-        value={senderNameAlt}
-        maxLength={200}
-        placeholder={t('admin.accounts.add.senderNameAltPh')}
-        onChange={edit(setSenderNameAlt)}
-        style={inputStyle}
-      />
-      <div style={hintStyle}>{t('admin.accounts.add.senderNameAltHint')}</div>
+      <AdvancedConnectionFields managed="domain">
+        <label htmlFor="domain-add-sender-alt" style={{ ...labelStyle, marginTop: 14 }}>{t('admin.accounts.add.senderNameAltLabel')}</label>
+        <input
+          id="domain-add-sender-alt"
+          value={senderNameAlt}
+          maxLength={200}
+          placeholder={t('admin.accounts.add.senderNameAltPh')}
+          onChange={edit(setSenderNameAlt)}
+          style={inputStyle}
+        />
+        <div style={hintStyle}>{t('admin.accounts.add.senderNameAltHint')}</div>
 
-      <label htmlFor="domain-add-name" style={{ ...labelStyle, marginTop: 14 }}>{t('admin.accounts.add.domainNameLabel')}</label>
-      <input
-        id="domain-add-name"
-        value={name}
-        placeholder={t('admin.accounts.add.domainNamePh')}
-        onChange={edit(setName)}
-        style={inputStyle}
-      />
+        <label htmlFor="domain-add-name" style={{ ...labelStyle, marginTop: 14 }}>{t('admin.accounts.add.domainNameLabel')}</label>
+        <input
+          id="domain-add-name"
+          value={name}
+          placeholder={t('admin.accounts.add.domainNamePh')}
+          onChange={edit(setName)}
+          style={inputStyle}
+        />
+      </AdvancedConnectionFields>
 
       {seatsLine}
 

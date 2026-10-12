@@ -67,10 +67,13 @@ describe('GET /api/accounts health', () => {
     });
   });
 
-  it('adds only the health code and keeps sync_error as the sole error text', async () => {
+  it('adds safe status codes and keeps sync_error as the sole error text', async () => {
     const row = { ...ROW, last_sync: new Date(), sync_error: 'Connection refused' };
     const [account] = await list([row]);
-    expect(Object.keys(account).sort()).toEqual([...Object.keys(row), 'aliases', 'health', 'provider_ids_backfill', 'thread_recompute'].sort());
+    expect(Object.keys(account).sort()).toEqual([...Object.keys(row), 'aliases', 'health', 'provider_ids_backfill', 'thread_recompute', 'can_reconnect_proton', 'proton_status'].sort());
+    expect(account.can_reconnect_proton).toBe(false);
+    // Only a managed Proton mailbox with a link ever carries a status code.
+    expect(account.proton_status).toBeNull();
     expect(account.sync_error).toBe('Connection refused');
     expect(account.health).toBe('failed');
   });

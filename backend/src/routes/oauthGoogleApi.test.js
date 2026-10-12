@@ -30,7 +30,8 @@ vi.mock('../services/oauth/googleApps.js', () => ({
   resolveGoogleConfig: vi.fn(async () => config.value),
   findKnownGoogleEmails: vi.fn(async () => ['old@gmail.com']),
 }));
-vi.mock('../services/oauth/oauthState.js', () => ({
+vi.mock('../services/oauth/oauthState.js', async (importOriginal) => ({
+  parseAttemptId: (await importOriginal()).parseAttemptId,
   createOAuthState: vi.fn(async () => ({ state: 'S'.repeat(43), codeChallenge: 'C'.repeat(43) })),
 }));
 vi.mock('../services/oauth/googleLaunch.js', async (importOriginal) => ({
@@ -65,6 +66,7 @@ beforeEach(() => {
   query.mockResolvedValue({ rows: [] });
 });
 
+const ATTEMPT = 'a1b2c3d4-0000-4000-8000-0123456789ab';
 const start = (email, user = 'u1', names = {}) => fetch(`${base}/start`, {
   method: 'POST',
   headers: { 'Content-Type': 'application/json', ...(user ? { 'x-test-user': user } : {}) },
@@ -90,6 +92,25 @@ describe('POST /api/oauth/google/start', () => {
     const google = new URL(url);
     expect(google.searchParams.get('client_id')).toBe(CLIENT_ID);
     expect(google.searchParams.get('login_hint')).toBe('a@gmail.com');
+  });
+
+  it('carries the attempt id of the form into the state, so the callback can hand it back', async () => {
+    const res = await start('a@gmail.com', 'u1', { attemptId: ATTEMPT });
+    expect(res.status).toBe(200);
+    expect(createOAuthState).toHaveBeenCalledWith(expect.objectContaining({ attemptId: ATTEMPT }));
+  });
+
+  it('still starts without an attempt id', async () => {
+    expect((await start('a@gmail.com')).status).toBe(200);
+    expect(createOAuthState).toHaveBeenCalledWith(expect.objectContaining({ attemptId: null }));
+  });
+
+  it('refuses an attempt id that is not opaque, before selecting an app', async () => {
+    const res = await start('a@gmail.com', 'u1', { attemptId: '<b>x</b> not an id at all' });
+    expect(res.status).toBe(400);
+    expect(await res.json()).toMatchObject({ code: 'attempt_invalid' });
+    expect(selectGoogleApp).not.toHaveBeenCalled();
+    expect(createOAuthState).not.toHaveBeenCalled();
   });
 
   it('carries the sender names from the form to the callback through the state', async () => {

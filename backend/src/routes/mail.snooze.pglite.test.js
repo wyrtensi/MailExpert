@@ -15,7 +15,8 @@ vi.mock('../middleware/auth.js', () => ({
 }));
 vi.mock('../index.js', () => ({
   imapManager: {
-    ensureFolder: vi.fn(async () => {}),
+    // The real one answers the server path the folder has (a managed Proton mailbox: Folders/Snoozed).
+    ensureFolder: vi.fn(async (_account, folder) => ({ path: folder, created: false })),
     moveMessage: vi.fn(async () => 500),
     _guardMoveUid: vi.fn(),
     _unguardMoveUid: vi.fn(),
@@ -24,6 +25,8 @@ vi.mock('../index.js', () => ({
 
 const express = (await import('express')).default;
 const mailRoutes = (await import('./mail.js')).default;
+const { imapManager } = await import('../index.js');
+const { ImapManager } = await import('../services/imapManager.js');
 
 const ACCOUNT = '00000000-0000-4000-8000-00000000000a';
 const MSG = '10000000-0000-4000-8000-000000000001';
@@ -36,14 +39,14 @@ beforeAll(async () => {
   db = new PGlite();
   dbState.query = async (text, params) => db.query(text, params);
   await db.exec(`
-    CREATE TABLE email_accounts (id uuid PRIMARY KEY, name text, folder_mappings jsonb);
+    CREATE TABLE email_accounts (id uuid PRIMARY KEY, name text, folder_mappings jsonb, enabled boolean NOT NULL DEFAULT true);
     CREATE TABLE folders (account_id uuid NOT NULL, path text NOT NULL, name text NOT NULL,
                           delimiter varchar(10), special_use text, no_select boolean NOT NULL DEFAULT false,
                           total_count int NOT NULL DEFAULT 0, unread_count int NOT NULL DEFAULT 0);
     CREATE TABLE messages (
       id uuid PRIMARY KEY, uid int, folder text NOT NULL, message_id text, thread_id text,
       in_reply_to text, thread_references text, is_read boolean NOT NULL DEFAULT true,
-      account_id uuid NOT NULL, is_deleted boolean NOT NULL DEFAULT false
+      account_id uuid NOT NULL, is_deleted boolean NOT NULL DEFAULT false, read_changed_at timestamptz
     );
     CREATE TABLE snoozed_messages (
       id serial PRIMARY KEY, snoozed_by uuid, account_id uuid NOT NULL, message_id_header text NOT NULL,
@@ -103,5 +106,47 @@ describe('POST /api/mail/messages/:id/snooze in Postgres', () => {
     expect(res.status).toBe(400);
     expect((await res.json()).error).toBe('Message is already snoozed');
     expect(await records()).toHaveLength(1);
+  });
+
+  it('snooze_uses_translated_path_through_wakeup', async () => {
+    // A managed Proton mailbox keeps user folders under Folders/: ensureFolder answers that path.
+    imapManager.ensureFolder.mockImplementationOnce(async () => ({ path: 'Folders/Snoozed', created: true }));
+    imapManager.moveMessage.mockClear();
+    await db.query(`INSERT INTO messages (id, uid, folder, message_id, account_id, is_read) VALUES ($1, 7, 'INBOX', '<p@x>', $2, false)`, [MSG, ACCOUNT]);
+
+    const res = await snooze(inDays(2));
+
+    expect(res.status).toBe(200);
+    expect(imapManager.ensureFolder).toHaveBeenLastCalledWith(expect.objectContaining({ id: ACCOUNT }), 'Snoozed', { resolvePath: true });
+    expect(imapManager.moveMessage).toHaveBeenCalledWith(expect.objectContaining({ id: ACCOUNT }), 7, 'INBOX', 'Folders/Snoozed');
+    expect((await db.query('SELECT folder, uid FROM messages WHERE id = $1', [MSG])).rows).toEqual([{ folder: 'Folders/Snoozed', uid: 500 }]);
+    expect((await db.query('SELECT original_folder, snoozed_folder FROM snoozed_messages')).rows)
+      .toEqual([{ original_folder: 'INBOX', snoozed_folder: 'Folders/Snoozed' }]);
+
+    // The snooze is live where the letter really is: a second snooze is refused.
+    imapManager.ensureFolder.mockImplementationOnce(async () => ({ path: 'Folders/Snoozed', created: false }));
+    const again = await snooze(inDays(3));
+    expect(again.status).toBe(400);
+
+    // Wake-up finds the letter in Folders/Snoozed and moves it back from there.
+    await db.query(`UPDATE snoozed_messages SET snooze_until = now() - interval '1 minute'`);
+    const engine = {
+      _secondaryLoginBlocked: () => false, _guardMoveUid: vi.fn(), _unguardMoveUid: vi.fn(), broadcast: vi.fn(),
+      moveMessageGetNewUid: vi.fn(async () => 900), setFlag: vi.fn(async () => {}),
+    };
+    await ImapManager.prototype._runSnoozeWakeup.call(engine);
+    expect(engine.moveMessageGetNewUid).toHaveBeenCalledWith(expect.objectContaining({ id: ACCOUNT }), 500, 'Folders/Snoozed', 'INBOX', { background: true });
+    expect((await db.query('SELECT folder, uid FROM messages WHERE id = $1', [MSG])).rows).toEqual([{ folder: 'INBOX', uid: 900 }]);
+    expect(await records()).toEqual([]);
+  });
+
+  it('refuses a letter already in the translated Snoozed folder', async () => {
+    imapManager.ensureFolder.mockImplementationOnce(async () => ({ path: 'Folders/Snoozed', created: false }));
+    imapManager.moveMessage.mockClear();
+    await db.query(`INSERT INTO messages (id, uid, folder, message_id, account_id) VALUES ($1, 7, 'Folders/Snoozed', '<q@x>', $2)`, [MSG, ACCOUNT]);
+    const res = await snooze(inDays(2));
+    expect(res.status).toBe(400);
+    expect((await res.json()).error).toBe('Message is already in Snoozed folder');
+    expect(imapManager.moveMessage).not.toHaveBeenCalled();
   });
 });

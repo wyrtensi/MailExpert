@@ -20,6 +20,7 @@ import { createIdentityGate } from './identityGate.js';
 import { defaultEmptyBody } from './defaultEmptyBody.js';
 import { bodyErrorHandler } from './errorHandlers.js';
 
+const CREATION_PATHS = ['/api/accounts', '/api/accounts/provider', '/api/accounts/proton/connect', '/api/accounts/proton/connect/attempt/continue'];
 const LARGE_BODY_PATHS = Object.keys(LARGE_BODY_PARSERS);
 const TWO_MB = 2 * 1024 * 1024;
 // Over the global 1 MB limit, so only the larger limits can accept it.
@@ -95,7 +96,7 @@ function buildApp({ identityGate }) {
   app.post('/api/auth/login', (req, res) => res.json({ received: req.body }));
   const routes = express.Router();
   routes.use(requireAuth);
-  routes.post([...LARGE_BODY_PATHS, '/api/rules'], async (req, res) => {
+  routes.post([...LARGE_BODY_PATHS, ...CREATION_PATHS, '/api/rules', '/api/accounts/one/metadata'], async (req, res) => {
     handling.emit('handling');
     await heldHandler;
     res.json({ received: req.body.text.length });
@@ -375,4 +376,18 @@ describe('JSON body limits and sign-in', () => {
     expect(res.status).toBe(200);
     expect(await res.json()).toEqual({ received: { username: 'a' } });
   });
+});
+
+it.each(CREATION_PATHS)('caps creation JSON at 32 KiB before its handler: %s', async path => {
+  expect((await post(path, JSON.stringify({text: 'x'.repeat(32768)}), {cookie})).status).toBe(413);
+  expect(parsed).toEqual([]);
+  expect((await post(path, JSON.stringify({text: 'ok'}), {cookie})).status).toBe(200);
+});
+it.each(CREATION_PATHS)('guards creation before parsing: %s', async path => {
+  expect((await post(path, '{')).status).toBe(401);
+  expect((await fetchFully(path, {method:'POST',headers:{'Content-Type':'application/json',cookie},body:'{'})).status).toBe(403);
+  expect((await post(path, '{', {}, google.base)).status).toBe(401);
+});
+it('does not apply the creation cap to account metadata routes', async () => {
+  expect((await post('/api/accounts/one/metadata', JSON.stringify({text:'x'.repeat(40000)}), {cookie})).status).toBe(200);
 });

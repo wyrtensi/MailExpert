@@ -195,7 +195,33 @@ last=$(<"$A/state/backup-last.json")
 [ "$(jq -r .verified <<<"$last")" = false ] || fail "backup-last.json verified: $last"
 [ "$(on "$A" snapshots_here --tag manual | jq length)" = 1 ] || fail "one manual snapshot expected"
 [ ! -e "$A/backups/staging" ] || fail "staging was left behind"
+[[ $OUT == *"proton worker: snapshot gate closed"* && $OUT == *"proton worker state added"* && $OUT == *"snapshot gate open"* ]] ||
+  fail "the backup did not hold the Proton worker's gate around its capture"
+[ "$(docker exec "$A_PROJECT-proton-worker" python /opt/mailexpert-proton/worker.py --request GET /healthz | jq -r .state)" = idle ] ||
+  fail "the Proton worker's gate stayed closed after the backup"
 pass "manual backup"
+
+# 5b. A backup killed (SIGKILL, no EXIT trap) while it holds the Proton worker's gate: the gate
+# stays closed for now, status.sh calls it a problem, and the next backup ends it and runs.
+proton_health() { docker exec "$A_PROJECT-proton-worker" python /opt/mailexpert-proton/worker.py --request GET /healthz; }
+setsid bash "$DEPLOY_DIR/backup.sh" --prefix "$A" --tag manual >/dev/null 2>&1 &
+killed=$!
+for _ in $(seq 120); do
+  [ "$(proton_health | jq -r .state)" = snapshot ] && break
+  sleep 0.5
+done
+[ "$(proton_health | jq -r .state)" = snapshot ] || fail "the killed backup never closed the gate"
+kill -9 -- "-$killed" 2>/dev/null || kill -9 "$killed"
+wait "$killed" 2>/dev/null || true
+sleep 1
+[ "$(proton_health | jq -r .state)" = snapshot ] || fail "the gate of a killed backup is open at once (expected: held until it expires or is reclaimed)"
+OUT=$(deploy status.sh --prefix "$A" 2>&1) || true
+[[ $OUT == *"snapshot gate is closed with no backup running"* ]] || fail "status.sh does not report the stuck gate: $OUT"
+rm -rf "$A/backups/staging"
+expect_exit 0 deploy backup.sh --prefix "$A" --tag manual
+[[ $OUT == *"ending the Proton snapshot gate left by an earlier backup"* ]] || fail "the next backup did not end the stale gate"
+[ "$(proton_health | jq -r .state)" = idle ] || fail "the gate stayed closed after the reclaiming backup"
+pass "a killed backup's Proton gate is reported and reclaimed by the next backup"
 
 # 6. --verify: restore into a scratch database, no pending migration, the credential decrypts
 # with the key from the snapshot; nothing printed but counts, nothing left behind.
@@ -319,6 +345,9 @@ expect_exit 0 deploy install.sh --prefix "$B"
 [ "$(curl -fsS "http://127.0.0.1:$B_PORT/api/health/ready" | jq -r .status)" = ready ] || fail "B is not ready"
 [ "$(credential "$B" check)" = match ] || fail "the credential does not decrypt on B"
 [ "$(on "$B" app_psql <<<"SELECT count(*) FROM users WHERE username = 'e2e-owner';")" = 1 ] || fail "the user did not move"
+health=$(proton_isolation "$B_PROJECT")
+[ "$(jq -r .state <<<"$health")" = idle ] || fail "B's proton worker: $health"
+docker exec "$B_PROJECT-proton-worker" test -d /var/lib/mailexpert-proton/bridge/gnupg || fail "A's Proton worker state did not move to B"
 pass "B runs with A's data and keys"
 
 # 14. B backs up into the same repository under its own host and its verify passes; its retention
@@ -364,6 +393,9 @@ derive_version() {
   docker commit --change "ENV BUILD_SHA=$sha" "$cid" "$IMAGE_PREFIX/mailexpert-backend:$tag" >/dev/null
   docker rm "$cid" >/dev/null
   docker tag "$IMAGE_PREFIX/mailexpert-frontend:$VERSION" "$IMAGE_PREFIX/mailexpert-frontend:$tag"
+  if docker image inspect "$IMAGE_PREFIX/mailexpert-proton-worker:$VERSION" >/dev/null 2>&1; then
+    docker tag "$IMAGE_PREFIX/mailexpert-proton-worker:$VERSION" "$IMAGE_PREFIX/mailexpert-proton-worker:$tag"
+  fi
   printf '%s
 ' "$tag"
 }
@@ -379,6 +411,8 @@ sha=$(running_sha)
 [ "sha-${sha:0:12}" = "$V_OK" ] || fail "B runs $sha after the update"
 [ "$(on "$B" migration_count)" = $((base + 1)) ] || fail "the new migration was not applied"
 [ -f "$B/backups/pre-update-$VERSION.dump" ] || fail "no local pre-update dump"
+[ -s "$B/backups/pre-update-$VERSION.proton/proton-state.tar" ] || fail "no Proton worker state next to the pre-update dump"
+proton_isolation "$B_PROJECT" >/dev/null
 [ "$(on "$B" snapshots_here --tag pre-update | jq length)" = 1 ] || fail "no pre-update snapshot"
 [ "$(credential "$B" check)" = match ] || fail "the credential after the update"
 pass "update to a version with a new migration"

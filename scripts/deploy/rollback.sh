@@ -41,6 +41,8 @@ LIB_DIR=$SCRIPT_DIR/lib
 . "$LIB_DIR/system.sh"
 # shellcheck source=lib/updater.sh
 . "$LIB_DIR/updater.sh"
+# shellcheck source=lib/proton.sh
+. "$LIB_DIR/proton.sh"
 exit_on_unexpected_failure
 
 # 1 once backend and frontend are stopped: before that every failure exits 3, nothing changed.
@@ -85,6 +87,7 @@ restore_into() {
 # left the database as it was.
 restart_old() {
   app_compose start backend frontend >/dev/null 2>&1 || warn "could not start backend and frontend again: run install.sh --prefix $OPT_PREFIX"
+  if proton_worker_installed; then app_compose start proton-worker >/dev/null 2>&1 || warn "could not start the Proton worker again: run install.sh --prefix $OPT_PREFIX"; fi
 }
 
 # swap_databases <db> <restored copy> <name for the replaced one>: the restored copy takes the
@@ -182,10 +185,8 @@ main() {
   fi
   # Old code on a newer schema is what this script undoes, so the target's migrations are not
   # compared with the database here: the dump brings the schema of that version.
-  ensure_image "$CFG_IMAGE_PREFIX/mailexpert-backend:$to"
-  ensure_image "$CFG_IMAGE_PREFIX/mailexpert-frontend:$to"
   profiles=$(env_get "$ENV_FILE" COMPOSE_PROFILES) || profiles=''
-  if has_profile "$profiles" tenant; then ensure_image "$CFG_IMAGE_PREFIX/mailexpert-tenant-worker:$to"; fi
+  ensure_target_images "$full" "$to" "$profiles"
   edge=$(previous_edge_image "$to") || edge=''
   if [ "$swapped" = 0 ]; then
     # The restored copy sits next to the live database until the swap, and the dump stays.
@@ -217,6 +218,8 @@ main() {
   STOPPED=1
   if [ "$swapped" = 0 ]; then
     log "stopping backend and frontend"
+    # The Proton worker first: it runs in the backend's namespace and its state goes back too.
+    if proton_worker_installed; then app_compose stop proton-worker >/dev/null; fi
     app_compose stop backend frontend >/dev/null
     log "restoring $dump into $scratch"
     # client_min_messages: no NOTICE about a scratch database that is not there, in the output.
@@ -237,6 +240,18 @@ main() {
     fi
     printf '%s\n%s\n%s\n' "$to" "$kept" "$from" >"$marker"
     log "the database $db is now the dump; the one it replaced is kept as $kept (drop it once sure: dropdb $kept in the postgres container)"
+  fi
+  # Letters queued in the dump are never sent again by themselves (lib/proton.sh), and the Proton
+  # worker gets the state update.sh kept next to the dump. A target without the worker leaves its
+  # volume behind: the state is cleared here, while this checkout still has the service, so that
+  # a later update starts clean instead of with links the restored database no longer has. All
+  # safe to repeat.
+  quarantine_restored_sends
+  if commit_has_proton_worker "$APP_DIR" "$full"; then
+    restore_proton_state "$(proton_dump_dir "${dump:-$BACKUP_DIR/pre-update-$to.dump}")"
+  elif proton_worker_installed; then
+    clear_proton_state
+    warn "$to has no Proton worker: its state was cleared; managed Proton mailboxes need adding again after a later update"
   fi
   if [ -n "$edge" ]; then env_set "$EDGE_ENV" EDGE_IMAGE "$edge"; fi
   # install.sh of a version older than the per-project unit names writes the default-name units

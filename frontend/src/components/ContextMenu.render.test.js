@@ -111,3 +111,30 @@ describe('ContextMenu move-to picker favorites show their custom label (#505)', 
     assert.ok(!favLabelSpan.textContent.includes('Taxes'), 'the real folder name is not shown as visible text in the favorite row');
   });
 });
+
+describe('ContextMenu snooze matches the server rule', () => {
+  let host, root;
+  before(() => {
+    useStore.getState().setUser({ id: 'u1' });
+    useStore.getState().setAccounts([{ id: 'acct', enabled: true, email_address: 'x@y.z', color: '#fff' }]);
+    host = dom.window.document.createElement('div');
+    dom.window.document.body.appendChild(host);
+    root = createRoot(host);
+  });
+  after(async () => {
+    await React.act(async () => root.unmount());
+    host.remove();
+  });
+  const hasSnooze = async (folder) => {
+    await React.act(async () => {
+      root.render(React.createElement(ContextMenu, { x: 10, y: 10, message: { ...MESSAGE, folder }, onClose: () => {}, onAction: () => {} }));
+    });
+    return host.textContent.includes('contextMenu.snooze.label');
+  };
+
+  test('is offered in the inbox and hidden in Snoozed and in the managed Proton Folders/Snoozed', async () => {
+    assert.equal(await hasSnooze('INBOX'), true);
+    assert.equal(await hasSnooze('Snoozed'), false);
+    assert.equal(await hasSnooze('Folders/Snoozed'), false);
+  });
+});

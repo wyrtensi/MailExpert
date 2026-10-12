@@ -31,6 +31,8 @@ LIB_DIR=$SCRIPT_DIR/lib
 . "$LIB_DIR/backup.sh"
 # shellcheck source=lib/ops.sh
 . "$LIB_DIR/ops.sh"
+# shellcheck source=lib/proton.sh
+. "$LIB_DIR/proton.sh"
 exit_on_unexpected_failure
 
 # How long to wait for the locks (take_backup_locks): another backup.sh (update.sh's pre-update
@@ -62,6 +64,8 @@ EOF
 # shellcheck disable=SC2317,SC2329 # invoked only through `trap finish EXIT` in main, not called directly
 finish() {
   local status=$?
+  # The Proton worker's gate never stays closed after a backup, whatever stopped it.
+  proton_snapshot_end || true
   if [ -n "$VERIFY_CONTAINER" ]; then docker rm -fv "$VERIFY_CONTAINER" >/dev/null 2>&1 || true; fi
   if [ -n "$VERIFY_DIR" ]; then rm -rf "$VERIFY_DIR"; fi
   if [ -n "$STAGING" ]; then rm -rf "$STAGING"; fi
@@ -286,7 +290,19 @@ main() {
   rm -rf "$STAGING"
   mkdir -m 700 "$STAGING"
   started=$SECONDS
+  # The managed Proton worker: no Proton send in flight and Bridge stopped while the database and
+  # its state are captured, so both describe the same moment (lib/proton.sh). Bounded at 60 s;
+  # a busy worker fails the backup before the dump. Reopened right after the capture, and by
+  # finish whatever happens.
+  # proton_snapshot_begin is called directly (not in $(...)): PROTON_SNAPSHOT must reach finish.
+  proton_snapshot_begin "backup-$(gen_hex 6)" >/dev/null ||
+    die "$(proton_refusal_text)"
   dump_database "$STAGING"
+  # The gate must have held through the dump and must hold through the state's capture.
+  proton_snapshot_check "$PROTON_SNAPSHOT"
+  stage_proton_state "$STAGING"
+  proton_snapshot_check "$PROTON_SNAPSHOT"
+  proton_snapshot_end || die "the Proton worker's gate was not held to the end of the capture; nothing is uploaded"
   seconds=$((SECONDS - started))
   bytes=$(stat -c %s "$STAGING/db.dump")
   counts=$(<"$STAGING/counts.json")
@@ -294,6 +310,7 @@ main() {
   if [ -n "$keep" ]; then
     cp -p "$STAGING/db.dump" "$keep"
     log "dump kept at $keep"
+    keep_proton_state "$STAGING" "$keep"
   fi
   [ "$local_only" = 0 ] || return 0
 

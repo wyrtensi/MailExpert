@@ -23,7 +23,8 @@ import {
 } from './labels.js';
 
 const account = { id: 'acct-1' };
-const mkImap = () => ({ ensureFolder: vi.fn(), copyMessage: vi.fn(), removeMessageCopy: vi.fn() });
+// ensureFolder answers the real server path, as imapManager.ensureFolder does.
+const mkImap = () => ({ ensureFolder: vi.fn(async (_account, folder) => ({ path: folder, created: false })), copyMessage: vi.fn(), removeMessageCopy: vi.fn() });
 
 beforeEach(() => { query.mockReset(); fanOutReadToSiblings.mockReset(); });
 
@@ -55,8 +56,8 @@ describe('applyLabel', () => {
     const imap = mkImap();
     imap.copyMessage.mockResolvedValueOnce(77);
     const r = await applyLabel(imap, account, { uid: 7, folder: 'INBOX' }, 'Todo');
-    expect(r).toEqual({ applied: true, uid: 77 });
-    expect(imap.ensureFolder).toHaveBeenCalledWith(account, 'Todo');
+    expect(r).toEqual({ applied: true, uid: 77, folder: 'Todo' });
+    expect(imap.ensureFolder).toHaveBeenCalledWith(account, 'Todo', { resolvePath: true });
     expect(imap.copyMessage).toHaveBeenCalledWith('acct-1', 7, 'INBOX', 'Todo');
   });
 
@@ -64,13 +65,13 @@ describe('applyLabel', () => {
     const imap = mkImap();
     imap.copyMessage.mockResolvedValueOnce(null);
     const r = await applyLabel(imap, account, { uid: 7, folder: 'INBOX' }, 'Todo');
-    expect(r).toEqual({ applied: true, uid: null });
+    expect(r).toEqual({ applied: true, uid: null, folder: 'Todo' });
   });
 
   it('is a no-op when the message already lives in the label folder', async () => {
     const imap = mkImap();
     const r = await applyLabel(imap, account, { uid: 7, folder: 'Todo' }, 'Todo');
-    expect(r).toEqual({ applied: false, uid: 7, reason: 'already-there' });
+    expect(r).toEqual({ applied: false, uid: 7, reason: 'already-there', folder: 'Todo' });
     expect(imap.ensureFolder).not.toHaveBeenCalled();
     expect(imap.copyMessage).not.toHaveBeenCalled();
   });
@@ -81,8 +82,44 @@ describe('applyLabel', () => {
     const r = await applyLabel(imap, account, {
       account_id: 'acct-1', uid: 7, folder: 'INBOX', message_id: '<m>',
     }, 'Todo');
-    expect(r).toEqual({ applied: false, uid: 91, reason: 'already-labelled' });
+    expect(r).toEqual({ applied: false, uid: 91, reason: 'already-labelled', folder: 'Todo' });
     expect(imap.ensureFolder).not.toHaveBeenCalled();
+    expect(imap.copyMessage).not.toHaveBeenCalled();
+  });
+});
+
+// A provider whose server keeps user folders in a namespace (managed Proton: Folders/) answers
+// another path than the one asked for. The COPY, and what the caller stores, use that path.
+describe('applyLabel with a translated folder path', () => {
+  it('labels_copy_and_storage_use_resolved_path', async () => {
+    const imap = mkImap();
+    imap.ensureFolder.mockResolvedValueOnce({ path: 'Folders/Todo', created: true });
+    imap.copyMessage.mockResolvedValueOnce(77);
+    query.mockResolvedValue({ rows: [] });
+    const message = { account_id: 'acct-1', uid: 7, folder: 'INBOX', message_id: '<m>' };
+
+    const r = await applyLabel(imap, account, message, 'Todo');
+
+    expect(imap.ensureFolder).toHaveBeenCalledWith(account, 'Todo', { resolvePath: true });
+    expect(imap.copyMessage).toHaveBeenCalledWith('acct-1', 7, 'INBOX', 'Folders/Todo');
+    expect(r).toEqual({ applied: true, uid: 77, folder: 'Folders/Todo' });
+    // The existing-copy lookup looked in the translated folder too.
+    expect(query.mock.calls.map(([, params]) => params[1])).toEqual(['Todo', 'Folders/Todo']);
+
+    // GTD stores the resolved path from ensureLabelFolders; a later label then finds its copy there.
+    const stored = await ensureLabelFolders({ ensureFolder: vi.fn(async () => ({ path: 'Folders/Todo', created: false })) }, account, ['Todo']);
+    expect(stored).toEqual([{ folder: 'Todo', path: 'Folders/Todo', created: false }]);
+    query.mockReset().mockResolvedValueOnce({ rows: [{ uid: 77 }] });
+    const again = await applyLabel(mkImap(), account, message, stored[0].path);
+    expect(again).toEqual({ applied: false, uid: 77, reason: 'already-labelled', folder: 'Folders/Todo' });
+  });
+
+  it('finds a copy already in the translated folder instead of copying twice', async () => {
+    const imap = mkImap();
+    imap.ensureFolder.mockResolvedValueOnce({ path: 'Folders/Todo', created: false });
+    query.mockResolvedValueOnce({ rows: [] }).mockResolvedValueOnce({ rows: [{ uid: 55 }] });
+    const r = await applyLabel(imap, account, { account_id: 'acct-1', uid: 7, folder: 'INBOX', message_id: '<m>' }, 'Todo');
+    expect(r).toEqual({ applied: false, uid: 55, reason: 'already-labelled', folder: 'Folders/Todo' });
     expect(imap.copyMessage).not.toHaveBeenCalled();
   });
 });

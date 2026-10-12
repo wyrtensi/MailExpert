@@ -17,6 +17,13 @@
     { "name": "missing reconnect flag is treated as false", "account": { "enabled": true, "sync_error": null, "lastSyncAgeMs": 60000 }, "expected": "healthy" },
     { "name": "disabled beats everything", "account": { "enabled": false, "oauth_reconnect_required": true, "sync_error": "oauth_reconnect_required", "lastSyncAgeMs": null }, "expected": "disabled" },
     { "name": "disabled healthy account", "account": { "enabled": false, "oauth_reconnect_required": false, "sync_error": null, "lastSyncAgeMs": 60000 }, "expected": "disabled" },
-    { "name": "missing enabled flag is treated as enabled", "account": { "oauth_reconnect_required": false, "sync_error": null, "lastSyncAgeMs": 60000 }, "expected": "healthy" }
+    { "name": "missing enabled flag is treated as enabled", "account": { "oauth_reconnect_required": false, "sync_error": null, "lastSyncAgeMs": 60000 }, "expected": "healthy" },
+    { "name": "lost managed Proton session beats a sync error", "account": { "enabled": true, "sync_error": "Authentication failed", "proton_status": "proton_reconnect_required", "lastSyncAgeMs": 60000 }, "expected": "proton_reconnect_required" },
+    { "name": "Proton reconnect code pushed over WebSocket", "account": { "enabled": true, "sync_error": "proton_reconnect_required", "lastSyncAgeMs": 60000 }, "expected": "proton_reconnect_required" },
+    { "name": "Proton service offline beats a sync error and stale", "account": { "enabled": true, "sync_error": "Connection refused", "proton_status": "proton_unavailable", "lastSyncAgeMs": null }, "expected": "proton_unavailable" },
+    { "name": "lost Proton session beats Proton offline", "account": { "enabled": true, "sync_error": "proton_reconnect_required", "proton_status": "proton_unavailable", "lastSyncAgeMs": 60000 }, "expected": "proton_reconnect_required" },
+    { "name": "OAuth reconnect beats a Proton status", "account": { "enabled": true, "oauth_reconnect_required": true, "proton_status": "proton_reconnect_required", "lastSyncAgeMs": 60000 }, "expected": "oauth_reconnect_required" },
+    { "name": "disabled beats a lost Proton session", "account": { "enabled": false, "proton_status": "proton_reconnect_required", "lastSyncAgeMs": 60000 }, "expected": "disabled" },
+    { "name": "an unknown Proton status is ignored", "account": { "enabled": true, "sync_error": null, "proton_status": "something_else", "lastSyncAgeMs": 60000 }, "expected": "healthy" }
   ]
 }

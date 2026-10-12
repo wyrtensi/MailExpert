@@ -36,6 +36,12 @@ case " $line " in
     n=$(cat "$SWAP_COUNT" 2>/dev/null || echo 0)
     echo $((n + 1)) >"$SWAP_COUNT"
     [ "$n" -ge "${STUB_SWAP_FAILS:-0}" ] || exit 1 ;;
+  # The Proton worker of a version that has it (lib/proton.sh): its container, volumes, image and
+  # the root helper that clears or restores its state.
+  *" ps --all --quiet proton-worker "* | *" ps --quiet proton-worker "*) echo worker-short ;;
+  *".Destination"*) echo me-test_volume ;;
+  *" inspect -f {{.Config.Image}} "*) echo ghcr.io/x/mailexpert-proton-worker:sha-0123456789ab ;;
+  *" run --rm -i --network none --user 0 "*) echo 0 ;;
 esac
 exit 0
 STUB_EOF
@@ -52,6 +58,7 @@ STUB_EOF
   cat >"$P/app/scripts/deploy/install.sh" <<'STUB_EOF'
 #!/usr/bin/env bash
 printf '%s\n' "$*" >>"$INSTALL_LOG"
+printf 'install.sh %s\n' "$*" >>"$DOCKER_LOG"
 if [ -n "${STUB_OLD_UNITS:-}" ]; then
   for f in "$STUB_OLD_UNITS"/mailexpert-*; do sed "s#@PREFIX@#$2#g" "$f" >"$MAILEXPERT_SYSTEMD_DIR/${f##*/}"; done
   systemctl restart mailexpert-updater.path
@@ -60,6 +67,11 @@ exit "${STUB_INSTALL:-0}"
 STUB_EOF
   OLD=$(commit "$P/app" one)
   printf 'x\n' >"$P/app/README"
+  # STUB_NEW_WORKER=1: the version the panel runs ships the Proton worker, the target does not.
+  if [ -n "${STUB_NEW_WORKER:-}" ]; then
+    mkdir -p "$P/app/deploy/proton-worker"
+    : >"$P/app/deploy/proton-worker/Dockerfile"
+  fi
   NEW=$(commit "$P/app" two)
   git -C "$P/app" checkout -q --detach "$NEW"
   git -C "$P/app" remote add origin "$P/app"
@@ -128,6 +140,28 @@ STUB_EOF
   [ "$(cat "$P/state/rolled-back-version")" = "sha-${NEW:0:12}" ]
   [ ! -e "$P/state/update-spool/result/updater.json" ]
   [ ! -e "$P/state/rollback-in-progress" ]
+  # Neither version has the Proton worker: its state is not touched.
+  if grep -q 'proton-worker' "$DOCKER_LOG"; then false; fi
+}
+
+@test "a rollback to a version without the Proton worker clears the worker's state before install.sh" {
+  STUB_NEW_WORKER=1 stub_install
+  run bash "$SCRIPT" --prefix "$P" --to "sha-${OLD:0:12}" --confirm "sha-${OLD:0:12}"
+  [ "$status" -eq 0 ]
+  local stop clear install
+  stop=$(grep -n ' stop proton-worker' "$DOCKER_LOG" | head -1 | cut -d: -f1)
+  # The helper's script spans lines in the log: its last line names the action.
+  grep -q 'run --rm -i --network none --user 0 .*-v me-test_volume:/state ' "$DOCKER_LOG"
+  clear=$(grep -n 'sh 1000 clear$' "$DOCKER_LOG" | cut -d: -f1)
+  install=$(grep -n "^install.sh --prefix $P --version sha-${OLD:0:12}$" "$DOCKER_LOG" | cut -d: -f1)
+  [ -n "$stop" ]
+  [ -n "$clear" ]
+  [ -n "$install" ]
+  [ "$stop" -lt "$clear" ]
+  [ "$clear" -lt "$install" ]
+  # Cleared, never restored: the target cannot use it, and a later update must start clean.
+  if grep -q 'sh 1000 restore$' "$DOCKER_LOG"; then false; fi
+  [[ $output == *"sha-${OLD:0:12} has no Proton worker: its state was cleared"* ]]
 }
 
 @test "a rollback to a version with the default unit names removes this project's suffixed units" {

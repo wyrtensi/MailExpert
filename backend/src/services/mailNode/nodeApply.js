@@ -655,10 +655,10 @@ export function defaultRateLimit(eop, domainLimit) {
 }
 
 // The limit a new mailbox of the domain gets.
-export async function newMailboxRateLimit(domain) {
+export async function newMailboxRateLimit(domain, db = { query }) {
   const [eop, { rows }] = await Promise.all([
-    getEopSettings(),
-    query('SELECT mailbox_send_limit FROM mail_node_domains WHERE domain = $1', [domain]),
+    getEopSettings(db),
+    db.query('SELECT mailbox_send_limit FROM mail_node_domains WHERE domain = $1', [domain]),
   ]);
   return defaultRateLimit(eop, rows[0]?.mailbox_send_limit ?? null);
 }

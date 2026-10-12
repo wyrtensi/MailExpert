@@ -5,12 +5,12 @@ import {
   SUGGESTION_BADGE_KEYS,
   SUGGESTION_LIMIT,
   addAccountOptions,
-  defaultAddKind,
   buildEmailSuggestions,
   canStartGmail,
   exactMailboxMatch,
   gmailStartErrorKey,
   mailboxSuggestion,
+  manualCreatePayload,
   moveSuggestionHighlight,
   pickHighlightedSuggestion,
   shouldFetchKnownEmails,
@@ -25,16 +25,19 @@ const mailbox = (email, extra = {}) => ({
 describe('addAccountOptions', () => {
   const available = { configured: true, available: true };
 
-  it('offers Gmail, the mail node and manual setup to an administrator, in that order', () => {
-    assert.deepEqual(addAccountOptions({ isAdmin: true, googleStatus: available, domainStatus: { configured: true } }), [
-      { kind: 'gmail', titleKey: 'admin.accounts.add.gmailTitle', descriptionKey: 'admin.accounts.add.gmailDescription', enabled: true, hintKey: null },
-      { kind: 'domain', titleKey: 'admin.accounts.add.domainTitle', descriptionKey: 'admin.accounts.add.domainDescription', enabled: true, hintKey: null },
-      { kind: 'manual', titleKey: 'admin.accounts.add.manualTitle', descriptionKey: 'admin.accounts.add.manualDescription', enabled: true, hintKey: null },
-    ]);
+  it('offers all eight ways to every employee, in picker order', () => {
+    const options = addAccountOptions({ googleStatus: available, domainStatus: { configured: true } });
+    assert.deepEqual(options.map((o) => o.kind), ['domain', 'gmail', 'proton', 'yahoo', 'yandex', 'mailru', 'icloud', 'other']);
+    assert.deepEqual(options.find((o) => o.kind === 'other'), {
+      kind: 'other', titleKey: 'admin.accounts.add.otherTitle', introKey: 'admin.accounts.add.intro.other',
+      enabled: true, hintKey: null, unavailable: false,
+    });
+    assert.ok(options.every((o) => o.enabled));
   });
 
-  it('hides manual setup from everyone else', () => {
-    assert.deepEqual(addAccountOptions({ isAdmin: false, googleStatus: available }).map((o) => o.kind), ['gmail', 'domain']);
+  it('does not filter by role: the manual way is there for a non-admin too', () => {
+    assert.ok(addAccountOptions({ googleStatus: available }).some((o) => o.kind === 'other'));
+    assert.ok(!addAccountOptions().some((o) => o.kind === 'manual'));
   });
 
   it('keeps the mail node listed but inactive until it is set up, silent while the status loads', () => {
@@ -44,7 +47,7 @@ describe('addAccountOptions', () => {
   });
 
   it('keeps Gmail listed but inactive, with the reason, while Google is not configured', () => {
-    const [notConfigured] = addAccountOptions({ googleStatus: { configured: false, available: false } });
+    const notConfigured = addAccountOptions({ googleStatus: { configured: false, available: false } }).find((o) => o.kind === 'gmail');
     assert.equal(notConfigured.enabled, false);
     assert.equal(notConfigured.hintKey, 'admin.integrations.google.errorNotConfigured');
   });
@@ -52,19 +55,41 @@ describe('addAccountOptions', () => {
   // An address already in an app's grant journal goes back there without a new seat, even when
   // every app is full or closed; only the server knows the address, so it decides at start.
   it('keeps Gmail usable while no app has a free seat, with a note that only known addresses fit', () => {
-    const [full] = addAccountOptions({ googleStatus: { configured: true, available: false } });
+    const full = addAccountOptions({ googleStatus: { configured: true, available: false } }).find((o) => o.kind === 'gmail');
     assert.equal(full.enabled, true);
     assert.equal(full.hintKey, 'admin.accounts.add.gmailOnlyKnown');
   });
 
   it('keeps Gmail inactive without a reason while the status loads', () => {
-    const [gmail] = addAccountOptions({ googleStatus: null });
+    const gmail = addAccountOptions({ googleStatus: null }).find((o) => o.kind === 'gmail');
     assert.equal(gmail.enabled, false);
     assert.equal(gmail.hintKey, null);
   });
 
+  it('gives every service a one-line intro; the four app-password services share one', () => {
+    const intro = Object.fromEntries(addAccountOptions({ googleStatus: available }).map((o) => [o.kind, o.introKey]));
+    assert.deepEqual(intro, {
+      domain: 'admin.accounts.add.intro.domain',
+      gmail: 'admin.accounts.add.intro.gmail',
+      proton: 'admin.accounts.add.intro.proton',
+      yahoo: 'admin.accounts.add.intro.appPassword',
+      yandex: 'admin.accounts.add.intro.appPassword',
+      mailru: 'admin.accounts.add.intro.appPassword',
+      icloud: 'admin.accounts.add.intro.appPassword',
+      other: 'admin.accounts.add.intro.other',
+    });
+  });
+
+  it('marks the Proton tile unavailable when its service is down, keeping it selectable for the reason', () => {
+    const proton = (protonStatus) => addAccountOptions({ googleStatus: available, protonStatus }).find((o) => o.kind === 'proton');
+    assert.deepEqual([proton({ configured: true, available: false }).unavailable, proton({ configured: true, available: false }).enabled], [true, true]);
+    assert.equal(proton({ configured: false, available: false }).unavailable, true);
+    assert.equal(proton({ configured: true, available: true }).unavailable, false);
+    assert.equal(proton(null).unavailable, false, 'nothing is claimed while the status loads');
+  });
+
   it('lists the kinds in dialog order', () => {
-    assert.deepEqual([...ADD_ACCOUNT_KINDS], ['gmail', 'domain', 'manual']);
+    assert.deepEqual([...ADD_ACCOUNT_KINDS], ['domain', 'gmail', 'proton', 'yahoo', 'yandex', 'mailru', 'icloud', 'other']);
   });
 });
 
@@ -221,16 +246,16 @@ describe('gmailStartErrorKey', () => {
   });
 });
 
-describe('defaultAddKind', () => {
-  it('opens on personal Gmail even when another way is usable and Gmail is not', () => {
-    const options = addAccountOptions({ isAdmin: true, googleStatus: { configured: false, available: false }, domainStatus: { configured: true } });
-    assert.equal(defaultAddKind(options), 'gmail');
-    assert.equal(defaultAddKind(addAccountOptions({ googleStatus: { configured: true, available: true }, domainStatus: { configured: true } })), 'gmail');
-  });
-
-  it('opens on Gmail while the statuses load, and never on manual setup by itself', () => {
-    assert.equal(defaultAddKind(addAccountOptions({ isAdmin: true })), 'gmail');
-    assert.equal(defaultAddKind([{ kind: 'domain', enabled: false }, { kind: 'manual', enabled: true }]), 'domain');
-    assert.equal(defaultAddKind([]), null);
+describe('manualCreatePayload', () => {
+  it('keeps only the fields the manual contract knows and marks the provider as other', () => {
+    const body = manualCreatePayload({
+      name: 'Team', email_address: 'a@example.com', imap_host: 'imap.example.com', imap_port: '993', smtp_host: 'smtp.example.com',
+      smtp_port: 587, smtp_tls: 'STARTTLS', auth_user: 'a', auth_pass: 'secret', categorization_enabled: false, label: 'x',
+      smtp_auth_user: '', sender_name: undefined,
+    });
+    assert.deepEqual(body, {
+      provider: 'other', name: 'Team', email_address: 'a@example.com', imap_host: 'imap.example.com', imap_port: 993,
+      smtp_host: 'smtp.example.com', smtp_port: 587, smtp_tls: 'STARTTLS', auth_user: 'a', auth_pass: 'secret',
+    });
   });
 });

@@ -1,4 +1,6 @@
-import { query } from '../db.js';
+import { query, pool } from '../db.js';
+import { setTimeout as delay } from 'node:timers/promises';
+import { ConnectionError } from './connectionErrors.js';
 import { encrypt } from '../encryption.js';
 import { sanitizeSignature } from '../emailSanitizer.js';
 import { validateHost } from '../hostValidation.js';
@@ -30,7 +32,7 @@ export function validatePort(port, allowed) {
 // change is the audit log's (by name only) and an administrator's alone, since a host, a port or a
 // TLS switch decides where the stored password or OAuth token is sent.
 export const CONNECTION_FIELDS = [
-  'imap_host', 'imap_port', 'imap_tls', 'imap_skip_tls_verify', 'smtp_host', 'smtp_port', 'smtp_tls',
+  'imap_host', 'imap_port', 'imap_tls_mode', 'imap_tls', 'imap_skip_tls_verify', 'smtp_host', 'smtp_port', 'smtp_tls',
   'auth_user', 'auth_pass', 'smtp_auth_user', 'smtp_auth_pass',
 ];
 const PASSWORD_FIELDS = new Set(['auth_pass', 'smtp_auth_pass']);
@@ -90,6 +92,37 @@ export async function changedServersError(updates, policy) {
 // IMAP over TLS is implied by the port: 993 (or x993).
 export const impliedImapTls = (port) => Number(port) % 1000 === 993;
 
+const IMAP_TLS_MODES = new Set(['implicit', 'starttls']);
+const changedValue = (stored, updates, key) => key in updates && String(updates[key] ?? '') !== String(stored[key] ?? '');
+
+// Keeps imap_tls_mode and imap_tls consistent on a server edit (admin PUT /:id, the CLI's
+// updateAccountConnection). Mutates `updates`; answers the error text or null.
+// - A mode the edit names is validated (implicit|starttls) and decides imap_tls; a verified row
+//   cannot be sent back to the NULL legacy mode. Resending the stored value is not a change.
+// - A verified (explicit) row whose host or port really changes gets its mode re-derived from the
+//   final port, so an old explicit mode never outlives the server it was chosen for.
+// - A NULL-mode legacy row keeps the old rule: the port implies imap_tls, the mode stays NULL.
+export function applyImapTlsMode(stored, updates) {
+  if ('imap_tls_mode' in updates && (updates.imap_tls_mode ?? null) === (stored.imap_tls_mode ?? null)) {
+    delete updates.imap_tls_mode;
+  }
+  if ('imap_tls_mode' in updates) {
+    if (!IMAP_TLS_MODES.has(updates.imap_tls_mode)) return 'IMAP TLS mode must be implicit or starttls';
+  } else if (stored.imap_tls_mode != null) {
+    if (changedValue(stored, updates, 'imap_host') || changedValue(stored, updates, 'imap_port')) {
+      const port = 'imap_port' in updates ? updates.imap_port : stored.imap_port;
+      updates.imap_tls_mode = impliedImapTls(port) ? 'implicit' : 'starttls';
+    }
+  } else {
+    if ('imap_port' in updates) updates.imap_tls = impliedImapTls(updates.imap_port);
+    return null;
+  }
+  if ('imap_tls_mode' in updates || 'imap_tls' in updates || 'imap_port' in updates) {
+    updates.imap_tls = (updates.imap_tls_mode ?? stored.imap_tls_mode) === 'implicit';
+  }
+  return null;
+}
+
 // A settings column's value as it is stored: passwords encrypted, an empty SMTP login or password
 // as null, the signature sanitized.
 export function storedColumnValue(key, value) {
@@ -101,7 +134,7 @@ export function storedColumnValue(key, value) {
 
 // The fields whose change makes a running mailbox reconnect.
 export const RECONNECT_FIELDS = Object.freeze([
-  'enabled', 'auth_user', 'auth_pass', 'imap_host', 'imap_port', 'imap_tls', 'imap_skip_tls_verify',
+  'enabled', 'auth_user', 'auth_pass', 'imap_host', 'imap_port', 'imap_tls_mode', 'imap_tls', 'imap_skip_tls_verify',
 ]);
 
 // Serializes an account's reconnect triggers so a rapid settings change (e.g. a gtd_enabled
@@ -123,4 +156,56 @@ export function reconnectAccount(imapManager, id, { onlyActive = false } = {}) {
       imapManager.clearConnectCooldown(id);
       return imapManager.connectAccount(r.rows[0]);
     }));
+}
+
+
+// A deadline applies to acquisition too, including a stalled database connection or query.
+async function withinLockBudget(promise, end, signal) {
+  let timer, abort;
+  const deadline = new Promise((_, reject) => {
+    abort = () => reject(new ConnectionError('connection_cancelled'));
+    timer = setTimeout(() => reject(new ConnectionError('connection_timeout')), Math.max(0, end - Date.now()));
+    signal?.addEventListener('abort', abort, { once: true });
+    if (signal?.aborted) abort();
+  });
+  try { return await Promise.race([promise, deadline]); }
+  finally { clearTimeout(timer); signal?.removeEventListener('abort', abort); }
+}
+
+// A caller already in a transaction must pass its client: the transaction owns that lock until
+// commit. Network work uses a reserved session with no transaction, released even on failure.
+export async function withAccountAddressLock(email, fn, { client, signal, timeoutMs = 35000 } = {}) {
+  const key = `account-address:${email.trim().toLowerCase()}`;
+  if (signal?.aborted) throw new ConnectionError('connection_cancelled');
+  const end = Date.now() + timeoutMs;
+  const owned = !client;
+  let connection = client;
+  if (owned) {
+    const pending = pool.connect();
+    try { connection = await withinLockBudget(pending, end, signal); }
+    catch (err) { pending.then(late => late.release(), () => {}); throw err; }
+  }
+  let acquired = false, broken = false;
+  try {
+    while (!acquired) {
+      if (signal?.aborted) throw new ConnectionError('connection_cancelled');
+      if (Date.now() >= end) throw new ConnectionError('connection_timeout');
+      let result;
+      try {
+        result = await withinLockBudget(connection.query(`SELECT pg_try_advisory_${owned ? '' : 'xact_'}lock(hashtext($1)) AS acquired`, [key]), end, signal);
+      } catch (err) { broken = true; throw err; }
+      acquired = result.rows[0]?.acquired === true;
+      if (!acquired) await delay(Math.min(25, Math.max(1, end - Date.now())));
+    }
+    if (signal?.aborted) throw new ConnectionError('connection_cancelled');
+    return await fn(connection);
+  } finally {
+    if (owned) {
+      if (acquired && !broken) {
+        await withinLockBudget(connection.query('SELECT pg_advisory_unlock(hashtext($1))', [key]), Date.now() + 1000)
+          .catch(() => { broken = true; });
+      }
+      connection.release(broken);
+    }
+  }
 }

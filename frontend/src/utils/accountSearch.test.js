@@ -88,6 +88,17 @@ describe('searchAccounts', () => {
     assert.deepEqual(find('imap.gmail'), [], 'the role label of the host is not part of the name');
   });
 
+  it('does not match every "Other" mailbox on \'imap\': the protocol is not a provider name', () => {
+    const list = [
+      { id: 'o1', name: 'Shop', email_address: 'shop@own.test', mail_provider: 'other', connection_mode: 'manual', imap_host: 'imap.own.test' },
+      { id: 'o2', name: 'Desk', email_address: 'desk@else.test', mail_provider: 'other', connection_mode: 'manual', imap_host: 'mail.else.test' },
+    ];
+    const got = (q) => ids(searchAccounts(buildAccountSearchIndex(list), q));
+    assert.deepEqual(got('imap'), []);
+    assert.deepEqual(got('other'), ['o1', 'o2'], 'the provider name still finds them');
+    assert.deepEqual(got('другой'), ['o1', 'o2']);
+  });
+
   it('requires every word of the query, in any order', () => {
     assert.deepEqual(find('example sales'), ['a1']);
     assert.deepEqual(find('sales gmail'), []);
@@ -111,5 +122,36 @@ describe('searchAccounts', () => {
     for (let i = 0; i < 200; i++) searchAccounts(index, `box${i % 600} corp`);
     assert.ok(performance.now() - started < 500, 'the keystroke path is a plain substring scan');
     assert.equal(searchAccounts(index, 'box599@corp4').length, 1);
+  });
+});
+
+describe('provider keywords', () => {
+  const PROVIDERS = [
+    { id: 'p1', name: 'One', email_address: 'one@yandex.ru', mail_provider: 'yandex', connection_mode: 'preset', imap_host: 'imap.yandex.ru' },
+    { id: 'p2', name: 'Two', email_address: 'two@proton.me', mail_provider: 'proton', connection_mode: 'managed', imap_host: '127.0.0.1' },
+    { id: 'p3', name: 'Three', email_address: 'three@example.test', mail_provider: 'other', connection_mode: 'manual', imap_host: 'imap.example.test' },
+    { id: 'p4', name: 'Four', email_address: 'four@mail.ru', mail_provider: 'mailru', connection_mode: 'preset' },
+    { id: 'p5', name: 'Five', email_address: 'five@icloud.com', mail_provider: 'icloud', connection_mode: 'preset' },
+  ];
+  const run = (query) => ids(searchAccounts(buildAccountSearchIndex(PROVIDERS), query));
+
+  it('search_matches_provider_email_sender_alias: a Russian and an English name find the same account', () => {
+    assert.deepEqual(run('Яндекс'), run('yandex'));
+    assert.deepEqual(run('yandex'), ['p1']);
+    assert.deepEqual(run('протон'), ['p2']);
+    assert.deepEqual(run('майл'), ['p4']);
+    assert.deepEqual(run('apple'), ['p5']);
+  });
+
+  it('reads the connection mode in both languages', () => {
+    assert.deepEqual(run('управляемый'), ['p2']);
+    assert.deepEqual(run('managed'), ['p2']);
+    assert.deepEqual(run('ручной'), ['p3']);
+    assert.deepEqual(run('manual'), ['p3']);
+  });
+
+  it('does not index the loopback host of a managed mailbox', () => {
+    assert.deepEqual(run('127.0.0.1'), []);
+    assert.equal(accountSearchText(PROVIDERS[1]).includes('127.0.0.1'), false);
   });
 });

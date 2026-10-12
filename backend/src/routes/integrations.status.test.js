@@ -24,6 +24,14 @@ vi.mock('../services/oauth/googleApps.js', () => ({
   resolveGoogleConfig: vi.fn(async () => googleApps.config),
   importLegacyGoogleConfig: vi.fn(async () => null),
 }));
+const policy = vi.hoisted(() => ({ value: { allowPrivateHosts: false, allowInsecureTls: true, allowNonstandardPorts: false } }));
+vi.mock('../services/connectionPolicy.js', () => ({
+  getConnectionPolicy: vi.fn(async () => { if (policy.value instanceof Error) throw policy.value; return policy.value; }),
+}));
+const protonState = vi.hoisted(() => ({ value: { configured: true, available: true, code: null } }));
+vi.mock('../services/proton/workerStatus.js', () => ({
+  getProtonStatus: vi.fn(async () => { if (protonState.value instanceof Error) throw protonState.value; return protonState.value; }),
+}));
 const capacity = vi.hoisted(() => ({ value: true }));
 vi.mock('../services/oauth/googleAppSelection.js', () => ({
   googleHasCapacity: vi.fn(async () => capacity.value),
@@ -36,6 +44,11 @@ import { importLegacyGoogleConfig } from '../services/oauth/googleApps.js';
 
 const CLIENT_ID = '123456789012-abc123def456.apps.googleusercontent.com';
 const REDIRECT_URI = 'https://mail.example.com/oauth/google/callback';
+const NEW_PARTS = {
+  mailProviders: expect.any(Array),
+  proton: { configured: true, available: true, code: null },
+  manual: { allowPrivateHosts: false, allowNonstandardPorts: false },
+};
 const imapManagerStub = { disconnectAccount: vi.fn(async () => {}) };
 
 function buildApp() {
@@ -69,6 +82,8 @@ afterEach(() => {
   delete process.env.MS_CLIENT_ID;
   for (const k of GOOGLE_VARS) delete process.env[k];
   authState.admin = false;
+  protonState.value = { configured: true, available: true, code: null };
+  policy.value = { allowPrivateHosts: false, allowInsecureTls: true, allowNonstandardPorts: false };
   googleApps.config = null;
   capacity.value = true;
   query.mockReset();
@@ -83,13 +98,13 @@ describe('GET /api/integrations/status (non-admin capability check)', () => {
     process.env.MS_CLIENT_ID = 'some-client-id';
     const res = await fetch(`${base}/api/integrations/status`);
     expect(res.status).toBe(200);
-    expect(await res.json()).toEqual({ microsoft: { configured: true }, google: { configured: false, available: false }, domainMail: { configured: false } });
+    expect(await res.json()).toEqual({ microsoft: { configured: true }, google: { configured: false, available: false }, domainMail: { configured: false }, ...NEW_PARTS });
   });
 
   it('reports configured=false when MS_CLIENT_ID is unset', async () => {
     const res = await fetch(`${base}/api/integrations/status`);
     expect(res.status).toBe(200);
-    expect(await res.json()).toEqual({ microsoft: { configured: false }, google: { configured: false, available: false }, domainMail: { configured: false } });
+    expect(await res.json()).toEqual({ microsoft: { configured: false }, google: { configured: false, available: false }, domainMail: { configured: false }, ...NEW_PARTS });
   });
 
   it('never leaks credentials in the response', async () => {
@@ -150,8 +165,56 @@ describe('GET /api/integrations/status (non-admin capability check)', () => {
     errorSpy.mockRestore();
     expect(res.status).toBe(200);
     const body = await res.json();
-    expect(body).toEqual({ microsoft: { configured: true }, google: { configured: true, available: false }, domainMail: { configured: false } });
+    expect(body).toEqual({ microsoft: { configured: true }, google: { configured: true, available: false }, domainMail: { configured: false }, ...NEW_PARTS });
     expect(JSON.stringify(errorSpy.mock.calls)).not.toMatch(/ECONNREFUSED/);
+  });
+});
+
+describe('GET /api/integrations/status (mailbox providers)', () => {
+  it('lists the four fixed providers with safe metadata only', async () => {
+    const body = await (await fetch(`${base}/api/integrations/status`)).json();
+    expect(body.mailProviders.map((p) => p.id)).toEqual(['yahoo', 'yandex', 'mailru', 'icloud']);
+    expect(body.mailProviders[0]).toEqual(expect.objectContaining({
+      imap: { host: 'imap.mail.yahoo.com', port: 993, tls: 'implicit' },
+      smtp: { host: 'smtp.mail.yahoo.com', port: 587, tls: 'starttls' },
+      appPasswordUrl: 'https://login.yahoo.com/account/security',
+    }));
+  });
+
+  it('reports the manual policy as two booleans and never the TLS bypass', async () => {
+    policy.value = { allowPrivateHosts: true, allowInsecureTls: true, allowNonstandardPorts: true };
+    const body = await (await fetch(`${base}/api/integrations/status`)).json();
+    expect(body.manual).toEqual({ allowPrivateHosts: true, allowNonstandardPorts: true });
+    expect(JSON.stringify(body)).not.toMatch(/nsecure/);
+  });
+
+  it('reports the Proton state the worker module computes', async () => {
+    protonState.value = { configured: true, available: false, code: 'proton_unavailable' };
+    const body = await (await fetch(`${base}/api/integrations/status`)).json();
+    expect(body.proton).toEqual({ configured: true, available: false, code: 'proton_unavailable' });
+  });
+
+  it('keeps the status answer when the Proton check itself fails', async () => {
+    protonState.value = new Error('socket /run/secret-test-dir/worker.sock exploded');
+    const res = await fetch(`${base}/api/integrations/status`);
+    const text = await res.text();
+    expect(res.status).toBe(200);
+    expect(JSON.parse(text).proton).toEqual({ configured: false, available: false, code: 'proton_unavailable' });
+    expect(text).not.toContain('secret-test-dir');
+  });
+
+  it('keeps the status answer when the policy read fails, with both flags off', async () => {
+    policy.value = new Error('db down');
+    const res = await fetch(`${base}/api/integrations/status`);
+    expect(res.status).toBe(200);
+    expect((await res.json()).manual).toEqual({ allowPrivateHosts: false, allowNonstandardPorts: false });
+  });
+
+  it('never carries the secret sentinel of a policy row or the Proton state', async () => {
+    policy.value = { allowPrivateHosts: false, allowNonstandardPorts: false, allowInsecureTls: false, secretSentinel: 'secret-sentinel' };
+    protonState.value = { configured: true, available: true, code: null, token: 'secret-sentinel' };
+    const text = await (await fetch(`${base}/api/integrations/status`)).text();
+    expect(text).not.toContain('secret-sentinel');
   });
 });
 

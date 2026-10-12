@@ -3,6 +3,7 @@ import { fleetAccounts, fleetDomains, fleetLetters } from './fleet.js';
 import { demoOutageRequest, demoOutageWaiting } from './outages.js';
 import { demoNodeAgentRequest, demoNodeUpdateState } from './nodeAgent.js';
 import { DEMO_TENANT_SETTINGS, demoTenantAlerts, demoTenantRequest } from './tenant.js';
+import { DEMO_MAIL_PROVIDERS, createProviderDemo } from './providers.js';
 import { demoRole } from '../utils/demoRole.js';
 import { googleCallbackFormError } from '../utils/googleApps.js';
 import {
@@ -49,9 +50,19 @@ const ACCOUNT_FIXTURES = [
     aliases: [],
   },
 ];
-// 48 generated mailboxes (demo/fleet.js) after the two hand-made ones: 50 in all.
+// 48 generated mailboxes (demo/fleet.js) after the two hand-made ones: 50, and the managed Proton one below.
 const FLEET_ACCOUNTS = fleetAccounts();
 ACCOUNT_FIXTURES.push(...FLEET_ACCOUNTS);
+// One managed Proton mailbox whose Bridge session has ended, so the sidebar's reconnect state and
+// the "sign in to Proton again" action every employee has can be seen; a reconnect heals it.
+ACCOUNT_FIXTURES.push({
+  ...structuredClone(ACCOUNT_FIXTURES[0]),
+  id: 'demo-proton-team', name: 'Proton Team', sender_name: 'MailExpert Proton', email_address: 'team@proton.me',
+  imap_host: '127.0.0.1', imap_port: 1993, smtp_host: '127.0.0.1', smtp_port: 1465, smtp_tls: 'SSL', imap_tls_mode: 'implicit',
+  color: '#6d4aff', sort_order: ACCOUNT_FIXTURES.length, signature: null,
+  mail_provider: 'proton', connection_mode: 'managed', can_reconnect_proton: true,
+  proton_status: 'proton_reconnect_required', health: 'proton_reconnect_required', mail_node: false, thread_mode: 'rfc',
+});
 
 // The days a mail node mailbox keeps working after its deletion is asked for (the mail node
 // settings; the server's default). The demo never runs the deletion job: a pending mailbox stays.
@@ -1704,6 +1715,9 @@ function connectGmail(body) {
   return { path: null, demo: true, result: 'created' };
 }
 
+// ---- Mailbox providers (the add-account dialog): src/demo/providers.js -----------------------
+const providerDemo = createProviderDemo({ accounts: ACCOUNT_FIXTURES, clone, demoError, normalizeEmail, mailboxWithEmail, welcomeLetter });
+
 function demoSenderHistory(id) {
   const current = messageById(id);
   if (!current) return { correspondent: null, total: 0, items: [] };
@@ -2011,7 +2025,23 @@ const MAIL_NODE_USER_READS = [
   /^\/mail-node\/messages\/[^/]+\/spam-verdict$/,
   /^\/mail-node\/seats$/,
 ];
-export function demoAdminOnly(verb, pathname, body = {}) {
+// The server and sign-in fields of a mailbox, as CONNECTION_FIELDS and changedConnectionFields in
+// backend services/accounts/connection.js: a resent value that equals the stored one is not a
+// change; a password counts when one is sent or one was stored (the demo stores none).
+const CONNECTION_FIELDS = [
+  'imap_host', 'imap_port', 'imap_tls_mode', 'imap_tls', 'imap_skip_tls_verify', 'smtp_host', 'smtp_port', 'smtp_tls',
+  'auth_user', 'auth_pass', 'smtp_auth_user', 'smtp_auth_pass',
+];
+function changedConnectionFields(account, body) {
+  const updates = body && typeof body === 'object' ? body : {};
+  return CONNECTION_FIELDS.filter((key) => {
+    if (!Object.hasOwn(updates, key)) return false;
+    if (key.endsWith('_pass')) return !!updates[key] || !!account[key];
+    return String(account[key] ?? '') !== String(updates[key] ?? '');
+  });
+}
+
+export function demoAdminOnly(verb, pathname) {
   if (pathname === '/admin' || pathname.startsWith('/admin/')) return true;
   if (pathname.startsWith('/mail-node/')) {
     // Asking for EOP seats is everyone's (routes/mailNodeSeats.js); "Reconcile" and the hold are not.
@@ -2025,7 +2055,7 @@ export function demoAdminOnly(verb, pathname, body = {}) {
   if (/^\/integrations\/[^/]+$/.test(pathname)) return (verb === 'POST' || verb === 'DELETE') && pathname !== '/integrations/status';
   if (pathname.startsWith('/categories/sources')) return verb !== 'GET';
   if (/^\/categories\/recategorize\/[^/]+$/.test(pathname)) return verb === 'POST';
-  if (pathname === '/accounts') return verb === 'POST' && body?.kind !== 'domain';
+  // POST /accounts is every approved employee's: a verified manual (Other) mailbox, like a node one.
   if (/^\/accounts\/[^/]+\/(oauth-subject\/reset|threading\/(preview|mode))$/.test(pathname)) return verb === 'POST';
   if (/^\/accounts\/[^/]+\/deactivation$/.test(pathname)) return verb === 'POST' || verb === 'DELETE';
   // Switching a plugin on or off is the administrator's; everyone reads the list.
@@ -2147,15 +2177,30 @@ export async function demoRequest(method, path, body = {}) {
     ACCOUNT_FIXTURES.push(account);
     return clone(account);
   }
+  if (verb === 'POST' && pathname === '/accounts/provider') return clone(providerDemo.createProviderMailbox(body));
+  if (verb === 'POST' && pathname === '/accounts/proton/connect') return providerDemo.startProton(body);
+  const protonMatch = pathname.match(/^\/accounts\/proton\/connect\/([^/]+)(\/continue|\/cancel)?$/);
+  if (protonMatch) {
+    const result = providerDemo.protonAttemptRequest(verb, decodeURIComponent(protonMatch[1]), protonMatch[2], body);
+    if (result) return result;
+  }
   const accountMatch = pathname.match(/^\/accounts\/([^/]+)$/);
   if (verb === 'PUT' && accountMatch) {
     const account = accountFor(decodeURIComponent(accountMatch[1]));
     if (!account) throw demoError('Account not found');
-    if (account.mail_node && (body?.imap_host !== undefined || body?.smtp_host !== undefined)) {
-      throw demoError('Connection settings are locked for a mailbox on the mail node', 'mail_node_connection_locked');
+    const changed = changedConnectionFields(account, body);
+    if (account.mail_provider === 'proton' && account.connection_mode === 'managed' && changed.length) {
+      throw demoError('Managed mailbox connection settings cannot be changed', 'managed_connection_locked');
+    }
+    // Same order as routes/accounts.js: managed Proton, mail node, then the admin-only rule.
+    if (account.mail_node && changed.length) {
+      throw demoError('The server settings of a mail node mailbox cannot be changed', 'mail_node_connection_locked');
     }
     if (account.mail_node && body?.enabled !== undefined && !body.enabled && account.enabled !== false) {
       throw demoError('A mail node mailbox cannot be paused: deactivate it instead', 'mail_node_disable_unsupported');
+    }
+    if (!demoViewer().isAdmin && changed.length) {
+      throw Object.assign(demoError('Only an administrator can change the server settings of a mailbox', 'connection_admin_only'), { status: 403 });
     }
     const assignable = ['name', 'sender_name', 'color', 'enabled', 'imap_host', 'imap_port', 'smtp_host', 'smtp_port',
       'smtp_tls', 'folder_mappings', 'signature', 'categorization_enabled', 'sort_order', 'include_in_unified_inbox'];
@@ -2568,7 +2613,12 @@ export async function demoRequest(method, path, body = {}) {
 
   if (verb === 'GET' && pathname === '/integrations') return clone(integrationsConfig);
   if (verb === 'GET' && pathname === '/integrations/status') {
-    return { google: { configured: true, available: true }, microsoft: { configured: false }, domainMail: { configured: true } };
+    return {
+      google: { configured: true, available: true }, microsoft: { configured: false }, domainMail: { configured: true },
+      mailProviders: clone(DEMO_MAIL_PROVIDERS),
+      proton: { configured: true, available: true, code: null },
+      manual: { allowPrivateHosts: false, allowNonstandardPorts: false },
+    };
   }
   const integrationMatch = pathname.match(/^\/integrations\/([^/]+)$/);
   if (verb === 'POST' && integrationMatch) {

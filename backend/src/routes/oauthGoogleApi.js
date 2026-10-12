@@ -4,7 +4,7 @@ import { requireAuth } from '../middleware/auth.js';
 import { buildGoogleAuthorizationUrl } from '../services/oauth/googleOAuth.js';
 import { findKnownGoogleEmails, resolveGoogleConfig } from '../services/oauth/googleApps.js';
 import { GoogleAppSelectionError, releaseGoogleSeat, selectGoogleApp } from '../services/oauth/googleAppSelection.js';
-import { createOAuthState } from '../services/oauth/oauthState.js';
+import { createOAuthState, parseAttemptId } from '../services/oauth/oauthState.js';
 import { GOOGLE_EMAIL_PATTERN, createGoogleLaunch } from '../services/oauth/googleLaunch.js';
 import { allowedRequestOrigin } from '../utils/publicOrigins.js';
 import { parseSenderNames } from '../utils/senderNames.js';
@@ -26,6 +26,10 @@ router.post('/start', async (req, res) => {
   // Optional here: without a sender name the mailbox sends under the Google profile name.
   const names = parseSenderNames(req.body);
   if (names.error) return res.status(400).json({ error: names.error, code: 'sender_name_invalid' });
+  // The dialog's id of this attempt, handed back by the callback. Absent is fine; present but not
+  // an opaque token is refused rather than quietly dropped.
+  const attemptId = req.body?.attemptId === undefined ? null : parseAttemptId(req.body.attemptId);
+  if (req.body?.attemptId !== undefined && !attemptId) return res.status(400).json({ error: 'Invalid attempt id', code: 'attempt_invalid' });
 
   // Mailboxes are shared: an address any user already connected is connected for everyone.
   const existing = await query('SELECT id FROM email_accounts WHERE lower(email_address) = $1 LIMIT 1', [email]);
@@ -47,7 +51,7 @@ router.post('/start', async (req, res) => {
     }
     const { state, codeChallenge } = await createOAuthState({
       provider: PROVIDER, userId: req.session.userId, loginHint: email, appId: config.appId, mode: 'add', email,
-      senderName: names.senderName, senderNameAlt: names.senderNameAlt, reservation: selected.reservation,
+      senderName: names.senderName, senderNameAlt: names.senderNameAlt, reservation: selected.reservation, attemptId,
     });
     const url = buildGoogleAuthorizationUrl({
       clientId: config.clientId, state, codeChallenge, redirectUri: config.redirectUri, loginHint: email,

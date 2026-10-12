@@ -21,7 +21,10 @@ import { redactEmail } from '../utils/redact.js';
 import { eopCategory } from '../utils/antispamReport.js';
 import { deliveryReportOf, readDeliveryReports, reportsToRead } from './deliveryReport.js';
 import { adjustFolderCounts, resolveSpamFolder } from '../utils/mailUtils.js';
-import { resolveForConnection, createPinnedLookup } from './hostValidation.js';
+import { createPinnedLookup } from './hostValidation.js';
+import { imapTlsSettings, resolveMailEndpoint } from './accounts/mailEndpoint.js';
+import { isManagedProtonAccount, MANAGED_PROTON_ENDPOINT, ProtonEndpointError } from './proton/mailEndpoint.js';
+import { accountFolderPath, accountRenameTarget } from './proton/folders.js';
 import { getConnectionPolicy } from './connectionPolicy.js';
 import { applyInboxRules, applyBlockList } from './inboxRules.js';
 import { generateVCard } from '../utils/vcard.js';
@@ -44,11 +47,12 @@ import { randomUUID } from 'crypto';
 // Shorthand for log lines — keeps domain visible while masking the local part.
 const logAccount = (account) => redactEmail(account?.email_address || '');
 
-// Resolves the IMAP host for an account, applying server-level connection policy.
-// Returns { resolved, policy } so callers can pass policy to makeClientCfg.
+// Resolves the IMAP endpoint for an account (accounts/mailEndpoint.js): the connection policy and
+// DNS rules for an ordinary mailbox, the fixed loopback endpoint of its database link for a managed
+// Proton mailbox. Returns { resolved, policy } so callers can pass policy to makeClientCfg.
 const resolveAccountHost = async (account) => {
   const policy = await getConnectionPolicy();
-  const resolved = await resolveForConnection(account.imap_host, { allowPrivate: policy.allowPrivateHosts });
+  const resolved = await resolveMailEndpoint(account, 'imap');
   return { resolved, policy };
 };
 
@@ -1658,8 +1662,8 @@ function nodeRestoreFailureDetail({ outcome, code, stage }) {
   return 'Password rejected: the mail node API failed';
 }
 
-// resolved comes from resolveForConnection(), which limits sockets to the validated
-// address set so DNS rebinding cannot change the target between validation and connect.
+// resolved comes from resolveMailEndpoint() (via resolveAccountHost), which limits sockets to the
+// validated address set so DNS rebinding cannot change the target between validation and connect.
 // policy: result of getConnectionPolicy() — gates TLS verification override.
 // The password is currentAuthPass(account): the restored one for a row read before a node password
 // restore (services/mailNode/currentPassword.js).
@@ -1673,11 +1677,18 @@ function nodeRestoreFailureDetail({ outcome, code, stage }) {
 export const IMAP_CLIENT_INFO = Object.freeze({ name: '', version: '', vendor: '', 'support-url': '' });
 
 export function makeClientCfg(account, resolved, { enableIdle = false, policy = {}, idleKeepaliveMs } = {}) {
-  if (!policy.allowInsecureTls && !account.imap_tls) {
+  // The managed Proton trust (loopback, Bridge's certificate) comes only with an endpoint built from
+  // the mailbox's database link, and such an endpoint is never used for any other mailbox.
+  const managed = isManagedProtonAccount(account);
+  if (managed !== (resolved?.[MANAGED_PROTON_ENDPOINT] === true)) throw new ProtonEndpointError('proton_link_missing');
+  // Explicit modes (and the managed endpoint) verify the certificate and never fall back to plain
+  // text; a NULL-mode legacy row keeps the port-implied boolean and the admin's insecure switches.
+  const mode = managed ? { secure: true, requireTLS: false, rejectUnauthorized: true } : imapTlsSettings(account, policy);
+  if (!managed && account.imap_tls_mode == null && !policy.allowInsecureTls && !account.imap_tls) {
     throw new Error('Plain-text IMAP is not allowed: admin must enable "Allow insecure TLS"');
   }
-  const skipTls = policy.allowInsecureTls && !!account.imap_skip_tls_verify;
-  const tlsOpts = { rejectUnauthorized: !skipTls };
+  const tlsOpts = { rejectUnauthorized: mode.rejectUnauthorized };
+  if (managed) tlsOpts.ca = resolved.tls.ca;
   // Keep the original hostname for TLS authentication while Node connects only to the
   // prevalidated addresses and moves to the next candidate when one is unreachable.
   if (resolved.servername) tlsOpts.servername = resolved.servername;
@@ -1688,8 +1699,10 @@ export function makeClientCfg(account, resolved, { enableIdle = false, policy = 
   }
   const cfg = {
     host: resolved.lookup && resolved.servername ? resolved.servername : resolved.host,
-    port: account.imap_port,
-    secure: account.imap_tls,
+    port: managed ? resolved.port : account.imap_port,
+    secure: mode.secure,
+    // Mandatory STARTTLS: ImapFlow refuses to log in when the server does not upgrade.
+    ...(mode.requireTLS ? { doSTARTTLS: true } : {}),
     auth: { user: account.auth_user, pass: decrypt(currentAuthPass(account)) },
     logger: false,
     tls: tlsOpts,
@@ -7821,9 +7834,12 @@ export class ImapManager {
   // the mailbox has under this account's personal namespace (e.g. 'INBOX.Todo' on a
   // prefixed server), `created` is true only when THIS call made it. The "create missing
   // folders" action reports both so the settings UI can show the real path and whether it
-  // pre-existed. Namespace/delimiter/already-exists handling lives in ensureMailbox.
+  // pre-existed. Namespace/delimiter/already-exists handling lives in ensureMailbox. A managed
+  // Proton mailbox keeps user folders under Folders/ (services/proton/folders.js): the name is
+  // translated here, before any session, so rules, snooze and labels get it too.
   async ensureFolder(account, path, opts = {}) {
-    return withFreshClient(account, (client) => ensureMailbox(client, path, opts));
+    const target = accountFolderPath(account, path);
+    return withFreshClient(account, (client) => ensureMailbox(client, target, opts));
   }
 
   async moveMessageGetNewUid(account, uid, fromFolder, toFolder, { background = false } = {}) {
@@ -7862,6 +7878,7 @@ export class ImapManager {
   async renameFolder(account, oldPath, newPath) {
     // The guard below cannot deselect INBOX, and the UI never offers renaming it.
     if (oldPath.toUpperCase() === 'INBOX') throw new Error('INBOX cannot be renamed');
+    const target = accountRenameTarget(account, oldPath, newPath);
     return withFreshClient(account, async (client) => {
       // imapflow sends CLOSE before RENAME when this folder is selected, and CLOSE expunges
       // every message flagged \Deleted, including mail another client only flagged. Selecting
@@ -7870,7 +7887,7 @@ export class ImapManager {
         const lock = await client.getMailboxLock('INBOX');
         lock.release();
       }
-      await client.mailboxRename(oldPath, newPath);
+      await client.mailboxRename(oldPath, target);
     });
   }
 

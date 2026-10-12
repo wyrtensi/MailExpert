@@ -1,77 +1,92 @@
-import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
-
-vi.mock('../services/auditLog.js', () => ({ recordAudit: vi.fn(async () => {}) }));
-vi.mock('../services/db.js', () => ({ query: vi.fn() }));
-// Stands in for the real requireAdmin (which checks the users table): flip `session.isAdmin`
-// to run a request as an ordinary signed-in user.
-const session = vi.hoisted(() => ({ isAdmin: true }));
-vi.mock('../middleware/auth.js', () => ({
-  isAdminRequest: async () => !!session.isAdmin,
-  requireAuth: (req, _res, next) => { req.session = { userId: 'user-1' }; next(); },
-  requireAdmin: (_req, res, next) => (
-    session.isAdmin ? next() : res.status(403).json({ error: 'Admin access required' })
-  ),
-}));
-vi.mock('../index.js', () => ({
-  imapManager: { connectAccount: vi.fn(() => Promise.resolve(true)) },
-}));
-vi.mock('../services/encryption.js', () => ({ encrypt: vi.fn((v) => (v ? `enc:${v}` : v)), decrypt: vi.fn() }));
-vi.mock('../services/hostValidation.js', () => ({ validateHost: vi.fn(async () => null) }));
-vi.mock('../services/connectionPolicy.js', () => ({
-  getConnectionPolicy: vi.fn().mockResolvedValue({ allowPrivateHosts: false, allowInsecureTls: false, allowNonstandardPorts: true }),
-}));
-vi.mock('../plugins/registry.js', () => ({ pluginRegistry: { collectHook: vi.fn(async () => []) } }));
-
+import { afterAll, beforeAll, beforeEach, expect, it, vi } from 'vitest';
+import { randomUUID } from 'node:crypto';
 import express from 'express';
+import { createRealSchemaDb } from '../services/testing/realSchema.js';
+const state = vi.hoisted(() => ({db: null}));
+vi.mock('../services/db.js', () => ({query:(s,p)=>state.db.query(s,p), pool:{connect:async()=>({query:(s,p)=>state.db.query(s,p),release(){}})}}));
+vi.mock('../index.js', () => ({imapManager:{connectAccount:vi.fn(async()=>true)}}));
+vi.mock('../services/accounts/connectionProbe.js', () => ({probeConnection:vi.fn(async c=>({imapLogin:c.auth_user,smtpLogin:c.smtp_auth_user}))}));
+vi.mock('../services/encryption.js', () => ({encrypt:v=>v ? 'enc:'+v:null,decrypt:v=>v}));
+vi.mock('../services/redis.js', () => ({redisClient:{incr:async()=>{throw new Error('offline');},del:async()=>{}}}));
+vi.mock('../services/auditLog.js', () => ({recordAudit:vi.fn()}));
+vi.mock('../plugins/registry.js',()=>({pluginRegistry:{collectHook:vi.fn(async()=>[])}}));
 import accountRoutes from './accounts.js';
-import { query } from '../services/db.js';
-import { imapManager } from '../index.js';
+import providerRoutes from './accountProviders.js';
+import {createIdentityGate} from '../middleware/identityGate.js';
+import {requireCsrfHeader} from '../middleware/csrf.js';
+import {probeConnection} from '../services/accounts/connectionProbe.js';
+import {reset} from '../services/rateLimiter.js';
+import {imapManager} from '../index.js';
+import {recordAudit} from '../services/auditLog.js';
+const USER='70000000-0000-4000-8000-000000000001';
+const BODY={provider:'yahoo',email_address:' Team@Example.com ',imap_host:'imap.example.com',smtp_host:'smtp.example.com',auth_pass:'secret'};
+let server, base;
+beforeAll(async()=>{
+ state.db=await createRealSchemaDb();
+ await state.db.query("INSERT INTO users (id,username,email,is_admin) VALUES ($1,'employee','employee@example.com',false)",[USER]);
+ const app=express();app.use(express.json());
+ app.use((req,_res,next)=>{req.session={userId:req.get('x-test-user'),authMethod:'google',destroy:fn=>fn()};next();});
+ app.use(createIdentityGate({getSettings:()=>({mode:'google'})}));
+ app.use(requireCsrfHeader);
+ app.use('/api/accounts/provider',providerRoutes);app.use('/api/accounts',accountRoutes);
+ server=await new Promise(resolve=>{const s=app.listen(0,()=>resolve(s));});base=`http://127.0.0.1:${server.address().port}`;
+});
+afterAll(async()=>{await new Promise(resolve=>server.close(resolve));await state.db.close();});
+beforeEach(async()=>{
+ vi.clearAllMocks();await reset(`account-create:${USER}`);
+ await state.db.exec('DELETE FROM account_creation_requests; DELETE FROM email_accounts');
+ probeConnection.mockImplementation(async c=>({imapLogin:c.auth_user,smtpLogin:c.smtp_auth_user}));
+});
+const post=(body=BODY,{path='/api/accounts',user=USER,csrf=true,key=randomUUID()}={})=>fetch(base+path,{method:'POST',headers:{'Content-Type':'application/json','Idempotency-Key':key,...(user?{'x-test-user':user}:{}),...(csrf?{'X-Requested-With':'MailExpert'}:{})},body:JSON.stringify(body)});
+it('approved_employee_creates_manual_mailbox',async()=>{
+ const res=await post();expect(res.status).toBe(200);
+ const account=await res.json();expect(account).toMatchObject({email_address:'team@example.com',mail_provider:'yahoo',connection_mode:'manual',imap_tls_mode:'implicit'});
+ expect(account).not.toHaveProperty('auth_pass');expect(account).not.toHaveProperty('oauth_access_token');
+ expect((await state.db.query('SELECT count(*)::int AS n FROM email_accounts')).rows).toEqual([{n:1}]);
+ expect(imapManager.connectAccount).toHaveBeenCalledOnce();
+ expect((await state.db.query('SELECT thread_mode FROM email_accounts')).rows[0].thread_mode).toBe('rfc');
+});
+it.each([null,'70000000-0000-4000-8000-000000000099'])('unapproved_and_anonymous_cannot_create (%s)',async user=>{
+ expect((await post(BODY,{user})).status).toBe(401);expect(probeConnection).not.toHaveBeenCalled();
+});
+it('requires CSRF before connecting',async()=>{expect((await post(BODY,{csrf:false})).status).toBe(403);expect(probeConnection).not.toHaveBeenCalled();});
+it.each(['mail_provider','connection_mode','mail_node','oauth_provider','oauth_access_token','proton_user_id'])('server_only_fields_refused_before_connect: %s',async field=>{
+ expect((await post({...BODY,[field]:'forged'})).status).toBe(400);expect(probeConnection).not.toHaveBeenCalled();
+ expect(recordAudit).toHaveBeenCalledWith(expect.objectContaining({action:'mailbox.connection_failed'}));
+});
+it('smtp_failure_has_no_insert',async()=>{
+ probeConnection.mockRejectedValueOnce(Object.assign(new Error('raw secret'),{code:'smtp_auth_failed'}));
+ const res=await post();expect(res.status).toBe(400);expect(await res.json()).toEqual({error:'smtp_auth_failed',code:'smtp_auth_failed'});
+ expect((await state.db.query('SELECT count(*)::int AS n FROM email_accounts')).rows[0].n).toBe(0);
+});
+it('advanced_preset_uses_manual_policy and cross-route duplicate is refused',async()=>{
+ expect((await post()).status).toBe(200);
+ const res=await post({provider:'yahoo',email:'TEAM@example.com',appPassword:'secret'},{path:'/api/accounts/provider'});
+ expect(res.status).toBe(409);expect((await res.json()).code).toBe('already_connected');expect(probeConnection).toHaveBeenCalledOnce();
+});
+it('the sixth attempt across both routes is refused before probing',async()=>{
+ probeConnection.mockRejectedValue(Object.assign(new Error('refused'),{code:'smtp_auth_failed'}));
+ for(let i=0;i<5;i++) expect((await post()).status).toBe(400);
+ expect((await post({provider:'yahoo',email:'team@example.com',appPassword:'secret'},{path:'/api/accounts/provider'})).status).toBe(429);
+ expect(probeConnection).toHaveBeenCalledTimes(5);
+});
+it('replays the safe result without reconnecting or probing again',async()=>{
+ const key=randomUUID();const first=await(await post(BODY,{key})).json();const second=await(await post(BODY,{key})).json();
+ expect(second.id).toBe(first.id);expect(probeConnection).toHaveBeenCalledOnce();expect(imapManager.connectAccount).toHaveBeenCalledOnce();
+});
+it.each(['yahoo','yandex','mailru','icloud'])('connects fixed provider %s',async provider=>{
+ const res=await post({provider,email:'team@example.com',appPassword:'secret'},{path:'/api/accounts/provider'});
+ expect(res.status).toBe(200);expect(await res.json()).toMatchObject({mail_provider:provider,connection_mode:'preset'});
+});
+it.each([{imap_host:'127.0.0.1'},{provider:'proton'},{login:'bad\r\nBcc: victim@example.com'}])('refuses invalid fixed-provider input before connect: %j',async patch=>{
+ expect((await post({provider:'yahoo',email:'team@example.com',appPassword:'secret',...patch},{path:'/api/accounts/provider'})).status).toBe(400);
+ expect(probeConnection).not.toHaveBeenCalled();
+});
 
-const ID = '77777777-7777-4777-8777-777777777777';
-const BODY = {
-  name: 'Team', email_address: 'team@example.com', protocol: 'imap',
-  imap_host: 'imap.example.com', imap_port: 993, smtp_host: 'smtp.example.com', smtp_port: 587,
-  auth_user: 'team@example.com', auth_pass: 'secret',
-};
-
-// Setting up a server by hand is an admin task until PR 9 adds the domain mailbox kind; everyone
-// else adds Gmail through the Google flow.
-describe('POST /api/accounts (manual server setup)', () => {
-  let server;
-  let base;
-  beforeAll(async () => {
-    const app = express();
-    app.use(express.json());
-    app.use('/api/accounts', accountRoutes);
-    await new Promise((resolve) => { server = app.listen(0, resolve); });
-    base = `http://127.0.0.1:${server.address().port}`;
-  });
-  afterAll(async () => { await new Promise((resolve) => server.close(resolve)); });
-  beforeEach(() => {
-    vi.clearAllMocks();
-    session.isAdmin = true;
-    query.mockReset().mockResolvedValue({ rows: [{ id: ID, protocol: 'imap', email_address: BODY.email_address }] });
-  });
-
-  const post = (body) => fetch(`${base}/api/accounts`, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify(body),
-  });
-
-  it('refuses an ordinary user without touching the database', async () => {
-    session.isAdmin = false;
-    const res = await post(BODY);
-    expect(res.status).toBe(403);
-    expect(await res.json()).toEqual({ error: 'Admin access required' });
-    expect(query).not.toHaveBeenCalled();
-    expect(imapManager.connectAccount).not.toHaveBeenCalled();
-  });
-
-  it('lets an administrator add a mailbox, which keeps the default rfc threading', async () => {
-    const res = await post(BODY);
-    expect(res.status).toBe(200);
-    const [sql] = query.mock.calls.find(([s]) => /INSERT INTO email_accounts/.test(s));
-    expect(sql).not.toMatch(/thread_mode/);
-  });
+it('durable same-key replays do not consume password attempts', async () => {
+ const key=randomUUID();const first=await(await post(BODY,{key})).json();
+ for(let i=0;i<6;i++) {
+  const res=await post(BODY,{key});expect(res.status).toBe(200);expect((await res.json()).id).toBe(first.id);
+ }
+ expect(probeConnection).toHaveBeenCalledOnce();
 });

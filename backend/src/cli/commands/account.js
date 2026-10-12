@@ -99,7 +99,8 @@ const create = {
     '"account set-connection <address> --smtp-login LOGIN --smtp-password-stdin" afterwards.',
     'Defaults as the panel\'s form: ports 993 and 587, STARTTLS, name and login the address.',
     ...SERVER_HELP,
-    'The panel does not test the connection on save: the backend connects the mailbox (a queued',
+    'This trusted administrator CLI retains legacy TLS/plaintext settings without an onboarding probe.',
+    'The backend connects the mailbox (a queued',
     'job) and "account list" shows its health and sync error.',
   ],
   positionals: ['address'],
@@ -128,7 +129,7 @@ const create = {
     };
     body.auth_pass = await readSecret(ctx, 'IMAP password', { exact: true });
     if (!body.auth_pass) throw new CliError('password_missing', 'No password on stdin');
-    const { account } = unwrap(await createManualAccount(body, ctx.actor), ACCOUNT_ERRORS);
+    const { account } = unwrap(await createManualAccount(body, ctx.actor, { trustedLegacy: true }), ACCOUNT_ERRORS);
     const queued = await queueEffects(ctx, { reconnect: [account.id] });
     return {
       data: { account: safeAccount(account), job: queued.job },

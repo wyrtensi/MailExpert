@@ -141,11 +141,11 @@ export async function setHoldDays(days) {
   return { from, to: days };
 }
 
-// The purchased number now. Reads with the global query: never call it inside a transaction.
-export async function seatSupply({ eop = null, now = Date.now() } = {}) {
-  const settings = eop ?? await getEopSettings();
+// The purchased number now. A reserved client keeps these reads in the caller's session.
+export async function seatSupply({ eop = null, now = Date.now(), db = { query } } = {}) {
+  const settings = eop ?? await getEopSettings(db);
   const source = seatSource(settings, getTenantDriver());
-  const read = source === 'graph' ? await getSeatRead() : null;
+  const read = source === 'graph' ? await getSeatRead(db) : null;
   return purchasedSeats({ eop: settings, read, source, now });
 }
 
@@ -221,8 +221,8 @@ async function takeFree(client, purchased) {
 // A seat for a creation in flight: a pending ledger row, { assignmentId, seat }, or { error:
 // seats_unknown | no_free_seats }. The insert of the account row confirms it (confirmSeat) in its own
 // transaction; a failed creation drops it (dropPendingSeat); one never confirmed expires.
-export async function reserveSeat(email) {
-  const { purchased } = await seatSupply();
+export async function reserveSeat(email, reservedClient = null) {
+  const { purchased } = await seatSupply({ db: reservedClient ?? { query } });
   return withTransaction(async (client) => {
     await lockSeats(client);
     const free = await takeFree(client, purchased);
@@ -231,7 +231,7 @@ export async function reserveSeat(email) {
       INSERT INTO mail_node_seat_assignments (seat_no, email, pending_until)
       VALUES ($1, $2, NOW() + make_interval(mins => $3::int)) RETURNING id`, [free.seat, String(email).toLowerCase(), PENDING_MINUTES]);
     return { assignmentId: Number(row.id), seat: free.seat };
-  });
+  }, reservedClient);
 }
 
 // Binds the pending row to the new account. Answers false when the row is gone (it expired and

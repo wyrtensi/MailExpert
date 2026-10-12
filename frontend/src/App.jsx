@@ -142,10 +142,13 @@ export default function App() {
         window.opener.postMessage({
           type: 'oauth_success', provider: oauthSuccess,
           result: params.get('oauth_result') || undefined, notice: params.get('oauth_notice') || undefined,
+          // Opaque id of the attempt that started this flow: the add-account dialog tells its own
+          // attempt from an older one by it.
+          attempt: params.get('oauth_attempt') || undefined,
         }, window.location.origin);
       } else {
         // oauth_account: the Microsoft mailbox to reconnect by device code instead (redirect_not_configured).
-        window.opener.postMessage({ type: 'oauth_error', error: oauthError, provider: params.get('oauth_provider') || undefined, account: params.get('oauth_account') || undefined }, window.location.origin);
+        window.opener.postMessage({ type: 'oauth_error', error: oauthError, provider: params.get('oauth_provider') || undefined, account: params.get('oauth_account') || undefined, attempt: params.get('oauth_attempt') || undefined }, window.location.origin);
       }
       window.close();
       return;

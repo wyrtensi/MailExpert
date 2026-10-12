@@ -26,6 +26,11 @@ import integrationsRoutes, { loadIntegrationConfigs } from './routes/integration
 import oauthGoogleApiRoutes from './routes/oauthGoogleApi.js';
 import authRoutes, { destroyUserSessions } from './routes/auth.js';
 import accountRoutes from './routes/accounts.js';
+import accountProviderRoutes from './routes/accountProviders.js';
+import accountProtonRoutes from './routes/accountProton.js';
+import { reconcileProtonConnectionsAtStartup, setProtonMailEngine, startProtonConnectionSweeper } from './services/proton/connections.js';
+import { setProtonReconcileEngine, startProtonLinkReconciler } from './services/proton/reconcile.js';
+import { registerProtonJobKinds } from './services/proton/lifecycle.js';
 import mailNodeRoutes from './routes/mailNode.js';
 import mailNodeQuarantineRoutes from './routes/mailNodeQuarantine.js';
 import mailNodeOutageRoutes from './routes/mailNodeOutages.js';
@@ -190,6 +195,9 @@ app.set('imapManager', imapManager);
 // Hand the mail engine to the plugin platform so plugin-api capabilities (labels, archive,
 // broadcast) can be bound to it without any plugin importing the mail engine or this entry file.
 setMailEngine(imapManager);
+// Managed Proton attempts connect the mailbox they commit through the same engine.
+setProtonMailEngine(imapManager);
+setProtonReconcileEngine(imapManager);
 
 // Routes
 app.use('/api/auth', authRoutes);
@@ -199,6 +207,9 @@ app.use('/oauth/login/google', authGoogleRoutes);
 app.use('/oauth', oauthRoutes);
 app.use('/api/integrations', integrationsRoutes);
 app.use('/api/oauth/google', oauthGoogleApiRoutes);
+app.use('/api/accounts/provider', accountProviderRoutes);
+// Before /api/accounts, whose /:id routes would refuse 'proton' as a malformed ID.
+app.use('/api/accounts/proton/connect', accountProtonRoutes);
 app.use('/api/accounts', accountRoutes);
 app.use('/api/mail-node', mailNodeRoutes);
 app.use('/api/mail-node', mailNodeQuarantineRoutes);
@@ -285,6 +296,9 @@ registerAdminEffectsJob();
 // The node's checks the panel CLI asked for (DNS, alerts, the outage trace): run here, where each
 // joins the run going and the trace keeps its request budget (services/mailNode/nodeChecks.js).
 registerNodeCheckJobKind();
+// A deleted managed Proton mailbox's worker link (and its native user with the last link) is
+// cleaned up by a durable job, retried while the worker is away (services/proton/lifecycle.js).
+registerProtonJobKinds();
 startJobWorker();
 
 // A failed concurrent build (migration 0061) leaves an unusable index that no later migration repairs.
@@ -366,6 +380,18 @@ try {
 imapManager.connectAllEnabled()
   .catch(err => console.error('Startup mailbox connection error:', err.message));
 
+// Managed Proton attempts this process can no longer follow fail safely, and commits interrupted
+// between the SQL commit and the worker's commit are completed (services/proton/connections.js).
+try {
+  await reconcileProtonConnectionsAtStartup();
+} catch (err) {
+  console.error('Proton connection reconciliation failed:', err.message);
+}
+startProtonConnectionSweeper();
+// Committed managed Proton links follow Bridge: a rotated certificate or password is stored and the
+// mailbox reconnects; a lost session is reported for a new sign-in (services/proton/reconcile.js).
+const stopProtonLinkReconciler = startProtonLinkReconciler();
+
 const PORT = process.env.PORT || 3000;
 httpServer.listen(PORT, () => {
   console.log(`MailExpert backend running on port ${PORT}`);
@@ -376,6 +402,7 @@ process.on('SIGTERM', () => {
   // The job queue stops claiming at once, before anything else (a tick in progress included), and
   // its running jobs get up to 8 s: a send in progress finishes rather than being cut mid-DATA.
   const workerStopped = stopJobWorker({ waitMs: 8000 }).catch(() => false);
+  stopProtonLinkReconciler();
   httpServer.close(async () => {
     await workerStopped;
     // close() lets pending commands finish before the connection is shut down.

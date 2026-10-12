@@ -7,8 +7,8 @@ import { auditOf } from '../actor.js';
 import { computeAccountHealth } from '../accountHealth.js';
 import { hasHeaderInjectionChars } from '../accountAliases.js';
 import {
-  CONNECTION_FIELDS, RECONNECT_FIELDS, changedConnectionFields, changedServersError, impliedImapTls, newServersError,
-  storedColumnValue,
+  CONNECTION_FIELDS, RECONNECT_FIELDS, applyImapTlsMode, changedConnectionFields, changedServersError, impliedImapTls, newServersError,
+  storedColumnValue, withAccountAddressLock,
 } from './connection.js';
 
 // An administrator's actions on mailboxes set up by hand (IMAP/SMTP) and on OAuth ones, shared by
@@ -28,6 +28,9 @@ export const ACCOUNT_ERRORS = Object.freeze({
   account_ambiguous: [409, 'More than one mailbox has this address: name it by its ID'],
   mail_node_connection_locked: [400, 'The server settings of a mail node mailbox cannot be changed'],
   no_fields: [400, 'No valid fields to update'],
+  already_connected: [409, 'Mailbox already connected'],
+  trusted_legacy_required: [403, 'Legacy creation requires the trusted CLI'],
+  managed_connection_locked: [400, 'Managed mailbox connection settings cannot be changed'],
   oauth_mailbox_not_found: [404, 'OAuth mailbox not found'],
 });
 
@@ -37,6 +40,7 @@ export const SAFE_FIELDS = [
   'imap_host', 'imap_port', 'imap_skip_tls_verify',
   'smtp_host', 'smtp_port', 'smtp_tls',
   'auth_user', 'smtp_auth_user', 'oauth_provider', 'oauth_reconnect_required', 'enabled',
+  'mail_provider', 'connection_mode', 'imap_tls_mode', 'can_reconnect_proton',
   'include_in_unified_inbox', 'mail_node',
   'last_sync', 'sync_error', 'sort_order', 'folder_mappings',
   'signature', 'created_at', 'categorization_enabled', 'thread_mode',
@@ -52,6 +56,7 @@ export const SAFE_FIELDS = [
 
 export function safeAccount(row) {
   const obj = Object.fromEntries(SAFE_FIELDS.map((k) => [k, row[k]]));
+  obj.can_reconnect_proton = row.can_reconnect_proton === true;
   // Sanitize on read so legacy values stored before the write-time sanitizer are safe
   if (obj.signature) obj.signature = sanitizeSignature(obj.signature);
   return obj;
@@ -95,11 +100,24 @@ export async function listAccounts({ addedBy = null } = {}) {
   };
 }
 
-// Adds a mailbox set up by hand (an administrator's task: an ordinary user adds Gmail through the
-// Google flow or a mailbox on the mail node). The servers pass the admin's connection policy
+// Adds a legacy mailbox through the trusted administrator CLI. The servers pass the connection policy
 // (private hosts, nonstandard ports). Answers { account } (the stored row) or { error, message? };
 // the caller connects it (imapManager).
-export async function createManualAccount(body, actor) {
+export async function createManualAccount(body, actor, { trustedLegacy = false } = {}) {
+  if (!trustedLegacy || actor?.via !== 'cli') return { error: 'trusted_legacy_required' };
+  const policy = await getConnectionPolicy();
+  const serversError = await newServersError(body || {}, policy);
+  if (serversError) return { error: 'servers_refused', message: serversError };
+  if (typeof body?.email_address !== 'string' || !body.email_address.trim()) return { error: 'name_email_required' };
+  return withAccountAddressLock(body.email_address, async client => {
+    const existing = await client.query('SELECT id FROM email_accounts WHERE lower(btrim(email_address)) = lower(btrim($1)) LIMIT 1', [body.email_address]);
+    if (existing.rows.length) return { error: 'already_connected' };
+    return persistManualAccount(body, actor, { client });
+  });
+}
+
+// Only trusted server code calls this after its verification or explicit CLI legacy policy.
+export async function persistManualAccount(body, actor, { client = { query }, provider = 'other', mode = 'manual', imapTlsMode = null, audit = true } = {}) {
   const {
     name, sender_name = null, email_address, color = '#6366f1', protocol = 'imap',
     imap_host, imap_port = 993, imap_skip_tls_verify = false,
@@ -113,28 +131,24 @@ export async function createManualAccount(body, actor) {
   if (hasHeaderInjectionChars(name) || hasHeaderInjectionChars(email_address)) return { error: 'name_email_control_chars' };
   if (sender_name && hasHeaderInjectionChars(sender_name)) return { error: 'sender_name_control_chars' };
 
-  const policy = await getConnectionPolicy();
-  const serversError = await newServersError({ imap_host, imap_port, smtp_host, smtp_port }, policy);
-  if (serversError) return { error: 'servers_refused', message: serversError };
-
-  const result = await query(`
+  const result = await client.query(`
       INSERT INTO email_accounts (
         added_by, name, sender_name, email_address, color, protocol,
         imap_host, imap_port, imap_tls, imap_skip_tls_verify, smtp_host, smtp_port, smtp_tls,
         auth_user, auth_pass, smtp_auth_user, smtp_auth_pass, oauth_provider, oauth_access_token, oauth_refresh_token,
-        signature
-      ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21)
+        signature, mail_provider, connection_mode, imap_tls_mode
+      ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24)
       RETURNING *
     `, [
-    actor?.userId ?? null, name, sender_name || null, email_address, color, protocol,
-    imap_host, imap_port, impliedImapTls(imap_port), !!imap_skip_tls_verify, smtp_host, smtp_port, smtp_tls,
+    actor?.userId ?? null, name, sender_name || null, email_address.trim().toLowerCase(), color, protocol,
+    imap_host, imap_port, imapTlsMode ? imapTlsMode === 'implicit' : impliedImapTls(imap_port), !!imap_skip_tls_verify, smtp_host, smtp_port, smtp_tls,
     auth_user, encrypt(auth_pass), smtp_auth_user || null, encrypt(smtp_auth_pass) || null,
     oauth_provider, encrypt(oauth_access_token), encrypt(oauth_refresh_token),
-    sanitizeSignature(signature) || null,
+    sanitizeSignature(signature) || null, provider, mode, imapTlsMode,
   ]);
 
   const account = result.rows[0];
-  recordAudit(auditOf(actor, {
+  if (audit) recordAudit(auditOf(actor, {
     accountId: account.id,
     action: 'mailbox.added',
     details: { protocol: account.protocol, oauthProvider: account.oauth_provider ?? null },
@@ -152,12 +166,14 @@ export async function updateAccountConnection(id, updates, actor) {
   if (!Object.keys(given).length) return { error: 'no_fields' };
   const { rows: [stored] } = await query('SELECT * FROM email_accounts WHERE id = $1', [id]);
   if (!stored) return { error: 'account_not_found' };
+  if (stored.mail_provider === 'proton' && stored.connection_mode === 'managed' && changedConnectionFields(stored, given).length) return { error: 'managed_connection_locked' };
   if (stored.mail_node && changedConnectionFields(stored, given).length) return { error: 'mail_node_connection_locked' };
 
   const policy = await getConnectionPolicy();
   const serversError = await changedServersError(given, policy);
   if (serversError) return { error: 'servers_refused', message: serversError };
-  if ('imap_port' in given) given.imap_tls = impliedImapTls(given.imap_port);
+  const tlsModeError = applyImapTlsMode(stored, given);
+  if (tlsModeError) return { error: 'servers_refused', message: tlsModeError };
 
   const keys = CONNECTION_FIELDS.filter((key) => key in given);
   const { rows: [account] } = await query(

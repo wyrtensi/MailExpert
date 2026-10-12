@@ -13,12 +13,15 @@ export const CSRF_HEADER = 'X-Requested-With';
 export const CSRF_VALUE = 'MailExpert';
 const messageBodyRequests = new Map();
 
-async function request(method, path, body, extraHeaders) {
+const attemptHeader = (id) => (id ? { 'Idempotency-Key': id } : undefined);
+
+async function request(method, path, body, extraHeaders, signal) {
   if (isDemoMode) return demoRequest(method, path, body);
   const opts = {
     method,
     credentials: 'include',
     headers: { [CSRF_HEADER]: CSRF_VALUE, ...(extraHeaders || {}) },
+    ...(signal ? { signal } : {}),
   };
   if (body) {
     opts.headers['Content-Type'] = 'application/json';
@@ -417,7 +420,19 @@ export const api = {
 
   // Accounts
   getAccounts: () => request('GET', '/accounts'),
-  addAccount: (data) => request('POST', '/accounts', data),
+  // `requestId` (older name `idempotencyKey`) is the attempt id of one connection attempt
+  // (utils/addAccountFlow.js), sent as the Idempotency-Key header: the server replays the first
+  // result for the same key. `signal` cancels the request.
+  addAccount: (data, { requestId, idempotencyKey, signal } = {}) => request('POST', '/accounts', data, attemptHeader(requestId ?? idempotencyKey), signal),
+  // A mailbox of one of the four fixed IMAP providers (Yahoo, Yandex, Mail.ru, iCloud): the server
+  // owns the hosts, ports and TLS; the body is the provider id, the address and the app password.
+  addProviderAccount: (data, { requestId, signal } = {}) => request('POST', '/accounts/provider', data, attemptHeader(requestId), signal),
+  // Managed Proton: the attempt id travels in the body (`requestId`), not in a header. Cancel takes
+  // no signal because it is sent after the attempt's own signal was aborted.
+  startProtonConnection: (data, { signal } = {}) => request('POST', '/accounts/proton/connect', data, undefined, signal),
+  getProtonConnection: (id, { signal } = {}) => request('GET', `/accounts/proton/connect/${encodeURIComponent(id)}`, undefined, undefined, signal),
+  continueProtonConnection: (id, data, { signal } = {}) => request('POST', `/accounts/proton/connect/${encodeURIComponent(id)}/continue`, data, undefined, signal),
+  cancelProtonConnection: (id) => request('POST', `/accounts/proton/connect/${encodeURIComponent(id)}/cancel`),
   // A mailbox on the mail node: the server picks the host and a password nobody sees.
   addDomainMailbox: ({ localPart, domain, name, ...names }) => request('POST', '/accounts', { kind: 'domain', localPart, domain, name, ...names }),
   mailNode: {
@@ -616,7 +631,8 @@ export const api = {
   pollMsDeviceFlow: () => directApi.pollMsDeviceFlow(),
   // Gmail by address: start answers a one-time /oauth/google/launch path (the address stays out
   // of MailExpert URLs); known-emails lists addresses connected before that have no mailbox now.
-  startGoogleOAuth: (email, names = {}) => request('POST', '/oauth/google/start', { email, ...names }),
+  // `attemptId` is opaque: the callback hands it back so the dialog can tell its own flow from an older one.
+  startGoogleOAuth: (email, names = {}, attemptId, signal) => request('POST', '/oauth/google/start', { email, ...names, ...(attemptId ? { attemptId } : {}) }, undefined, signal),
   knownGoogleEmails: (q) => request('GET', `/oauth/google/known-emails?${new URLSearchParams({ q })}`),
 
   // Sync

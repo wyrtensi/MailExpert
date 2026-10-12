@@ -25,6 +25,8 @@ LIB_DIR=$SCRIPT_DIR/lib
 . "$LIB_DIR/backup.sh"
 # shellcheck source=lib/health.sh
 . "$LIB_DIR/health.sh"
+# shellcheck source=lib/proton.sh
+. "$LIB_DIR/proton.sh"
 exit_on_unexpected_failure
 
 # Free space below this share of a disk is a problem.
@@ -58,7 +60,11 @@ collect_problems() {
   now=$(date +%s)
   panel_ready || echo "ready: http://127.0.0.1:$CFG_HTTP_PORT/api/health/ready does not answer 200"
   if ps=$(app_compose ps --all --format '{{.Service}} {{.State}} {{.Health}}' 2>/dev/null); then
-    service_problems frontend backend postgres redis <<<"$ps"
+    services='frontend backend postgres redis'
+    # The Proton worker turns unhealthy when Bridge should run and does not (worker.py /healthz).
+    if proton_worker_installed; then services+=' proton-worker'; fi
+    # shellcheck disable=SC2086 # one service name per word
+    service_problems $services <<<"$ps"
   else
     echo "containers: docker compose ps failed for $CFG_PROJECT"
   fi

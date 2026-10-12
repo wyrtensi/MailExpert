@@ -1,0 +1,5 @@
+# Pinned Proton Bridge source (shell-sourceable). Never patched.
+BRIDGE_REPO=https://github.com/mnixry/proton-bridge.git
+BRIDGE_COMMIT=eabe5b282e4b07a4fc720233fb85ddb4ab335b7f
+# Value of BRIDGE_APP_VERSION in the Makefile at BRIDGE_COMMIT.
+BRIDGE_APP_VERSION=3.27.1+git

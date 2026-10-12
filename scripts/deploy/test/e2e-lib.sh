@@ -51,4 +51,3 @@ proton_isolation() {
   [[ $answer == "200 "* ]] || fail "the worker's health through the backend: $answer"
   printf '%s\n' "${answer#200 }"
 }
-

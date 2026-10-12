@@ -269,20 +269,11 @@ proton_paths() {
   [ -n "$id" ] || die "compose did not create the Proton worker's container"
   state=$(proton_state_volume)
   runtime=$(docker inspect -f "{{range .Mounts}}{{if eq .Destination \"$PROTON_RUNTIME_PATH\"}}{{.Name}}{{end}}{{end}}" "$id")
-  [ -n "$state" ] && [ -n "$runtime" ] || die "the Proton worker's container has no state or runtime volume"
+  if [ -z "$state" ] || [ -z "$runtime" ]; then die "the Proton worker's container has no state or runtime volume"; fi
   image=$(docker inspect -f '{{.Config.Image}}' "$id")
   managed_label_args labels helper "$CFG_INSTALL_ID"
   docker run --rm -i --network none --user 0 "${labels[@]}" -v "$state:/state" -v "$runtime:/runtime" \
     --entrypoint sh "$image" -c "$PROTON_PATHS_SCRIPT" sh "$PROTON_WORKER_UID" "$@"
-}
-
-# ensure_proton_paths: the worker's volumes exist and are its own (uid 1000, 0700) before it
-# starts.
-ensure_proton_paths() {
-  local files
-  proton_worker_installed || return 0
-  files=$(proton_paths </dev/null) || die "the Proton worker's volumes could not be prepared (the error is above)"
-  log "proton worker volumes ready ($files state files)"
 }
 
 # restore_proton_state <dir>: <dir>/proton-state.tar into the worker's state volume, the worker
@@ -337,7 +328,7 @@ proton_namespace_problems() {
     if [ "${joined:-0}" != 0 ] || [ "${all:-false}" != false ]; then echo "proton-worker: ${name#/} publishes ports"; fi
   done
   while read -r id name line; do
-    [ -n "$id" ] && [ "$id" != "$worker" ] || continue
+    if [ -z "$id" ] || [ "$id" = "$worker" ]; then continue; fi
     case $line in
       "container:$backend" | "container:${backend_name#/}" | "container:${backend:0:12}")
         echo "proton-worker: ${name#/} joins the backend's network namespace too" ;;

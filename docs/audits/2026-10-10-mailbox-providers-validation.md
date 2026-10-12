@@ -101,9 +101,45 @@ Post-check: `healthcheck.sh` **exit 0**, healthy. Worker HTTP 200/running, linke
 
 Через установленный enqueueOutgoingSend создан job2 на+24h с отдельным test dedupe key. Штатный backup сохранил snapshot `207bfe86`, dump2566713bytes, 38 worker files; затем cancelScheduled подтвердил cancelled на A. Штатный restore.sh восстановил новую DB, keys и 37 worker files, counts99migrations/user1/mailbox1, verifier decrypted2/failed0. До запуска backend historical job2 стал `needs_attention`, `error_code=restored_from_backup`, attempts0. B ready=true, worker running/linked1, TLS verification не отключалась.
 
-Однако установленный ImapManager.fetchAttachment на B получил IMAP authentication rejection и не восстановился за бюджет60s: **rehearsal runner exit1**. Root cause пока не установлен; нельзя выдавать это за успешное восстановление почтового подключения. CLI probe на ошибке также пишет предупреждение из-за headless `ImapManager(null)`; это недостаток harness, отдельно от наблюдаемого IMAP AUTH rejection. Не менять пароль/worker state вручную и не маскировать результат bypass TLS или monkey-patching.
+Однако установленный ImapManager.fetchAttachment на B получил IMAP authentication rejection и не восстановился за бюджет60s: **первый rehearsal runner exit1**. На момент этого запуска причина была неизвестна. CLI probe на ошибке также пишет предупреждение из-за headless `ImapManager(null)`; это недостаток harness, отдельно от наблюдаемого IMAP AUTH rejection. Не менять пароль/worker state вручную и не маскировать результат bypass TLS или monkey-patching. Продолжение расследования приведено ниже.
 
 Finally остановил B backend/worker и запустил A; далее все остальные контейнеры B также остановлены по уточнению владельца об одном стенде. На A healthcheck exit0/healthy, last_sync свежий, sync_error NULL, исходный job2 cancelled, attachment hash совпал из одной Sent копии, exit0. Работа владельца осталась на исходном локальном stand. SMTP fault test не запускался: по правилу владельца о неуспехе прямого пути дальнейшее выполнение остановлено с отчётом.
 
 Первый запуск harness остановился до enqueue/изменения БД из-за CRLF в destination на stdin; SQL подтвердил отсутствие test job и healthy A. Исправлено чтение CR в одноразовом runner, не в продукте; повтор начал описанный выше rehearsal. Это не замена failing product checks.
+
+### AUTH после restore: штатное переподключение проверено
+
+После явного поручения продолжить исправление проверили уже восстановленную installation, без
+нового restore или изменения private state. Read-only клиент штатного Bridge gRPC вывел только
+enum и boolean: `state=0` (SignedOut), `splitMode=true`, один адрес, `passwordPresent=false`.
+API worker возвращал `not_connected`, в том числе после ожидания40s. Таким образом причиной
+отказа IMAP была отсутствующая авторизованная native-сессия, а не ошибка TLS или расшифровки
+сохранённого IMAP-пароля. Готовность HTTP панели и работа процесса worker этого не обнаруживают.
+
+В [закреплённом исходнике Bridge](https://github.com/mnixry/proton-bridge/blob/eabe5b282e4b07a4fc720233fb85ddb4ab335b7f/internal/bridge/user.go)
+`loadUser` при запуске выполняет refresh и очищает auth secrets при `AuthRefreshTokenInvalid`.
+Устаревший refresh token после продолжения работы исходной installation — вероятное объяснение
+состояния снимка, **не доказанный ответ Proton API**: его raw logs и токены не извлекались.
+Снимок локального состояния не гарантирует действительность сессии на стороне провайдера.
+
+На B выполнен штатный `startProtonConnection` с `reconnectAccountId` существующего ящика и
+последующие `getProtonConnection`, через установленный backend SDK. Ранее предоставленный
+тестовый пароль прошёл только по stdin; файл с паролем, ручная замена BridgePass, изменения
+Bridge и TLS bypass не применялись. Runner завершился0 и проверил сохранение того же mailbox ID.
+
+Независимый post-check runner завершился0. После перезапуска native state стал Connected (`2`),
+split mode сохранился, IMAP/SMTP-пароли, сертификат и login совпали с текущими данными worker.
+`ImapManager.fetchAttachment` вернул10485760bytes с прежним SHA-256
+`62be011d59b684394b8316bb24bc0e272982f487875524da82e5ea6876b2baba`, одна Sent копия.
+Фоновая синхронизация дала `sync_error IS NULL=true`, свежий `last_sync=true`.
+Historical job остался `needs_attention/restored_from_backup/attempts=0` после работающего
+backend и повторного запуска; переподключение не снимает карантин отправки.
+Все B containers снова остановлены; исходный stand возвращён и healthcheck healthy.
+
+Существующие owning tests `reconcile.pglite.test.js` и `connections.pglite.test.js`:35/35,
+exit0. Первый локальный запуск отказал из-за отсутствующего в PATH OpenSSL; повтор использовал
+уже установленный Git OpenSSL, без установки/обновления зависимостей. Продуктовый код не менялся.
+Инструкция восстановления дополнена повторным входом через существующий ящик и проверками
+почты. **Restore с повторным входом проверен; автоматическое восстановление старой сессии без
+пароля не обещается.** Actual SMTP timeout остаётся отдельной незавершённой проверкой Task13.
 

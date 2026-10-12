@@ -929,6 +929,33 @@ describe('usability of the provider forms', () => {
   });
 });
 
+describe('Gmail and our own mailbox share the dialog styles', () => {
+  test('gmail_uses_dialog_controls: 44 px field and button, an announced error, a 44 px fallback link', async () => {
+    answers['POST /api/oauth/google/start'] = { status: 409, body: { error: 'already_connected', code: 'already_connected' } };
+    const { host } = await mount(React.createElement(Harness, { Form: GmailAddForm, accounts: [], demo: false }));
+    const input = host.querySelector('#gmail-add-email');
+    assert.ok(input.classList.contains('add-account-input'));
+    assert.equal(input.getAttribute('autocapitalize'), 'none');
+    assert.equal(host.querySelector('label[for="gmail-add-email"]').className, 'add-account-label');
+    const button = byText(host, 'button', 'admin.accounts.add.continue');
+    assert.ok(button.classList.contains('add-account-button'));
+    await type(input, 'me@example.com');
+    await click(button);
+    const alert = host.querySelector('[role="alert"]');
+    assert.ok(alert, 'a refused start is announced');
+    assert.ok(alert.classList.contains('add-account-error'));
+  });
+
+  test('domain_controls_are_touch_sized: the node form fields and buttons are at least 44 px high', async () => {
+    answers['GET /api/mail-node/domains'] = { domains: [{ domain: 'example.com', active: true, state: 'ready' }] };
+    answers['GET /api/mail-node/seats'] = { used: 1, held: 0, free: 5, known: true, heldSeats: [], requests: [] };
+    const { host } = await mount(React.createElement(DomainMailboxAddForm, { accounts: [], onCreated() {} }));
+    for (const el of host.querySelectorAll('#domain-add-local, select, #domain-add-sender, button[type="submit"]')) {
+      assert.ok(parseInt(el.style.minHeight, 10) >= 44, `${el.id || el.tagName} is touch sized`);
+    }
+  });
+});
+
 describe('secrets boundary', () => {
   test('back_close_clear_secrets: an app password dies with the form and never reaches state, URLs or storage', async () => {
     answers['POST /api/accounts/provider'] = { status: 400, body: { error: 'imap_auth_failed', code: 'imap_auth_failed' } };

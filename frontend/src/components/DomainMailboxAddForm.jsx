@@ -16,14 +16,15 @@ import {
   seatsView,
 } from '../utils/mailNode.js';
 
+// Touch-sized (44 px) like the other add-account forms; also used by MailNodeForeignAliases.
 const inputStyle = {
-  width: '100%', padding: '9px 12px', background: 'var(--bg-tertiary)', border: '1px solid var(--border)',
+  width: '100%', minWidth: 0, minHeight: 44, padding: '9px 12px', background: 'var(--bg-tertiary)', border: '1px solid var(--border)',
   borderRadius: 7, color: 'var(--text-primary)', fontSize: 13, outline: 'none', boxSizing: 'border-box',
 };
 const labelStyle = { display: 'block', fontSize: 12, color: 'var(--text-secondary)', marginBottom: 5 };
 const hintStyle = { marginTop: 5, fontSize: 11, color: 'var(--text-tertiary)', lineHeight: 1.5 };
 const buttonStyle = (primary, enabled = true) => ({
-  padding: '9px 16px', borderRadius: 7, fontSize: 13, fontWeight: 500, cursor: enabled ? 'pointer' : 'default',
+  minHeight: 44, padding: '9px 16px', borderRadius: 7, fontSize: 13, fontWeight: 500, cursor: enabled ? 'pointer' : 'default',
   opacity: enabled ? 1 : 0.5,
   ...(primary
     ? { border: 'none', background: 'var(--accent)', color: 'var(--accent-text)' }
@@ -200,6 +201,9 @@ export default function DomainMailboxAddForm({
         <input
           id="domain-add-local"
           autoComplete="off"
+          autoCapitalize="none"
+          autoCorrect="off"
+          spellCheck={false}
           value={localPart}
           placeholder={t('admin.accounts.add.domainLocalPartPh')}
           aria-invalid={!!(localPart && addressError)}

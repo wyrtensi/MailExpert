@@ -23,13 +23,7 @@ import { isAttemptId, newAttemptId } from '../utils/addAccountFlow.js';
 import { appOAuthReturnWatch } from '../utils/appOAuthReturn.js';
 import AdvancedConnectionFields from './addAccount/AdvancedConnectionFields.jsx';
 
-const inputStyle = {
-  width: '100%', padding: '9px 12px', background: 'var(--bg-tertiary)', border: '1px solid var(--border)',
-  borderRadius: 7, color: 'var(--text-primary)', fontSize: 13, outline: 'none', boxSizing: 'border-box',
-};
 const LIST_ID = 'gmail-add-suggestions';
-const labelStyle = { display: 'block', fontSize: 12, color: 'var(--text-secondary)', marginBottom: 5, marginTop: 14 };
-const hintStyle = { marginTop: 5, fontSize: 11, color: 'var(--text-tertiary)', lineHeight: 1.5 };
 
 // "Add account -> Gmail": the user types the address, MailExpert picks the Google app. The start
 // answer is a one-time path; the address itself never goes into a MailExpert URL. The callback
@@ -210,7 +204,7 @@ export default function GmailAddForm({
 
   if (demoConsent) {
     return (
-      <div style={{ padding: '16px 18px', border: '1px solid var(--border)', borderRadius: 10, background: 'var(--bg-tertiary)' }}>
+      <div className="add-account-help" style={{ padding: '16px 18px' }}>
         <div style={{ fontSize: 11, textTransform: 'uppercase', letterSpacing: 0.4, color: 'var(--text-tertiary)' }}>
           {t('admin.accounts.add.demoConsentBadge')}
         </div>
@@ -220,17 +214,11 @@ export default function GmailAddForm({
         <div style={{ fontSize: 12, color: 'var(--text-secondary)', lineHeight: 1.6 }}>
           {t('admin.accounts.add.demoConsentBody')}
         </div>
-        <div style={{ display: 'flex', gap: 8, marginTop: 14 }}>
-          <button type="button" onClick={allowDemoConsent} disabled={busy} style={{
-            padding: '9px 16px', borderRadius: 8, fontSize: 13, fontWeight: 500, border: 'none',
-            background: 'var(--accent)', color: 'var(--accent-text)', cursor: busy ? 'default' : 'pointer',
-          }}>
+        <div className="add-account-actions" style={{ marginTop: 14 }}>
+          <button type="button" className="add-account-button" onClick={allowDemoConsent} disabled={busy}>
             {t('admin.accounts.add.demoConsentAllow')}
           </button>
-          <button type="button" onClick={() => setDemoConsent(null)} disabled={busy} style={{
-            padding: '9px 16px', borderRadius: 8, fontSize: 13, border: '1px solid var(--border)',
-            background: 'none', color: 'var(--text-secondary)', cursor: busy ? 'default' : 'pointer',
-          }}>
+          <button type="button" className="add-account-link-button" onClick={() => setDemoConsent(null)} disabled={busy}>
             {t('common.cancel')}
           </button>
         </div>
@@ -263,27 +251,36 @@ export default function GmailAddForm({
       {t(SUGGESTION_BADGE_KEYS[row.kind])}
     </span>
   );
-  const reconnectButton = (row) => (
+  // In a suggestion row the button stays compact (the row itself is the target); under the field,
+  // where the exact address is shown on its own, it is a full 44 px button.
+  const reconnectButton = (row, compact = true) => (
     <button
       type="button"
+      className={compact ? undefined : 'add-account-button'}
       onMouseDown={(e) => e.preventDefault()}
       onClick={() => openOAuthWindow(row.reconnectUrl)}
-      style={{ padding: '3px 8px', fontSize: 11, borderRadius: 6, border: 'none', background: 'var(--accent)', color: 'var(--accent-text)', cursor: 'pointer' }}
+      style={compact ? { padding: '3px 8px', fontSize: 11, borderRadius: 6, border: 'none', background: 'var(--accent)', color: 'var(--accent-text)', cursor: 'pointer' } : undefined}
     >
       {t('admin.accounts.add.reconnect')}
     </button>
   );
 
   return (
-    <div>
-      <label htmlFor="gmail-add-email" style={{ display: 'block', fontSize: 12, color: 'var(--text-secondary)', marginBottom: 5 }}>
+    <div className="add-account-form" data-provider-form="gmail">
+      <div className="add-account-field">
+      <label htmlFor="gmail-add-email" className="add-account-label">
         {t('admin.accounts.add.emailLabel')}
       </label>
       <div style={{ position: 'relative' }}>
         <input
           id="gmail-add-email"
           type="email"
+          inputMode="email"
+          className="add-account-input"
           autoComplete="off"
+          autoCapitalize="none"
+          autoCorrect="off"
+          spellCheck={false}
           role="combobox"
           aria-expanded={listOpen}
           aria-controls={LIST_ID}
@@ -294,7 +291,6 @@ export default function GmailAddForm({
           onFocus={() => setOpen(true)}
           onBlur={closeList}
           onKeyDown={onKeyDown}
-          style={inputStyle}
         />
         {listOpen && (
           <ul id={LIST_ID} role="listbox" style={{
@@ -326,57 +322,54 @@ export default function GmailAddForm({
       </div>
 
       {exact && !listOpen && (
-        <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginTop: 6 }}>
+        <div className="add-account-actions" style={{ marginTop: 6 }}>
           {badge(exact)}
-          {exact.kind === 'reconnect' && reconnectButton(exact)}
+          {exact.kind === 'reconnect' && reconnectButton(exact, false)}
         </div>
       )}
-      {errorKey && <div style={{ fontSize: 12, color: 'var(--red)', marginTop: 8 }}>{t(errorKey)}</div>}
+      </div>
+      {errorKey && <p className="add-account-error" role="alert">{t(errorKey)}</p>}
 
       <AdvancedConnectionFields managed="gmail">
-        <label htmlFor="gmail-add-sender" style={labelStyle}>{t('admin.accounts.add.senderNameLabel')}</label>
-        <input
-          id="gmail-add-sender"
-          value={senderName}
-          maxLength={200}
-          placeholder={t('admin.accounts.add.senderNamePh')}
-          onChange={(e) => setSenderName(e.target.value)}
-          style={inputStyle}
-        />
-        <div style={hintStyle}>{t('admin.accounts.add.gmailSenderHint')}</div>
-
-        <label htmlFor="gmail-add-sender-alt" style={labelStyle}>{t('admin.accounts.add.senderNameAltLabel')}</label>
-        <input
-          id="gmail-add-sender-alt"
-          value={senderNameAlt}
-          maxLength={200}
-          placeholder={t('admin.accounts.add.senderNameAltPh')}
-          onChange={(e) => setSenderNameAlt(e.target.value)}
-          style={inputStyle}
-        />
-        <div style={hintStyle}>{t('admin.accounts.add.senderNameAltHint')}</div>
+        <div className="add-account-field">
+          <label htmlFor="gmail-add-sender" className="add-account-label">{t('admin.accounts.add.senderNameLabel')}</label>
+          <input
+            id="gmail-add-sender"
+            className="add-account-input"
+            value={senderName}
+            maxLength={200}
+            placeholder={t('admin.accounts.add.senderNamePh')}
+            onChange={(e) => setSenderName(e.target.value)}
+          />
+          <p className="add-account-note">{t('admin.accounts.add.gmailSenderHint')}</p>
+        </div>
+        <div className="add-account-field">
+          <label htmlFor="gmail-add-sender-alt" className="add-account-label">{t('admin.accounts.add.senderNameAltLabel')}</label>
+          <input
+            id="gmail-add-sender-alt"
+            className="add-account-input"
+            value={senderNameAlt}
+            maxLength={200}
+            placeholder={t('admin.accounts.add.senderNameAltPh')}
+            onChange={(e) => setSenderNameAlt(e.target.value)}
+          />
+          <p className="add-account-note">{t('admin.accounts.add.senderNameAltHint')}</p>
+        </div>
       </AdvancedConnectionFields>
 
-      <button
-        type="button"
-        onClick={start}
-        disabled={!canStart}
-        style={{
-          marginTop: 14, padding: '9px 16px', borderRadius: 8, fontSize: 13, fontWeight: 500, border: 'none',
-          background: canStart ? 'var(--accent)' : 'var(--bg-elevated)', color: canStart ? 'var(--accent-text)' : 'var(--text-tertiary)',
-          cursor: canStart ? 'pointer' : 'not-allowed',
-        }}
-      >
-        {busy ? t('admin.accounts.add.starting') : t('admin.accounts.add.continue')}
-      </button>
+      <div className="add-account-actions">
+        <button type="button" className="add-account-button" onClick={start} disabled={!canStart}>
+          {busy ? t('admin.accounts.add.starting') : t('admin.accounts.add.continue')}
+        </button>
+      </div>
 
       {launchPath && (
-        <div style={{ fontSize: 12, color: 'var(--text-secondary)', marginTop: 12 }}>
+        <p className="add-account-note" style={{ marginTop: 0 }}>
           {t('admin.accounts.add.openGoogleNote')}{' '}
-          <a href={launchPath} target="_blank" rel="opener" onClick={() => setLaunchPath(null)}>
+          <a className="add-account-help-link" href={launchPath} target="_blank" rel="opener" onClick={() => setLaunchPath(null)}>
             {t('admin.accounts.add.openGoogle')}
           </a>
-        </div>
+        </p>
       )}
     </div>
   );

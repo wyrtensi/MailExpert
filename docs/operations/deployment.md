@@ -1067,20 +1067,111 @@ mailcow служба двигает только до версии из `deploy/
   предупреждение; `healthcheck.sh` сообщает о `proton-worker`, если контейнер не работает или
   нездоров.
 - **Бэкап.** `backup.sh` перед дампом закрывает шлюз worker (`/snapshot/begin`): новые отправки,
-  входы и удаления Proton ждут, отправки в полёте (до 60 с) завершаются, Bridge штатно
-  останавливается, worker дожидается выхода процесса. Затем дамп базы и архив состояния
-  `proton-state.tar` (в снимке рядом с `db.dump`, 0600; в журнале только число файлов), и шлюз
-  открывается — в том числе при любой ошибке. Если отправка или вход не закончились за 60 с, бэкап
-  завершается ошибкой до дампа и шлюз открывается: живую отправку не считают мёртвой по таймауту.
-  `update.sh` хранит состояние рядом с предмиграционным дампом:
-  `backups/pre-update-<версия>.proton/proton-state.tar`.
-- **Восстановление и откат.** `restore.sh` и `rollback.sh` кладут состояние в том до запуска worker
-  и проверяют владельца и права (1000, 0700). В снимке без состояния (версия без worker) оно остаётся
-  пустым: управляемые ящики Proton недоступны, пока их не подключат заново, остальная почта работает.
-  Оба скрипта переводят все восстановленные письма в очереди (`queued`/`running`) в
+  входы и удаления Proton ждут, отправки в полёте (до 60 с) завершаются, как и уже прошедший в
+  Proton вход, который панель ещё проверяет и записывает (проверка IMAP/SMTP, запись ящика в базу,
+  подтверждение worker), — Bridge штатно останавливается после них, worker дожидается выхода
+  процесса. Затем дамп базы и архив состояния `proton-state.tar` (в снимке рядом с `db.dump`, 0600;
+  в журнале только число файлов), и шлюз открывается — в том числе при любой ошибке. Если отправка
+  или вход не закончились за 60 с, бэкап завершается ошибкой до дампа и шлюз открывается: живую
+  отправку не считают мёртвой по таймауту. `update.sh` хранит состояние рядом с предмиграционным
+  дампом: `backups/pre-update-<версия>.proton/proton-state.tar`.
+- **Чувствительность архива.** `proton-state.tar` (и каталог `backups/pre-update-<версия>.proton/`)
+  содержит сессии Proton Bridge вместе с их ключами: кто его получил, тот входит в подключённые
+  аккаунты Proton. Храните и передавайте его как `ENCRYPTION_KEY` и `.env`.
+- **Восстановление.** `restore.sh` кладёт состояние в том до запуска worker и проверяет владельца и
+  права (1000, 0700). В снимке без состояния (версия без worker) оно остаётся пустым: управляемые
+  ящики Proton недоступны, пока их не подключат заново, остальная почта работает.
+- **Откат** (`rollback.sh`), два случая:
+  - *версия, на которую возвращаетесь, тоже с worker* — состояние из
+    `backups/pre-update-<версия>.proton/proton-state.tar` кладётся в том до запуска worker, как при
+    восстановлении; если его там нет, состояние очищается и ящики Proton нужно подключить заново;
+  - *версия без worker* (обычно — релиз до управляемого Proton) — пока в checkout ещё текущая
+    версия, worker останавливается и его том `proton_state` очищается (в журнале «`<версия>` has no
+    Proton worker: its state was cleared»), затем `install.sh` старой версии. Старый `install.sh`
+    удаляет контейнер worker, но не его том; без очистки следующее обновление подняло бы worker со
+    старыми связями Bridge, которых нет в восстановленной базе, и повторное добавление того же
+    ящика Proton упиралось бы в `generation_mismatch` (см. ниже). После повторного обновления
+    управляемые ящики Proton добавляются заново.
+
+  `restore.sh` и `rollback.sh` переводят все восстановленные письма в очереди (`queued`/`running`) в
   `needs_attention` (`restored_from_backup`): ушли ли они после снимка, неизвестно, повторную
   отправку решает человек. Согласованный снимок не делает отправку повторяемой — она остаётся «не
   более одного раза».
+
+#### Ящик Proton не добавляется снова: `generation_mismatch`
+
+Признак: добавление (или переподключение) ящика Proton снова и снова заканчивается отказом с кодом
+`proton_unavailable`, при этом сам worker работает; в базе у этого аккаунта Proton стоит
+`cleanup_pending`, а задание очистки `proton_cleanup` упало с `generation_mismatch`. Причина: worker хранит связь этого адреса с другим
+поколением (`generation`), чем база, — например, после ручного отката на версию без worker без
+очистки его тома и повторного обновления. Очистка ничего не удаляет
+наугад и ждёт оператора. Удалить строку в базе недостаточно: связь в worker останется, и следующее
+добавление снова упрётся в то же. CLI для этого нет (`mailexpert jobs` показывает только задания
+тенанта), поэтому — SQL. Пока идёт процедура, не подключайте этот ящик Proton.
+
+```bash
+cd <PREFIX>
+APP="docker compose -p <PROJECT> --project-directory app --env-file .env -f app/docker-compose.yml -f app/deploy/compose.prod.yml"
+```
+
+`mailexpert` в командах ниже — имя базы (`DB_NAME`), замените, если меняли его при установке.
+
+1. Найти упавшее задание и аккаунт Proton:
+
+   ```bash
+   $APP exec -T postgres sh -c 'exec psql -X -U "$POSTGRES_USER" -d mailexpert' <<'SQL'
+   SELECT id, payload->>'userId' AS user_id, payload->>'email' AS email, payload->>'generation' AS generation
+     FROM jobs WHERE kind = 'proton_cleanup' AND status = 'failed' AND error_code = 'generation_mismatch';
+   SELECT proton_user_id, generation, cleanup_pending,
+          EXISTS (SELECT 1 FROM proton_mailbox_links l WHERE l.proton_user_id = u.proton_user_id) AS linked
+     FROM proton_users u WHERE cleanup_pending;
+   SQL
+   ```
+
+   Нужны `id` задания (`<JOB_ID>`), `user_id` (`<USER_ID>`) и `email`; у этого аккаунта `linked`
+   должен быть `f` — иначе процедура не подходит, разбирайтесь отдельно.
+
+2. Прочитать поколение, с которым связь записана в worker (журнал контроллера; паролей и ключей
+   в нём нет, но в чаты и тикеты его всё равно не копируйте):
+
+   ```bash
+   $APP exec -T proton-worker cat /var/lib/mailexpert-proton/controller.json |
+     jq '.links[] | select(.userId == "<USER_ID>")'
+   ```
+
+   Строка с тем же `email` даёт `generation` — это `<WORKER_GENERATION>`. Если такой строки нет,
+   связь в worker уже снята: пропустите первую команду `UPDATE` в шаге 3 (о `proton_users`) и
+   поставьте задание заново как есть.
+
+3. Сделать поколение базы таким же, как у worker, и поставить задание заново — одной транзакцией,
+   которая откатится, если затронуто не ровно по одной строке:
+
+   ```bash
+   $APP exec -T postgres sh -c 'exec psql -X -v ON_ERROR_STOP=1 -U "$POSTGRES_USER" -d mailexpert' <<'SQL'
+   DO $$
+   DECLARE n integer;
+   BEGIN
+     UPDATE proton_users u SET generation = '<WORKER_GENERATION>'
+      WHERE proton_user_id = '<USER_ID>' AND cleanup_pending
+        AND NOT EXISTS (SELECT 1 FROM proton_mailbox_links l WHERE l.proton_user_id = u.proton_user_id);
+     GET DIAGNOSTICS n = ROW_COUNT;
+     IF n <> 1 THEN RAISE EXCEPTION 'proton_users: % rows', n; END IF;
+     UPDATE jobs SET payload = jsonb_set(payload, '{generation}', to_jsonb('<WORKER_GENERATION>'::text)),
+            status = 'queued', attempts = 0, run_at = now(), last_error = NULL, error_code = NULL,
+            claim_token = NULL, lease_until = NULL, updated_at = now()
+      WHERE id = <JOB_ID> AND kind = 'proton_cleanup' AND status = 'failed' AND error_code = 'generation_mismatch';
+     GET DIAGNOSTICS n = ROW_COUNT;
+     IF n <> 1 THEN RAISE EXCEPTION 'jobs: % rows', n; END IF;
+   END $$;
+   SQL
+   ```
+
+4. Backend подхватит задание в течение нескольких секунд: worker снимет старую связь и, если у
+   аккаунта больше нет связей, удалит его локальную сессию Bridge (сам аккаунт Proton не
+   трогается); задание повторяется, пока Bridge не подтвердит удаление. Проверка — запрос из шага 1:
+   задания и строки `proton_users` с этим `<USER_ID>` в выдаче больше нет. После этого ящик
+   добавляется заново обычным способом. Если тот же отказ даст другой адрес того же аккаунта Proton,
+   повторите процедуру для его задания.
 
 ### Откат обновления
 
@@ -1159,6 +1250,12 @@ backend и frontend. Если дамп не восстановился или б
    ```bash
    sudo /opt/mailexpert/app/scripts/deploy/install.sh --version <old-sha>
    ```
+
+4. Если с обновлением появился `proton-worker`, а `<old-sha>` его не знает, удалите том его
+   состояния (контейнер старый `install.sh` уже убрал): `docker volume rm mailexpert_proton_state`.
+   Иначе следующее обновление поднимет worker со старыми связями Bridge (раздел «Управляемый
+   Proton» выше). Если же обе версии с worker, перед шагом 3 верните его состояние из
+   `backups/pre-update-<old-sha>.proton/` — проще всего это делает `rollback.sh`.
 
 **Всё, что записано после обновления, теряется** — пользователи, правила, журнал, новые
 подключения ящиков появившиеся после апдейта. Почта сама не теряется: она живёт на серверах

@@ -293,15 +293,26 @@ ensure_proton_paths() {
 restore_proton_state() {
   local dir=$1 files
   proton_worker_installed || return 0
-  if [ -n "$(proton_container)" ]; then app_compose stop proton-worker >/dev/null; fi
   if [ ! -s "$dir/$PROTON_STATE_ARCHIVE" ]; then
-    files=$(proton_paths clear </dev/null) || die "the Proton worker's state could not be cleared (the error is above); the worker stays stopped"
+    clear_proton_state
     warn "the backup holds no Proton worker state: the worker's state was cleared, managed Proton mailboxes need reconnecting"
     return 0
   fi
+  if [ -n "$(proton_container)" ]; then app_compose stop proton-worker >/dev/null; fi
   files=$(proton_paths restore <"$dir/$PROTON_STATE_ARCHIVE") ||
     die "the Proton worker state could not be restored (the error is above); the worker stays stopped"
   log "proton worker state restored ($files files)"
+}
+
+# clear_proton_state: the worker stopped and its state volume emptied (Bridge vault, keychain,
+# journal), with the checked-out version's compose project. restore_proton_state without an
+# archive, and rollback.sh before install.sh switches to a version without the worker: that
+# version leaves the volume in place, and a later update must not start from the old links.
+clear_proton_state() {
+  proton_worker_installed || return 0
+  if [ -n "$(proton_container)" ]; then app_compose stop proton-worker >/dev/null; fi
+  proton_paths clear </dev/null >/dev/null ||
+    die "the Proton worker's state could not be cleared (the error is above); the worker stays stopped"
 }
 
 # proton_namespace_problems: why the worker's network namespace is not as intended, one line

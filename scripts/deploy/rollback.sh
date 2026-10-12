@@ -242,10 +242,16 @@ main() {
     log "the database $db is now the dump; the one it replaced is kept as $kept (drop it once sure: dropdb $kept in the postgres container)"
   fi
   # Letters queued in the dump are never sent again by themselves (lib/proton.sh), and the Proton
-  # worker gets the state update.sh kept next to the dump. Both are safe to repeat.
+  # worker gets the state update.sh kept next to the dump. A target without the worker leaves its
+  # volume behind: the state is cleared here, while this checkout still has the service, so that
+  # a later update starts clean instead of with links the restored database no longer has. All
+  # safe to repeat.
   quarantine_restored_sends
   if commit_has_proton_worker "$APP_DIR" "$full"; then
     restore_proton_state "$(proton_dump_dir "${dump:-$BACKUP_DIR/pre-update-$to.dump}")"
+  elif proton_worker_installed; then
+    clear_proton_state
+    warn "$to has no Proton worker: its state was cleared; managed Proton mailboxes need adding again after a later update"
   fi
   if [ -n "$edge" ]; then env_set "$EDGE_ENV" EDGE_IMAGE "$edge"; fi
   # install.sh of a version older than the per-project unit names writes the default-name units

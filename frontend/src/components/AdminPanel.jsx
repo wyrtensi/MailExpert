@@ -1222,38 +1222,36 @@ export function AccountsTab() {
         </button>
       </div>
 
+      <div style={{ marginBottom: 14 }}>
+        <input
+          type="search"
+          value={searchQuery}
+          onChange={e => setSearchQuery(e.target.value)}
+          onKeyDown={e => {
+            // Escape empties the box (and is not passed on while there is something to empty).
+            if (e.key === 'Escape' && searchQuery) { setSearchQuery(''); e.stopPropagation(); }
+          }}
+          placeholder={t('admin.accounts.search.placeholder')}
+          aria-label={t('admin.accounts.search.label')}
+          spellCheck={false}
+          autoComplete="off"
+          style={inputStyle}
+          onFocus={e => e.target.style.borderColor = 'var(--accent)'}
+          onBlur={e => e.target.style.borderColor = 'var(--border)'}
+        />
+        {/* One live region that is always in the page (a region that mounts with its text is not
+            reliably announced): the count while there are results, the empty-state message when
+            there are none. */}
+        <div role="status" style={{ fontSize: 11, color: 'var(--text-tertiary)', marginTop: 5, minHeight: 14 }}>
+          {!searching ? '' : shownAccounts.length > 0
+            ? t('admin.accounts.search.count', { count: accounts.length, shown: shownAccounts.length, total: accounts.length })
+            : t('admin.accounts.search.noMatch', { query: searchQuery.trim() })}
+        </div>
+      </div>
+
       {accounts.length === 0 && (
         <div style={{ textAlign: 'center', padding: '32px 0', color: 'var(--text-tertiary)', fontSize: 14 }}>
           {t('admin.accounts.empty')}
-        </div>
-      )}
-
-      {(
-        <div style={{ marginBottom: 14 }}>
-          <input
-            type="search"
-            value={searchQuery}
-            onChange={e => setSearchQuery(e.target.value)}
-            onKeyDown={e => {
-              // Escape empties the box (and is not passed on while there is something to empty).
-              if (e.key === 'Escape' && searchQuery) { setSearchQuery(''); e.stopPropagation(); }
-            }}
-            placeholder={t('admin.accounts.search.placeholder')}
-            aria-label={t('admin.accounts.search.label')}
-            spellCheck={false}
-            autoComplete="off"
-            style={inputStyle}
-            onFocus={e => e.target.style.borderColor = 'var(--accent)'}
-            onBlur={e => e.target.style.borderColor = 'var(--border)'}
-          />
-          {/* One live region that is always in the page (a region that mounts with its text is not
-              reliably announced): the count while there are results, the empty-state message when
-              there are none. */}
-          <div role="status" style={{ fontSize: 11, color: 'var(--text-tertiary)', marginTop: 5, minHeight: 14 }}>
-            {!searching ? '' : shownAccounts.length > 0
-              ? t('admin.accounts.search.count', { count: accounts.length, shown: shownAccounts.length, total: accounts.length })
-              : t('admin.accounts.search.noMatch', { query: searchQuery.trim() })}
-          </div>
         </div>
       )}
 

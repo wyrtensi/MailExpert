@@ -55,6 +55,7 @@ const { createRoot } = await import('react-dom/client');
 const { useStore } = await import('../store/index.js');
 const { api } = await import('../utils/api.js');
 const { default: MailApp } = await import('./MailApp.jsx');
+const { appOAuthReturnWatch } = await import('../utils/appOAuthReturn.js');
 
 globalThis.sessionStorage = dom.window.sessionStorage;
 globalThis.history = dom.window.history;
@@ -177,6 +178,30 @@ describe('MailApp with the add-account dialog', () => {
     assert.ok(needed <= 320, `the row needs ${needed}px of 320`);
     await React.act(async () => { cancel.click(); });
     assert.ok(header.querySelector('[aria-label="messageList.selectMessages"]'), 'Cancel leaves selection mode');
+  });
+
+  test('an OAuth result posted back ends the external-return wait of that attempt (the dialog may be closed)', async () => {
+    await mount();
+    const attempt = '7d3c1f0e-1b2a-4c5d-8e9f-0a1b2c3d4e5f';
+    appOAuthReturnWatch().clear();
+    appOAuthReturnWatch().watch({ attemptId: attempt, email: 'me@example.com', until: Date.now() + 600_000 });
+    let reads = 0;
+    api.getAccounts = () => { reads += 1; return Promise.resolve([]); };
+    try {
+      await React.act(async () => {
+        window.dispatchEvent(new dom.window.MessageEvent('message', {
+          data: { type: 'oauth_success', provider: 'google', result: 'created', attempt }, origin: dom.window.location.origin,
+        }));
+      });
+      await settle();
+      assert.equal(reads, 1, 'the result itself reads the list once');
+      await React.act(async () => { window.dispatchEvent(new dom.window.Event('focus')); });
+      await settle();
+      assert.equal(reads, 1, 'a later return does not read it again for a finished attempt');
+    } finally {
+      api.getAccounts = noop;
+      appOAuthReturnWatch().clear();
+    }
   });
 
   test('the command palette opens with Cmd+K when no dialog is open', async () => {

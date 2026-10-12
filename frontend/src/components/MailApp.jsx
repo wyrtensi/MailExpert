@@ -26,6 +26,8 @@ import { isDemoMode } from '../demo/mode.js';
 import LanguagePicker from './LanguagePicker.jsx';
 import { requestComposeClose } from '../utils/composeCloseRequest.js';
 import { reconcileAccounts } from '../utils/accountsReconcile.js';
+import { appOAuthReturnWatch } from '../utils/appOAuthReturn.js';
+import { isAttemptId } from '../utils/addAccountFlow.js';
 import { isModalOpen } from '../utils/modalGate.js';
 
 const ContactsPage = lazy(() => import('./ContactsPage.jsx'));
@@ -790,6 +792,8 @@ export default function MailApp() {
       }
       const result = parseOAuthResult(oauthMessageToSearchParams(e.data));
       if (result?.provider !== 'google') return;
+      // The attempt has its answer: an external-return wait for it (a dialog closed meanwhile) ends.
+      if (isAttemptId(e.data?.attempt)) appOAuthReturnWatch().forget(e.data.attempt);
       addNotification({
         type: result.status === 'error' ? 'error' : 'info',
         title: t('admin.integrations.google.title'),

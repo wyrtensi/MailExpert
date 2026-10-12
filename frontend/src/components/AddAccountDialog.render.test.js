@@ -62,6 +62,7 @@ const { api } = await import('../utils/api.js');
 const { default: AddAccountDialog } = await import('./AddAccountDialog.jsx');
 const { ADD_ACCOUNT_KINDS } = await import('../utils/addAccount.js');
 const { isAttemptId } = await import('../utils/addAccountFlow.js');
+const { appOAuthReturnWatch } = await import('../utils/appOAuthReturn.js');
 
 const settle = () => React.act(async () => { await new Promise(r => setTimeout(r, 0)); });
 const key = (target, k, init = {}) => target.dispatchEvent(new dom.window.KeyboardEvent('keydown', { key: k, bubbles: true, cancelable: true, ...init }));
@@ -295,6 +296,8 @@ describe('AddAccountDialog Gmail attempts', () => {
   });
   beforeEach(async () => {
     await React.act(async () => root.render(null));
+    // The return watch outlives a dialog by design; each test starts with nothing waiting.
+    appOAuthReturnWatch().clear();
     closed = 0;
     starts = [];
     api.startGoogleOAuth = (email, names, attemptId) => {
@@ -392,6 +395,32 @@ describe('AddAccountDialog Gmail attempts', () => {
       await focus();
       assert.equal(closed, 1, 'the launched address appeared: the form finishes');
       assert.deepEqual(useStore.getState().accounts.map((a) => a.id), ['g']);
+    } finally {
+      mock.timers.reset();
+    }
+  });
+
+  test('closed_dialog_external_return_reconciles: a sign-in finished in the external browser after Close still refreshes the list', async () => {
+    failFirst = false;
+    let reads = 0;
+    let list = [];
+    api.getAccounts = () => { reads += 1; return Promise.resolve(list); };
+    mock.timers.enable({ apis: ['Date'], now: 3_000_000 });
+    try {
+      await cont();
+      await click(dialog().querySelector('button[aria-label="common.close"]'));
+      assert.equal(closed, 1, 'the dialog is closed while Google is still open elsewhere');
+      const focus = async () => { await React.act(async () => { window.dispatchEvent(new dom.window.Event('focus')); }); await settle(); };
+      mock.timers.tick(120_000);
+      list = [{ id: 'g', email_address: 'me@example.com' }];
+      const before = reads;
+      await focus();
+      assert.equal(reads, before + 1, 'the return reads the list although the form is gone');
+      assert.deepEqual(useStore.getState().accounts.map((a) => a.id), ['g'], 'the new mailbox is in the shared list');
+      assert.equal(closed, 1, 'nothing reopens');
+      mock.timers.tick(5_000);
+      await focus();
+      assert.equal(reads, before + 1, 'once the address is there, the wait is over');
     } finally {
       mock.timers.reset();
     }

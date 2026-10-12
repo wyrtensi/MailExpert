@@ -175,6 +175,12 @@ class BridgeController:
             handle.flush()
             os.fsync(handle.fileno())
         os.replace(temporary, target)
+        # The rename itself is durable only once the directory entry is on disk.
+        directory = os.open(self.state_dir, os.O_RDONLY | getattr(os, 'O_DIRECTORY', 0))
+        try:
+            os.fsync(directory)
+        finally:
+            os.close(directory)
 
     # -- process -----------------------------------------------------------------------
     def _needs_bridge(self):

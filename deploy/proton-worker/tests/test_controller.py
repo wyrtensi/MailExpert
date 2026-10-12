@@ -464,6 +464,23 @@ class ControllerTests(unittest.TestCase):
         self.controller.cancel_connection('attempt-a')
         self.assertEqual(len(writes), 1)
 
+    def test_journal_rename_is_made_durable_with_a_directory_fsync(self):
+        # bughunt M-4: after the atomic rename the directory entry is fsynced as well, or a
+        # power loss can bring back the previous journal without the link just committed.
+        import stat
+        from unittest import mock
+        synced = []
+        real_fsync = os.fsync
+
+        def fsync(descriptor):
+            synced.append((stat.S_ISDIR(os.fstat(descriptor).st_mode),
+                           (Path(self.temp.name) / 'controller.json').exists()))
+            real_fsync(descriptor)
+
+        with mock.patch('os.fsync', fsync):
+            self.start()
+        self.assertEqual(synced, [(False, False), (True, True)])
+
     # -- fix round 2 -------------------------------------------------------------------
 
     def failing_first_start(self):

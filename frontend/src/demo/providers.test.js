@@ -94,6 +94,34 @@ test('demo_employee_other_allowed_put_restricted: an employee adds an Other mail
   });
 });
 
+test('demo_put_rule_matches_backend: node lock before the admin rule, every connection field', async () => {
+  const node = (await demoRequest('GET', '/accounts')).find(a => a.mail_node === true);
+  assert.ok(node, 'the demo has a mail node mailbox');
+  await asViewer('user', async () => {
+    // routes/accounts.js: managed, then mail node (400), then the admin-only 403.
+    await assert.rejects(
+      () => demoRequest('PUT', `/accounts/${node.id}`, { imap_host: 'imap.elsewhere.invalid' }),
+      err => err.code === 'mail_node_connection_locked' && err.status !== 403,
+    );
+    await assert.rejects(
+      () => demoRequest('PUT', `/accounts/${node.id}`, { auth_user: 'someone-else' }),
+      err => err.code === 'mail_node_connection_locked',
+      'any connection field of a node mailbox is locked, not only the hosts',
+    );
+    const created = await demoRequest('POST', '/accounts', {
+      email_address: 'employee-tls@demo.mailexpert.local', imap_host: 'imap.example.invalid', smtp_host: 'smtp.example.invalid',
+      auth_user: 'u', auth_pass: SECRET,
+    });
+    for (const body of [{ imap_tls_mode: 'starttls' }, { imap_tls: false }, { smtp_auth_pass: 'another' }]) {
+      await assert.rejects(
+        () => demoRequest('PUT', `/accounts/${created.id}`, body),
+        err => err.status === 403 && err.code === 'connection_admin_only',
+        JSON.stringify(body),
+      );
+    }
+  });
+});
+
 test('an administrator changes the connection of an ordinary mailbox, never of a managed Proton one', async () => {
   const account = await connected('locked@proton.me');
   await assert.rejects(
@@ -112,4 +140,19 @@ test('demo_reconnect_capability_matches_actor: any employee may sign a managed P
     const again = await proton('shared@proton.me', { reconnectAccountId: account.id });
     assert.notEqual(again.errorCode, 'already_connected');
   });
+});
+
+test('demo_proton_problem_mailbox: a seeded managed Proton mailbox needs a new sign-in, and the reconnect heals it', async () => {
+  const seeded = (await demoRequest('GET', '/accounts')).find(a => a.mail_provider === 'proton' && a.proton_status === 'proton_reconnect_required');
+  assert.ok(seeded, 'the demo shows a Proton mailbox in a problem state');
+  assert.equal(seeded.connection_mode, 'managed');
+  assert.equal(seeded.can_reconnect_proton, true);
+  await asViewer('user', async () => {
+    const started = await proton(seeded.email_address, { reconnectAccountId: seeded.id });
+    await poll(started.id);
+    assert.equal((await poll(started.id)).state, 'connected');
+  });
+  const healed = (await demoRequest('GET', '/accounts')).find(a => a.id === seeded.id);
+  assert.equal(healed.proton_status, null);
+  assert.equal(healed.health, 'healthy');
 });

@@ -50,9 +50,19 @@ const ACCOUNT_FIXTURES = [
     aliases: [],
   },
 ];
-// 48 generated mailboxes (demo/fleet.js) after the two hand-made ones: 50 in all.
+// 48 generated mailboxes (demo/fleet.js) after the two hand-made ones: 50, and the managed Proton one below.
 const FLEET_ACCOUNTS = fleetAccounts();
 ACCOUNT_FIXTURES.push(...FLEET_ACCOUNTS);
+// One managed Proton mailbox whose Bridge session has ended, so the sidebar's reconnect state and
+// the "sign in to Proton again" action every employee has can be seen; a reconnect heals it.
+ACCOUNT_FIXTURES.push({
+  ...structuredClone(ACCOUNT_FIXTURES[0]),
+  id: 'demo-proton-team', name: 'Proton Team', sender_name: 'MailExpert Proton', email_address: 'team@proton.me',
+  imap_host: '127.0.0.1', imap_port: 1993, smtp_host: '127.0.0.1', smtp_port: 1465, smtp_tls: 'SSL', imap_tls_mode: 'implicit',
+  color: '#6d4aff', sort_order: ACCOUNT_FIXTURES.length, signature: null,
+  mail_provider: 'proton', connection_mode: 'managed', can_reconnect_proton: true,
+  proton_status: 'proton_reconnect_required', health: 'proton_reconnect_required', mail_node: false, thread_mode: 'rfc',
+});
 
 // The days a mail node mailbox keeps working after its deletion is asked for (the mail node
 // settings; the server's default). The demo never runs the deletion job: a pending mailbox stays.
@@ -2015,12 +2025,20 @@ const MAIL_NODE_USER_READS = [
   /^\/mail-node\/messages\/[^/]+\/spam-verdict$/,
   /^\/mail-node\/seats$/,
 ];
-// The server and sign-in fields of a mailbox (CONNECTION_FIELDS on the server). A resent value that
-// equals the stored one is not a change; a password counts whenever it is sent.
-const CONNECTION_FIELDS = ['imap_host', 'imap_port', 'imap_skip_tls_verify', 'smtp_host', 'smtp_port', 'smtp_tls', 'auth_user', 'auth_pass', 'smtp_auth_user', 'smtp_auth_pass'];
+// The server and sign-in fields of a mailbox, as CONNECTION_FIELDS and changedConnectionFields in
+// backend services/accounts/connection.js: a resent value that equals the stored one is not a
+// change; a password counts when one is sent or one was stored (the demo stores none).
+const CONNECTION_FIELDS = [
+  'imap_host', 'imap_port', 'imap_tls_mode', 'imap_tls', 'imap_skip_tls_verify', 'smtp_host', 'smtp_port', 'smtp_tls',
+  'auth_user', 'auth_pass', 'smtp_auth_user', 'smtp_auth_pass',
+];
 function changedConnectionFields(account, body) {
-  return CONNECTION_FIELDS.filter((key) => body?.[key] !== undefined
-    && (key.endsWith('_pass') ? body[key] !== null && body[key] !== '' : String(body[key] ?? '') !== String(account[key] ?? '')));
+  const updates = body && typeof body === 'object' ? body : {};
+  return CONNECTION_FIELDS.filter((key) => {
+    if (!Object.hasOwn(updates, key)) return false;
+    if (key.endsWith('_pass')) return !!updates[key] || !!account[key];
+    return String(account[key] ?? '') !== String(updates[key] ?? '');
+  });
 }
 
 export function demoAdminOnly(verb, pathname) {
@@ -2174,14 +2192,15 @@ export async function demoRequest(method, path, body = {}) {
     if (account.mail_provider === 'proton' && account.connection_mode === 'managed' && changed.length) {
       throw demoError('Managed mailbox connection settings cannot be changed', 'managed_connection_locked');
     }
-    if (!demoViewer().isAdmin && changed.length) {
-      throw Object.assign(demoError('Only an administrator can change the server settings of a mailbox', 'connection_admin_only'), { status: 403 });
-    }
-    if (account.mail_node && (body?.imap_host !== undefined || body?.smtp_host !== undefined)) {
-      throw demoError('Connection settings are locked for a mailbox on the mail node', 'mail_node_connection_locked');
+    // Same order as routes/accounts.js: managed Proton, mail node, then the admin-only rule.
+    if (account.mail_node && changed.length) {
+      throw demoError('The server settings of a mail node mailbox cannot be changed', 'mail_node_connection_locked');
     }
     if (account.mail_node && body?.enabled !== undefined && !body.enabled && account.enabled !== false) {
       throw demoError('A mail node mailbox cannot be paused: deactivate it instead', 'mail_node_disable_unsupported');
+    }
+    if (!demoViewer().isAdmin && changed.length) {
+      throw Object.assign(demoError('Only an administrator can change the server settings of a mailbox', 'connection_admin_only'), { status: 403 });
     }
     const assignable = ['name', 'sender_name', 'color', 'enabled', 'imap_host', 'imap_port', 'smtp_host', 'smtp_port',
       'smtp_tls', 'folder_mappings', 'signature', 'categorization_enabled', 'sort_order', 'include_in_unified_inbox'];

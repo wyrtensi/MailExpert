@@ -580,10 +580,11 @@ test('the demo threading diagnostics reject like the real 404 for an unknown mes
   );
 });
 
-test('the demo holds 50 mailboxes: Gmail ones in gmail mode and node ones on several domains', async () => {
+test('the demo holds 51 mailboxes: Gmail ones in gmail mode, node ones on several domains, one managed Proton', async () => {
   const accounts = await demoRequest('GET', '/accounts');
-  assert.equal(accounts.length, 50);
-  assert.equal(new Set(accounts.map(a => a.email_address)).size, 50);
+  assert.equal(accounts.length, 51);
+  assert.equal(new Set(accounts.map(a => a.email_address)).size, 51);
+  assert.equal(accounts.filter(a => a.mail_provider === 'proton' && a.connection_mode === 'managed').length, 1);
   assert.equal(accounts.filter(a => a.thread_mode === 'gmail' && a.oauth_provider === 'google').length, 24);
   const nodeDomains = new Set(accounts.filter(a => a.mail_node).map(a => a.email_address.split('@')[1]));
   assert.ok(nodeDomains.size >= 3);

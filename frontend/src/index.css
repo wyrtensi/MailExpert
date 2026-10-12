@@ -899,6 +899,8 @@ body, #root {
 .add-account-form { display: flex; flex-direction: column; gap: 14px; min-width: 0; }
 .add-account-field { min-width: 0; }
 .add-account-label { display: block; margin-bottom: 5px; font-size: 12px; color: var(--text-secondary); }
+.add-account-required { margin-inline-start: 4px; color: var(--red); font-weight: 700; }
+.add-account-provider-image { display: block; object-fit: contain; flex-shrink: 0; border-radius: 6px; }
 .add-account-input {
   width: 100%;
   min-width: 0;

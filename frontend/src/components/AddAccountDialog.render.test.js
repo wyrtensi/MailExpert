@@ -152,6 +152,18 @@ describe('AddAccountDialog', () => {
     assert.equal(document.activeElement, d.querySelector('h2'), 'focus moved into the dialog');
   });
 
+  test('brand icons are bundled decorative images with no third-party requests', async () => {
+    await open();
+    for (const kind of ADD_ACCOUNT_KINDS.filter(kind => kind !== 'other')) {
+      const icon = tile(kind).querySelector('img');
+      assert.ok(icon, `${kind} has a real brand asset`);
+      assert.equal(icon.getAttribute('alt'), '');
+      assert.equal(icon.getAttribute('aria-hidden'), 'true');
+      assert.ok(icon.getAttribute('src').startsWith('/'), 'asset belongs to this installation');
+      assert.ok(!icon.getAttribute('src').startsWith('//'), 'not a third-party URL');
+    }
+  });
+
   test('tile_replaces_picker_with_full_form: the grid is gone, the title carries the service name', async () => {
     await open();
     await click(tile('yahoo'));

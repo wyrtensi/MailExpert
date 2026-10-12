@@ -956,6 +956,54 @@ describe('Gmail and our own mailbox share the dialog styles', () => {
   });
 });
 
+describe('required field indicators', () => {
+  function requiredField(host, selector) {
+    const input = host.querySelector(selector);
+    assert.ok(input.required, `${selector} is semantically required`);
+    const label = host.querySelector(`label[for="${input.id}"]`);
+    const mark = label?.querySelector('[data-required-mark]');
+    assert.equal(mark?.textContent, '*');
+    assert.equal(mark?.getAttribute('aria-hidden'), 'true');
+  }
+
+  for (const provider of PRESETS) {
+    test(`${provider} marks address/password without marking optional metadata`, async () => {
+      const { host } = await mount(React.createElement(Harness, { Form: ImapProviderAddForm, provider, catalog: CATALOG }));
+      requiredField(host, '#imap-add-email');
+      requiredField(host, '#imap-add-password');
+      await click(byText(host, 'button', 'admin.accounts.add.advanced'));
+      const name = host.querySelector('input[placeholder="admin.accounts.displayNamePh"]');
+      assert.equal(name.required, false);
+      assert.equal(host.querySelector(`label[for="${name.id}"] [data-required-mark]`), null);
+    });
+  }
+
+  test('Other marks mandatory server hosts and ports, but not fallback logins', async () => {
+    const { host } = await mount(React.createElement(Harness, { Form: ManualAccountAddForm }));
+    await click(byText(host, 'button', 'admin.accounts.add.advanced'));
+    for (const key of ['imap_host','imap_port','smtp_host','smtp_port']) requiredField(host, `[id$="-${key}"]`);
+    assert.equal(host.querySelector('[id$="-login"]').required, false);
+  });
+
+  test('managed Gmail and Proton identify the fields needed for sign-in', async () => {
+    const gmail = await mount(React.createElement(Harness, { Form: GmailAddForm, accounts: [], demo: false }));
+    requiredField(gmail.host, '#gmail-add-email');
+    await gmail.unmount();
+    mounted.splice(mounted.indexOf(gmail), 1);
+    const proton = await mount(React.createElement(Harness, { Form: ProtonAddForm, proton: {configured:true,available:true} }));
+    requiredField(proton.host, '#proton-add-email');
+    requiredField(proton.host, '#proton-add-password');
+  });
+
+  test('our mailbox marks its local address and required sender name', async () => {
+    answers['GET /api/mail-node/domains'] = {domains:[{domain:'example.com',active:true,state:'ready'}]};
+    answers['GET /api/mail-node/seats'] = {used:1,held:0,free:5,known:true,heldSeats:[],requests:[]};
+    const { host } = await mount(React.createElement(DomainMailboxAddForm, {accounts:[],onCreated(){}}));
+    requiredField(host, '#domain-add-local');
+    requiredField(host, '#domain-add-sender');
+  });
+});
+
 describe('secrets boundary', () => {
   test('back_close_clear_secrets: an app password dies with the form and never reaches state, URLs or storage', async () => {
     answers['POST /api/accounts/provider'] = { status: 400, body: { error: 'imap_auth_failed', code: 'imap_auth_failed' } };

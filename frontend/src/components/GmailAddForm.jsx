@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { useTranslation } from 'react-i18next';
+import RequiredMark from './addAccount/RequiredMark.jsx';
 import { api } from '../utils/api.js';
 import { openOAuthWindow } from '../utils/oauthWindow.js';
 import { createLatestRequest } from '../utils/latestRequest.js';
@@ -270,10 +271,12 @@ export default function GmailAddForm({
       <div className="add-account-field">
       <label htmlFor="gmail-add-email" className="add-account-label">
         {t('admin.accounts.add.emailLabel')}
+        <RequiredMark />
       </label>
       <div style={{ position: 'relative' }}>
         <input
           id="gmail-add-email"
+          required
           type="email"
           inputMode="email"
           className="add-account-input"

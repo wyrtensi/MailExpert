@@ -3,6 +3,7 @@ import { useTranslation } from 'react-i18next';
 import { api } from '../utils/api.js';
 import MailNodeSeats from './MailNodeSeats.jsx';
 import AdvancedConnectionFields from './addAccount/AdvancedConnectionFields.jsx';
+import RequiredMark from './addAccount/RequiredMark.jsx';
 import {
   domainMailboxFormError,
   domainMailboxTaken,
@@ -196,10 +197,11 @@ export default function DomainMailboxAddForm({
 
   return (
     <form onSubmit={review}>
-      <label htmlFor="domain-add-local" style={labelStyle}>{t('admin.accounts.add.domainAddressLabel')}</label>
+      <label htmlFor="domain-add-local" style={labelStyle}>{t('admin.accounts.add.domainAddressLabel')}<RequiredMark /></label>
       <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
         <input
           id="domain-add-local"
+          required
           autoComplete="off"
           autoCapitalize="none"
           autoCorrect="off"
@@ -212,6 +214,7 @@ export default function DomainMailboxAddForm({
         />
         <span style={{ color: 'var(--text-tertiary)', fontSize: 13 }}>@</span>
         <select
+          required
           aria-label={t('admin.accounts.add.domainDomainLabel')}
           value={domain}
           onChange={(e) => { typedRef.current = true; edit(setDomain)(e); }}
@@ -229,7 +232,7 @@ export default function DomainMailboxAddForm({
         </div>
       )}
 
-      <label htmlFor="domain-add-sender" style={{ ...labelStyle, marginTop: 14 }}>{t('admin.accounts.add.senderNameLabel')}</label>
+      <label htmlFor="domain-add-sender" style={{ ...labelStyle, marginTop: 14 }}>{t('admin.accounts.add.senderNameLabel')}<RequiredMark /></label>
       <input
         id="domain-add-sender"
         required

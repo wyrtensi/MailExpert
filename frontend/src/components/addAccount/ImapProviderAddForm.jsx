@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { useTranslation } from 'react-i18next';
+import RequiredMark from './RequiredMark.jsx';
 import { api } from '../../utils/api.js';
 import { GMAIL_EMAIL_PATTERN, ADD_ACCOUNT_TITLE_KEYS } from '../../utils/addAccount.js';
 import { newAttemptId, submitWithReplay } from '../../utils/addAccountFlow.js';
@@ -126,10 +127,11 @@ export default function ImapProviderAddForm({
   return (
     <form className="add-account-form" onSubmit={submit} noValidate data-provider-form={provider} aria-busy={busy}>
       <div className="add-account-field">
-        <label className="add-account-label" htmlFor="imap-add-email">{t('admin.accounts.add.addressLabel')}</label>
+        <label className="add-account-label" htmlFor="imap-add-email">{t('admin.accounts.add.addressLabel')}<RequiredMark /></label>
         <input
           id="imap-add-email"
           type="email"
+          required
           inputMode="email"
           className="add-account-input"
           autoComplete="email"
@@ -151,9 +153,11 @@ export default function ImapProviderAddForm({
       <div className="add-account-field">
         <label className="add-account-label" htmlFor="imap-add-password">
           {t(isOther ? 'admin.accounts.add.passwordLabel' : 'admin.accounts.add.appPasswordLabel')}
+          <RequiredMark />
         </label>
         <PasswordField
           id="imap-add-password"
+          required
           value={password}
           readOnly={busy}
           onChange={(e) => { setPassword(e.target.value); clearError(); }}

@@ -80,6 +80,7 @@ export default function AppPasswordHelp({ provider, url }) {
   return (
     <div className="add-account-help" ref={rootRef} data-app-password-help={provider}>
       <strong className="add-account-help-title">{t('admin.accounts.add.appPassword.title')}</strong>
+      <p className="add-account-help-note">{t('admin.accounts.add.appPassword.signInFirst', { service: providerName })}</p>
       <ol>
         {steps.slice(0, 3).map((key) => <li key={key}>{t(key)}</li>)}
       </ol>

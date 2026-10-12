@@ -34,10 +34,22 @@ describe('user regex time budget', () => {
     expect(matchUserRegex('^invoice #\\d+', 'Re: Invoice #42')).toBe(false);
   });
 
+  // A generous budget: these cases are about what is matched, not about time.
   it('matches only within the first RULE_TEXT_CHAR_CAP characters', () => {
     const text = `${'x'.repeat(RULE_TEXT_CHAR_CAP)}needle`;
-    expect(matchUserRegex('needle', text)).toBe(false);
-    expect(matchUserRegex('needle', `needle${text}`)).toBe(true);
+    expect(matchUserRegex('needle', text, { timeoutMs: 10_000 })).toBe(false);
+    expect(matchUserRegex('needle', `needle${text}`, { timeoutMs: 10_000 })).toBe(true);
+  });
+
+  // '.*needle' is quadratic on a long line without the word; the leading '.*' changes nothing
+  // for a yes/no test, so it is dropped and the common pattern never exhausts the budget.
+  it.each(['.*needle', '.*?needle', '.*.*needle'])('does not spend the budget on a leading %s', (pattern) => {
+    expect(matchUserRegex(pattern, 'x'.repeat(200_000), { timeoutMs: 1_000 })).toBe(false);
+    expect(matchUserRegex(pattern, 'a needle here', { timeoutMs: 1_000 })).toBe(true);
+  });
+
+  it.each([['.*', ''], ['.*|zzz', 'abc'], ['.*foo$', 'a foo']])('keeps the meaning of %s', (pattern, text) => {
+    expect(matchUserRegex(pattern, text, { timeoutMs: 1_000 })).toBe(new RegExp(pattern, 'i').test(text));
   });
 
   it('a body rule with a polynomial pattern does not fire and the sync completes', async () => {

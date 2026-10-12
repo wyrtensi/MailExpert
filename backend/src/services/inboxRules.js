@@ -49,7 +49,7 @@ export function isDangerousRegex(src) {
 // Text a user regex sees: the same cap the search index applies to bodies
 // (FTS_BODY_CHAR_CAP in routes/search.js).
 export const RULE_TEXT_CHAR_CAP = 600_000;
-const REGEX_TIMEOUT_MS = 50;
+const REGEX_TIMEOUT_MS = 100;
 
 // isDangerousRegex cannot tell every slow pattern: '.*a.*b' alone backtracks in O(n^3).
 // User patterns therefore run in a VM context with a hard time budget, which interrupts
@@ -59,9 +59,14 @@ const regexContext = vm.createContext(Object.create(null));
 const regexScript = new vm.Script('new RegExp(pattern, "i").test(text)');
 const timedOutPatterns = new Set();
 
+// For a yes/no test an unanchored leading '.*' (or '.*?') matches nothing the rest of the
+// pattern would not: it can always match empty. Dropping it keeps the common '.*word' linear
+// instead of quadratic on a long line.
+const LEADING_ANY = /^(?:\.\*\??)+/;
+
 export function matchUserRegex(pattern, text, { timeoutMs = REGEX_TIMEOUT_MS } = {}) {
   if (timedOutPatterns.has(pattern)) return false;
-  regexContext.pattern = pattern;
+  regexContext.pattern = String(pattern).replace(LEADING_ANY, '');
   regexContext.text = String(text || '').slice(0, RULE_TEXT_CHAR_CAP);
   try {
     return regexScript.runInContext(regexContext, { timeout: timeoutMs }) === true;

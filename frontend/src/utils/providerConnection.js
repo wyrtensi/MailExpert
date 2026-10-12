@@ -183,6 +183,23 @@ export function isAuthRefusal(code) {
   return code === 'imap_auth_failed' || code === 'smtp_auth_failed';
 }
 
+// What to do after the server refused the sign-in, per service: which password it wants and what
+// must be switched on at the provider. Shown under the refusal; null for every other code (the
+// refusal's own message already says what to check).
+// Spelled out literally so the i18n coverage test finds them.
+const AUTH_NEXT_STEP_KEYS = {
+  yahoo: 'admin.accounts.add.error.next.yahooAuth',
+  yandex: 'admin.accounts.add.error.next.yandexAuth',
+  mailru: 'admin.accounts.add.error.next.mailruAuth',
+  icloud: 'admin.accounts.add.error.next.icloudAuth',
+  other: 'admin.accounts.add.error.next.otherAuth',
+};
+
+export function connectionNextStepKey(code, provider) {
+  if (!isAuthRefusal(code) || typeof provider !== 'string') return null;
+  return Object.hasOwn(AUTH_NEXT_STEP_KEYS, provider) ? AUTH_NEXT_STEP_KEYS[provider] : null;
+}
+
 // Every code the Proton connection API can answer (status errorCode, or an HTTP refusal).
 // `invalid_credentials` adds the owner's hint about the server's access to Proton; `connection` is
 // a separate message.

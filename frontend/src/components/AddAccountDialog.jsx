@@ -94,7 +94,10 @@ export default function AddAccountDialog({ onClose, forms = FORMS }) {
   // Off while the dialog goes away, so handing focus back to the opener is not undone by the trap.
   const trapRef = useRef(true);
 
-  const options = useMemo(() => addAccountOptions({ googleStatus, domainStatus }), [googleStatus, domainStatus]);
+  const options = useMemo(
+    () => addAccountOptions({ googleStatus, domainStatus, protonStatus: formStatus.proton }),
+    [googleStatus, domainStatus, formStatus.proton],
+  );
   const selected = flow.provider ? options.find((option) => option.kind === flow.provider) ?? null : null;
 
   // Which integrations are configured: decides the state shown on the Gmail and mail-node forms.
@@ -198,8 +201,9 @@ export default function AddAccountDialog({ onClose, forms = FORMS }) {
     };
   }, []);
 
-  // Unmounted from outside (the native Back closed it through the store): cancel the attempt the
-  // same way Close does, and read the list again if the attempt had been sent.
+  // Runs when the form's session is replaced (a tile chosen, Back) and when the dialog is unmounted
+  // from outside (the native Back closed it through the store): cancel the attempt the same way
+  // Close does, and read the list again if the attempt had been sent. Close itself has done both.
   useEffect(() => () => {
     if (closedRef.current) return;
     session?.abort();
@@ -327,6 +331,9 @@ export default function AddAccountDialog({ onClose, forms = FORMS }) {
           )}
           {Form && inForm && (
             <>
+              {selected.enabled && selected.introKey && (
+                <p className="add-account-hint" data-provider-intro>{t(selected.introKey, { service: t(selected.titleKey) })}</p>
+              )}
               {selected.enabled && selected.hintKey && <p className="add-account-hint">{t(selected.hintKey)}</p>}
               {selected.enabled || !selected.hintKey
                 ? (

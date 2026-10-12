@@ -112,6 +112,31 @@ describe('AddAccountDialog', () => {
     useStore.setState({ accounts: [{ id: 'a1', email_address: 'one@example.invalid' }], showAddAccountDialog: true, notifications: [], fontSize: 100 });
   });
 
+  test('provider_intro_under_title: each form opens with one line on what the service needs', async () => {
+    await open();
+    await click(tile('yahoo'));
+    const intro = dialog().querySelector('[data-provider-intro]');
+    assert.equal(intro?.textContent, 'admin.accounts.add.intro.appPassword');
+    await click(dialog().querySelector('.add-account-back'));
+    await click(tile('other'));
+    assert.equal(dialog().querySelector('[data-provider-intro]')?.textContent, 'admin.accounts.add.intro.other');
+  });
+
+  test('proton_tile_shows_unavailable: a stopped Proton service is visible on its tile, which stays selectable', async () => {
+    api.getIntegrationsStatus = () => Promise.resolve({
+      google: { configured: true, available: true }, domainMail: { configured: true }, proton: { configured: true, available: false },
+    });
+    try {
+      await open();
+      assert.ok(tile('proton').querySelector('.add-account-tile-state'), 'the tile says the service is unavailable');
+      assert.equal(tile('yahoo').querySelector('.add-account-tile-state'), null);
+      await click(tile('proton'));
+      assert.ok(lastProps, 'the Proton form still opens and explains why');
+    } finally {
+      api.getIntegrationsStatus = () => Promise.resolve({ google: { configured: true, available: true }, domainMail: { configured: true } });
+    }
+  });
+
   test('shows one labelled modal dialog with eight tiles in the picker order, and no form', async () => {
     await open();
     assert.equal(document.querySelectorAll('[role="dialog"]').length, 1);

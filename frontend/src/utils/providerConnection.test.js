@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 import {
   advancedFromDefaults,
   connectionErrorKey,
+  connectionNextStepKey,
   emptyAdvanced,
   findReconnectTarget,
   isAuthRefusal,
@@ -216,5 +217,16 @@ describe('Proton request body and reconnect', () => {
     assert.equal(findReconnectTarget(accounts, 'zed@proton.me', accounts[0]), null);
     // Capability is the server's: a seed claiming it is checked against the list.
     assert.equal(findReconnectTarget(accounts, 'bob@proton.me', { ...accounts[1], can_reconnect_proton: true }), null);
+  });
+});
+
+describe('connectionNextStepKey', () => {
+  it('names the next step of an AUTH refusal per service, and nothing for other codes or services', () => {
+    assert.equal(connectionNextStepKey('imap_auth_failed', 'yahoo'), 'admin.accounts.add.error.next.yahooAuth');
+    assert.equal(connectionNextStepKey('smtp_auth_failed', 'icloud'), 'admin.accounts.add.error.next.icloudAuth');
+    assert.equal(connectionNextStepKey('imap_auth_failed', 'other'), 'admin.accounts.add.error.next.otherAuth');
+    assert.equal(connectionNextStepKey('tls_error', 'yahoo'), null);
+    assert.equal(connectionNextStepKey('imap_auth_failed', 'gmail'), null);
+    assert.equal(connectionNextStepKey('imap_auth_failed', 'toString'), null);
   });
 });

@@ -24,15 +24,16 @@ export const GOOGLE_OAUTH_STATE_TTL_MS = 600 * 1000;
 export const OAUTH_RETURN_MIN_INTERVAL_MS = 3 * 1000;
 
 // Spelled out literally so the i18n coverage test finds them.
+// `introKey` is the one line under the form's title that says what the service needs.
 const OPTION_KEYS = {
-  domain: { titleKey: 'admin.accounts.add.domainTitle' },
-  gmail: { titleKey: 'admin.accounts.add.gmailTitle' },
-  proton: { titleKey: 'admin.accounts.add.protonTitle' },
-  yahoo: { titleKey: 'admin.accounts.add.yahooTitle' },
-  yandex: { titleKey: 'admin.accounts.add.yandexTitle' },
-  mailru: { titleKey: 'admin.accounts.add.mailruTitle' },
-  icloud: { titleKey: 'admin.accounts.add.icloudTitle' },
-  other: { titleKey: 'admin.accounts.add.otherTitle' },
+  domain: { titleKey: 'admin.accounts.add.domainTitle', introKey: 'admin.accounts.add.intro.domain' },
+  gmail: { titleKey: 'admin.accounts.add.gmailTitle', introKey: 'admin.accounts.add.intro.gmail' },
+  proton: { titleKey: 'admin.accounts.add.protonTitle', introKey: 'admin.accounts.add.intro.proton' },
+  yahoo: { titleKey: 'admin.accounts.add.yahooTitle', introKey: 'admin.accounts.add.intro.appPassword' },
+  yandex: { titleKey: 'admin.accounts.add.yandexTitle', introKey: 'admin.accounts.add.intro.appPassword' },
+  mailru: { titleKey: 'admin.accounts.add.mailruTitle', introKey: 'admin.accounts.add.intro.appPassword' },
+  icloud: { titleKey: 'admin.accounts.add.icloudTitle', introKey: 'admin.accounts.add.intro.appPassword' },
+  other: { titleKey: 'admin.accounts.add.otherTitle', introKey: 'admin.accounts.add.intro.other' },
 };
 
 // Spelled out literally so the i18n coverage test finds them.
@@ -65,8 +66,9 @@ const normalize = (email) => String(email ?? '').trim().toLowerCase();
 // reason of an inactive option, or the note shown above the form of an active one. `googleStatus`
 // and `domainStatus` are the `google` and `domainMail` parts of GET /api/integrations/status, or
 // null while it loads. The other providers are always active here: their own forms report an
-// unavailable service (for instance the Proton worker).
-export function addAccountOptions({ googleStatus = null, domainStatus = null } = {}) {
+// unavailable service. `unavailable` only marks a tile whose service is down (the Proton worker,
+// from `protonStatus`, the status API's `proton`); the tile stays selectable and its form says why.
+export function addAccountOptions({ googleStatus = null, domainStatus = null, protonStatus = null } = {}) {
   return ADD_ACCOUNT_KINDS.map((kind) => {
     let enabled = true;
     let hintKey = null;
@@ -78,7 +80,8 @@ export function addAccountOptions({ googleStatus = null, domainStatus = null } =
       enabled = domainStatus?.configured === true;
       hintKey = enabled || !domainStatus ? null : 'admin.accounts.add.domainNotConfigured';
     }
-    return { kind, ...OPTION_KEYS[kind], enabled, hintKey };
+    const unavailable = (!enabled && !!hintKey) || (kind === 'proton' && protonStatus?.available === false);
+    return { kind, ...OPTION_KEYS[kind], enabled, hintKey, unavailable };
   });
 }
 

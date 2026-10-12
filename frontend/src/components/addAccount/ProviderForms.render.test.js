@@ -819,6 +819,116 @@ describe('our own mailbox keeps its alias contract', () => {
   });
 });
 
+describe('usability of the provider forms', () => {
+  const READY = { configured: true, available: true, code: null };
+  const reveal = (host, id) => host.querySelector(`button[aria-controls="${id}"]`);
+
+  test('password_reveal_toggle: the app password, the Proton password and the second password can be shown and hidden', async () => {
+    const { host } = await mount(React.createElement(Harness, { Form: ImapProviderAddForm, provider: 'yahoo', catalog: CATALOG }));
+    const field = host.querySelector('#imap-add-password');
+    const button = reveal(host, 'imap-add-password');
+    assert.ok(button, 'a reveal button controls the field');
+    assert.equal(button.type, 'button', 'it never submits the form');
+    assert.equal(button.getAttribute('aria-pressed'), 'false');
+    assert.equal(button.getAttribute('aria-label'), 'common.showPassword');
+    assert.ok(button.classList.contains('add-account-reveal'), 'a 44 x 44 control (CSS class)');
+    await click(button);
+    assert.equal(field.type, 'text');
+    assert.equal(button.getAttribute('aria-pressed'), 'true');
+    assert.equal(button.getAttribute('aria-label'), 'common.hidePassword');
+    await click(button);
+    assert.equal(field.type, 'password');
+
+    const proton = await mount(React.createElement(Harness, { Form: ProtonAddForm, proton: READY }));
+    assert.ok(reveal(proton.host, 'proton-add-password'));
+  });
+
+  test('address fields help the browser: email keyboard and suggestions, no capitalisation', async () => {
+    const imap = await mount(React.createElement(Harness, { Form: ImapProviderAddForm, provider: 'icloud', catalog: CATALOG }));
+    const proton = await mount(React.createElement(Harness, { Form: ProtonAddForm, proton: READY }));
+    for (const input of [imap.host.querySelector('#imap-add-email'), proton.host.querySelector('#proton-add-email')]) {
+      assert.equal(input.type, 'email');
+      assert.equal(input.getAttribute('autocomplete'), 'email');
+      assert.equal(input.getAttribute('autocapitalize'), 'none');
+    }
+    // Password fields never invite the browser to fill the panel's own saved sign-in.
+    assert.equal(imap.host.querySelector('#imap-add-password').getAttribute('autocomplete'), 'new-password');
+    assert.equal(proton.host.querySelector('#proton-add-password').getAttribute('autocomplete'), 'new-password');
+  });
+
+  for (const [provider, email, key] of [
+    ['yahoo', 'ann@yahoo.com', 'admin.accounts.add.error.next.yahooAuth'],
+    ['yandex', 'ann@ya.ru', 'admin.accounts.add.error.next.yandexAuth'],
+    ['mailru', 'ann@mail.ru', 'admin.accounts.add.error.next.mailruAuth'],
+    ['icloud', 'ann@icloud.com', 'admin.accounts.add.error.next.icloudAuth'],
+  ]) {
+    test(`auth_refusal_says_what_to_do_next: ${provider}`, async () => {
+      answers['POST /api/accounts/provider'] = { status: 400, body: { error: 'smtp_auth_failed', code: 'smtp_auth_failed' } };
+      const { host } = await mount(React.createElement(Harness, { Form: ImapProviderAddForm, provider, catalog: CATALOG }));
+      await type(host.querySelector('#imap-add-email'), email);
+      await type(host.querySelector('#imap-add-password'), 'p');
+      await submit(host.querySelector('form'));
+      assert.equal(host.querySelector('[role="alert"]').textContent, 'admin.accounts.add.error.smtpAuth');
+      assert.equal(host.querySelector('[data-next-step]')?.textContent, key);
+    });
+  }
+
+  test('auth_refusal_says_what_to_do_next: Other names no app password of a service, a network error adds nothing', async () => {
+    answers['POST /api/accounts'] = { status: 400, body: { error: 'imap_auth_failed', code: 'imap_auth_failed' } };
+    const { host } = await mount(React.createElement(Harness, { Form: ManualAccountAddForm, manualPolicy: { allowNonstandardPorts: false } }));
+    await type(host.querySelector('#imap-add-email'), 'me@example.com');
+    await type(host.querySelector('#imap-add-password'), 'p');
+    await click(host.querySelector('[data-advanced-connection] button[aria-expanded]'));
+    await type(host.querySelector('[id$="imap_host"]'), 'imap.example.com');
+    await type(host.querySelector('[id$="smtp_host"]'), 'smtp.example.com');
+    await submit(host.querySelector('form'));
+    assert.equal(host.querySelector('[data-next-step]')?.textContent, 'admin.accounts.add.error.next.otherAuth');
+    answers['POST /api/accounts'] = { status: 400, body: { error: 'connection_timeout', code: 'connection_timeout' } };
+    await type(host.querySelector('#imap-add-password'), 'p2');
+    await submit(host.querySelector('form'));
+    assert.equal(host.querySelector('[role="alert"]').textContent, 'admin.accounts.add.error.timeout');
+    gone(host.querySelector('[data-next-step]'));
+  });
+
+  test('slow_check_progress: a long check says it is still running and how long it can take', async () => {
+    let release;
+    answers['POST /api/accounts/provider'] = () => new Promise((resolve) => { release = () => resolve(accountRow('s1', 'ann@yahoo.com')); });
+    const { host } = await mount(React.createElement(Harness, { Form: ImapProviderAddForm, provider: 'yahoo', catalog: CATALOG, slowAfterMs: 300 }));
+    await type(host.querySelector('#imap-add-email'), 'ann@yahoo.com');
+    await type(host.querySelector('#imap-add-password'), 'p');
+    await submit(host.querySelector('form'));
+    const form = host.querySelector('form');
+    assert.equal(form.getAttribute('aria-busy'), 'true');
+    assert.ok(byText(host, 'p', 'admin.accounts.add.checking'));
+    gone(host.querySelector('[data-checking-slow]'));
+    await until(() => host.querySelector('[data-checking-slow]'), 'the slow-check note');
+    assert.equal(host.querySelector('[data-checking-slow]').textContent, 'admin.accounts.add.checkingSlow');
+    assert.ok(host.querySelector('#imap-add-password').readOnly, 'the values being checked cannot change under the check');
+    await React.act(async () => { release(); });
+    await flush();
+    gone(host.querySelector('[data-checking-slow]'));
+  });
+
+  test('proton_focus_follows_the_step: the challenge field takes focus; a failed start returns it to the password', async () => {
+    let current = { id: CONNECTION_ID, state: 'authenticating' };
+    answers['POST /api/accounts/proton/connect'] = { id: CONNECTION_ID, state: 'authenticating' };
+    answers[`GET /api/accounts/proton/connect/${CONNECTION_ID}`] = () => current;
+    answers[`POST /api/accounts/proton/connect/${CONNECTION_ID}/cancel`] = { id: CONNECTION_ID, state: 'cancelled' };
+    const { host } = await mount(React.createElement(Harness, { Form: ProtonAddForm, proton: READY, pollMs: 8, ttlMs: 5000 }));
+    await type(host.querySelector('#proton-add-email'), 'ann@proton.me');
+    await type(host.querySelector('#proton-add-password'), 'p');
+    await submit(host.querySelector('form'));
+    await until(() => host.querySelector('[data-proton-working]'), 'the working state');
+    assert.equal(win.document.activeElement, host.querySelector('[data-proton-working] [role="status"]'), 'the progress line has focus, not the body');
+    current = { id: CONNECTION_ID, state: 'needs_2fa' };
+    await until(() => host.querySelector('#proton-add-secret'), 'the code field');
+    assert.equal(win.document.activeElement, host.querySelector('#proton-add-secret'));
+    current = { id: CONNECTION_ID, state: 'failed', errorCode: 'invalid_credentials' };
+    await until(() => host.querySelector('#proton-add-password'), 'back to the form');
+    assert.equal(win.document.activeElement, host.querySelector('#proton-add-password'), 'the password is asked again');
+  });
+});
+
 describe('secrets boundary', () => {
   test('back_close_clear_secrets: an app password dies with the form and never reaches state, URLs or storage', async () => {
     answers['POST /api/accounts/provider'] = { status: 400, body: { error: 'imap_auth_failed', code: 'imap_auth_failed' } };

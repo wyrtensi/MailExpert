@@ -1388,8 +1388,8 @@
         "error": {
           "emailInvalid": "Enter the full email address.",
           "loginInvalid": "The sign-in name is not valid.",
-          "imapAuth": "The server refused the sign-in for incoming mail (IMAP). Check the address and the app password.",
-          "smtpAuth": "The server refused the sign-in for outgoing mail (SMTP). Check the address and the app password.",
+          "imapAuth": "The server refused the sign-in for incoming mail (IMAP). Check the address and the password.",
+          "smtpAuth": "The server refused the sign-in for outgoing mail (SMTP). Check the address and the password.",
           "imapUnavailable": "The incoming mail server (IMAP) could not be reached or refused the connection.",
           "smtpUnavailable": "The outgoing mail server (SMTP) could not be reached or refused the connection.",
           "timeout": "The server did not answer in time. Check the server name and port, then try again.",
@@ -1400,7 +1400,14 @@
           "conflict": "This attempt was already used with other details. Press Connect again.",
           "rateLimited": "Too many attempts. Wait a minute and try again.",
           "invalidRequest": "The details are not valid. Check the address, the password and the servers.",
-          "generic": "The mailbox could not be connected. Try again."
+          "generic": "The mailbox could not be connected. Try again.",
+          "next": {
+            "yahooAuth": "Yahoo accepts only an app password here, not the password you use on the Yahoo website. Create one with the steps above and paste it.",
+            "yandexAuth": "Yandex needs an app password of the type Mail and IMAP access turned on in Yandex Mail settings (Mail clients). A new app password may take a while to start working.",
+            "mailruAuth": "Mail.ru accepts only a password for external apps with the access type Full access to Mail. The password of the Mail.ru website does not work here.",
+            "icloudAuth": "iCloud accepts only an app-specific password, which needs two-factor authentication on the Apple Account. For an address on your own domain, enter the main iCloud address as the sign-in name below.",
+            "otherAuth": "Check the sign-in name and the password. Many mail services also need an app password, or IMAP access turned on in their own settings."
+          }
         },
         "protonError": {
           "invalidCredentials": "Proton did not accept the address or the password. If the password is right, check the server's access to Proton.",
@@ -1441,7 +1448,15 @@
         "protonCodeHint": "The code from your authenticator app, as Proton asks.",
         "protonSecondPasswordLabel": "Second (mailbox) password",
         "protonSecondPasswordHint": "This Proton account has a second password. Enter it to continue.",
-        "protonContinue": "Continue"
+        "protonContinue": "Continue",
+        "checkingSlow": "Still checking: a mail server can take up to half a minute to answer. You can wait, or go Back to stop.",
+        "intro": {
+          "domain": "A new mailbox on a domain of this installation's mail node. MailExpert creates it and keeps its password.",
+          "gmail": "You sign in on Google's own page; MailExpert never sees the Google password.",
+          "proton": "Sign in with the Proton address and password. MailExpert runs Proton Bridge for this mailbox on its server.",
+          "appPassword": "{{service}} needs the address and an app password: the account's regular password does not work in mail programs. How to create one is shown under the password field.",
+          "other": "Any mailbox with IMAP and SMTP access. You will need the server names from your mail provider."
+        }
       },
       "presetYahoo": "Yahoo Mail",
       "presetIcloud": "iCloud",

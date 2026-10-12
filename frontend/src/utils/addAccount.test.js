@@ -28,7 +28,10 @@ describe('addAccountOptions', () => {
   it('offers all eight ways to every employee, in picker order', () => {
     const options = addAccountOptions({ googleStatus: available, domainStatus: { configured: true } });
     assert.deepEqual(options.map((o) => o.kind), ['domain', 'gmail', 'proton', 'yahoo', 'yandex', 'mailru', 'icloud', 'other']);
-    assert.deepEqual(options.find((o) => o.kind === 'other'), { kind: 'other', titleKey: 'admin.accounts.add.otherTitle', enabled: true, hintKey: null });
+    assert.deepEqual(options.find((o) => o.kind === 'other'), {
+      kind: 'other', titleKey: 'admin.accounts.add.otherTitle', introKey: 'admin.accounts.add.intro.other',
+      enabled: true, hintKey: null, unavailable: false,
+    });
     assert.ok(options.every((o) => o.enabled));
   });
 
@@ -61,6 +64,28 @@ describe('addAccountOptions', () => {
     const gmail = addAccountOptions({ googleStatus: null }).find((o) => o.kind === 'gmail');
     assert.equal(gmail.enabled, false);
     assert.equal(gmail.hintKey, null);
+  });
+
+  it('gives every service a one-line intro; the four app-password services share one', () => {
+    const intro = Object.fromEntries(addAccountOptions({ googleStatus: available }).map((o) => [o.kind, o.introKey]));
+    assert.deepEqual(intro, {
+      domain: 'admin.accounts.add.intro.domain',
+      gmail: 'admin.accounts.add.intro.gmail',
+      proton: 'admin.accounts.add.intro.proton',
+      yahoo: 'admin.accounts.add.intro.appPassword',
+      yandex: 'admin.accounts.add.intro.appPassword',
+      mailru: 'admin.accounts.add.intro.appPassword',
+      icloud: 'admin.accounts.add.intro.appPassword',
+      other: 'admin.accounts.add.intro.other',
+    });
+  });
+
+  it('marks the Proton tile unavailable when its service is down, keeping it selectable for the reason', () => {
+    const proton = (protonStatus) => addAccountOptions({ googleStatus: available, protonStatus }).find((o) => o.kind === 'proton');
+    assert.deepEqual([proton({ configured: true, available: false }).unavailable, proton({ configured: true, available: false }).enabled], [true, true]);
+    assert.equal(proton({ configured: false, available: false }).unavailable, true);
+    assert.equal(proton({ configured: true, available: true }).unavailable, false);
+    assert.equal(proton(null).unavailable, false, 'nothing is claimed while the status loads');
   });
 
   it('lists the kinds in dialog order', () => {

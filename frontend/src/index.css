@@ -875,7 +875,6 @@ body, #root {
   transition: background 0.12s, border-color 0.12s;
 }
 .add-account-tile:hover { background: var(--bg-hover); border-color: var(--border); }
-.add-account-tile[aria-disabled="true"] { opacity: 0.7; }
 .add-account-tile-name { min-width: 0; overflow-wrap: anywhere; }
 .add-account-tile-state { font-size: 11px; font-weight: 400; color: var(--text-tertiary); overflow-wrap: anywhere; }
 .add-account-tile[data-last-selected="true"] { border-width: 2px; border-color: var(--accent); padding: 13px 7px; }
@@ -917,6 +916,30 @@ textarea.add-account-input { min-height: 88px; resize: vertical; }
 .add-account-input::placeholder { color: var(--text-tertiary); }
 .add-account-input:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; border-color: var(--accent); }
 .add-account-input[aria-invalid="true"] { border-color: var(--red); }
+.add-account-input[readonly] { color: var(--text-secondary); }
+/* Password field with its show/hide button beside it (PasswordField.jsx). */
+.add-account-password { display: flex; align-items: stretch; gap: 6px; min-width: 0; }
+.add-account-password > .add-account-input { flex: 1 1 auto; }
+.add-account-reveal {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+  min-width: 44px;
+  min-height: 44px;
+  padding: 0;
+  box-sizing: border-box;
+  background: var(--bg-tertiary);
+  border: 1px solid var(--border);
+  border-radius: 7px;
+  color: var(--text-secondary);
+  cursor: pointer;
+}
+.add-account-reveal:hover { background: var(--bg-hover); color: var(--text-primary); }
+.add-account-reveal[aria-pressed="true"] { color: var(--accent); border-color: var(--accent); }
+.add-account-reveal:focus-visible,
+.add-account-progress:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+.add-account-progress { outline: none; border-radius: 6px; }
 .add-account-note { margin: 5px 0 0; font-size: 11px; line-height: 1.5; color: var(--text-tertiary); overflow-wrap: anywhere; }
 .add-account-error { margin: 0; font-size: 12px; line-height: 1.5; color: var(--red); overflow-wrap: anywhere; }
 .add-account-success { margin: 0; font-size: 12px; line-height: 1.5; color: var(--text-secondary); }
@@ -964,6 +987,11 @@ textarea.add-account-input { min-height: 88px; resize: vertical; }
 .add-account-advanced-toggle[aria-expanded="true"] svg { transform: rotate(90deg); }
 .add-account-advanced-body { display: flex; flex-direction: column; gap: 14px; padding: 4px 4px 8px; min-width: 0; }
 .add-account-server-grid { display: grid; grid-template-columns: minmax(0, 2fr) minmax(0, 1fr) minmax(0, 1.4fr); gap: 10px; }
+/* Narrow phones: the host gets its own row, port and security share the next one. */
+@media (max-width: 479px) {
+  .add-account-server-grid { grid-template-columns: minmax(0, 1fr) minmax(0, 1.4fr); }
+  .add-account-server-grid > :first-child { grid-column: 1 / -1; }
+}
 .add-account-fieldset { margin: 0; padding: 0; border: none; min-width: 0; }
 .add-account-fieldset > legend { padding: 0; margin-bottom: 8px; font-size: 12px; font-weight: 600; color: var(--text-primary); }
 .add-account-help { padding: 12px 14px; border-radius: 8px; background: var(--bg-tertiary); font-size: 12px; line-height: 1.55; color: var(--text-secondary); min-width: 0; }

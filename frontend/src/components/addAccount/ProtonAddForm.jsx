@@ -5,12 +5,16 @@ import { GMAIL_EMAIL_PATTERN } from '../../utils/addAccount.js';
 import { newAttemptId, submitWithReplay } from '../../utils/addAccountFlow.js';
 import { findReconnectTarget, protonErrorKey, protonStartBody } from '../../utils/providerConnection.js';
 import AdvancedConnectionFields from './AdvancedConnectionFields.jsx';
+import PasswordField from './PasswordField.jsx';
+import useSlowFlag from './useSlowFlag.js';
 
 // The attempt is polled once a second while it is active and given up after ten minutes (the
 // server's connection lifetime).
 export const PROTON_POLL_MS = 1000;
 export const PROTON_TTL_MS = 10 * 60 * 1000;
 const POLL_FAILURES_LIMIT = 5;
+// A sign-in and the check after it can take a while; after this long the form says it is still on.
+const SLOW_STEP_MS = 8000;
 
 const ACTIVE_STATES = ['authenticating', 'checking', 'needs_2fa', 'needs_second_password'];
 const TERMINAL_STATES = ['connected', 'failed', 'expired', 'cancelled'];
@@ -38,6 +42,7 @@ export default function ProtonAddForm({
   onConnected,
   pollMs = PROTON_POLL_MS,
   ttlMs = PROTON_TTL_MS,
+  slowAfterMs = SLOW_STEP_MS,
 }) {
   const { t } = useTranslation();
   const [password, setPassword] = useState('');
@@ -60,6 +65,24 @@ export default function ProtonAddForm({
   const unavailable = proton?.available === false;
   const working = !!operation && ACTIVE_STATES.includes(operation.state);
   const challenge = operation ? CHALLENGE_OF_STATE[operation.state] ?? null : null;
+  const slow = useSlowFlag((busy || working) && !challenge, slowAfterMs);
+
+  // Focus follows the step, so it never falls back to the page when a part of the form goes away:
+  // the progress line while Proton is signing in, the code field when it asks, and the password
+  // field when the attempt has ended and the form is back.
+  const passwordRef = useRef(null);
+  const secretRef = useRef(null);
+  const progressRef = useRef(null);
+  const stepRef = useRef('form');
+  const step = working ? (challenge ? `challenge:${challenge}` : 'working') : 'form';
+  useEffect(() => {
+    const previous = stepRef.current;
+    stepRef.current = step;
+    if (previous === step) return;
+    if (step.startsWith('challenge')) secretRef.current?.focus();
+    else if (step === 'working' && previous === 'form') progressRef.current?.focus();
+    else if (step === 'form') passwordRef.current?.focus();
+  }, [step]);
 
   const finish = (nextOperation) => {
     operationRef.current = nextOperation;
@@ -227,34 +250,35 @@ export default function ProtonAddForm({
   return (
     <div className="add-account-form" data-provider-form="proton">
       {!working && (
-        <form className="add-account-form" onSubmit={start} noValidate>
+        <form className="add-account-form" onSubmit={start} noValidate aria-busy={busy}>
           <div className="add-account-field">
             <label className="add-account-label" htmlFor="proton-add-email">{t('admin.accounts.add.addressLabel')}</label>
             <input
               id="proton-add-email"
               type="email"
+              inputMode="email"
               className="add-account-input"
-              autoComplete="off"
+              autoComplete="email"
               autoCapitalize="none"
+              autoCorrect="off"
               spellCheck={false}
               value={email}
+              readOnly={busy}
               placeholder={t('admin.accounts.add.protonAddressPh')}
               onChange={(e) => { onEmailChange?.(e.target.value); setErrorKey(null); }}
             />
           </div>
           <div className="add-account-field">
             <label className="add-account-label" htmlFor="proton-add-password">{t('admin.accounts.add.protonPasswordLabel')}</label>
-            <input
+            <PasswordField
+              ref={passwordRef}
               id="proton-add-password"
-              type="password"
-              className="add-account-input"
-              autoComplete="new-password"
-              autoCapitalize="none"
-              spellCheck={false}
               value={password}
+              readOnly={busy}
+              describedBy="proton-add-password-hint"
               onChange={(e) => { setPassword(e.target.value); setErrorKey(null); }}
             />
-            <p className="add-account-note">{t('admin.accounts.add.protonPasswordHint')}</p>
+            <p className="add-account-note" id="proton-add-password-hint">{t('admin.accounts.add.protonPasswordHint')}</p>
           </div>
           {target && <p className="add-account-note" role="status" data-reconnect>{t('admin.accounts.add.protonReconnectNote')}</p>}
           <AdvancedConnectionFields
@@ -262,7 +286,10 @@ export default function ProtonAddForm({
             metadata={metadata}
             onMetadataChange={(patch) => setMetadata((current) => ({ ...current, ...patch }))}
           />
-          {busy && <p className="add-account-success" role="status">{t('admin.accounts.add.checking')}</p>}
+          <div role="status" aria-live="polite">
+            {busy && <p className="add-account-success">{t('admin.accounts.add.protonSigningIn')}</p>}
+            {busy && slow && <p className="add-account-note" data-checking-slow>{t('admin.accounts.add.checkingSlow')}</p>}
+          </div>
           {errorKey && <p className="add-account-error" role="alert">{t(errorKey)}</p>}
           <div className="add-account-actions">
             <button type="submit" className="add-account-button" disabled={!canStart}>
@@ -274,27 +301,45 @@ export default function ProtonAddForm({
 
       {working && (
         <div className="add-account-form" data-proton-working={operation.state}>
-          <p className="add-account-success" role="status">
-            {t(operation.state === 'checking' ? 'admin.accounts.add.checking' : 'admin.accounts.add.protonSigningIn')}
-          </p>
+          <div role="status" aria-live="polite" ref={progressRef} tabIndex={-1} className="add-account-progress">
+            <p className="add-account-success">
+              {t(operation.state === 'checking' ? 'admin.accounts.add.checking' : 'admin.accounts.add.protonSigningIn')}
+            </p>
+            {slow && <p className="add-account-note" data-checking-slow>{t('admin.accounts.add.checkingSlow')}</p>}
+          </div>
           {challenge && (
             <form className="add-account-form" onSubmit={answerChallenge} noValidate data-proton-challenge={challenge}>
               <div className="add-account-field">
                 <label className="add-account-label" htmlFor="proton-add-secret">
                   {t(challenge === '2fa' ? 'admin.accounts.add.protonCodeLabel' : 'admin.accounts.add.protonSecondPasswordLabel')}
                 </label>
-                <input
-                  id="proton-add-secret"
-                  type={challenge === '2fa' ? 'text' : 'password'}
-                  className="add-account-input"
-                  inputMode={challenge === '2fa' ? 'numeric' : undefined}
-                  autoComplete={challenge === '2fa' ? 'one-time-code' : 'new-password'}
-                  autoCapitalize="none"
-                  spellCheck={false}
-                  value={secret}
-                  onChange={(e) => { setSecret(e.target.value); setErrorKey(null); }}
-                />
-                <p className="add-account-note">
+                {challenge === '2fa' ? (
+                  <input
+                    ref={secretRef}
+                    id="proton-add-secret"
+                    type="text"
+                    className="add-account-input"
+                    inputMode="numeric"
+                    autoComplete="one-time-code"
+                    autoCapitalize="none"
+                    autoCorrect="off"
+                    spellCheck={false}
+                    value={secret}
+                    readOnly={busy}
+                    aria-describedby="proton-add-secret-hint"
+                    onChange={(e) => { setSecret(e.target.value); setErrorKey(null); }}
+                  />
+                ) : (
+                  <PasswordField
+                    ref={secretRef}
+                    id="proton-add-secret"
+                    value={secret}
+                    readOnly={busy}
+                    describedBy="proton-add-secret-hint"
+                    onChange={(e) => { setSecret(e.target.value); setErrorKey(null); }}
+                  />
+                )}
+                <p className="add-account-note" id="proton-add-secret-hint">
                   {t(challenge === '2fa' ? 'admin.accounts.add.protonCodeHint' : 'admin.accounts.add.protonSecondPasswordHint')}
                 </p>
               </div>

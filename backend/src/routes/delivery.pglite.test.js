@@ -279,6 +279,7 @@ describe('GET /api/mail/messages/:id/delivery', () => {
   it('answers 404 for an unknown letter and 400 for a bad id', async () => {
     expect((await details('51000000-0000-4000-8000-0000000000ff')).status).toBe(404);
     expect((await fetch(`${base}/api/mail/messages/x/delivery`)).status).toBe(400);
+    expect((await fetch(`${base}/api/mail/messages/x/eop-trace`, { method: 'POST' })).status).toBe(400);
   });
 });
 

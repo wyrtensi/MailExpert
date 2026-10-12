@@ -219,7 +219,7 @@ stage_proton_state() {
   if [ -n "$PROTON_SNAPSHOT" ]; then
     # GNU tar names skipped sockets (gpg-agent) on stderr; paths only, never contents.
     app_compose exec -T proton-worker tar -C "$PROTON_STATE_PATH" --numeric-owner -cf - . >"$dir/$PROTON_STATE_ARCHIVE" \
-      2> >(grep -v 'socket ignored' >&2)
+      2> >(awk '!/socket ignored/' >&2)
   else
     docker cp "$id:$PROTON_STATE_PATH/." - >"$dir/$PROTON_STATE_ARCHIVE"
   fi

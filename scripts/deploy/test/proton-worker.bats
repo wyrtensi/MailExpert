@@ -50,6 +50,8 @@ case " $* " in
     if [ -n "${DOCKER_STALE_GATE:-}" ]; then echo '{"state":"snapshot","snapshotId":"backup-old","httpStatus":200}'
     else echo '{"state":"idle","snapshotId":null,"httpStatus":200}'; fi ;;
   *" exec -T proton-worker tar "*)
+    if [ -n "${DOCKER_TAR_STDERR:-}" ]; then printf '%s\n' "$DOCKER_TAR_STDERR" >&2; fi
+    if [ -n "${DOCKER_TAR_FAIL:-}" ]; then exit 2; fi
     d=$(mktemp -d); mkdir -p "$d/bridge"; printf 'vault-secret-sentinel' >"$d/bridge/vault.enc"; printf '{}' >"$d/controller.json"
     tar -C "$d" -cf - . ;;
   *" inspect -f {{.Id}} backend-short "*) echo "${DOCKER_BACKEND_ID:-backendid}" ;;
@@ -248,6 +250,54 @@ ghcr.io/o/mailexpert-proton-worker:sha-new" ]
   rm -f "$dir/proton-state.tar"
   stage_proton_state "$dir"
   [ ! -e "$dir/proton-state.tar" ]
+}
+
+@test "snapshot archive stderr filtering does not trigger the unexpected-failure trap" {
+  local dir=$BATS_TEST_TMPDIR/staging warning
+  mkdir -m 700 "$dir"
+  for warning in '' 'tar: ./bridge/socket: socket ignored'; do
+    export DOCKER_TAR_STDERR="$warning"
+    run bash -euc '
+      source "$1/lib/common.sh"
+      source "$1/lib/proton.sh"
+      exit_on_unexpected_failure
+      APP_DIR=$2
+      APP_COMPOSE=(docker compose -p me-test)
+      app_compose() { "${APP_COMPOSE[@]}" "$@"; }
+      PROTON_SNAPSHOT=snap-1
+      stage_proton_state "$3"
+      wait
+    ' bash "$DEPLOY_DIR" "$APP_DIR" "$dir"
+    [ "$status" -eq 0 ]
+    [[ $output == *"proton worker state added (2 files)"* ]]
+    [[ $output != *"a command failed"* ]]
+    [[ $output != *"socket ignored"* ]]
+  done
+}
+
+@test "snapshot archive preserves real tar warnings and failures" {
+  local dir=$BATS_TEST_TMPDIR/staging
+  mkdir -m 700 "$dir"
+  PROTON_SNAPSHOT=snap-1
+  export DOCKER_TAR_STDERR='tar: fixture warning'
+  run stage_proton_state "$dir"
+  [ "$status" -eq 0 ]
+  [[ $output == *"tar: fixture warning"* ]]
+  export DOCKER_TAR_FAIL=1
+  run bash -euc '
+    source "$1/lib/common.sh"
+    source "$1/lib/proton.sh"
+    exit_on_unexpected_failure
+    APP_DIR=$2
+    APP_COMPOSE=(docker compose -p me-test)
+    app_compose() { "${APP_COMPOSE[@]}" "$@"; }
+    PROTON_SNAPSHOT=snap-1
+    stage_proton_state "$3"
+    wait
+  ' bash "$DEPLOY_DIR" "$APP_DIR" "$dir"
+  [ "$status" -ne 0 ]
+  [[ $output == *"tar: fixture warning"* ]]
+  [[ $output != *"proton worker state added"* ]]
 }
 
 @test "restore_old_snapshot_keeps_proton_unavailable_safely: no state in the backup, empty worker state and a warning" {

@@ -311,8 +311,10 @@ function stripInvertFilters(css) {
     const paren = css.indexOf(')', invertRe.lastIndex);
     if (paren === -1) break;
     const semi = css.indexOf(';', paren + 1);
+    const brace = css.indexOf('}', paren + 1);
     out += css.slice(pos, m.index);
-    pos = semi === -1 ? css.length : semi + 1;
+    // A declaration without a semicolon must not consume the next CSS rule.
+    pos = brace !== -1 && (semi === -1 || brace < semi) ? brace : (semi === -1 ? css.length : semi + 1);
     invertRe.lastIndex = pos;
   }
   return out + css.slice(pos);

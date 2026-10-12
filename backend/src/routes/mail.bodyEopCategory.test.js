@@ -49,6 +49,23 @@ describe('GET /api/mail/messages/:id/body — EOP category', () => {
     imapManager.fetchMessageBody.mockReset();
   });
 
+  it.each([true, false])('returns recorded Sent Bcc without fetching Bcc headers (cached=%s)', async cached => {
+    const bcc = [{ name: 'Hidden', email: 'hidden@example.com' }];
+    query.mockResolvedValueOnce({ rows: [messageRow({ folder: 'Sent',
+      body_text: cached ? 'Sent' : null, bcc_addresses: bcc })] })
+      .mockResolvedValueOnce({ rows: [{ id: 'acc-1' }] }).mockResolvedValue({ rows: [] });
+    imapManager.fetchMessageBody.mockResolvedValue({ html: null, text: 'Sent', attachments: [] });
+    const response = await fetch(`${base}/api/mail/messages/${MESSAGE_ID}/body`);
+    expect(response.status).toBe(200);
+    expect((await response.json()).bccAddresses).toEqual(bcc);
+  });
+
+  it('does not invent Bcc recipients on received mail', async () => {
+    query.mockResolvedValue({ rows: [messageRow({ body_text: 'Received' })] });
+    const body = await (await fetch(`${base}/api/mail/messages/${MESSAGE_ID}/body`)).json();
+    expect(body.bccAddresses).toEqual([]);
+  });
+
   it.each([true, false])('returns cached reply metadata with the body (cached=%s)', async cached => {
     const inReplyTo = '<parent@example.com>';
     const references = '<root@example.com> <parent@example.com>';

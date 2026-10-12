@@ -143,7 +143,7 @@ describe('listMessages — threaded mode', () => {
     expect(result.messages).toHaveLength(1);
   });
 
-  it('scopes thread_totals to INBOX when viewing a specific account INBOX', async () => {
+  it('keeps Inbox rows scoped while counting non-draft Sent replies', async () => {
     query
       .mockResolvedValueOnce({ rows: [{ id: 'acc-1' }] })
       .mockResolvedValueOnce({ rows: [{ total_count: 10, unread_count: 0 }] })
@@ -153,7 +153,10 @@ describe('listMessages — threaded mode', () => {
     await listMessages({ userId: 'user-1', accountId: 'acc-1', folder: 'INBOX', threaded: 'true' });
 
     const cteSql = query.mock.calls[2][0];
-    expect(cteSql).toContain('AND folder = $2');
+    expect(cteSql).toContain('m.folder = $2');
+    const totals = cteSql.split('thread_totals AS (')[1].split('ranked AS (')[0];
+    expect(totals).not.toContain('AND folder = $2');
+    expect(totals).toContain("flags ? '\\Draft'");
   });
 
   it('counts thread messages across all folders when viewing a non-INBOX folder', async () => {
@@ -171,7 +174,7 @@ describe('listMessages — threaded mode', () => {
     expect(cteSql).not.toContain("AND folder = 'INBOX'");
   });
 
-  it('scopes thread_totals to INBOX for unified inbox threaded view', async () => {
+  it('counts non-draft replies across folders for unified inbox', async () => {
     query
       .mockResolvedValueOnce({ rows: [{ id: 'acc-1' }, { id: 'acc-2' }] })
       .mockResolvedValueOnce({ rows: [{ n: 20 }] })
@@ -181,7 +184,9 @@ describe('listMessages — threaded mode', () => {
     await listMessages({ userId: 'user-1', threaded: 'true' });
 
     const cteSql = query.mock.calls[2][0];
-    expect(cteSql).toContain("AND folder = 'INBOX'");
+    const totals = cteSql.split('thread_totals AS (')[1].split('ranked AS (')[0];
+    expect(totals).not.toContain("AND folder = 'INBOX'");
+    expect(totals).toContain("flags ? '\\Draft'");
   });
 
   // A thread row displays the thread ROOT's sender (thread_from_email AS from_email, for a

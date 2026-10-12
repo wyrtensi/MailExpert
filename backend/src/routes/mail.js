@@ -323,7 +323,8 @@ router.get('/thread/:threadId', async (req, res) => {
     }
     const messages = result.rows.map(row => ({
       ...row,
-      is_draft: draftsPaths.get(row.account_id).has(row.folder),
+      is_draft: draftsPaths.get(row.account_id).has(row.folder)
+        || (Array.isArray(row.flags) && row.flags.includes('\\Draft')),
     }));
 
     res.json({ messages });
@@ -578,7 +579,7 @@ router.get('/messages/:id/body', async (req, res) => {
       responseHtml = blockRemoteImages(html);
       hasBlockedRemoteImages = true;
     }
-    return res.json({ html: responseHtml, text: message.body_text, attachments, hasBlockedRemoteImages, senderEmail: message.sender_email, senderName: message.sender_name, eopCategory: message.eop_category ?? null, inReplyTo: message.in_reply_to ?? null, references: message.thread_references ?? null });
+    return res.json({ html: responseHtml, text: message.body_text, attachments, hasBlockedRemoteImages, senderEmail: message.sender_email, senderName: message.sender_name, eopCategory: message.eop_category ?? null, inReplyTo: message.in_reply_to ?? null, references: message.thread_references ?? null, bccAddresses: Array.isArray(message.bcc_addresses) ? message.bcc_addresses : [] });
   }
 
   // Fetch from IMAP — signal user activity so background jobs back off during this request.
@@ -620,7 +621,7 @@ router.get('/messages/:id/body', async (req, res) => {
       responseHtml = blockRemoteImages(safeHtml);
       hasBlockedRemoteImages = true;
     }
-    res.json({ html: responseHtml, text: safeText, attachments: attachments || [], hasBlockedRemoteImages, senderEmail: message.sender_email, senderName: message.sender_name, eopCategory: message.eop_category ?? null, inReplyTo: message.in_reply_to ?? null, references: message.thread_references ?? null });
+    res.json({ html: responseHtml, text: safeText, attachments: attachments || [], hasBlockedRemoteImages, senderEmail: message.sender_email, senderName: message.sender_name, eopCategory: message.eop_category ?? null, inReplyTo: message.in_reply_to ?? null, references: message.thread_references ?? null, bccAddresses: Array.isArray(message.bcc_addresses) ? message.bcc_addresses : [] });
   } catch (err) {
     const msg = err.message || 'Unknown error';
     console.error(`Body fetch error for message ${id} (account ${message.account_id}):`, msg);

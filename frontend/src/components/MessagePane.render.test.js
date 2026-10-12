@@ -122,7 +122,8 @@ describe('Download all asks first when an attachment is risky', () => {
     originalFetch = globalThis.fetch;
     globalThis.fetch = async (url) => {
       const id = /\/messages\/([^/]+)\/body/.exec(String(url))?.[1];
-      const json = ATTACHMENTS[id] ? { html: '<p>hi</p>', text: 'hi', attachments: ATTACHMENTS[id] } : {};
+      const json = ATTACHMENTS[id] ? { html: '<p>hi</p>', text: 'hi', attachments: ATTACHMENTS[id],
+        bccAddresses: id === 'd4' ? [{ email: 'hidden@example.com', name: 'Hidden' }] : [] } : {};
       return { ok: true, status: 200, json: async () => json, text: async () => '' };
     };
     // jsdom cannot download. Record the downloads the component starts itself instead.
@@ -142,6 +143,11 @@ describe('Download all asks first when an attachment is risky', () => {
     });
     await React.act(async () => { await new Promise(r => setTimeout(r, 0)); });
   }
+
+  test('shows the Bcc that the server recorded for a sent message', async () => {
+    await open('d4');
+    assert.ok(dom.window.document.body.textContent.includes('Hidden'), 'recorded Bcc is visible');
+  });
 
   const downloadAllLink = () => {
     const link = [...document.querySelectorAll('a')].find(a => a.textContent.includes('message.downloadAll'));

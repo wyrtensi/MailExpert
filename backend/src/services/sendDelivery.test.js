@@ -50,6 +50,20 @@ beforeEach(() => {
 });
 
 describe('a delivered letter', () => {
+  it('carries Bcc into the local Sent metadata without changing delivery', async () => {
+    resolveSentFolder.mockResolvedValue('Sent');
+    const sender = { ...account, oauth_provider: null, smtp_host: 'smtp.example.com' };
+    createAccountSmtpTransport.mockResolvedValue({ account: sender, transport: { sendMail } });
+    const upsertSentMessageRecord = vi.fn(async () => {});
+    const manager = { ...imapManager, appendToSent: vi.fn(async () => ({ uid: 7 })), upsertSentMessageRecord };
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
+    try {
+      await deliverOutgoingMessage({ account: sender, mail: mail({ to: ['to@example.com'], bcc: ['hidden@example.com'] }),
+        actorUserId: 'u1', imapManager: manager, markEffectStarted, onDelivered });
+      expect(upsertSentMessageRecord.mock.calls[0][3].bcc).toEqual([{ email: 'hidden@example.com', name: '' }]);
+      expect(sendMail).toHaveBeenCalledOnce();
+    } finally { vi.clearAllTimers(); vi.useRealTimers(); }
+  });
   it('marks the effect before handing it over and reports it delivered by its Message-ID', async () => {
     sendMail.mockImplementation(async () => {
       expect(markEffectStarted).toHaveBeenCalledOnce();

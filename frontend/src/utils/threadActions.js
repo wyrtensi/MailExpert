@@ -28,11 +28,11 @@
  */
 export async function resolveThreadMessages({ message, isThreadRow, cached, fetchThread, allowCache = false, excludeDrafts = false }) {
   if (!isThreadRow) return [message];
-  if (allowCache && Array.isArray(cached) && cached.length > 0) return withoutDrafts(cached, excludeDrafts);
+  if (allowCache && Array.isArray(cached) && cached.length > 0) return withoutDrafts(cached, excludeDrafts, message);
   const data = await fetchThread();
   // An empty or malformed response must not silently reduce the action to nothing: fall back to
   // the row itself, which is the same conservative choice the previous implementation made.
-  return data?.messages?.length ? withoutDrafts(data.messages, excludeDrafts) : [message];
+  return data?.messages?.length ? withoutDrafts(data.messages, excludeDrafts, message) : [message];
 }
 
 // Deleting a thread expunges its drafts outright — the bulk-delete route permanently deletes
@@ -43,8 +43,9 @@ export async function resolveThreadMessages({ message, isThreadRow, cached, fetc
 // A thread that is nothing BUT drafts keeps them: there the drafts are the user's explicit
 // target, not collateral. The same holds for a single draft row, which never reaches this
 // function because it is not a thread row.
-function withoutDrafts(messages, excludeDrafts) {
+function withoutDrafts(messages, excludeDrafts, anchor) {
   if (!excludeDrafts) return messages;
-  const kept = messages.filter(msg => msg?.is_draft !== true);
+  const anchorIsDraft = anchor?.is_draft === true || messages.some(msg => msg?.id === anchor?.id && msg?.is_draft === true);
+  const kept = messages.filter(msg => (msg?.is_draft === true) === anchorIsDraft);
   return kept.length ? kept : messages;
 }

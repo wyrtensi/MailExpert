@@ -43,3 +43,22 @@ describe('listMessages answers eop_category', () => {
     expect(categories(messages)).toEqual({ [PHISH]: 'PHSH', [PLAIN]: null });
   });
 });
+
+describe('Inbox conversation badges', () => {
+  it('counts the sent reply and deduplicates folder copies', async () => {
+    await db.query("UPDATE messages SET thread_id = '<root@example.com>' WHERE id = $1", [PHISH]);
+    await db.query(`INSERT INTO messages (account_id,uid,folder,message_id,thread_id,date)
+      VALUES ($1,3,'Sent','<reply@example.com>','<root@example.com>',now()),
+             ($1,4,'All Mail','<reply@example.com>','<root@example.com>',now())`, [ACCOUNT]);
+    const { messages } = await listMessages({ accountId: ACCOUNT, folder: 'INBOX', threaded: true });
+    expect(messages.find(row => row.id === PHISH).message_count).toBe(2);
+  });
+  it('does not let an unsent flagged draft turn a letter into a conversation', async () => {
+    await db.query("UPDATE messages SET thread_id = '<root@example.com>' WHERE id = $1", [PHISH]);
+    await db.query(`INSERT INTO messages (account_id,uid,folder,message_id,thread_id,date,flags)
+      VALUES ($1,3,'INBOX','<draft@example.com>','<root@example.com>',now(),$2::jsonb)`,
+    [ACCOUNT, JSON.stringify(['\\Draft'])]);
+    const { messages } = await listMessages({ accountId: ACCOUNT, folder: 'INBOX', threaded: true });
+    expect(messages.find(row => row.thread_id === '<root@example.com>').message_count).toBe(1);
+  });
+});

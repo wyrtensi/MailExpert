@@ -1,6 +1,7 @@
 import { query } from './db.js';
 import { resolveAccountScope } from './unifiedInbox.js';
 import { deliveryStateColumn } from './deliveryStatus.js';
+import { draftMessageSql } from '../utils/mailUtils.js';
 
 export async function listMessages({ accountId, folder = 'INBOX', limit = 50, offset = 0, unreadOnly, threaded, category }) {
   const accountsResult = await query('SELECT id, include_in_unified_inbox FROM email_accounts WHERE enabled = true');
@@ -81,12 +82,6 @@ export async function listMessages({ accountId, folder = 'INBOX', limit = 50, of
   if (threaded === 'true' || threaded === true) {
     const filterValues = [...values];
     const threadAccountParam = isSpecificAccount ? [resolvedAccountId] : scopedAccountIds;
-    // For INBOX-specific views the thread badge must match the expansion, so scope
-    // thread_totals to that folder. For other folders (All Mail, Sent, etc.) count
-    // across all folders so the badge reflects the true thread size.
-    const threadFolderFilter = isSpecificAccount
-      ? (folder === 'INBOX' ? `AND folder = $2` : '')
-      : `AND folder = 'INBOX'`;
 
     const threadResult = await query(`
       WITH paged_threads AS (
@@ -133,7 +128,8 @@ export async function listMessages({ accountId, folder = 'INBOX', limit = 50, of
         WHERE m.account_id = ANY($${p})
           AND m.is_deleted = false
           AND m.message_id IS NOT NULL
-          ${threadFolderFilter}
+          -- Count the whole conversation, including Sent, but never an unsent reply.
+          AND NOT ${draftMessageSql('m')}
           AND (m.account_id, m.thread_key) IN (SELECT account_id, thread_id FROM paged_threads)
         GROUP BY m.account_id, m.thread_key
       ),

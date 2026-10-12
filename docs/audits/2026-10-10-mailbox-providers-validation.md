@@ -4,7 +4,7 @@
 
 ## Проверенное состояние
 
-Ветка фичи: `codex/mailbox-providers`, код `e3c97e36`. Отдельные исправления main: `fix/bughunt-main`, `372cf016`. Пока исправления main не включены в фичу, известный обход SSRF через специальные формы IPv6 сохраняется в ручном добавлении. Порядок интеграции: исправления main, затем rebase фичи и повтор затронутых проверок.
+Первоначальные проверки и визуальная матрица выполнены на `codex/mailbox-providers`, код `e3c97e36`. Исправления main `372cf016` прошли все checks CI PR #240 и с разрешения владельца слиты коммитом `e5d7e51c`. Rebase завершён без конфликтов: `b99c211c`, включая исправление обхода IPv6 SSRF. Итоговый проверенный код — `f7e1a3fe`: дополнительное исправление ложной ошибки фильтра stderr при backup. Последующий коммит отчёта меняет только документацию.
 
 Предыдущее финальное ревью всей фичи завершено с исправлениями до `986cd08b`. Дополнительное ревью в этом продолжении охватило доработки интерфейса `986cd08b..19de8ff3`, исправления main `80e9e87b..372cf016` и fix2 `19de8ff3..e3c97e36`. Новые подтверждённые блокирующие дефекты в этих диапазонах не найдены. Это не подтверждает работу живых провайдеров.
 
@@ -12,16 +12,20 @@
 
 | Проверка | Состояние и результат |
 | --- | --- |
-| Полный backend фичи | Прогон предыдущего агента на `e3c97e36`: 360 файлов, 5725 passed, 1 существующий skipped; lint и lint:plugins exit 0. Без изменения кода повторно не запускался |
-| Полный frontend фичи | Прогон предыдущего агента на `e3c97e36`: 5824/5824; lint и build exit 0. Без изменения кода повторно не запускался |
+| Полный backend фичи | После rebase на `b99c211c`: `npm test` — 364 файла, 5803 passed, 1 существующий skipped; `npm run lint` и `npm run lint:plugins` exit 0. Backend после этого не менялся |
+| Полный frontend фичи | После rebase на `b99c211c`: `npm test` — 5824/5824; `npm run lint` и `npm run build` exit 0. Есть предупреждение Vite о размере chunks. Frontend после этого не менялся |
 | Диалог и формы | В этом продолжении: `node --test src/utils/oauthReturnWatch.test.js src/components/addAccount/ProviderForms.render.test.js src/components/AddAccountDialog.render.test.js src/components/MailApp.addAccount.render.test.js` в frontend — 87/87, 14 suites, exit 0 |
 | Исправления main | В этом продолжении: `npx vitest run src/services/hostValidation.test.js src/services/safeFetch.test.js src/services/inboxRules.regex.test.js src/routes/mail.folderDelete.pglite.test.js src/routes/auth.disabledLogin.test.js src/routes/oauth.microsoft.test.js src/routes/contacts.photo.test.js src/routes/send.queue.pglite.test.js` — 8 файлов, 228/228, exit 0 |
-| Worker | `docker run --rm --network none --read-only --tmpfs /tmp --mount type=bind,source=<WORKER_SOURCE>,target=/source,readonly --env PYTHONPATH=/source:/opt/mailexpert-proton:/opt/mailexpert-proton/bridge_grpc --entrypoint python me-proton-worker-dev:fix2 -B -m unittest discover -s /source/tests -t /source/tests` — 84/84, exit 0. Монтировались исходники HEAD, а не копия Python из старого образа |
-| Deploy | Полный tracked-экспорт `git archive HEAD`, одноразовый контейнер `mirror.gcr.io/bats/bats:1.14.0` с jq, git, util-linux и shellcheck. `shellcheck $(find scripts deploy frontend -name '*.sh') && bats scripts/deploy/test` — shellcheck exit 0, Bats 597/597, exit 0 |
+| Worker | До rebase: 84/84 на mounted HEAD source в `me-proton-worker-dev:fix2`, exit 0. После rebase: `docker run --rm --network none --read-only --tmpfs /tmp --env PYTHONPATH=/opt/mailexpert-proton:/opt/mailexpert-proton/bridge_grpc --mount type=bind,source=<WORKER_TESTS>,target=/tests,readonly --entrypoint python me-e2e-proton/mailexpert-proton-worker:sha-b99c211cd1f3 -B -m unittest discover -s /tests -t /tests` — 84/84, exit 0. Проверялся runtime Python нового образа. Worker после этого не менялся |
+| Deploy | Полный tracked-экспорт `git archive HEAD` на `f7e1a3fe`, одноразовый контейнер `mirror.gcr.io/bats/bats:1.14.0` с jq, git, util-linux и shellcheck. `shellcheck $(find scripts deploy frontend -name '*.sh') && bats scripts/deploy/test` — shellcheck exit 0, Bats 599/599, exit 0 |
+| PostgreSQL creation race | После rebase: `bash scripts/deploy/test/e2e-provider-creation.sh --project me-e2e` — PostgreSQL 16, 99 migrations, шесть гонок между отдельными Node процессами, одна вставленная запись в каждой, exit 0. Ownership cleanup подтверждён |
+| DinD | Четыре образа собраны из проверяемого HEAD. `E2E_ID=proton-resume-20261012 bash scripts/deploy/test/e2e.sh --version sha-b99c211cd1f3 --image-prefix me-e2e-proton` — полный install и backup/update/restore e2e, exit 0. После исправления фильтра: `E2E_ID=proton-final-20261012 bash scripts/deploy/test/e2e.sh --version sha-f7e1a3fe852b --image-prefix me-e2e-proton --only backup` — exit 0. Реального связанного ящика Proton в этих фикстурах нет |
 | Tenant worker | `node --test deploy/tenant-worker/worker.test.mjs`, Git OpenSSL в PATH — 23 passed, 1 skipped, exit 0. Пропуск: импорт ExchangeOnlineManagement требует образа worker; dry-mode PowerShell выполнен |
 | Whitespace | `git diff --check 986cd08b e3c97e36` и `git diff --check 80e9e87b 372cf016` — exit 0 |
 
 Логи предыдущих полных прогонов, новое ревью и `task13-bats-shellcheck.log` сохраняются в локальном SDD-каталоге. Локальные файлы не заменяют результаты GitHub CI.
+
+Новая находка полного DinD: успешный backup писал ложное сообщение ERR trap из `proton.sh`, потому что `grep -v` возвращал 1 на пустом/полностью отфильтрованном stderr tar. RED regression подтвердил дефект (1 failed / 1 passed). В `f7e1a3fe` фильтр заменён на `awk`; пустой вывод и пропущенные сокеты больше не запускают ERR trap, настоящие предупреждения и ненулевой код tar сохраняются. GREEN: shellcheck и 47 owning Bats tests exit 0, затем полный Bats 599 и повтор DinD exit 0. В повторном DinD прежнего ложного сообщения нет. Ошибки намеренно неработоспособной версии, неверного ключа и отказа restore поверх БД — ожидаемые отрицательные сценарии. Первый owning Bats запуск не имел git в одноразовом контейнере; повтор с git прошёл.
 
 ## Проверка интерфейса
 
@@ -38,11 +42,10 @@
 
 ## Что остаётся обязательным
 
-1. Зелёный CI исправлений main и отдельно разрешённый мерж, затем rebase фичи на обновлённый main.
-2. DinD install/update/backup/restore на окончательном rebased HEAD и проверка создания в реальном PostgreSQL между процессами. Предыдущие прогоны до rebase не считать доказательством итоговой ветки.
-3. GitHub CI фичи, видимость опубликованного пакета worker для установки.
-4. Отдельно согласованный rollout указанного стенда с миграцией `0099`, backup и планом возврата.
-5. Живой Proton Free: ввод владельцем пароля и возможных challenge, sync, отправка/приём в разрешённом scope, одна копия Sent, вложение 10 MiB с проверкой hash, drafts/flags/folders/trash, рестарт и проверенный TLS. Много native users/адресов и 2FA требуют дополнительных аккаунтов. Другие провайдеры требуют предоставленных аккаунтов; реальные подключения ещё не проверены.
+1. Согласованный push и draft PR фичи, GitHub CI. CI исправлений main, разрешённый мерж, rebase и локальные проверки уже выполнены.
+2. Живой Proton Free: ввод владельцем пароля и возможных challenge, sync, отправка/приём в разрешённом scope, одна копия Sent, вложение 10 MiB с проверкой hash, drafts/flags/folders/trash, рестарт и проверенный TLS. Много native users/адресов и 2FA требуют дополнительных аккаунтов. Другие провайдеры требуют предоставленных аккаунтов; реальные подключения ещё не проверены.
+3. Штатный `stage.sh panel` требует опубликованные образы коммита main; CI PR их только собирает. Для живой проверки до мержа нужен отдельно согласованный одноразовый стенд со штатным installer и подготовленными exact-tag images. Обход публикации или ручное изменение существующего стенда не выполнялись.
+4. Для обновления существующего стенда: видимость опубликованного пакета worker, read-only status и отдельный план/согласование rollout с миграцией `0099`, backup и возвратом по `mailexpert-rollout`.
 
 ## Известные ограничения
 

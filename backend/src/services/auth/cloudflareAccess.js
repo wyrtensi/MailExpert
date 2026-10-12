@@ -7,6 +7,7 @@ export const CF_ACCESS_HEADER = 'cf-access-jwt-assertion';
 const CACHE_MAX_AGE_MS = 10 * 60_000;
 const STALE_MAX_AGE_MS = 24 * 60 * 60_000;
 const JWKS_FETCH_TIMEOUT_MS = 5_000;
+const JWKS_RETRY_MS = 30_000;
 
 // A key set that survives the Access certs endpoint being briefly unreachable: a failed
 // refresh keeps serving the last good document until it is too old to trust. One refresh
@@ -19,26 +20,55 @@ export function createResilientJwks({
 }) {
   let cached = null;
   let inFlight = null;
+  let nextRetryAt = 0;
+  let lastUnknownRefresh = -Infinity;
 
   const refresh = async () => {
-    const document = await fetchJwks();
-    cached = { getKey: createLocalJWKSet(document), fetchedAt: now() };
+    try {
+      const document = await fetchJwks();
+      cached = { getKey: createLocalJWKSet(document), fetchedAt: now() };
+      nextRetryAt = 0;
+    } catch (err) {
+      nextRetryAt = now() + JWKS_RETRY_MS;
+      throw err;
+    }
   };
 
-  const ensureFresh = async () => {
-    if (cached && now() - cached.fetchedAt <= cacheMaxAgeMs) return;
+  const canUseCached = () => cached && now() - cached.fetchedAt <= staleMaxAgeMs;
+  const ensureFresh = async (unknownKey = false) => {
+    if (!unknownKey && cached && now() - cached.fetchedAt <= cacheMaxAgeMs) return;
+    if (!inFlight && now() < nextRetryAt) {
+      if (canUseCached()) return;
+      throw new Error('Access signing keys unavailable');
+    }
+    if (unknownKey && !inFlight) {
+      // Unknown kids are untrusted input: one forced refresh per cooldown, not per token.
+      if (now() - lastUnknownRefresh < JWKS_RETRY_MS) {
+        if (canUseCached()) return;
+        throw new Error('Access signing keys unavailable');
+      }
+      lastUnknownRefresh = now();
+    }
     inFlight ??= refresh().finally(() => { inFlight = null; });
     try {
       await inFlight;
     } catch (err) {
-      if (cached && now() - cached.fetchedAt <= staleMaxAgeMs) return;
+      if (canUseCached()) return;
       throw err;
     }
   };
 
   return async (protectedHeader, token) => {
+    const previous = cached;
     await ensureFresh();
-    return cached.getKey(protectedHeader, token);
+    try {
+      return await cached.getKey(protectedHeader, token);
+    } catch (err) {
+      // A document just fetched already answers this lookup; do not fetch it twice.
+      if (err?.code !== 'ERR_JWKS_NO_MATCHING_KEY' || cached !== previous) throw err;
+      await ensureFresh(true);
+      return cached.getKey(protectedHeader, token);
+    }
   };
 }
 

@@ -19,6 +19,12 @@ describe('domainAdmits', () => {
 
 describe('removedInCloudflare', () => {
   const base = { baseline: ['a@example.com', 'b@example.com'], activeEmails: ['a@example.com', 'b@example.com', 'new@example.com'], pinned: none };
+  it('honors explicit email and domain exclusions even when Include still lists the user', () => {
+    const include = [email('a@example.com'), email('b@example.com')];
+    expect(removedInCloudflare({ ...base, policy: policy(include, [email('b@example.com')]) })).toEqual(['b@example.com']);
+    expect(removedInCloudflare({ ...base, policy: policy(include, [domain('example.com')]) })).toEqual(['a@example.com', 'b@example.com']);
+    expect(removedInCloudflare({ ...base, pinned: new Set(['b@example.com']), policy: policy(include, [email('b@example.com')]) })).toEqual([]);
+  });
 
   it('finds an email MailExpert wrote that Cloudflare no longer lists', () => {
     expect(removedInCloudflare({ ...base, policy: policy([email('A@example.com')]) })).toEqual(['b@example.com']);

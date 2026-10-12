@@ -2936,17 +2936,22 @@ export default function MessageList() {
 
           {/* Select / Cancel — replaces compose button; FAB is the primary compose affordance */}
           {selectionMode ? (
+            // An icon like its neighbours: the word ("Отмена") did not fit the one-row header at 320 px.
             <button
               onClick={clearSelection}
+              aria-label={t('common.cancel')}
+              title={t('common.cancel')}
               style={{
                 background: 'none', border: 'none',
                 color: 'var(--accent)', cursor: 'pointer',
-                fontSize: 14, fontWeight: 500,
-                padding: '0 4px', minWidth: 52, minHeight: 44,
-                display: 'flex', alignItems: 'center',
+                padding: 0, borderRadius: 7,
+                display: 'flex', alignItems: 'center', justifyContent: 'center',
+                minWidth: 44, minHeight: 44,
               }}
             >
-              {t('common.cancel')}
+              <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" aria-hidden="true">
+                <line x1="18" y1="6" x2="6" y2="18" /><line x1="6" y1="6" x2="18" y2="18" />
+              </svg>
             </button>
           ) : (
             <button

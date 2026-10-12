@@ -159,6 +159,26 @@ describe('MailApp with the add-account dialog', () => {
     assert.ok(contactsInDrawer, '...and stays reachable from the sidebar drawer');
   });
 
+  test('in selection mode the 320 px header still fits: Cancel is a named 44 px icon, not a word that grows with the language', async () => {
+    await mount(320);
+    await React.act(async () => { document.querySelector('[aria-label="messageList.selectMessages"]').click(); });
+    const header = document.querySelector('[data-mobile-list-header]');
+    const cancel = header.querySelector('[aria-label="common.cancel"]');
+    assert.ok(cancel, 'Cancel is named for screen readers');
+    assert.equal(cancel.textContent.trim(), '', 'no visible word: "Отмена" was ~6 px too wide at 320 px');
+    assert.equal(cancel.getAttribute('title'), 'common.cancel');
+    const px = (v) => parseInt(v, 10) || 0;
+    assert.equal(px(cancel.style.minWidth), 44);
+    assert.ok(px(cancel.style.minHeight) >= 44);
+    const children = [...header.children];
+    const needed = px(header.style.paddingLeft) + px(header.style.paddingRight)
+      + px(header.style.columnGap || header.style.gap) * (children.length - 1)
+      + children.reduce((sum, el) => sum + px(el.style.minWidth), 0);
+    assert.ok(needed <= 320, `the row needs ${needed}px of 320`);
+    await React.act(async () => { cancel.click(); });
+    assert.ok(header.querySelector('[aria-label="messageList.selectMessages"]'), 'Cancel leaves selection mode');
+  });
+
   test('the command palette opens with Cmd+K when no dialog is open', async () => {
     await mount();
     await press('k', { ctrlKey: true });

@@ -13,6 +13,7 @@ export const PROTON_TTL_MS = 10 * 60 * 1000;
 const POLL_FAILURES_LIMIT = 5;
 
 const ACTIVE_STATES = ['authenticating', 'checking', 'needs_2fa', 'needs_second_password'];
+const TERMINAL_STATES = ['connected', 'failed', 'expired', 'cancelled'];
 const CHALLENGE_OF_STATE = { needs_2fa: '2fa', needs_second_password: 'second_password' };
 
 // Managed Proton: address and Proton password, then (only when Bridge asks) a two-factor code or a
@@ -160,15 +161,20 @@ export default function ProtonAddForm({
     setBusy(true);
     setErrorKey(null);
     try {
-      // A lost answer is replayed once with the same id (the server answers the same attempt).
+      // A lost answer is replayed once with the same id (the server answers the same attempt). The
+      // request itself is not aborted by Back or Close: the server starts the sign-in whether or
+      // not the answer is read, and only the answer carries the id that cancels it.
       const status = await submitWithReplay(
         (id) => api.startProtonConnection(protonStartBody({
           email: address, password, requestId: id, reconnectAccountId: target?.id, metadata,
-        }), { signal }),
+        })),
         attemptRef.current,
         { signal },
       );
-      if (signal?.aborted) { cancelOnServer(status?.id); return; }
+      if (signal?.aborted || !liveRef.current) {
+        if (status?.id && !TERMINAL_STATES.includes(status.state)) cancelOnServer(status.id);
+        return;
+      }
       if (liveRef.current) setPassword('');
       if (liveRef.current) setBusy(false);
       apply(status, status?.id);

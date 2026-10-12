@@ -697,6 +697,32 @@ describe('Proton', () => {
     assert.equal(again.host.querySelector('#proton-add-password').value, '');
   });
 
+  test('back_during_start_cancels_once_the_id_arrives: Back or Close while the start is in flight ends the server attempt', async () => {
+    // The stub behaves like fetch: a request that carries an aborted signal rejects.
+    let release;
+    answers['POST /api/accounts/proton/connect'] = (call) => new Promise((resolve, reject) => {
+      release = () => resolve({ id: CONNECTION_ID, state: 'authenticating' });
+      call.signal?.addEventListener('abort', () => reject(Object.assign(new Error('aborted'), { name: 'AbortError' })));
+    });
+    const controller = new AbortController();
+    const connected = [];
+    const handle = await mount(React.createElement(Harness, {
+      Form: ProtonAddForm, proton: READY, signal: controller.signal, onConnected: (r) => connected.push(r), ...fastProps,
+    }));
+    await fillAndStart(handle.host);
+    await until(() => typeof release === 'function', 'the start request');
+    controller.abort(); // Back
+    await handle.unmount(); // the dialog drops the form
+    mounted.splice(mounted.indexOf(handle), 1);
+    await React.act(async () => { release(); });
+    await flush();
+    const cancels = calls.filter((c) => c.path.endsWith(`/${CONNECTION_ID}/cancel`));
+    assert.equal(cancels.length, 1, 'the attempt the server started is cancelled as soon as its id is known');
+    assert.equal(gets().length, 0, 'no polling for a form that is gone');
+    assert.equal(connected.length, 0);
+    assert.equal(calls.filter((c) => c.method === 'POST' && c.path === '/api/accounts/proton/connect').length, 1, 'the password is not sent again');
+  });
+
   test('Cancel in the form ends the attempt on the server and returns to the form', async () => {
     const { host } = await mount(React.createElement(Harness, { Form: ProtonAddForm, proton: READY, ...fastProps }));
     await fillAndStart(host);

@@ -150,6 +150,8 @@ router.get('/microsoft/callback', async (req, res) => {
   if (!userId) return res.redirect(errorRedirect('invalid_state'));
   // A state issued before the two flows existed says neither: refused, as the Google flow does.
   if (flow.mode !== 'add' && flow.mode !== 'reconnect') return res.redirect(errorRedirect('invalid_state'));
+  // Admin rights are checked again on completion: they may have been taken away since the start.
+  if (!(await isAdminRequest(req))) return res.redirect(errorRedirect('admin_required'));
 
   const { clientId, clientSecret, tenantId, redirectUri } = getMsConfig();
 
@@ -400,6 +402,11 @@ router.get('/microsoft/device/poll', async (req, res) => {
   if (Date.now() > flow.expiresAt) {
     deviceFlows.delete(req.session.userId);
     return res.json({ status: 'expired' });
+  }
+  // A device flow lives up to 15 minutes: an administrator demoted meanwhile does not finish it.
+  if (!(await isAdminRequest(req))) {
+    deviceFlows.delete(req.session.userId);
+    return res.json({ status: 'error', error: 'Microsoft sign-in refused', code: 'admin_required' });
   }
 
   try {

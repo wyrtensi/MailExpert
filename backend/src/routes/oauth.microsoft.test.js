@@ -271,6 +271,18 @@ describe('the mailbox address comes only from a verified claim', () => {
   });
 });
 
+describe('a callback for a user who is no longer an administrator', () => {
+  it.each([['an add', () => startAdd()], ['a reconnect', () => startReconnect()]])('refuses %s before the code exchange', async (_label, start) => {
+    start();
+    signedInAdmin = false;
+    const res = await callback();
+    expect(res.headers.get('location')).toBe('/?oauth_error=admin_required&oauth_provider=microsoft');
+    expect(globalThis.fetch.mock.calls.some(([url]) => String(url).endsWith('/token'))).toBe(false);
+    expect(wroteAccount()).toBe(false);
+    expect(session.oauthNonce).toBeUndefined();
+  });
+});
+
 describe('adding a Microsoft mailbox', () => {
   beforeEach(() => { startAdd(); stubMicrosoft(() => json(true, TOKENS)); });
 
@@ -428,6 +440,19 @@ describe('Microsoft device-code flow', () => {
     expect(await res.json()).toEqual({ error: 'Admin access required', code: 'admin_required' });
     // Microsoft was never asked for a device code, and there is no flow for the poll to finish.
     expect(globalThis.fetch.mock.calls.some(([url]) => String(url).endsWith('/devicecode'))).toBe(false);
+    expect(await (await poll()).json()).toMatchObject({ status: 'error' });
+  });
+
+  it('does not finish a flow whose starter is no longer an administrator', async () => {
+    stubMicrosoft((href) => (href.endsWith('/devicecode') ? startOk() : json(true, TOKENS)));
+    expect((await startDevice({ account: ACCOUNT_ID })).status).toBe(200);
+    signedInAdmin = false;
+    // The poll's own refusal shape, so the settings screen shows the admin_required message.
+    expect(await (await poll()).json()).toEqual({ status: 'error', error: 'Microsoft sign-in refused', code: 'admin_required' });
+    expect(globalThis.fetch.mock.calls.some(([url]) => String(url).endsWith('/token'))).toBe(false);
+    expect(wroteAccount()).toBe(false);
+    // The flow is gone: being made an administrator again does not revive it.
+    signedInAdmin = true;
     expect(await (await poll()).json()).toMatchObject({ status: 'error' });
   });
 

@@ -1,3 +1,4 @@
+import vm from 'node:vm';
 import { query } from './db.js';
 import { parseHeadersInput } from './messageParser.js';
 import { htmlToText } from '../utils/htmlToText.js';
@@ -45,6 +46,42 @@ export function isDangerousRegex(src) {
   return false;
 }
 
+// Text a user regex sees: the same cap the search index applies to bodies
+// (FTS_BODY_CHAR_CAP in routes/search.js).
+export const RULE_TEXT_CHAR_CAP = 600_000;
+const REGEX_TIMEOUT_MS = 100;
+
+// isDangerousRegex cannot tell every slow pattern: '.*a.*b' alone backtracks in O(n^3).
+// User patterns therefore run in a VM context with a hard time budget, which interrupts
+// the regex engine. A pattern that exhausted the budget once is never run again (until
+// restart), so one bad rule cannot cost the budget on every incoming message.
+const regexContext = vm.createContext(Object.create(null));
+const regexScript = new vm.Script('new RegExp(pattern, "i").test(text)');
+const timedOutPatterns = new Set();
+
+// For a yes/no test an unanchored leading '.*' (or '.*?') matches nothing the rest of the
+// pattern would not: it can always match empty. Dropping it keeps the common '.*word' linear
+// instead of quadratic on a long line.
+const LEADING_ANY = /^(?:\.\*\??)+/;
+
+export function matchUserRegex(pattern, text, { timeoutMs = REGEX_TIMEOUT_MS } = {}) {
+  if (timedOutPatterns.has(pattern)) return false;
+  regexContext.pattern = String(pattern).replace(LEADING_ANY, '');
+  regexContext.text = String(text || '').slice(0, RULE_TEXT_CHAR_CAP);
+  try {
+    return regexScript.runInContext(regexContext, { timeout: timeoutMs }) === true;
+  } catch (err) {
+    if (err?.code === 'ERR_SCRIPT_EXECUTION_TIMEOUT') {
+      timedOutPatterns.add(pattern);
+      console.warn(`inboxRules: regex ${JSON.stringify(pattern)} exceeded ${timeoutMs} ms; it no longer matches until restart`);
+    }
+    return false;
+  } finally {
+    regexContext.pattern = undefined;
+    regexContext.text = undefined;
+  }
+}
+
 function matchOperator(operator, fieldVal, ruleVal) {
   const f = normalizeStr(fieldVal);
   const r = normalizeStr(ruleVal);
@@ -63,11 +100,7 @@ function matchOperator(operator, fieldVal, ruleVal) {
       // Reject catastrophic-backtracking patterns before compiling (ReDoS guard);
       // user patterns run synchronously on every incoming message.
       if (isDangerousRegex(ruleVal)) return false;
-      try {
-        return new RegExp(ruleVal, 'i').test(fieldVal || '');
-      } catch {
-        return false;
-      }
+      return matchUserRegex(ruleVal, fieldVal);
     }
     default:             return false;
   }

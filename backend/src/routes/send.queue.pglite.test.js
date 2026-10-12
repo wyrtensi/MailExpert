@@ -628,3 +628,15 @@ describe('Editing a scheduled forward', () => {
     expect(res.status).toBe(200);
   });
 });
+
+describe('malformed ids', () => {
+  it.each([
+    [{ accountId: 'not-a-uuid' }, 'accountId'],
+    [{ aliasId: 'not-a-uuid' }, 'aliasId'],
+  ])('answers 400 invalid_id for %j before any query', async (extra, name) => {
+    const res = await call('POST', '/send', { body: { ...LETTER, ...extra }, key: `k-${Math.random()}` });
+    expect(res.status).toBe(400);
+    expect(await res.json()).toEqual({ error: `Invalid ${name}`, code: 'invalid_id' });
+    expect(sendMail).not.toHaveBeenCalled();
+  });
+});

@@ -295,3 +295,63 @@ describe('allowPrivate option', () => {
     expect(result.host).toBe('192.168.1.100');
   });
 });
+
+// ── IPv6 forms that embed or alias private targets ──────────────────────────
+
+describe('special IPv6 ranges', () => {
+  it.each([
+    ['::ffff:7f00:1'],          // IPv4-mapped loopback, hex form (WHATWG URL output)
+    ['[::ffff:7f00:1]'],
+    ['::ffff:a00:1'],           // IPv4-mapped 10.0.0.1
+    ['::ffff:a9fe:a9fe'],       // IPv4-mapped 169.254.169.254
+    ['::ffff:ac11:2'],          // IPv4-mapped 172.17.0.2
+    ['0:0:0:0:0:ffff:7f00:0001'],
+    ['::'],                     // unspecified
+    ['[::]'],
+    ['0:0:0:0:0:0:0:1'],        // loopback, long form
+    ['::7f00:1'],               // IPv4-compatible (deprecated ::/96)
+    ['::127.0.0.1'],
+    ['64:ff9b::7f00:1'],        // NAT64 well-known prefix wrapping 127.0.0.1
+    ['64:ff9b::10.0.0.1'],
+    ['64:ff9b:1::1'],           // local-use NAT64 (RFC 8215)
+    ['fe90::1'],                // link-local is fe80::/10, not only fe80:
+    ['febf::1'],
+    ['fec0::1'],                // deprecated site-local
+    ['ff02::1'],                // multicast
+    ['100::1'],                 // discard-only
+    ['2002:a00:1::'],           // 6to4 wrapping 10.0.0.1, short groups
+    ['2001::1'],                // Teredo
+  ])('blocks %s', ip => {
+    expect(validateHostLiteral(ip)).toMatch(/private|reserved/i);
+  });
+
+  it.each([
+    ['::ffff:808:808'],         // IPv4-mapped 8.8.8.8
+    ['64:ff9b::808:808'],       // NAT64 of a public IPv4
+    ['2606:4700:4700::1111'],
+    ['2a01:111:f400::1'],
+  ])('passes public %s', ip => {
+    expect(validateHostLiteral(ip)).toBeNull();
+  });
+
+  it('validateHost blocks the audit probes before any DNS lookup', async () => {
+    for (const host of ['[::ffff:7f00:1]', '::', '::ffff:a00:1', '64:ff9b::7f00:1']) {
+      expect(await validateHost(host)).toMatch(/private|reserved/i);
+    }
+    expect(dns.resolve4).not.toHaveBeenCalled();
+  });
+
+  it('validateHost blocks an AAAA record in IPv4-mapped hex form', async () => {
+    dns.resolve6.mockResolvedValue(['::ffff:a00:5']);
+    expect(await validateHost('evil.attacker.com')).toMatch(/private|reserved/i);
+  });
+
+  it('resolveForConnection rejects an IPv4-mapped literal (IMAP/SMTP host)', async () => {
+    await expect(resolveForConnection('::ffff:a00:5')).rejects.toThrow(/private|reserved/i);
+    await expect(resolveForConnection('[::]')).rejects.toThrow(/private|reserved/i);
+  });
+
+  it('allowPrivate still lets the special forms through', () => {
+    expect(validateHostLiteral('::ffff:7f00:1', { allowPrivate: true })).toBeNull();
+  });
+});

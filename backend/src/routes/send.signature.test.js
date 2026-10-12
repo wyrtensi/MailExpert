@@ -14,7 +14,7 @@ import { query } from '../services/db.js';
 import { enqueueOutgoingSend } from '../services/sendQueue.js';
 import { wrapSignatureHtml } from '../utils/signatureWrapper.js';
 
-const account = { id: 'a1', email_address: 'me@example.com', name: 'Me', signature: '<b>Sig</b>' };
+const account = { id: 'a1a1a1a1-1111-4111-8111-a1a1a1a1a1a1', email_address: 'me@example.com', name: 'Me', signature: '<b>Sig</b>' };
 let server, base;
 beforeAll(async () => {
   const app = express();
@@ -31,7 +31,7 @@ beforeEach(() => {
 });
 const post = (extra = {}) => fetch(`${base}/api/mail/send`, {
   method: 'POST', headers: { 'Content-Type': 'application/json', 'X-Idempotency-Key': 'sig1' },
-  body: JSON.stringify({ accountId: 'a1', to: ['you@example.com'], subject: 'Test', body: '<p>Hello</p>', bodyIsHtml: true, ...extra }),
+  body: JSON.stringify({ accountId: 'a1a1a1a1-1111-4111-8111-a1a1a1a1a1a1', to: ['you@example.com'], subject: 'Test', body: '<p>Hello</p>', bodyIsHtml: true, ...extra }),
 });
 // The letter as the route built it for the queue.
 const built = (call = 0) => enqueueOutgoingSend.mock.calls[call][0].mail.options;

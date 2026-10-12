@@ -88,6 +88,17 @@ describe('searchAccounts', () => {
     assert.deepEqual(find('imap.gmail'), [], 'the role label of the host is not part of the name');
   });
 
+  it('does not match every "Other" mailbox on \'imap\': the protocol is not a provider name', () => {
+    const list = [
+      { id: 'o1', name: 'Shop', email_address: 'shop@own.test', mail_provider: 'other', connection_mode: 'manual', imap_host: 'imap.own.test' },
+      { id: 'o2', name: 'Desk', email_address: 'desk@else.test', mail_provider: 'other', connection_mode: 'manual', imap_host: 'mail.else.test' },
+    ];
+    const got = (q) => ids(searchAccounts(buildAccountSearchIndex(list), q));
+    assert.deepEqual(got('imap'), []);
+    assert.deepEqual(got('other'), ['o1', 'o2'], 'the provider name still finds them');
+    assert.deepEqual(got('другой'), ['o1', 'o2']);
+  });
+
   it('requires every word of the query, in any order', () => {
     assert.deepEqual(find('example sales'), ['a1']);
     assert.deepEqual(find('sales gmail'), []);

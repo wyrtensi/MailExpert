@@ -27,7 +27,7 @@ const PROVIDER_NAMES = {
   yandex: ['yandex', 'яндекс'],
   mailru: ['mail.ru', 'mailru', 'майл', 'мейл', 'мэйл'],
   icloud: ['icloud', 'apple', 'айклауд', 'эппл'],
-  other: ['other', 'imap', 'другой'],
+  other: ['other', 'другой'],
 };
 const MODE_NAMES = {
   preset: ['preset', 'готовый', 'пресет'],

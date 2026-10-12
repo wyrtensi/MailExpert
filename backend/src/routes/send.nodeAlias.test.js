@@ -30,8 +30,8 @@ beforeAll(async () => {
 afterAll(async () => { await new Promise(resolve => server.close(resolve)); });
 beforeEach(() => {
   vi.clearAllMocks();
-  account = { id: 'a1', email_address: 'me@example.com', name: 'Me', signature: null, mail_node: true };
-  alias = { id: ALIAS_ID, account_id: 'a1', name: 'Other', email: 'other@example.com', reply_to: null, signature: null };
+  account = { id: 'a1a1a1a1-1111-4111-8111-a1a1a1a1a1a1', email_address: 'me@example.com', name: 'Me', signature: null, mail_node: true };
+  alias = { id: ALIAS_ID, account_id: 'a1a1a1a1-1111-4111-8111-a1a1a1a1a1a1', name: 'Other', email: 'other@example.com', reply_to: null, signature: null };
   query.mockImplementation(async (sql) => {
     if (sql.includes('FROM email_accounts')) return { rows: [account] };
     if (sql.includes('FROM account_aliases')) return { rows: [alias] };
@@ -41,7 +41,7 @@ beforeEach(() => {
 });
 const post = () => fetch(`${base}/api/mail/send`, {
   method: 'POST', headers: { 'Content-Type': 'application/json', 'X-Idempotency-Key': 'node-alias' },
-  body: JSON.stringify({ accountId: 'a1', aliasId: ALIAS_ID, to: ['you@example.com'], subject: 'Hi', body: 'Hello' }),
+  body: JSON.stringify({ accountId: 'a1a1a1a1-1111-4111-8111-a1a1a1a1a1a1', aliasId: ALIAS_ID, to: ['you@example.com'], subject: 'Hi', body: 'Hello' }),
 });
 
 describe('sending from an alias of a mail node mailbox', () => {

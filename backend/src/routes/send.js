@@ -15,6 +15,7 @@ import { OAUTH_SEND_FAILURES } from '../services/oauth/constants.js';
 import { isDisabledMailbox, isForeignNodeAliasAddress, isReadOnlyNodeMailbox } from '../utils/senderNames.js';
 import { ATTACHMENT_LIMIT_ERROR, MAX_ATTACHMENT_BYTES } from '../utils/attachmentLimit.js';
 import { smtpFailureIsDefinite, smtpConnectionFailure } from '../services/smtpErrors.js';
+import { isUuid } from '../utils/uuid.js';
 import {
   enqueueOutgoingSend, existingSendJob, parseSendAt, pickComposeContext, sendJobResponse, sendRetryConflict,
 } from '../services/sendQueue.js';
@@ -90,6 +91,9 @@ router.post('/send', async (req, res) => {
   const VALID_PRIORITIES = new Set(['high', 'normal', 'low']);
   const emailPriority = VALID_PRIORITIES.has(priority) ? priority : 'normal';
   if (!accountId) return res.status(400).json({ error: 'accountId required' });
+  // Both reach uuid-typed SQL; a malformed value would surface as a Postgres cast error (500).
+  if (!isUuid(accountId)) return res.status(400).json({ error: 'Invalid accountId', code: 'invalid_id' });
+  if (aliasId && !isUuid(aliasId)) return res.status(400).json({ error: 'Invalid aliasId', code: 'invalid_id' });
   // Any one field may carry the recipients: a message addressed only in Bcc is valid.
   if (![to, cc, bcc].some(list => Array.isArray(list) && list.length)) {
     return res.status(400).json({ error: 'At least one recipient is required' });

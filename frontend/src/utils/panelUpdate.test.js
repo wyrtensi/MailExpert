@@ -219,7 +219,9 @@ describe('rollback command', () => {
   });
 
   it('builds the manual rollback to the version the update started from', () => {
-    assert.equal(rollbackCommand(run), 'sudo /opt/mailexpert/app/scripts/deploy/rollback.sh --to sha-aaaaaaaaaaaa');
+    assert.equal(rollbackCommand(run), 'sudo /opt/mailexpert/app/scripts/deploy/rollback.sh --prefix /opt/mailexpert --to sha-aaaaaaaaaaaa');
+    assert.equal(rollbackCommand({ ...run, logFile: '/opt/panel-secondary/state/updater/x.log' }),
+      'sudo /opt/panel-secondary/app/scripts/deploy/rollback.sh --prefix /opt/panel-secondary --to sha-aaaaaaaaaaaa');
     assert.equal(rollbackCommand({ ...run, from: null }), null);
     assert.equal(rollbackCommand({ ...run, from: 'sha-x; rm -rf /' }), null);
     assert.equal(rollbackCommand({ ...run, logFile: '$(evil)/state/updater/x.log' }), null);

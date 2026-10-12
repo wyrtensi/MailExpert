@@ -67,6 +67,11 @@ export function createReconciler({
 
   async function pass() {
     const results = (await getSpool().readResults()).filter((r) => r.action === 'update');
+    // Host retention removes old results; do not retain their IDs for the process lifetime.
+    const activeIds = new Set(results.map((r) => r.id));
+    for (const key of journaled) {
+      if (!activeIds.has(key.slice(0, key.indexOf(':')))) journaled.delete(key);
+    }
     if (afterResults) {
       try {
         await afterResults(results);

@@ -328,10 +328,21 @@ result() { jq -r "$2" "$RES/$1.json"; }
   [ "$(result "$ID1" .message)" = "ready to update to 1.0.1 (sha-${MIG:0:12})" ]
   [ "$(result "$ID1" '.preflight.pendingMigrations | join(",")')" = 0002_b ]
   [ "$(result "$ID1" .preflight.migrationsApplied)" = 1 ]
+  [ "$(result "$ID1" .autoRollback)" = false ]
   [ "$(stat -c %a "$RES/$ID1.json")" = 644 ]
   [ "$(jq -r .installed "$RES/updater.json")" = true ]
   [ ! -e "$UPDATE_LOG" ]
   [[ $stderr == *"request $ID1 from admin@example.com"* ]]
+}
+
+@test "a ready check without pending migrations reports automatic rollback eligibility" {
+  stub_install
+  put_request "$ID1" check "sha-${MIG:0:12}"
+  STUB_APPLIED=$'0001_a\n0002_b' run_updater
+  [ "$status" -eq 0 ]
+  [ "$(result "$ID1" .state)" = ready ]
+  [ "$(result "$ID1" .autoRollback)" = true ]
+  [ ! -e "$UPDATE_LOG" ]
 }
 
 id_n() { printf 'bbbbbbbb-bbbb-4bbb-8bbb-%012d' "$1"; }

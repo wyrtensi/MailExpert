@@ -32,6 +32,26 @@ function setup({ routes, env = {}, start = 1_000_000 } = {}) {
 }
 
 describe('latest check', () => {
+  it('bounds remembered releases while retaining recent commits', async () => {
+    let sha = '1'.padStart(40, '0');
+    const { fetch, check, advance } = setup({ routes: {
+      '/git/ref/tags/latest': () => json({ object: { type: 'commit', sha } }),
+      '/contents/backend/package.json': () => packageAt('1.0.1'),
+    } });
+    for (let i = 1; i <= 18; i++) {
+      sha = i.toString(16).padStart(40, '0');
+      await check.getStatus();
+      advance(6 * 3600_000);
+    }
+    const reads = () => fetch.mock.calls.filter(([url]) => url.includes('/contents/')).length;
+    expect(reads()).toBe(18);
+    await check.getStatus();
+    expect(reads()).toBe(18);
+    advance(6 * 3600_000);
+    sha = '1'.padStart(40, '0');
+    await check.getStatus();
+    expect(reads()).toBe(19);
+  });
   it('follows a lightweight tag and compares the running build with it', async () => {
     const { fetch, check } = setup({ routes: {
       '/git/ref/tags/latest': json(commitRef),

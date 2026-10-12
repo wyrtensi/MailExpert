@@ -467,7 +467,7 @@ describe('the panel update section', () => {
     assert.equal(text(root, '[data-run-state]'), 'Update failed');
     assert.match(text(root, '[data-run-exit]'), /Exit code: 2/);
     assert.match(text(root, '[data-run-message]'), /docker compose up failed/);
-    assert.equal(text(root, '[data-run-rollback-command]'), 'sudo /opt/mailexpert/app/scripts/deploy/rollback.sh --to sha-aaaaaaaaaaaa');
+    assert.equal(text(root, '[data-run-rollback-command]'), 'sudo /opt/mailexpert/app/scripts/deploy/rollback.sh --prefix /opt/mailexpert --to sha-aaaaaaaaaaaa');
     assert.equal(get(root, '[data-run-runbook]').getAttribute('href'), LINKS.runbook);
     assert.equal(text(root, '[data-run-log-file]'), '/opt/mailexpert/state/updater/u1.log');
     assert.equal(get(root, '[data-run-journal]').tagName, 'DIV');

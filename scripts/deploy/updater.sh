@@ -248,7 +248,7 @@ preflight() {
 }
 
 do_check() {
-  local id=$1 target=$2 logfile=$WORK_DIR/$1.log reason verdict message
+  local id=$1 target=$2 logfile=$WORK_DIR/$1.log reason verdict message auto=false
   new_log "$logfile"
   set_result "$id" "id=$(json_str "$id")" "action=\"check\"" "target=$(json_str "$target")" \
     "state=\"checking\"" "from=$(json_str "$CFG_VERSION")" "receivedAt=$(json_str "$(now)")" \
@@ -258,13 +258,14 @@ do_check() {
   record_releases "$id" "$target"
   preflight "$id" "$target" "$logfile"
   verdict=$VERDICT
+  if [ "$verdict" = ready ] && auto_rollback_allowed "$PREFLIGHT"; then auto=true; fi
   case $verdict in
     ready) message="ready to update to $(version_label "$target")" ;;
     blocked) message="status.sh found problems that block an update to $target" ;;
     *) message="status.sh failed; see $logfile" ;;
   esac
   log "check $id: $verdict"
-  set_result "$id" "state=$(json_str "$verdict")" "message=$(json_str "$message")" "finishedAt=$(json_str "$(now)")"
+  set_result "$id" "state=$(json_str "$verdict")" "autoRollback=$auto" "message=$(json_str "$message")" "finishedAt=$(json_str "$(now)")"
 }
 
 # progress <id> <log>: the log tail into the result while update.sh or install.sh runs.

@@ -10,6 +10,7 @@ import json
 import socket
 import tempfile
 import threading
+import time
 import unittest
 from pathlib import Path
 
@@ -333,6 +334,122 @@ class SnapshotGateTests(unittest.TestCase):
         self.assertEqual(self.controller.health()['sendLeases'], 0)
         self.link()
         self.assertEqual(self.controller.snapshot_begin('snap-1')['state'], 'snapshot')
+
+
+    # -- bughunt M-3: begin and end act only on their own gate --------------------------
+    def begin_in_thread(self, snapshot_id):
+        outcome = {}
+
+        def run():
+            try:
+                outcome['result'] = self.controller.snapshot_begin(snapshot_id)
+            except Exception as error:  # noqa: BLE001
+                outcome['error'] = error
+
+        thread = threading.Thread(target=run, daemon=True)
+        thread.start()
+        return thread, outcome
+
+    def wait_gate(self, snapshot_id):
+        deadline = time.monotonic() + 5
+        while self.controller.health()['snapshotId'] != snapshot_id:
+            self.assertLess(time.monotonic(), deadline, 'begin never closed the gate')
+            time.sleep(0.01)
+
+    def test_end_during_drain_keeps_bridge_running(self):
+        self.link()
+        self.controller.snapshot_wait_seconds = 5
+        lease = self.controller.acquire_send_lease()
+        thread, outcome = self.begin_in_thread('snap-1')
+        self.wait_gate('snap-1')
+        self.assertTrue(self.controller.snapshot_end('snap-1')['ended'])
+        self.controller.release_send_lease(lease['leaseId'])
+        thread.join(5)
+        self.assertRegex(str(outcome.get('error')), '^operation_conflict$')
+        self.assertEqual(self.native.exit_confirmed, 0)
+        self.assertTrue(self.native.running())
+        self.assertNotEqual(self.controller.health()['state'], 'snapshot')
+
+    def test_timed_out_begin_leaves_the_next_gate_alone(self):
+        self.link()
+        self.controller.snapshot_wait_seconds = 0.5
+        lease = self.controller.acquire_send_lease()
+        first, first_outcome = self.begin_in_thread('snap-1')
+        self.wait_gate('snap-1')
+        self.controller.snapshot_wait_seconds = 5
+        timer = threading.Timer(1, self.controller.release_send_lease, [lease['leaseId']])
+        timer.start()
+        self.addCleanup(timer.cancel)
+        with self.controller.lock:
+            # The next backup takes the gate before the first begin runs again; its wait
+            # releases the lock to the first one, which must leave this gate alone.
+            self.controller.snapshot_end('snap-1')
+            result = self.controller.snapshot_begin('snap-2')
+        first.join(5)
+        self.assertRegex(str(first_outcome.get('error')), '^operation_conflict$')
+        self.assertEqual(result['state'], 'snapshot')
+        self.assertEqual(self.controller.health()['snapshotId'], 'snap-2')
+        self.assertEqual(self.native.exit_confirmed, 1)
+
+    # -- bughunt M-1: an ended sign-in does not hold the snapshot ------------------------
+    def test_cancelled_attempt_does_not_make_snapshot_busy(self):
+        self.controller.start_connection('attempt-a', 'mail@example.com', 'secret-sentinel')
+        self.controller.cancel_connection('attempt-a')
+        # A late login Bridge finished anyway left a native user behind.
+        self.native.add_user()
+        self.assertEqual(self.controller.snapshot_begin('snap-1')['state'], 'snapshot')
+        self.assertEqual(self.native.exit_confirmed, 1)
+        self.controller.snapshot_end('snap-1')
+        self.assertIsNone(self.controller.slot)
+        self.assertIn('user-a', self.native.removed_users)
+        del self.native.users['user-a']
+        self.native.event('user_changed', userId='user-a')
+        self.controller.start_connection('attempt-b', 'other@example.com', 'secret-sentinel')
+
+    def test_failed_login_rpc_does_not_make_snapshot_busy(self):
+        def broken(email, password):
+            raise RuntimeError('secret-sentinel')
+
+        self.native.login = broken
+        self.controller.start_connection('attempt-a', 'mail@example.com', 'secret-sentinel')
+        self.assertEqual(self.controller.snapshot_begin('snap-1')['state'], 'snapshot')
+        self.controller.snapshot_end('snap-1')
+        self.assertIsNone(self.controller.slot)
+
+    def test_cancel_during_drain_wakes_the_snapshot(self):
+        self.controller.start_connection('attempt-a', 'mail@example.com', 'secret-sentinel')
+        self.controller.snapshot_wait_seconds = 5
+        timer = threading.Timer(0.2, self.controller.cancel_connection, ['attempt-a'])
+        timer.start()
+        self.addCleanup(timer.cancel)
+        started = time.monotonic()
+        self.assertEqual(self.controller.snapshot_begin('snap-1')['state'], 'snapshot')
+        self.assertLess(time.monotonic() - started, 2)
+
+    def test_native_release_during_drain_wakes_the_snapshot(self):
+        self.controller.start_connection('attempt-a', 'mail@example.com', 'secret-sentinel')
+        self.controller.snapshot_wait_seconds = 5
+        timer = threading.Timer(0.2, self.native.event, ['error'], {'code': 'bad_password'})
+        timer.start()
+        self.addCleanup(timer.cancel)
+        started = time.monotonic()
+        self.assertEqual(self.controller.snapshot_begin('snap-1')['state'], 'snapshot')
+        self.assertLess(time.monotonic() - started, 2)
+
+    def test_attempt_past_its_lifetime_does_not_hold_the_snapshot(self):
+        self.controller.start_connection('attempt-a', 'mail@example.com', 'secret-sentinel')
+        self.clock += self.controller.ttl_seconds
+        self.assertEqual(self.controller.snapshot_begin('snap-1')['state'], 'snapshot')
+        self.assertEqual(self.controller.connection_status('attempt-a').state, 'expired')
+        self.controller.snapshot_end('snap-1')
+        self.assertIsNone(self.controller.slot)
+
+    def test_live_challenge_still_makes_snapshot_busy(self):
+        self.controller.start_connection('attempt-a', 'mail@example.com', 'secret-sentinel')
+        self.native.event('needs_2fa')
+        with self.assertRaisesRegex(WorkerError, '^snapshot_busy$'):
+            self.controller.snapshot_begin('snap-1')
+        self.assertEqual(self.controller.connection_status('attempt-a').state, 'needs_2fa')
 
 
 class SnapshotRouteTests(unittest.TestCase):

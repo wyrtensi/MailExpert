@@ -28,6 +28,7 @@ MAX_RECONCILE_FAILURES = 5
 RECONCILE_BACKOFF_CAP = 60
 RECOVERY_BACKOFF_CAP = 300
 SNAPSHOT_WAIT_SECONDS = 60
+DRAIN_RECHECK_SECONDS = 1
 # A gate whose holder stops renewing it (a backup killed without its exit trap) reopens.
 SNAPSHOT_TTL_SECONDS = 300
 # DELETEs of leases not (yet) granted, kept so that a late grant is released at once.
@@ -431,10 +432,34 @@ class BridgeController:
                 self.clock() - operation.created_at < self.ttl_seconds)
 
     def _login_active(self):
-        return (self.slot is not None or self.recovering or
+        """Sign-in work a snapshot waits for. A slot holder that has ended (cancel, failure,
+        expiry) only waits for a terminal event or a recovery: stopping Bridge for the snapshot
+        and the restart after it are that recovery, so it does not hold the snapshot."""
+        return (self._holder_live() or self.recovering or
                 any(self._finalizing(op) for op in list(self.operations.values())) or
                 any(item['reason'] == 'attempt' and not item.get('stuck')
                     for item in list(self.pending_removals.values())))
+
+    def _holder_live(self):
+        if self.slot is None:
+            return False
+        holder = self.operations.get(self.slot)
+        if holder is None:
+            return True
+        return (holder.state in ACTIVE_STATES and
+                self.clock() - holder.created_at < self.ttl_seconds)
+
+    def _settle_holder(self):
+        """Before Bridge stops for a snapshot: end a holder past its lifetime (tick() does not
+        run while the gate is closed) and let the restart after the snapshot reconcile an ended
+        holder, removing users a late login created, and free the slot."""
+        holder = self.operations.get(self.slot)
+        if holder is None:
+            return
+        if holder.state in ACTIVE_STATES:
+            self._stop_attempt(holder, 'expired')
+        if holder.state in TERMINAL_STATES:
+            holder.reconcile = True
 
     def acquire_send_lease(self, lease_id=None):
         """Reserve one actual Proton send; refused while a snapshot holds the gate.
@@ -493,11 +518,14 @@ class BridgeController:
             self.snapshot = snapshot_id
             self.snapshot_expires_at = self.clock() + self.snapshot_ttl_seconds
             try:
-                drained = self.drained.wait_for(
-                    lambda: not self.send_leases and not self._login_active(),
-                    timeout=self.snapshot_wait_seconds)
+                drained = self._wait_drained(snapshot_id)
+                if self.snapshot != snapshot_id:
+                    # snapshot_end (or a reclaim) acted on this gate while it drained.
+                    raise WorkerError('operation_conflict')
                 if not drained:
                     raise WorkerError('snapshot_busy')
+                if self.slot is not None:
+                    self._settle_holder()
                 if self.started:
                     self.started = False
                     try:
@@ -509,11 +537,30 @@ class BridgeController:
                         raise WorkerError('worker_unavailable') from None
                 self._persist()
             except BaseException:
-                self.snapshot = None
-                self.drained.notify_all()
+                if self.snapshot == snapshot_id:
+                    self.snapshot = None
+                    self.snapshot_expires_at = None
+                    self.drained.notify_all()
                 raise
             _log('snapshot_begin')
             return self.health()
+
+    def _wait_drained(self, snapshot_id):
+        """Wait until sends and sign-ins are drained or the gate is no longer this caller's.
+
+        Releases notify the condition; the short re-check also notices a sign-in whose
+        lifetime runs out during the wait, since tick() does not run while the gate is closed.
+        """
+        deadline = time.monotonic() + self.snapshot_wait_seconds
+        while True:
+            if self.snapshot != snapshot_id:
+                return False
+            if not self.send_leases and not self._login_active():
+                return True
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                return False
+            self.drained.wait(min(remaining, DRAIN_RECHECK_SECONDS))
 
     def snapshot_end(self, snapshot_id):
         """Open the gate again and start Bridge when links or removals need it.
@@ -657,6 +704,7 @@ class BridgeController:
             ok = False
         with self.lock:
             self.recovering = False
+            self.drained.notify_all()
             self.started = ok and not self.closed
             self.native_lost = False
             if self.started:
@@ -686,6 +734,7 @@ class BridgeController:
         holder = self.operations.get(self.slot)
         if reconciled and (holder is None or holder.state in TERMINAL_STATES):
             self.slot = None
+            self.drained.notify_all()
         elif holder is not None:
             holder.ended_at = self.clock()
         if reconciled:
@@ -768,6 +817,7 @@ class BridgeController:
                 present = True
             if not present:
                 self.pending_removals.pop(user_id)
+                self.drained.notify_all()
                 _log('native_user_removed')
         for operation in self.operations.values():
             if operation.state == 'checking' and operation.userId == user_id:
@@ -814,6 +864,7 @@ class BridgeController:
         operation.state = state
         operation.errorCode = code
         operation.ended_at = self.clock()
+        self.drained.notify_all()
 
     def _stop_attempt(self, operation, state, code=None):
         """Change public state; the slot stays until a terminal event or recovery."""
@@ -831,6 +882,7 @@ class BridgeController:
     def _release(self, operation):
         if self.slot == operation.id:
             self.slot = None
+            self.drained.notify_all()
 
     def _drop_attempt_user(self, operation):
         """Remove the native user an ended attempt created, unless something still uses it.
@@ -881,5 +933,6 @@ class BridgeController:
             return
         if not present:
             self.pending_removals.pop(user_id)
+            self.drained.notify_all()
             return
         self._begin_removal(user_id, self.pending_removals[user_id]['reason'])

@@ -67,3 +67,23 @@ it('deleted successful result cannot recreate a mailbox with the old key', async
   expect(probeConnection).toHaveBeenCalledOnce();
   expect((await state.db.query('SELECT count(*)::int AS n FROM email_accounts')).rows[0].n).toBe(0);
 });
+it('a client disconnect is not stored as the outcome: a retry with the same key probes again', async () => {
+  const key = randomUUID(), p = parsed(), controller = new AbortController();
+  probeConnection.mockImplementationOnce(async () => {
+    controller.abort();
+    throw Object.assign(new Error('aborted'), { code: 'connection_cancelled' });
+  });
+  const first = await createVerifiedAccount(p.candidate, actor, { provider: p.provider, mode: p.mode, requestId: key, signal: controller.signal });
+  expect(first).toMatchObject({ error: 'connection_cancelled' });
+  const { rows: [request] } = await state.db.query('SELECT result_code, account_id FROM account_creation_requests WHERE request_id = $1', [key]);
+  expect(request).toMatchObject({ result_code: null, account_id: null });
+  const second = await create(key);
+  expect(second.account).toMatchObject({ email_address: 'team@example.com' });
+  expect(probeConnection).toHaveBeenCalledTimes(2);
+});
+it('a disconnect after a successful probe is not stored either', async () => {
+  const key = randomUUID(), p = parsed(), controller = new AbortController();
+  probeConnection.mockImplementationOnce(async c => { controller.abort(); return { imapLogin: c.auth_user, smtpLogin: c.smtp_auth_user }; });
+  expect(await createVerifiedAccount(p.candidate, actor, { provider: p.provider, mode: p.mode, requestId: key, signal: controller.signal })).toMatchObject({ error: 'connection_cancelled' });
+  expect((await create(key)).account).toBeTruthy();
+});

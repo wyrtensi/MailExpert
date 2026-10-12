@@ -36,13 +36,19 @@ export async function createVerifiedAccount(candidate, actor, { provider, mode, 
         recordAudit(auditOf(actor, { accountEmail: email, action: 'mailbox.connection_failed', details: { provider, mode, code } }));
         return refusal(code);
       };
+      // The client went away (the route aborts on close): not an outcome of the request, so a
+      // retry with the same key probes again instead of replaying the cancellation.
+      const abandon = () => {
+        recordAudit(auditOf(actor, { accountEmail: email, action: 'mailbox.connection_failed', details: { provider, mode, code: 'connection_cancelled' } }));
+        return refusal('connection_cancelled');
+      };
       const existing = await client.query('SELECT id FROM email_accounts WHERE lower(btrim(email_address)) = $1 LIMIT 1', [email]);
       if (existing.rows.length) return finishFailure('already_connected');
       return withCreationAdmission(actor, async () => {
         let logins;
         try { logins = await probeConnection(candidate, { signal }); }
-        catch (err) { return finishFailure(safeFailure(err)); }
-        if (signal?.aborted) return finishFailure('connection_cancelled');
+        catch (err) { return signal?.aborted ? abandon() : finishFailure(safeFailure(err)); }
+        if (signal?.aborted) return abandon();
         await client.query('BEGIN');
         try {
           const result = await persistManualAccount({

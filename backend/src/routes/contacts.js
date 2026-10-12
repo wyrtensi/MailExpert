@@ -109,6 +109,8 @@ router.get('/', async (req, res) => {
   }
 });
 
+const PHOTO_TYPES = new Set(['image/jpeg', 'image/png', 'image/gif', 'image/webp']);
+
 // GET /api/contacts/photo?email=:email
 // Returns the contact photo for the given sender email as image bytes.
 // This route must remain ABOVE /:id to prevent Express matching "photo" as an id.
@@ -129,13 +131,16 @@ router.get('/photo', async (req, res) => {
 
     const photoData = result.rows[0].photo_data;
     res.set('Cache-Control', 'private, max-age=86400');
+    // The bytes come from synced vCards; never let them run as a page on the panel's origin.
+    res.set('X-Content-Type-Options', 'nosniff');
+    res.set('Content-Security-Policy', "sandbox; default-src 'none'");
 
     if (photoData.startsWith('data:')) {
       const commaIdx = photoData.indexOf(',');
       if (commaIdx < 0) return res.status(404).end();
       const mimeMatch = photoData.slice(0, commaIdx).match(/data:([^;]+)/);
-      const mimeType = mimeMatch ? mimeMatch[1] : 'image/jpeg';
-      res.set('Content-Type', mimeType);
+      const declared = (mimeMatch ? mimeMatch[1] : 'image/jpeg').trim().toLowerCase();
+      res.set('Content-Type', PHOTO_TYPES.has(declared) ? declared : 'application/octet-stream');
       return res.send(Buffer.from(photoData.slice(commaIdx + 1), 'base64'));
     }
 

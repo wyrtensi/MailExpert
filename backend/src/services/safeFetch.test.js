@@ -39,6 +39,18 @@ describe('safeFetch — SSRF guard', () => {
     )).toBe('ERR_BLOCKED_PRIVATE_IP');
   });
 
+  it.each([
+    ['http://[::ffff:127.0.0.1]:PORT/ok'],
+    ['http://[::ffff:7f00:1]:PORT/ok'],
+    ['http://[::]:PORT/ok'],
+    ['http://[::ffff:a9fe:a9fe]/'],
+    ['http://[64:ff9b::7f00:1]:PORT/ok'],
+  ])('blocks the IPv6 alias %s of a private IPv4', async (url) => {
+    expect(await causeCode(
+      safeFetch(url.replace('PORT', String(port)), {}, { allowPrivate: false, requireHttps: false })
+    )).toBe('ERR_BLOCKED_PRIVATE_IP');
+  });
+
   it('follows redirects, validating each hop', async () => {
     const r = await safeFetch(`http://127.0.0.1:${port}/redir`, {}, { allowPrivate: true });
     expect(r.status).toBe(200);

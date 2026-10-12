@@ -1,4 +1,4 @@
-import { isIPv4, isIPv6 } from 'net';
+import { BlockList, isIPv4, isIPv6 } from 'net';
 import { promises as dnsPromises } from 'dns';
 
 function ipv4ToLong(ip) {
@@ -27,28 +27,53 @@ function isPrivateIPv4(ip) {
   );
 }
 
+// IPv6 ranges that never name a public unicast host. IPv4-mapped addresses (::ffff:0:0/96)
+// are not listed: they are checked as the IPv4 address they carry.
+const PRIVATE_IPV6 = new BlockList();
+for (const [prefix, bits] of [
+  ['::', 96],          // unspecified, loopback and deprecated IPv4-compatible (::a.b.c.d)
+  ['::ffff:0:0:0', 96], // SIIT IPv4-translated
+  ['64:ff9b:1::', 48], // local-use NAT64 (RFC 8215)
+  ['100::', 64],       // discard-only
+  ['2001::', 32],      // Teredo: tunnels through NAT and can reach private ranges
+  ['fc00::', 7],       // unique local
+  ['fe80::', 10],      // link-local
+  ['fec0::', 10],      // deprecated site-local
+  ['ff00::', 8],       // multicast
+]) PRIVATE_IPV6.addSubnet(prefix, bits, 'ipv6');
+
+// The eight 16-bit groups of a valid IPv6 address (any notation, dotted IPv4 tail included).
+function ipv6Groups(ip) {
+  let text = ip.toLowerCase();
+  const zone = text.indexOf('%');
+  if (zone !== -1) text = text.slice(0, zone);
+  if (text.includes('.')) {
+    const cut = text.lastIndexOf(':') + 1;
+    const v4 = text.slice(cut).split('.').map(Number);
+    text = `${text.slice(0, cut)}${((v4[0] << 8) | v4[1]).toString(16)}:${((v4[2] << 8) | v4[3]).toString(16)}`;
+  }
+  const [head, tail = null] = text.split('::');
+  const left = head ? head.split(':') : [];
+  const right = tail ? tail.split(':') : [];
+  const groups = tail === null ? left : [...left, ...Array(8 - left.length - right.length).fill('0'), ...right];
+  return groups.map(g => parseInt(g || '0', 16));
+}
+
+function ipv4FromGroups(hi, lo) {
+  return `${hi >> 8}.${hi & 0xff}.${lo >> 8}.${lo & 0xff}`;
+}
+
 function isPrivateIPv6(ip) {
-  const h = ip.toLowerCase();
-  if (h === '::1' || h.startsWith('fc') || h.startsWith('fd') || h.startsWith('fe80')) return true;
-  // IPv4-mapped IPv6 (::ffff:x.x.x.x) — check the embedded IPv4 address.
-  // Without this, ::ffff:127.0.0.1 bypasses the IPv4 private-range checks.
-  if (h.startsWith('::ffff:')) {
-    const embedded = h.slice(7);
-    if (isIPv4(embedded)) return isPrivateIPv4(embedded);
+  const g = ipv6Groups(ip);
+  // IPv4-mapped (::ffff:0:0/96, in dotted or hex form): judge the IPv4 address it carries.
+  if (g.slice(0, 5).every(x => x === 0) && g[5] === 0xffff) return isPrivateIPv4(ipv4FromGroups(g[6], g[7]));
+  // NAT64 well-known prefix (64:ff9b::/96): a gateway forwards it to the embedded IPv4 address.
+  if (g[0] === 0x64 && g[1] === 0xff9b && g.slice(2, 6).every(x => x === 0)) {
+    return isPrivateIPv4(ipv4FromGroups(g[6], g[7]));
   }
-  // 6to4 (2002::/16) — embeds an IPv4 address in bits 16-47.
-  // e.g. 2002:7f00:0001:: wraps 127.0.0.1 and bypasses IPv4 checks without this guard.
-  const sixToFour = h.match(/^2002:([0-9a-f]{1,4}):([0-9a-f]{1,4}):/);
-  if (sixToFour) {
-    const hi = parseInt(sixToFour[1].padStart(4, '0'), 16);
-    const lo = parseInt(sixToFour[2].padStart(4, '0'), 16);
-    const embedded = `${hi >> 8}.${hi & 0xff}.${lo >> 8}.${lo & 0xff}`;
-    if (isPrivateIPv4(embedded)) return true;
-  }
-  // Teredo (2001:0000::/32) — reject the entire prefix; Teredo tunnels UDP through NAT
-  // and can reach private ranges via the embedded server/client address fields.
-  if (/^2001:0{1,4}:/.test(h)) return true;
-  return false;
+  // 6to4 (2002::/16) embeds an IPv4 address in bits 16-47.
+  if (g[0] === 0x2002 && isPrivateIPv4(ipv4FromGroups(g[1], g[2]))) return true;
+  return PRIVATE_IPV6.check(g.map(x => x.toString(16)).join(':'), 'ipv6');
 }
 
 // Synchronous check: literal IPs and reserved hostnames.

@@ -197,7 +197,20 @@ export default function AddAccountDialog({ onClose, forms = FORMS }) {
         if (!had) child.removeAttribute('inert');
       }
       const opener = openerRef.current;
-      if (opener && opener.isConnected && typeof opener.focus === 'function') opener.focus();
+      const canReceiveFocus = (element) => {
+        if (!element?.isConnected || typeof element.focus !== 'function' || element.closest('[inert], [hidden]')) return false;
+        for (let parent = element; parent; parent = parent.parentElement) {
+          const style = getComputedStyle(parent);
+          if (style.display === 'none' || style.visibility === 'hidden') return false;
+        }
+        const rect = element.getBoundingClientRect();
+        return rect.width > 0 && rect.height > 0 && rect.right > 0 && rect.bottom > 0
+          && rect.left < window.innerWidth && rect.top < window.innerHeight;
+      };
+      // A mobile menu may have closed or unmounted its opener while the dialog was open.
+      const target = canReceiveFocus(opener) ? opener
+        : [...document.querySelectorAll('[data-add-account-trigger]')].find(canReceiveFocus);
+      target?.focus();
     };
   }, []);
 

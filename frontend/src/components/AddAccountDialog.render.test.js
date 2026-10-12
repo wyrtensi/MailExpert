@@ -66,6 +66,7 @@ const { appOAuthReturnWatch } = await import('../utils/appOAuthReturn.js');
 
 const settle = () => React.act(async () => { await new Promise(r => setTimeout(r, 0)); });
 const key = (target, k, init = {}) => target.dispatchEvent(new dom.window.KeyboardEvent('keydown', { key: k, bubbles: true, cancelable: true, ...init }));
+const visibleRect = () => ({ left: 0, top: 0, right: 100, bottom: 44, width: 100, height: 44 });
 
 // A form that exposes what the dialog hands to it, so the tests can drive it.
 let lastProps = null;
@@ -93,6 +94,7 @@ describe('AddAccountDialog', () => {
     api.getAccounts = () => { getAccountsCalls += 1; return Promise.resolve(serverAccounts); };
     host = document.createElement('div');
     trigger = document.createElement('button');
+    trigger.getBoundingClientRect = visibleRect;
     trigger.textContent = 'open';
     document.body.append(trigger, host);
     root = createRoot(host);
@@ -214,6 +216,58 @@ describe('AddAccountDialog', () => {
     assert.equal(closed, 1);
     assert.equal(document.activeElement, trigger);
     assert.equal(document.querySelector('[role="dialog"]'), null);
+  });
+
+  test('closing returns focus to a visible permanent trigger when the mobile opener is hidden', async () => {
+    const permanent = document.createElement('button');
+    permanent.setAttribute('data-add-account-trigger', '');
+    permanent.getBoundingClientRect = visibleRect;
+    document.body.append(permanent);
+    try {
+      await open();
+      trigger.style.display = 'none';
+      await click(dialog().querySelector('[aria-label="common.close"]'));
+      assert.equal(document.activeElement, permanent);
+    } finally {
+      trigger.style.display = '';
+      permanent.remove();
+    }
+  });
+
+  test('closing returns focus to a permanent trigger when its opener was removed', async () => {
+    const permanent = document.createElement('button');
+    permanent.setAttribute('data-add-account-trigger', '');
+    permanent.getBoundingClientRect = visibleRect;
+    document.body.append(permanent);
+    try {
+      await open();
+      trigger.remove();
+      await click(dialog().querySelector('[aria-label="common.close"]'));
+      assert.equal(document.activeElement, permanent);
+    } finally {
+      document.body.append(trigger);
+      permanent.remove();
+    }
+  });
+
+  test('closing skips an offscreen mobile opener and a hidden permanent trigger', async () => {
+    const hidden = document.createElement('button');
+    hidden.setAttribute('data-add-account-trigger', '');
+    hidden.style.display = 'none';
+    const permanent = document.createElement('button');
+    permanent.setAttribute('data-add-account-trigger', '');
+    permanent.getBoundingClientRect = visibleRect;
+    document.body.append(hidden, permanent);
+    try {
+      await open();
+      trigger.getBoundingClientRect = () => ({ left: -300, top: 0, right: -1, bottom: 44, width: 299, height: 44 });
+      await click(dialog().querySelector('[aria-label="common.close"]'));
+      assert.equal(document.activeElement, permanent);
+    } finally {
+      trigger.getBoundingClientRect = visibleRect;
+      hidden.remove();
+      permanent.remove();
+    }
   });
 
   test('escape_dismisses_suggestions_first: a key the form already used does not close the dialog', async () => {

@@ -13,7 +13,7 @@
 | Проверка | Состояние и результат |
 | --- | --- |
 | Полный backend фичи | После rebase на `b99c211c`: `npm test` — 364 файла, 5803 passed, 1 существующий skipped; `npm run lint` и `npm run lint:plugins` exit 0. Backend после этого не менялся |
-| Полный frontend фичи | После rebase на `b99c211c`: `npm test` — 5824/5824; `npm run lint` и `npm run build` exit 0. Есть предупреждение Vite о размере chunks. Frontend после этого не менялся |
+| Полный frontend фичи | После rebase на `b99c211c`: 5824/5824. После исправления c2e26a55: `npm test` — 5827/5827; `npm run lint` и `npm run build` exit 0. Есть предупреждение Vite о размере chunks |
 | Диалог и формы | В этом продолжении: `node --test src/utils/oauthReturnWatch.test.js src/components/addAccount/ProviderForms.render.test.js src/components/AddAccountDialog.render.test.js src/components/MailApp.addAccount.render.test.js` в frontend — 87/87, 14 suites, exit 0 |
 | Исправления main | В этом продолжении: `npx vitest run src/services/hostValidation.test.js src/services/safeFetch.test.js src/services/inboxRules.regex.test.js src/routes/mail.folderDelete.pglite.test.js src/routes/auth.disabledLogin.test.js src/routes/oauth.microsoft.test.js src/routes/contacts.photo.test.js src/routes/send.queue.pglite.test.js` — 8 файлов, 228/228, exit 0 |
 | Worker | До rebase: 84/84 на mounted HEAD source в `me-proton-worker-dev:fix2`, exit 0. После rebase: `docker run --rm --network none --read-only --tmpfs /tmp --env PYTHONPATH=/opt/mailexpert-proton:/opt/mailexpert-proton/bridge_grpc --mount type=bind,source=<WORKER_TESTS>,target=/tests,readonly --entrypoint python me-e2e-proton/mailexpert-proton-worker:sha-b99c211cd1f3 -B -m unittest discover -s /tests -t /tests` — 84/84, exit 0. Проверялся runtime Python нового образа. Worker после этого не менялся |
@@ -42,7 +42,7 @@
 
 ## Что остаётся обязательным
 
-1. Согласованный push и draft PR фичи, GitHub CI. CI исправлений main, разрешённый мерж, rebase и локальные проверки уже выполнены.
+1. Draft PR #241 создан от владельца и прикреплён. Все 11 CI checks на a19e83be прошли, включая deploy e2e. После исправления c2e26a55 запущен новый CI; итог этого запуска нужно проверить перед merge.
 2. Живой Proton Free: ввод владельцем пароля и возможных challenge, sync, отправка/приём в разрешённом scope, одна копия Sent, вложение 10 MiB с проверкой hash, drafts/flags/folders/trash, рестарт и проверенный TLS. Много native users/адресов и 2FA требуют дополнительных аккаунтов. Другие провайдеры требуют предоставленных аккаунтов; реальные подключения ещё не проверены.
 3. Штатный `stage.sh panel` требует опубликованные образы коммита main; CI PR их только собирает. Для живой проверки до мержа нужен отдельно согласованный одноразовый стенд со штатным installer и подготовленными exact-tag images. Обход публикации или ручное изменение существующего стенда не выполнялись.
 4. Для обновления существующего стенда: видимость опубликованного пакета worker, read-only status и отдельный план/согласование rollout с миграцией `0099`, backup и возвратом по `mailexpert-rollout`.
@@ -51,4 +51,15 @@
 
 Неофициальный Bridge для Proton Free остаётся зависимостью, постоянная доступность API не гарантируется. Принятые владельцем риски приватного native gRPC и focus-порта записаны в спецификации.
 
-Открытые замечания из handoff: возврат фокуса на скрытый пункт мобильного меню; недоступные тосты под модальным диалогом; повтор snapshot begin с тем же ID во время drain преждевременно сообщает snapshot (текущий скрипт его не повторяет); избыточная рекомендация остановки сервисов при snapshot_busy; восстановление cleanup после удаления failed job через 30 дней недостаточно описано. В исправлениях main timeout-отравленный regex не совпадает до рестарта; соседние auth-маршруты открытой disabled-сессии, Google callback и push DNS rebinding остаются за рамками этого набора.
+Открытые замечания из handoff: недоступные тосты под модальным диалогом; повтор snapshot begin с тем же ID во время drain преждевременно сообщает snapshot (текущий скрипт его не повторяет); избыточная рекомендация остановки сервисов при snapshot_busy; восстановление cleanup после удаления failed job через 30 дней недостаточно описано. В исправлениях main timeout-отравленный regex не совпадает до рестарта; соседние auth-маршруты открытой disabled-сессии, Google callback и push DNS rebinding остаются за рамками этого набора.
+
+## Дополнительная проверка c2e26a55
+
+Исправлен возврат фокуса после мобильного меню: закрытый drawer сохраняет opener за пределами экрана. Диалог возвращает фокус на видимую постоянную кнопку; скрытые и удалённые opener не выбираются. Три regression tests: сначала два failures для скрытого/удалённого opener, затем отдельный failure для offscreen opener; после исправления 32/32 dialog/shell tests прошли. Полный frontend `npm test` — 5827/5827, exit 0; lint/build exit 0. В реальном demo браузере mobile menu → Add account → Close возвращает фокус на постоянную кнопку с видимым прямоугольником. Screenshot сохранён вне source как `mobile-focus-return-fixed.png`.
+
+Владелец отдельно согласовал свежий стенд: exact-tag c2e26a55, штатный `install.sh`, local-auth, локальный compose overlay по образцу stage.sh, отдельные имена/volume, без изменений существующего стенда. Четыре image builds, fixture shellcheck, installer и HTTPS version check с доверенным локальным CA: exit 0. `status.sh --target sha-c2e26a5581d6 --json`: ready true, 99 migrations, pending/unknown migrations пусты, checkout clean, worker idle, problems пусты. Off-site restic не настроен; `healthcheck.sh` exit 0 сообщает `backup: not configured`. Это ограничение тестового стенда, а не успешная проверка backup со связанной учёткой.
+
+Первый bootstrap остановился до запуска installer: Git Bash temporary path не был переведён в Windows path для Docker cp. Исправлен путь в одноразовом harness, ownership пустого fixture проверен перед продолжением. Продукт и установленные scripts не патчились.
+
+Автоматический браузер отказался открывать локальный Caddy certificate (`ERR_CERT_AUTHORITY_INVALID`). Принятие браузерного предупреждения и регистрацию первого локального администратора передали владельцу; пароль/challenge Proton вводит владелец. До его входа live AUTH, delivery, linked-state backup и визуальные 0/1 mailbox не засчитаны.
+

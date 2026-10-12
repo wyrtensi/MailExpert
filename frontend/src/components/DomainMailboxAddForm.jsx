@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import { api } from '../utils/api.js';
 import MailNodeSeats from './MailNodeSeats.jsx';
@@ -97,9 +97,12 @@ export default function DomainMailboxAddForm({
   const noSeat = !!seatsBlock && !seatsBlock.canTake;
   const canContinue = !busy && !formError && !noSeat;
   const email = `${normalizeLocalPart(localPart)}@${domain}`;
+  // Only an address the user typed here is reported: the prefilled name before @ joined to a node
+  // domain is not one, and reporting it would replace an address typed for another tile.
+  const typedRef = useRef(false);
   useEffect(() => {
-    if (onEmailChange && localPart) onEmailChange(email);
-    // Only a typed address is reported; the callback's identity does not matter.
+    if (onEmailChange && localPart && typedRef.current) onEmailChange(email);
+    // The callback's identity does not matter.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [email]);
   const names = senderNamesPayload({ senderName, senderNameAlt });
@@ -200,14 +203,14 @@ export default function DomainMailboxAddForm({
           value={localPart}
           placeholder={t('admin.accounts.add.domainLocalPartPh')}
           aria-invalid={!!(localPart && addressError)}
-          onChange={edit(setLocalPart)}
+          onChange={(e) => { typedRef.current = true; edit(setLocalPart)(e); }}
           style={{ ...inputStyle, flex: 1 }}
         />
         <span style={{ color: 'var(--text-tertiary)', fontSize: 13 }}>@</span>
         <select
           aria-label={t('admin.accounts.add.domainDomainLabel')}
           value={domain}
-          onChange={edit(setDomain)}
+          onChange={(e) => { typedRef.current = true; edit(setDomain)(e); }}
           style={{ ...inputStyle, flex: 1 }}
         >
           {domains.map((d) => <option key={d} value={d}>{d}</option>)}

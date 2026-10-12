@@ -775,7 +775,21 @@ describe('our own mailbox keeps its alias contract', () => {
     );
     assert.equal('Idempotency-Key' in post.headers, false, 'the node route takes no idempotency key');
     assert.equal(created.length, 1);
-    assert.ok(typed.includes('orders@example.com'));
+    assert.deepEqual(typed, [], 'a prefilled address is not one the user typed');
+  });
+
+  test('domain_reports_only_typed_address: an address from another tile survives a visit to our own mailbox', async () => {
+    answers['GET /api/mail-node/domains'] = { domains: [{ domain: 'example.com', active: true, state: 'ready' }] };
+    answers['GET /api/mail-node/seats'] = { used: 1, held: 0, free: 5, known: true, heldSeats: [], requests: [] };
+    const typed = [];
+    const { host } = await mount(React.createElement(DomainMailboxAddForm, {
+      accounts: [], initialEmail: 'me@yahoo.com', onEmailChange: (value) => typed.push(value),
+    }));
+    assert.equal(host.querySelector('#domain-add-local').value, 'me', 'the name before @ starts the field');
+    assert.equal(host.querySelector('select').value, 'example.com');
+    assert.deepEqual(typed, [], 'opening the form does not turn me@yahoo.com into me@example.com');
+    await type(host.querySelector('#domain-add-local'), 'sales');
+    assert.equal(typed.at(-1), 'sales@example.com', 'a typed name is reported');
   });
 });
 

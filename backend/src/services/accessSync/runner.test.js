@@ -64,6 +64,18 @@ beforeEach(() => {
 });
 
 describe('runAccessSync', () => {
+  it('disables and signs out a baseline user excluded while still listed in Include', async () => {
+    state(['a@example.com', 'b@example.com']);
+    activeUsers('a@example.com', 'b@example.com');
+    cloudflare(policyWith([email('a@example.com'), email('b@example.com')], { exclude: [email('b@example.com')] }));
+    disableUsersByEmail.mockResolvedValue({ disabled: [{ id: 'user-b', email: 'b@example.com', is_admin: false }], keptLastAdmin: [] });
+    const result = await run();
+    expect(result.disabled).toBe(1);
+    expect(disableUsersByEmail).toHaveBeenCalledWith(TX, ['b@example.com'], expect.any(Object));
+    expect(signOutUser).toHaveBeenCalledWith('user-b');
+    expect(cf.updatePolicy.mock.calls[0][0].include).toEqual([email('a@example.com')]);
+    expect(cf.updatePolicy.mock.calls[0][0].exclude).toEqual([email('b@example.com')]);
+  });
   it('does nothing outside google mode or without complete settings', async () => {
     expect(await run({ settings: { mode: 'local', bootstrapAdminEmails: new Set() } })).toEqual({ outcome: 'not_google_mode' });
     loadRunConfig.mockResolvedValue(null);

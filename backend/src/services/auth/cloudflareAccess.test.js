@@ -49,6 +49,49 @@ describe('verifyCloudflareAccessToken', () => {
 });
 
 describe('createResilientJwks', () => {
+  it('refreshes an unknown kid once, shares the refresh and limits repeated unknown kids', async () => {
+    let document = jwksDocument;
+    let calls = 0;
+    const jwks = createResilientJwks({ fetchJwks: async () => { calls++; return document; }, now: () => 0 });
+    expect(await verifyCloudflareAccessToken(await sign(), CONFIG, { jwks })).toBe('user@example.com');
+    document = { keys: [{ ...jwksDocument.keys[0], kid: 'rotated' }] };
+    const rotated = await new SignJWT({ email: 'user@example.com' }).setProtectedHeader({ alg: 'RS256', kid: 'rotated' })
+      .setIssuer(ISSUER).setAudience(AUDIENCE).setExpirationTime('5m').sign(signingKey);
+    expect(await Promise.all([verifyCloudflareAccessToken(rotated, CONFIG, { jwks }), verifyCloudflareAccessToken(rotated, CONFIG, { jwks })]))
+      .toEqual(['user@example.com', 'user@example.com']);
+    expect(calls).toBe(2);
+    const forged = await new SignJWT({ email: 'user@example.com' }).setProtectedHeader({ alg: 'RS256', kid: 'rotated' })
+      .setIssuer(ISSUER).setAudience(AUDIENCE).setExpirationTime('5m').sign(foreignKey);
+    expect(await verifyCloudflareAccessToken(forged, CONFIG, { jwks })).toBeNull();
+    for (let i = 0; i < 3; i++) expect(await verifyCloudflareAccessToken(await sign(), CONFIG, { jwks })).toBeNull();
+    expect(calls).toBe(2);
+  });
+
+  it('backs off failed refreshes, retries later and never extends absolute stale trust', async () => {
+    let clock = 0;
+    const fetchJwks = vi.fn(async () => jwksDocument);
+    const jwks = createResilientJwks({ fetchJwks, now: () => clock, cacheMaxAgeMs: 1000, staleMaxAgeMs: 5000 });
+    const token = await sign();
+    expect(await verifyCloudflareAccessToken(token, CONFIG, { jwks })).toBe('user@example.com');
+    fetchJwks.mockRejectedValue(new Error('fixture outage'));
+    clock = 2000;
+    for (let i = 0; i < 3; i++) expect(await verifyCloudflareAccessToken(token, CONFIG, { jwks })).toBe('user@example.com');
+    expect(fetchJwks).toHaveBeenCalledTimes(2);
+    clock = 6000;
+    expect(await verifyCloudflareAccessToken(token, CONFIG, { jwks })).toBeNull();
+    expect(fetchJwks).toHaveBeenCalledTimes(2);
+    clock = 40_000;
+    fetchJwks.mockResolvedValue(jwksDocument);
+    expect(await verifyCloudflareAccessToken(token, CONFIG, { jwks })).toBe('user@example.com');
+    expect(fetchJwks).toHaveBeenCalledTimes(3);
+  });
+
+  it('backs off even without any initial keys and fails closed', async () => {
+    const fetchJwks = vi.fn(async () => { throw new Error('fixture outage'); });
+    const jwks = createResilientJwks({ fetchJwks, now: () => 0 });
+    for (let i = 0; i < 3; i++) expect(await verifyCloudflareAccessToken(await sign(), CONFIG, { jwks })).toBeNull();
+    expect(fetchJwks).toHaveBeenCalledTimes(1);
+  });
   it('caches the key set, refreshes it after max age and serves a stale copy while a refresh fails', async () => {
     let clock = 0;
     const fetchJwks = vi.fn(async () => jwksDocument);

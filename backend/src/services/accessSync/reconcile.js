@@ -27,8 +27,12 @@ export function removedInCloudflare({ policy, baseline, activeEmails, pinned }) 
   if (listed.size === 0) return [];
   const active = new Set(activeEmails);
   const admits = domainAdmits(policy);
+  const excludedEmails = new Set((policy.exclude ?? []).map(ruleEmail).filter(Boolean));
+  const excludedDomains = new Set((policy.exclude ?? []).map(ruleDomain).filter(Boolean));
   return [...new Set(baseline)]
-    .filter((email) => active.has(email) && !listed.has(email) && !pinned.has(email) && !admits(email))
+    .filter((email) => active.has(email) && !pinned.has(email)
+      && (excludedEmails.has(email) || excludedDomains.has(email.slice(email.lastIndexOf('@') + 1))
+        || (!listed.has(email) && !admits(email))))
     .sort();
 }
 

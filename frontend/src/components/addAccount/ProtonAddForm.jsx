@@ -6,6 +6,7 @@ import { newAttemptId, submitWithReplay } from '../../utils/addAccountFlow.js';
 import { findReconnectTarget, protonErrorKey, protonStartBody } from '../../utils/providerConnection.js';
 import AdvancedConnectionFields from './AdvancedConnectionFields.jsx';
 import PasswordField from './PasswordField.jsx';
+import RequiredMark from './RequiredMark.jsx';
 import useSlowFlag from './useSlowFlag.js';
 
 // The attempt is polled once a second while it is active and given up after ten minutes (the
@@ -252,10 +253,11 @@ export default function ProtonAddForm({
       {!working && (
         <form className="add-account-form" onSubmit={start} noValidate aria-busy={busy}>
           <div className="add-account-field">
-            <label className="add-account-label" htmlFor="proton-add-email">{t('admin.accounts.add.addressLabel')}</label>
+            <label className="add-account-label" htmlFor="proton-add-email">{t('admin.accounts.add.addressLabel')}<RequiredMark /></label>
             <input
               id="proton-add-email"
               type="email"
+              required
               inputMode="email"
               className="add-account-input"
               autoComplete="email"
@@ -269,10 +271,11 @@ export default function ProtonAddForm({
             />
           </div>
           <div className="add-account-field">
-            <label className="add-account-label" htmlFor="proton-add-password">{t('admin.accounts.add.protonPasswordLabel')}</label>
+            <label className="add-account-label" htmlFor="proton-add-password">{t('admin.accounts.add.protonPasswordLabel')}<RequiredMark /></label>
             <PasswordField
               ref={passwordRef}
               id="proton-add-password"
+              required
               value={password}
               readOnly={busy}
               describedBy="proton-add-password-hint"
@@ -312,12 +315,14 @@ export default function ProtonAddForm({
               <div className="add-account-field">
                 <label className="add-account-label" htmlFor="proton-add-secret">
                   {t(challenge === '2fa' ? 'admin.accounts.add.protonCodeLabel' : 'admin.accounts.add.protonSecondPasswordLabel')}
+                  <RequiredMark />
                 </label>
                 {challenge === '2fa' ? (
                   <input
                     ref={secretRef}
                     id="proton-add-secret"
                     type="text"
+                    required
                     className="add-account-input"
                     inputMode="numeric"
                     autoComplete="one-time-code"
@@ -334,6 +339,7 @@ export default function ProtonAddForm({
                     ref={secretRef}
                     id="proton-add-secret"
                     value={secret}
+                    required
                     readOnly={busy}
                     describedBy="proton-add-secret-hint"
                     onChange={(e) => { setSecret(e.target.value); setErrorKey(null); }}

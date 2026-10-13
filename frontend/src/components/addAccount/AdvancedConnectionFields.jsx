@@ -1,5 +1,6 @@
 import { useId, useState } from 'react';
 import { useTranslation } from 'react-i18next';
+import RequiredMark from './RequiredMark.jsx';
 import {
   advancedFromDefaults,
   isServerChanged,
@@ -29,10 +30,10 @@ function Chevron() {
   );
 }
 
-function Field({ id, label, children, note }) {
+function Field({ id, label, children, note, required = false }) {
   return (
     <div className="add-account-field">
-      <label className="add-account-label" htmlFor={id}>{label}</label>
+      <label className="add-account-label" htmlFor={id}>{label}{required && <RequiredMark />}</label>
       {children}
       {note && <p className="add-account-note">{note}</p>}
     </div>
@@ -93,11 +94,12 @@ function ServerFields({ idBase, server }) {
       autoComplete="off"
       autoCapitalize="none"
       spellCheck={false}
+      required
       {...extra}
     />
   );
   const select = (key, options) => (
-    <select id={`${idBase}-${key}`} className="add-account-input" value={values[key]} onChange={set(key)}>
+    <select id={`${idBase}-${key}`} className="add-account-input" value={values[key]} onChange={set(key)} required>
       {options.map(([value, labelKey]) => <option key={value} value={value}>{t(labelKey)}</option>)}
     </select>
   );
@@ -114,9 +116,9 @@ function ServerFields({ idBase, server }) {
       <fieldset className="add-account-fieldset">
         <legend>{t('admin.accounts.add.imapSection')}</legend>
         <div className="add-account-server-grid">
-          <Field id={`${idBase}-imap_host`} label={t('admin.accounts.add.hostLabel')}>{input('imap_host', { placeholder: t('admin.accounts.imapHostPh') })}</Field>
-          <Field id={`${idBase}-imap_port`} label={t('admin.accounts.add.portLabel')}>{input('imap_port', { inputMode: 'numeric' })}</Field>
-          <Field id={`${idBase}-imap_tls_mode`} label={t('admin.accounts.add.securityLabel')}>
+          <Field id={`${idBase}-imap_host`} label={t('admin.accounts.add.hostLabel')} required>{input('imap_host', { placeholder: t('admin.accounts.imapHostPh') })}</Field>
+          <Field id={`${idBase}-imap_port`} label={t('admin.accounts.add.portLabel')} required>{input('imap_port', { inputMode: 'numeric' })}</Field>
+          <Field id={`${idBase}-imap_tls_mode`} label={t('admin.accounts.add.securityLabel')} required>
             {select('imap_tls_mode', [['implicit', 'admin.accounts.add.securityImplicit'], ['starttls', 'admin.accounts.add.securityStarttls']])}
           </Field>
         </div>
@@ -125,9 +127,9 @@ function ServerFields({ idBase, server }) {
       <fieldset className="add-account-fieldset">
         <legend>{t('admin.accounts.add.smtpSection')}</legend>
         <div className="add-account-server-grid">
-          <Field id={`${idBase}-smtp_host`} label={t('admin.accounts.add.hostLabel')}>{input('smtp_host', { placeholder: t('admin.accounts.smtpHostPh') })}</Field>
-          <Field id={`${idBase}-smtp_port`} label={t('admin.accounts.add.portLabel')}>{input('smtp_port', { inputMode: 'numeric' })}</Field>
-          <Field id={`${idBase}-smtp_tls`} label={t('admin.accounts.add.securityLabel')}>
+          <Field id={`${idBase}-smtp_host`} label={t('admin.accounts.add.hostLabel')} required>{input('smtp_host', { placeholder: t('admin.accounts.smtpHostPh') })}</Field>
+          <Field id={`${idBase}-smtp_port`} label={t('admin.accounts.add.portLabel')} required>{input('smtp_port', { inputMode: 'numeric' })}</Field>
+          <Field id={`${idBase}-smtp_tls`} label={t('admin.accounts.add.securityLabel')} required>
             {select('smtp_tls', [['SSL', 'admin.accounts.add.securityImplicit'], ['STARTTLS', 'admin.accounts.add.securityStarttls']])}
           </Field>
         </div>

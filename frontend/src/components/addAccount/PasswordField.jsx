@@ -6,7 +6,7 @@ import { useTranslation } from 'react-i18next';
 // only changes the input type. `autoComplete` defaults to new-password: these are passwords of
 // other services, and the browser must not fill the panel's own saved sign-in into them.
 const PasswordField = forwardRef(function PasswordField({
-  id, value, onChange, autoComplete = 'new-password', readOnly = false, describedBy,
+  id, value, onChange, autoComplete = 'new-password', readOnly = false, describedBy, required = false,
 }, ref) {
   const { t } = useTranslation();
   const [shown, setShown] = useState(false);
@@ -25,6 +25,7 @@ const PasswordField = forwardRef(function PasswordField({
         spellCheck={false}
         value={value}
         readOnly={readOnly}
+        required={required}
         aria-describedby={describedBy}
         onChange={onChange}
       />

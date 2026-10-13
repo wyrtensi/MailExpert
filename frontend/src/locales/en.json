@@ -1212,7 +1212,7 @@
       "color": "Account color",
       "colorPick": "Account color: choose",
       "displayName": "Display name",
-      "displayNamePh": "e.g. Work Gmail",
+      "displayNamePh": "e.g. Work mailbox",
       "senderName": "Sender name",
       "senderNamePh": "e.g. Alice Smith",
       "email": "Email address",
@@ -1353,6 +1353,7 @@
           "domainSecrets": "The password is generated and kept by MailExpert only; nobody sees it."
         },
         "appPassword": {
+          "signInFirst": "First sign in to your {{service}} account in the browser. Then open the link below and create an app password to connect your mailbox to MailExpert.",
           "title": "Create an app password",
           "create": "Open the page to create it",
           "copy": "Copy link",

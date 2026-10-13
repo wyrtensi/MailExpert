@@ -161,6 +161,44 @@ after(() => { win.close(); });
 const outsideAdvanced = (host, selector) => [...host.querySelectorAll(selector)].filter((el) => !el.closest('[data-advanced-connection]'));
 
 describe('fixed providers: Yahoo, Yandex, Mail.ru, iCloud', () => {
+  for (const provider of PRESETS) {
+    test(`missing advanced servers block ${provider} even after the block is collapsed`, async () => {
+      const { host } = await mount(React.createElement(Harness, { Form: ImapProviderAddForm, provider, catalog: CATALOG, initialEmail: 'team@example.com' }));
+      await type(host.querySelector('#imap-add-password'), SENTINEL);
+      await click(host.querySelector('[data-advanced-connection] button[aria-expanded]'));
+      for (const key of ['imap_host', 'smtp_host', 'imap_port', 'smtp_port']) {
+        const input = host.querySelector(`[id$="${key}"]`);
+        const original = input.value;
+        await type(input, '   ');
+        assert.equal(host.querySelector('button[type="submit"]').disabled, true, key);
+        assert.equal(input.getAttribute('aria-invalid'), 'true');
+        await submit(host.querySelector('form'));
+        assert.equal(calls.filter((c) => c.method === 'POST').length, 0);
+        await type(input, original);
+        assert.equal(host.querySelector('button[type="submit"]').disabled, false);
+      }
+      await type(host.querySelector('[id$="imap_host"]'), '');
+      await click(host.querySelector('[data-advanced-connection] button[aria-expanded]'));
+      assert.equal(host.querySelector('button[type="submit"]').disabled, true);
+      assert.ok(host.querySelector('[data-servers-missing]'));
+    });
+  }
+
+  test('invalid email is explained on blur and clears once corrected', async () => {
+    const { host } = await mount(React.createElement(Harness, { Form: ImapProviderAddForm, provider: 'yahoo', catalog: CATALOG }));
+    const email = host.querySelector('#imap-add-email');
+    gone(host.querySelector('[data-email-error]'));
+    await type(email, 'wrong-address');
+    gone(host.querySelector('[data-email-error]'), 'do not interrupt initial typing');
+    await React.act(async () => { email.dispatchEvent(new win.FocusEvent('focusout', { bubbles: true })); });
+    assert.equal(email.getAttribute('aria-invalid'), 'true');
+    assert.equal(host.querySelector('[data-email-error]')?.textContent, 'admin.accounts.add.error.emailInvalid');
+    assert.equal(email.getAttribute('aria-describedby'), host.querySelector('[data-email-error]').id);
+    await type(email, 'team@example.com');
+    gone(host.querySelector('[data-email-error]'));
+    assert.equal(email.getAttribute('aria-invalid'), null);
+  });
+
   for (const id of PRESETS) {
     test(`two_required_fields_for_each_preset: ${id}`, async () => {
       const { host } = await mount(React.createElement(Harness, { Form: ImapProviderAddForm, provider: id, catalog: CATALOG }));

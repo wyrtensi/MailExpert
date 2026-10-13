@@ -54,6 +54,7 @@ export default function ImapProviderAddForm({
   const isOther = provider === 'other';
   const defaults = useMemo(() => (isOther ? null : catalog?.find((entry) => entry?.id === provider) ?? null), [catalog, provider, isOther]);
   const [password, setPassword] = useState('');
+  const [emailTouched, setEmailTouched] = useState(false);
   const [login, setLogin] = useState('');
   const [loginOffered, setLoginOffered] = useState(false);
   const [advanced, setAdvanced] = useState(() => (isOther ? emptyAdvanced() : advancedFromDefaults(defaults)));
@@ -84,11 +85,12 @@ export default function ImapProviderAddForm({
   const clearError = () => { setErrorKey(null); setNextStepKey(null); };
 
   const address = email.trim();
-  const missing = isOther ? missingServerFields(advanced) : [];
+  const serverRequired = isOther || !!defaults;
+  const missing = serverRequired ? missingServerFields(advanced) : [];
   const portIssues = portProblems(advanced, manualPolicy);
-  const serverIncomplete = isOther && (missing.length > 0 || portIssues.length > 0);
-  const fixedPortIssue = !isOther && !!defaults && portIssues.length > 0;
-  const valid = GMAIL_EMAIL_PATTERN.test(address) && password.length > 0 && !serverIncomplete && !fixedPortIssue;
+  const serverIncomplete = serverRequired && (missing.length > 0 || portIssues.length > 0);
+  const emailInvalid = emailTouched && address.length > 0 && !GMAIL_EMAIL_PATTERN.test(address);
+  const valid = GMAIL_EMAIL_PATTERN.test(address) && password.length > 0 && !serverIncomplete;
   const canSubmit = valid && !busy;
   const otherTile = isOther ? null : otherProviderForEmail(address, provider, catalog);
 
@@ -140,9 +142,13 @@ export default function ImapProviderAddForm({
           spellCheck={false}
           value={email}
           readOnly={busy}
+          aria-invalid={emailInvalid ? 'true' : undefined}
+          aria-describedby={emailInvalid ? 'imap-add-email-error' : undefined}
           placeholder={t('admin.accounts.add.addressPh')}
+          onBlur={() => setEmailTouched(true)}
           onChange={(e) => { onEmailChange?.(e.target.value); clearError(); }}
         />
+        {emailInvalid && <p id="imap-add-email-error" className="add-account-error" role="alert" data-email-error>{t('admin.accounts.add.error.emailInvalid')}</p>}
         {otherTile && (
           <p className="add-account-note" role="status" data-other-tile={otherTile}>
             {t('admin.accounts.add.otherTileHint', { service: t(ADD_ACCOUNT_TITLE_KEYS[otherTile]) })}
@@ -192,7 +198,7 @@ export default function ImapProviderAddForm({
           values: advanced,
           onChange: patchAdvanced,
           defaults,
-          required: isOther,
+          required: serverRequired,
           showLogins: isOther,
           login,
           onLoginChange: setLogin,

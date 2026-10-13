@@ -1429,7 +1429,7 @@ export function AccountsTab() {
                 {providerIdsBackfillText(account.provider_ids_backfill, t)}
               </div>
             )}
-            <div style={{ fontSize: 11, display: 'flex', alignItems: 'center', gap: 6 }}>
+            <div style={{ fontSize: 11, display: 'flex', alignItems: 'center', gap: 6, flexWrap: 'wrap', minWidth: 0, maxWidth: '100%' }}>
               <span style={{ color: 'var(--text-tertiary)' }}>{t('admin.accounts.threading.title')} </span>
               <span style={{ color: 'var(--text-secondary)' }}>{threadModeLabel(account, t)}</span>
               {isAdmin && (
@@ -5201,7 +5201,7 @@ function UsersAndInvitesPanel() {
       <div style={{ display: 'flex', flexDirection: 'column', gap: 6, marginBottom: 28 }}>
         {users.map(u => (
           <div key={u.id} style={{
-            display: 'flex', alignItems: 'center', gap: 10,
+            display: 'flex', alignItems: 'center', gap: 10, flexWrap: 'wrap',
             padding: '10px 12px', borderRadius: 8,
             background: 'var(--bg-tertiary)', border: '1px solid var(--border-subtle)',
           }}>
@@ -5215,9 +5215,9 @@ function UsersAndInvitesPanel() {
               {u.username[0].toUpperCase()}
             </div>
 
-            <div style={{ flex: 1, minWidth: 0 }}>
-              <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
-                <span style={{ fontSize: 13, fontWeight: 500, color: 'var(--text-primary)' }}>
+            <div style={{ flex: '1 1 160px', minWidth: 0 }}>
+              <div style={{ display: 'flex', alignItems: 'center', gap: 6, flexWrap: 'wrap' }}>
+                <span style={{ fontSize: 13, fontWeight: 500, color: 'var(--text-primary)', overflowWrap: 'anywhere', minWidth: 0 }}>
                   {u.username}
                 </span>
                 {u.isAdmin && (
@@ -5240,7 +5240,7 @@ function UsersAndInvitesPanel() {
             </div>
 
             {u.id !== currentUser?.id && (
-              <div style={{ display: 'flex', gap: 5, flexShrink: 0 }}>
+              <div style={{ display: 'flex', gap: 5, flexWrap: 'wrap', maxWidth: '100%' }}>
                 <button
                   onClick={() => handleToggleAdmin(u)}
                   title={u.isAdmin ? t('admin.users.removeAdmin') : t('admin.users.makeAdmin')}

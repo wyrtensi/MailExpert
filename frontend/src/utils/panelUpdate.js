@@ -202,7 +202,7 @@ export function installPrefix(logFile) {
 export function rollbackCommand(run) {
   const prefix = installPrefix(run?.logFile);
   if (!prefix || !isValidVersion(run?.from)) return null;
-  return `sudo ${prefix}/app/scripts/deploy/rollback.sh --to ${run.from}`;
+  return `sudo ${prefix}/app/scripts/deploy/rollback.sh --prefix ${prefix} --to ${run.from}`;
 }
 
 // Whether the run ended in a way that wants the runbook: the update failed and the host could not,

@@ -24,6 +24,18 @@ beforeEach(() => { errorSpy = vi.spyOn(console, 'error').mockImplementation(() =
 afterEach(() => { errorSpy.mockRestore(); });
 
 describe('update audit reconciler', () => {
+  it('forgets pruned spool IDs but still deduplicates reappearing results against the journal', async () => {
+    const done = result({ state: 'succeeded', terminal: true });
+    const { spool, query, recordAudit, reconcile } = setup([done],
+      [requested(), recorded('panel.update_started'), recorded('panel.update_finished')]);
+    await reconcile();
+    spool.readResults.mockResolvedValue([]);
+    await reconcile();
+    spool.readResults.mockResolvedValue([done]);
+    await reconcile();
+    expect(query).toHaveBeenCalledTimes(2);
+    expect(recordAudit).not.toHaveBeenCalled();
+  });
   it('hands every pass the update results for the node update; its failure does not stop the journal', async () => {
     const spool = { readResults: vi.fn(async () => [result({ state: 'succeeded', terminal: true, exitCode: 0 })]) };
     const recordAudit = vi.fn(async () => {});

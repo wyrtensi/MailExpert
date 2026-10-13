@@ -18,6 +18,7 @@ const TTL_MS = 6 * 60 * 60 * 1000;
 const FAIL_BACKOFF_MS = 15 * 60 * 1000;
 const FORCE_MIN_INTERVAL_MS = 60 * 1000;
 const REQUEST_TIMEOUT_MS = 5000;
+const MAX_CACHED_RELEASES = 16;
 
 const SHA_RE = /^[0-9a-f]{40}$/;
 const COMPARE_STATUSES = new Set(['ahead', 'behind', 'identical', 'diverged']);
@@ -47,7 +48,7 @@ export function createLatestCheck({ fetch = safeFetch, env = process.env, now = 
   const api = `https://api.github.com/repos/${repo}`;
   const disabled = isDisabled(env);
   const current = { ...currentOf(env), release: isRelease(appVersion) ? appVersion : null };
-  const releases = new Map(); // commit -> its x.y.z, or null when it has none
+  const releases = new Map(); // bounded commit -> its x.y.z, or null when it has none
 
   let cache = null;          // { latest, compare } of the last good check
   let checkError = null;     // 'rate_limited' | 'unavailable' | null, of the last check
@@ -121,6 +122,7 @@ export function createLatestCheck({ fetch = safeFetch, env = process.env, now = 
       release = null;
     }
     releases.set(sha, release);
+    if (releases.size > MAX_CACHED_RELEASES) releases.delete(releases.keys().next().value);
     return release;
   }
 

@@ -24,7 +24,7 @@ const DECOY = new Set(['pdf', 'doc', 'docx', 'xls', 'xlsx', 'ppt', 'pptx', 'txt'
 // that is not reported as a disguise; a PDF, picture or media name in front of .rtf still is.
 const RTF_SOURCES = new Set(['doc', 'docx', 'odt']);
 
-export function classifyAttachmentRisk(filename, mimeType = '') {
+export function classifyAttachmentRisk(filename, mimeType = '', contains = []) {
   const name = stripTrailingDotsAndSpaces(String(filename || '').trim()).toLowerCase();
   const parts = name.split('.');
   const ext = parts.length > 1 ? parts[parts.length - 1] : '';
@@ -35,6 +35,13 @@ export function classifyAttachmentRisk(filename, mimeType = '') {
   const doubleExt = disguised ? `${prevExt}.${ext}` : null;
 
   const mime = String(mimeType || '').toLowerCase();
+  if (ext === 'eml' || mime === 'message/rfc822') {
+    // The bounded MIME summary is a warning aid, never proof that an attached message is safe.
+    const inner = Array.isArray(contains) ? contains.slice(0, 50) : [];
+    const blocked = inner.map(file => classifyAttachmentRisk(file?.filename, file?.type))
+      .find(risk => risk.level === 'block');
+    return blocked || { level: 'warn', ext: 'eml', doubleExt: null };
+  }
   if (BLOCK.has(ext) || /x-msdownload|x-msdos-program|x-sh\b|x-shellscript|java-archive|x-iso9660|vnd\.microsoft\.portable-executable/.test(mime)) {
     return { level: 'block', ext, doubleExt };
   }

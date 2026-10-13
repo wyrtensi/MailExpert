@@ -702,6 +702,7 @@ export function extractBodyFromMsg(msg) {
   if (!msg.bodyStructure) return { html: null, text: null, attachments: [] };
   const results = planBodyParts(msg.bodyStructure);
   const { html, text } = assembleBody(results.textParts, p => msg.bodyParts?.get(p));
+  listUnreferencedInlineImages(results, html);
   return { html, text, attachments: results.attachments };
 }
 
@@ -869,7 +870,7 @@ function decodeAttachmentBuffer(buf, encoding) {
 // application/zip, or a multipart/mixed holding only a file) — re-serving the
 // first part as text/plain rendered decoded binary as the message.
 export function bodyFallbackApplies(results) {
-  return !(results.attachments || []).length;
+  return !(results.attachments || []).length && !(results.inlineImages || []).length;
 }
 
 export function walkStructure(node, results) {
@@ -895,9 +896,50 @@ export function walkStructure(node, results) {
   }
 }
 
+const CID_REFERENCE_RE = /cid:<?([^\s"'<>)&]+)>?/gi;
+
+function listUnreferencedInlineImages(results, html) {
+  const referenced = new Set(Array.from((html || '').matchAll(CID_REFERENCE_RE), match => match[1].toLowerCase()));
+  for (const image of results.inlineImages || []) {
+    if (image.cid && referenced.has(image.cid.toLowerCase())) continue;
+    const subtype = image.type.split('/')[1];
+    const extension = subtype === 'jpeg' ? 'jpg' : subtype === 'svg+xml' ? 'svg' : subtype;
+    results.attachments.push({ part: image.part, filename: image.filename || `image.${extension}`,
+      type: image.type, encoding: image.encoding, size: image.size, disposition: image.disposition });
+  }
+}
+
+function findStructurePart(node, part) {
+  if (!node) return null;
+  if (node.part === part) return node;
+  for (const child of node.childNodes || []) {
+    const found = findStructurePart(child, part);
+    if (found) return found;
+  }
+  return null;
+}
+
 function walkNode(node, results) {
   if (!node) return;
   const type = (node.type || '').toLowerCase();
+  if (type === 'message/rfc822' && node.childNodes?.length
+      && ((node.disposition || '').toLowerCase() === 'attachment'
+        || node.dispositionParameters?.filename || node.parameters?.name)) {
+    // A labelled forwarded message is one file. Unlabelled DSN originals still render inline.
+    const inner = { textParts: [], attachments: [], inlineImages: [] };
+    for (const child of node.childNodes) walkStructure(child, inner);
+    listUnreferencedInlineImages(inner, null);
+    const filename = node.dispositionParameters?.filename || node.parameters?.name || 'message.eml';
+    // eslint-disable-next-line no-control-regex -- untrusted MIME filenames can carry control characters
+    const cleaned = filename.replace(BIDI_OVERRIDE_RE, '').replace(/[\u0000-\u001f\u007f]/g, ' ').trim();
+    const contains = inner.attachments.flatMap(attachment => [
+      { filename: attachment.filename, type: attachment.type }, ...(attachment.contains || []),
+    ]).slice(0, 50);
+    results.attachments.push({ part: node.part || '1', filename: cleaned || 'message.eml',
+      type, encoding: node.encoding || '7bit', size: node.size || 0,
+      disposition: (node.disposition || '').toLowerCase(), ...(contains.length ? { contains } : {}) });
+    return;
+  }
   if (node.childNodes && node.childNodes.length > 0) {
     for (const child of node.childNodes) walkNode(child, results);
     return;
@@ -955,6 +997,9 @@ function walkNode(node, results) {
       encoding: node.encoding || 'base64',
       // Content-ID header value is wrapped in angle brackets — strip them
       cid: (node.id || '').replace(/^<|>$/g, ''),
+      filename,
+      size: node.dispositionParameters?.size ? parseInt(node.dispositionParameters.size) : node.size || 0,
+      disposition,
     });
   } else if (filename) {
     // Named non-text part without an explicit disposition — still an attachment.
@@ -6694,6 +6739,7 @@ export class ImapManager {
     fromEmail,
     to = [],
     cc = [],
+    bcc = [],
     snippet = '',
     date = new Date(),
     inReplyTo = null,
@@ -6712,8 +6758,8 @@ export class ImapManager {
       INSERT INTO messages (
         account_id, uid, folder, message_id, subject,
         from_name, from_email, to_addresses, cc_addresses,
-        date, snippet, is_read, is_starred, has_attachments, flags, thread_id, threading_reason
-      ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8::jsonb,$9::jsonb,$10,$11,true,false,false,'[]',$12,$13)
+        date, snippet, is_read, is_starred, has_attachments, flags, thread_id, threading_reason, bcc_addresses
+      ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8::jsonb,$9::jsonb,$10,$11,true,false,false,'[]',$12,$13,$14::jsonb)
       ON CONFLICT (account_id, uid, folder) DO UPDATE SET
         message_id = COALESCE(EXCLUDED.message_id, messages.message_id),
         subject = CASE
@@ -6727,6 +6773,8 @@ export class ImapManager {
         cc_addresses = CASE
           WHEN EXCLUDED.cc_addresses::text IS NOT NULL AND EXCLUDED.cc_addresses::text <> '[]'
           THEN EXCLUDED.cc_addresses ELSE messages.cc_addresses END,
+        bcc_addresses = CASE WHEN EXCLUDED.bcc_addresses <> '[]'::jsonb
+          THEN EXCLUDED.bcc_addresses ELSE messages.bcc_addresses END,
         date = EXCLUDED.date,
         snippet = CASE WHEN EXCLUDED.snippet <> '' THEN EXCLUDED.snippet ELSE messages.snippet END,
         is_read = true,
@@ -6754,6 +6802,7 @@ export class ImapManager {
       sanitizeStr(fromName || ''), sanitizeStr(fromEmail || ''),
       JSON.stringify(to), JSON.stringify(cc),
       safeDate(date), sanitizeStr(snippet || ''), threadId, threadingReason,
+      JSON.stringify(Array.isArray(bcc) ? bcc : []),
     ]);
     this._scheduleProviderIdBackfill(account);
   }
@@ -7286,6 +7335,8 @@ export class ImapManager {
 
         ({ html, text } = assembleBody(results.textParts, p => prefetched.get(p)));
 
+        listUnreferencedInlineImages(results, html);
+
         // Step 3: replace cid: references in HTML with data: URIs so inline
         // images render inside the sandboxed srcdoc iframe
         if (html && inlineImages.length > 0) {
@@ -7312,7 +7363,7 @@ export class ImapManager {
             // ')', an angle bracket or the '&' of &quot;. Content-IDs, types and base64 text
             // all come from the sender, so none of them become regex or replacement-string
             // syntax, and a single pass never rescans an image it has inserted.
-            html = html.replace(/cid:<?([^\s"'<>)&]+)>?/gi, (ref, cid) => {
+            html = html.replace(CID_REFERENCE_RE, (ref, cid) => {
               const key = cid.toLowerCase();
               const dataUri = dataUris.get(key);
               if (!dataUri) return ref;
@@ -7493,8 +7544,8 @@ export class ImapManager {
           if (msg.bodyStructure) {
             const r = { textParts: [], attachments: [] };
             walkStructure(msg.bodyStructure, r);
-            const att = r.attachments.find(a => a.part === partNum);
-            if (att) encoding = att.encoding;
+            const att = r.attachments.find(a => a.part === partNum) || findStructurePart(msg.bodyStructure, partNum);
+            if (att?.encoding) encoding = att.encoding;
           }
           const buf = msg.bodyParts?.get(partNum);
           if (buf) {

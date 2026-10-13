@@ -647,6 +647,18 @@ export function detectCategoryFromHeaders(h) {
   return null;
 }
 
+// PostgreSQL VARCHAR(500) counts Unicode characters, not UTF-16 units. Only display names
+// are shortened: truncating addresses or Message-IDs changes routing or conversation identity.
+function capDisplayName(value) {
+  if (typeof value !== 'string' || value.length <= 500) return value;
+  let capped = '', count = 0;
+  for (const character of value) {
+    if (count++ === 500) break;
+    capped += character;
+  }
+  return capped;
+}
+
 export async function parseMessage(msg) {
   const envelope = msg.envelope || {};
   const flags = msg.flags ? [...msg.flags] : [];
@@ -734,9 +746,9 @@ export async function parseMessage(msg) {
     uid: msg.uid,
     messageId: envelope.messageId || null,
     subject: resolveSubject(envelope.subject, parsedHeaders),
-    fromName,
+    fromName: capDisplayName(fromName),
     fromEmail,
-    senderName: hasDistinctSender ? (senderAddr.name || '') : null,
+    senderName: hasDistinctSender ? capDisplayName(senderAddr.name || '') : null,
     senderEmail: hasDistinctSender ? senderEmail : null,
     to: mapAddrs(envelope.to),
     cc: mapAddrs(envelope.cc),

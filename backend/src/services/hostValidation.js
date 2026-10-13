@@ -136,10 +136,11 @@ export function createPinnedLookup(addresses) {
     if (!eligible.length) {
       const err = new Error('No validated address matches the requested family');
       err.code = 'ENOTFOUND';
-      return callback(err);
+      return process.nextTick(callback, err);
     }
-    if (options?.all) return callback(null, eligible.map(candidate => ({ ...candidate })));
-    callback(null, eligible[0].address, eligible[0].family);
+    // Match dns.lookup timing so TLS can attach its error listener before connection failure.
+    if (options?.all) return process.nextTick(callback, null, eligible.map(candidate => ({ ...candidate })));
+    process.nextTick(callback, null, eligible[0].address, eligible[0].family);
   };
 }
 

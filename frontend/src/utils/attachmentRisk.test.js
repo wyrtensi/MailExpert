@@ -3,6 +3,11 @@ import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
 import { classifyAttachmentRisk } from './attachmentRisk.js';
 
+it('attached messages warn even when their bounded contents list omits a file', () => {
+  assert.equal(classifyAttachmentRisk('forward.eml', 'message/rfc822').level, 'warn');
+  assert.equal(classifyAttachmentRisk('forward.eml', 'message/rfc822', [{ filename: 'program.exe' }]).level, 'block');
+});
+
 describe('classifyAttachmentRisk', () => {
   it('blocks executables, scripts, installers, images and shortcuts by extension', () => {
     const names = ['setup.exe', 'run.bat', 'thing.js', 'x.lnk', 'disk.iso', 'app.msi', 'macro.hta', 'lib.dll',

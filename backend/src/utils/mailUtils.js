@@ -34,6 +34,12 @@ const TRASH_FOLDER_SQL = `(special_use = '\\Trash'
 const DRAFTS_FOLDER_SQL = `(special_use = '\\Drafts'
   OR (lower(name) IN ('drafts', 'draft') AND ${TOP_LEVEL_FOLDER_SQL}))`;
 
+export const draftMessageSql = (message = 'm') => `(COALESCE(${message}.flags ? '\\Draft', false)
+  OR EXISTS (SELECT 1 FROM folders df
+    WHERE df.account_id = ${message}.account_id AND df.path = ${message}.folder
+      AND (${DRAFTS_FOLDER_SQL} OR df.path = (
+        SELECT ea.folder_mappings->>'drafts' FROM email_accounts ea WHERE ea.id = ${message}.account_id))))`;
+
 // Resolve the canonical trash folder path for an account (used as move destination).
 // folder_mappings.trash (user-configured) takes priority over special_use and the stock names,
 // but only when it points at a selectable folder (see mappedFolderUsable). It tests folders

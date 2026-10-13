@@ -2118,7 +2118,7 @@ ${bodyContent}
   // it does, the link has no href, so a right-click "Save link as", a middle click or a long press has
   // nothing to fetch; the confirming click starts the download itself.
   const anyRiskyAttachment = attachments.some(att =>
-    ['block', 'warn'].includes(classifyAttachmentRisk(att.filename, att.type).level));
+    ['block', 'warn'].includes(classifyAttachmentRisk(att.filename, att.type, att.contains).level));
   const downloadAllArmed = riskArmed === DOWNLOAD_ALL;
   const downloadAllUrl = message ? api.attachmentArchiveUrl(message.id) : '';
   const confirmDownloadAll = () => {
@@ -2804,6 +2804,16 @@ ${bodyContent}
                         </span>
                       </div>
                     )}
+                    {Array.isArray(body?.bccAddresses) && body.bccAddresses.length > 0 && (
+                      <div style={line}>
+                        <span>{t('compose.bcc')} </span>
+                        <span style={{ color: 'var(--text-secondary)' }}>
+                          {body.bccAddresses.map((recipient, index) => (
+                            <span key={index}>{person(recipient)}{index < body.bccAddresses.length - 1 ? ', ' : ''}</span>
+                          ))}
+                        </span>
+                      </div>
+                    )}
                     <div style={{ ...line, marginTop: 6, display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap' }}>
                       <span style={{ whiteSpace: 'nowrap' }}>
                         {formatDateTime(message.date, { withYear: !isMobile })}
@@ -2911,7 +2921,7 @@ ${bodyContent}
             </div>
             <div style={{ display: 'flex', flexWrap: 'wrap', gap: 8 }}>
               {attachments.map((att, i) => {
-                const risk = classifyAttachmentRisk(att.filename, att.type);
+                const risk = classifyAttachmentRisk(att.filename, att.type, att.contains);
                 const risky = risk.level === 'block' || risk.level === 'warn';
                 const riskColor = risk.level === 'block' ? 'var(--red)' : risk.level === 'warn' ? 'var(--amber)' : 'var(--text-tertiary)';
                 const armed = riskArmed === att.part;

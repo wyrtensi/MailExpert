@@ -92,6 +92,12 @@ describe('the draft destroyed by deleting the conversation around it', () => {
   const withDraft = [{ id: 'a' }, { id: 'draft', is_draft: true }, { id: 'c' }];
   const fetchWithDraft = () => Promise.resolve({ messages: withDraft });
 
+  test('acting on a draft leaves received and sent letters alone', async () => {
+    const got = await resolveThreadMessages({ message: withDraft[1], isThreadRow: true,
+      excludeDrafts: true, fetchThread: fetchWithDraft });
+    assert.deepEqual(got.map(message => message.id), ['draft']);
+  });
+
   test('a thread-wide action leaves the draft alone', async () => {
     const got = await resolveThreadMessages({
       message: row, isThreadRow: true, cached, excludeDrafts: true, fetchThread: fetchWithDraft,

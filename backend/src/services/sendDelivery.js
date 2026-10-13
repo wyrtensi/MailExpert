@@ -366,6 +366,7 @@ async function saveSentCopy({ account, mailOptions, meta, rawMessage, serverAuto
       fromEmail: meta.fromEmail,
       to: mapRecipientList(meta.to),
       cc: mapRecipientList(meta.cc),
+      bcc: mapRecipientList(meta.bcc),
       snippet: meta.snippet,
       date: new Date(),
       // Carried so the Sent row threads into its conversation via the References chain

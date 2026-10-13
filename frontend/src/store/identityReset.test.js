@@ -35,6 +35,25 @@ beforeEach(() => {
   useStore.getState().setUser({ id: 'u1' });
 });
 
+test('leaving a session resets personal settings and the remembered locked message', () => {
+  const removed = [];
+  const previousRemove = localStorage.removeItem;
+  localStorage.removeItem = key => removed.push(key);
+  try {
+    useStore.setState({ autoLockMinutes: 30, blockRemoteImages: true,
+      imageWhitelist: { addresses: ['allowed@example.com'], domains: [] },
+      hiddenFolders: { account: ['INBOX'] }, shortcuts: { next: 'z' } });
+    useStore.getState().setUser(null);
+    const state = useStore.getState();
+    assert.equal(state.autoLockMinutes, 0);
+    assert.equal(state.blockRemoteImages, false);
+    assert.deepEqual(state.imageWhitelist, { addresses: [], domains: [] });
+    assert.deepEqual(state.hiddenFolders, {});
+    assert.deepEqual(state.shortcuts, {});
+    assert.ok(removed.includes('mailexpert_locked_message'));
+  } finally { localStorage.removeItem = previousRemove; }
+});
+
 test('an expired session drops the previous user\'s mail state', () => {
   loadPrivateState();
   useStore.getState().setUser(null);

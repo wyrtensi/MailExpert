@@ -204,13 +204,19 @@ export const useStore = create((set, get) => ({
     // page load (nobody -> someone) keeps what this browser cached for that person's sake.
     const leaving = get().user != null && get().user.id !== user?.id;
     if (leaving) {
+      localStorage.removeItem('mailexpert_locked_message');
       for (const key of ['mailexpert_pinned_accounts', 'mailexpert_sort_accounts_by_latest', 'mailexpert_expanded_accounts']) {
         localStorage.removeItem(key);
       }
     }
     set(state => ({
       user,
-      ...(leaving ? { pinnedAccounts: [], sortAccountsByLatest: true, expandedAccounts: {} } : {}),
+      ...(leaving ? {
+        pinnedAccounts: [], sortAccountsByLatest: true, expandedAccounts: {},
+        autoLockMinutes: 0, blockRemoteImages: false,
+        imageWhitelist: { addresses: [], domains: [] }, shortcuts: {}, hiddenFolders: {},
+        aiActions: null, enabledPlugins: [], categorizationEnabled: false, gtdPetSlug: null,
+      } : {}),
       ...(state.user?.id !== user?.id ? {
         // An expired session shows the sign-in screen without a page reload, so the next
         // person to sign in on this tab must not inherit the previous user's mail or draft.

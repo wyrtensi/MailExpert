@@ -57,6 +57,9 @@ A per-file map: `docs/architecture/codebase-file-map.md`.
 - `docs/architecture/*`: `deployment-system.md` (modules, versions, rollout, update from the panel,
   threat model), `job-queue.md`, `panel-cli.md`, `team-mail-system-handoff.md`,
   `upstream-pr-assessment.md`.
+- Checking MailFlow, Inboxora or another fork for changes worth porting follows the skill
+  [`.claude/skills/porting-upstream-changes/SKILL.md`](.claude/skills/porting-upstream-changes/SKILL.md)
+  (Codex: `.agents/skills/...`); it starts from the "Проверено до" marker in `upstream-pr-assessment.md`.
 - Mail node and EOP: `docs/architecture/mail-node-research/eop-panel-requirements.md`; the owner's
   decisions D-1 ... D-16 are in its section 7.1. Do not reopen a recorded decision; quote it.
 - Specs and plans: `docs/superpowers/specs/`, `docs/superpowers/plans/`.

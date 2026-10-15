@@ -41,4 +41,6 @@ output/
 
 # Claude Code: agent worktrees and local settings (the shared skills in .claude/skills are tracked)
 .claude/worktrees/
+# Codex: local junction to .claude/skills, so both agents read the same skills
+/.agents/
 .claude/settings.local.json

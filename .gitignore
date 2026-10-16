@@ -43,4 +43,6 @@ output/
 .claude/worktrees/
 # Codex: local junction to .claude/skills, so both agents read the same skills
 /.agents/
+# Local-only skills, kept out of the repository
+/.claude/skills/porting-upstream-changes/
 .claude/settings.local.json

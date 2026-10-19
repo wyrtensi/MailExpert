@@ -127,6 +127,40 @@ describe('listMessages — total count selection', () => {
   });
 });
 
+// A category tab lists only that category's mail; the folder's counts are of all its mail, so the
+// flat list offered pages, or a "Load more", with nothing on them.
+describe('listMessages — flat total under a category filter', () => {
+  it('counts the category rows with the list conditions, not the folder cache', async () => {
+    query
+      .mockResolvedValueOnce({ rows: [{ id: 'acc-1' }] })   // accounts
+      .mockResolvedValueOnce({ rows: [{ n: 3 }] })          // category row count
+      .mockResolvedValueOnce({ rows: [] });                 // messages
+
+    const result = await listMessages({ userId: 'user-1', accountId: 'acc-1', category: 'promotions', unreadOnly: 'true' });
+
+    expect(result.total).toBe(3);
+    const [countSql, countValues] = query.mock.calls[1];
+    expect(countSql).toContain('COUNT(*)');
+    expect(countSql).not.toContain('total_count');
+    expect(countSql).toContain('m.category = $3');
+    expect(countSql).toContain('m.is_read = false');
+    // The mock keeps the array the service goes on to append the page's limit and offset to.
+    expect(countValues.slice(0, 3)).toEqual(['acc-1', 'INBOX', 'promotions']);
+  });
+
+  it('counts the primary tab, which also holds uncategorised mail, the same way (unified Inbox)', async () => {
+    query
+      .mockResolvedValueOnce({ rows: [{ id: 'acc-1' }] })
+      .mockResolvedValueOnce({ rows: [{ n: 40 }] })
+      .mockResolvedValueOnce({ rows: [] });
+
+    const result = await listMessages({ userId: 'user-1', category: 'primary' });
+
+    expect(result.total).toBe(40);
+    expect(query.mock.calls[1][0]).toContain("m.category IS NULL OR m.category = 'primary'");
+  });
+});
+
 // Threaded mode: 4 query calls — accounts, folder cache, thread CTE, thread count
 describe('listMessages — threaded mode', () => {
   it('returns thread count as total, ignoring the cached folder count', async () => {

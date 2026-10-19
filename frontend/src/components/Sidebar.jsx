@@ -12,7 +12,7 @@ import { openOAuthWindow } from '../utils/oauthWindow.js';
 import { api } from '../utils/api.js';
 import { noticeVersion } from '../utils/panelUpdate.js';
 import { mailboxBusyOr } from '../utils/mailboxBusy.js';
-import { resolveThreadMessages } from '../utils/threadActions.js';
+import { resolveThreadMoveIds } from '../utils/threadActions.js';
 import {
   activateOnKey,
   buildFolderTree,
@@ -414,14 +414,14 @@ export default function Sidebar() {
     if (payload.threadId) {
       const row = pool.find(m => m.id === payload.messageId);
       if (!row) return;
-      let threadMsgs;
       try {
         // The server decides what a thread contains, never the expansion-time cache — a thread
         // gains messages while you look at it, and a stale list moves some and strands the rest.
-        // See utils/threadActions.js.
-        threadMsgs = await resolveThreadMessages({
-          message: row,
-          isThreadRow: true,
+        // Drafts and Trash/Spam copies stay put and only the dragged row's account moves, as for the
+        // context-menu move. See utils/threadActions.js.
+        movedIds = await resolveThreadMoveIds({
+          row,
+          folders: state.folders,
           fetchThread: () => api.getThread(
             payload.threadId, payload.threadFolder, payload.threadUnified, row.account_id,
           ),
@@ -431,13 +431,6 @@ export default function Sidebar() {
         state.addNotification({ title: t('message.moved.failTitle'), body: t('message.moved.failBody') });
         return;
       }
-      // A folder path is account-specific, and a thread can span accounts (and always includes
-      // Sent copies), so scope the move to the dragged row's account exactly as the context-menu
-      // move does — the server silently skips messages whose account lacks the destination.
-      movedIds = [...new Set(
-        threadMsgs.filter(m => m?.account_id === row.account_id).map(m => m.id).filter(Boolean)
-      )];
-      if (!movedIds.length) movedIds = [row.id];
       msgs = [row];
     } else {
       const ids = payload.messageIds ?? [payload.messageId];

@@ -30,10 +30,7 @@ public class MailExpertNotificationActionReceiver extends BroadcastReceiver {
         Constraints constraints = new Constraints.Builder()
             .setRequiredNetworkType(NetworkType.CONNECTED)
             .build();
-        Data input = new Data.Builder()
-            .putString(MailExpertNotificationActionWorker.KEY_ACTION, action)
-            .putString(MailExpertNotificationActionWorker.KEY_MESSAGE_ID, messageId)
-            .build();
+        Data input = MailExpertNotificationActionWorker.tapInput(action, messageId, System.currentTimeMillis());
         OneTimeWorkRequest request = new OneTimeWorkRequest.Builder(MailExpertNotificationActionWorker.class)
             .setInputData(input)
             .setConstraints(constraints)

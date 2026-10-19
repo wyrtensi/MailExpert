@@ -34,4 +34,11 @@ describe('signOut (#523, #310)', () => {
     assert.equal(storage.getItem('mailexpert_theme'), 'light');
     assert.ok(SIGN_OUT_CLEARED_KEYS.includes('mailexpert_expanded_accounts'));
   });
+
+  it('clears personal folder shortcuts and remembered sender choices even when logout fails', async () => {
+    const keys = ['mailexpert_favorite_folders', 'mailexpert_recent_folders', 'mailexpert_default_sender', 'mailexpert_last_from_account'];
+    const storage = memoryStorage(Object.fromEntries(keys.map(key => [key, 'previous-user'])));
+    await signOut({ setUser: () => {}, storage, logout: async () => { throw new Error('offline'); }, navigate: () => {} });
+    for (const key of keys) assert.equal(storage.getItem(key), null, key);
+  });
 });

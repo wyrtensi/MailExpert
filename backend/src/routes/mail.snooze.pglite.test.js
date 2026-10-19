@@ -150,3 +150,31 @@ describe('POST /api/mail/messages/:id/snooze in Postgres', () => {
     expect(imapManager.moveMessage).not.toHaveBeenCalled();
   });
 });
+
+// The sweep reads every due snooze first and wakes them one by one, each over IMAP. The reader can
+// move a letter out of Snoozed by hand in between; waking it then would move a UID that is no
+// longer there and count the letter back into its folder a second time.
+describe('snooze wakeup sweep in Postgres', () => {
+  it('wakes a snooze only while it is still live when its turn comes', async () => {
+    const second = '10000000-0000-4000-8000-000000000002';
+    await db.query(`INSERT INTO messages (id, uid, folder, message_id, account_id) VALUES ($1, 7, 'Snoozed', '<a@x>', $2)`, [MSG, ACCOUNT]);
+    await db.query(`INSERT INTO messages (id, uid, folder, message_id, account_id) VALUES ($1, 8, 'Snoozed', '<b@x>', $2)`, [second, ACCOUNT]);
+    await db.query(`INSERT INTO snoozed_messages (account_id, message_id_header, original_folder, snooze_until, snoozed_folder)
+      VALUES ($1, '<a@x>', 'INBOX', now() - interval '1 minute', 'Snoozed'), ($1, '<b@x>', 'INBOX', now() - interval '1 minute', 'Snoozed')`, [ACCOUNT]);
+    const engine = {
+      _secondaryLoginBlocked: () => false, _guardMoveUid: vi.fn(), _unguardMoveUid: vi.fn(), broadcast: vi.fn(),
+      setFlag: vi.fn(async () => {}),
+      // While one letter wakes, the reader moves the other one to Archive by hand.
+      moveMessageGetNewUid: vi.fn(async (_account, uid) => {
+        await db.query(`UPDATE messages SET folder = 'Archive' WHERE folder = 'Snoozed' AND uid <> $1`, [uid]);
+        return 900;
+      }),
+    };
+    await ImapManager.prototype._runSnoozeWakeup.call(engine);
+    expect(engine.moveMessageGetNewUid).toHaveBeenCalledTimes(1);
+    expect((await db.query('SELECT folder FROM messages ORDER BY folder')).rows.map(r => r.folder)).toEqual(['Archive', 'INBOX']);
+    // The letter moved by hand keeps its record for the orphan cleanup; the woken one's is gone.
+    expect(await records()).toHaveLength(1);
+    expect(engine.broadcast).toHaveBeenCalledTimes(1);
+  });
+});

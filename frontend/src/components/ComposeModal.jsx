@@ -36,6 +36,7 @@ import { composeContext, sendFailureKey } from '../utils/scheduledSend.js';
 import { trackSend } from '../utils/sendTracker.js';
 import { formatDateTime } from '../utils/formatDate.js';
 import { useOnValuesChange } from '../hooks/useOnValuesChange.js';
+import { AI_MESSAGE_MAX_CHARS } from '../aiActions.js';
 
 // Resize an image blob/file to max maxW pixels wide, preserving aspect ratio.
 // Returns a Promise<string> of a base64 data URL.
@@ -197,7 +198,7 @@ function parseChips(val) {
 }
 
 export default function ComposeModal() {
-  const { t } = useTranslation();
+  const { t, i18n } = useTranslation();
   const { closeCompose, composeData, composeMinimized, setComposeMinimized, accounts, addNotification, plaintextEmail: plaintextPreference, setThreadMessages } = useStore();
   const plaintextEmail = composeData?.restored && typeof composeData.bodyIsHtml === 'boolean'
     ? !composeData.bodyIsHtml : plaintextPreference;
@@ -846,9 +847,17 @@ export default function ComposeModal() {
       },
     };
     const { system, user } = PROMPTS[action] || PROMPTS.draft;
+    // Applying a rewrite replaces the draft, so truncating its input would silently lose text.
+    if (user.length > AI_MESSAGE_MAX_CHARS) {
+      const fmt = new Intl.NumberFormat(i18n.language);
+      setAiPanel({ action, status: 'error', text: t('compose.toolbar.aiTooLong', {
+        length: fmt.format(user.length), max: fmt.format(AI_MESSAGE_MAX_CHARS),
+      }) });
+      return;
+    }
     const messages = [
       { role: 'system', content: system },
-      { role: 'user', content: user.slice(0, 16000) },
+      { role: 'user', content: user },
     ];
 
     setAiPanel({ action, status: 'generating', text: '' });

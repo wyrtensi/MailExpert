@@ -6,6 +6,7 @@ import { claimForExpunge, finishExpunge, releaseExpungeClaim } from '../services
 import { SENDER_HISTORY_DEFAULT_LIMIT, SENDER_HISTORY_MAX_LIMIT, senderHistory } from '../services/senderHistory.js';
 import { conversation } from '../services/conversation.js';
 import { shouldBlockImages } from '../utils/imageBlocking.js';
+import { needsCidRefetch, settleCids, withoutCidMarker } from '../utils/cidRefs.js';
 import { threadingDiagnostics } from '../services/threadingDiagnostics.js';
 import { requireAuth } from '../middleware/auth.js';
 import { imapManager } from '../index.js';
@@ -535,7 +536,9 @@ router.get('/messages/:id/body', async (req, res) => {
   // Return cached body if available — but re-fetch when the cached HTML still
   // contains unresolved cid: references, or http:// image URLs that were cached
   // before the http→https upgrade was added (would be blocked as mixed content).
-  const hasCidRefs  = message.body_html && /\bcid:/i.test(message.body_html);
+  // A body fetched completely is marked settled and not fetched again for references that can
+  // never resolve (utils/cidRefs.js); the marker never leaves the cache.
+  const hasCidRefs  = needsCidRefetch(message.body_html);
   const hasHttpImgs = message.body_html && (
     // <img src="http://"> cached before the http→https upgrade
     /<img[^>]+src=["']http:\/\//i.test(message.body_html) ||
@@ -591,6 +594,9 @@ router.get('/messages/:id/body', async (req, res) => {
       }
     }
 
+    // The settled cid: marker (utils/cidRefs.js) stays in the cache, written back above; it never
+    // leaves MailExpert.
+    if (html) html = withoutCidMarker(html);
     // Apply remote-image blocking at response time — never write the blocked variant
     // back to the DB so the canonical cached HTML always has images intact.
     const skipBlocking = req.query.remoteImages === '1';
@@ -610,7 +616,7 @@ router.get('/messages/:id/body', async (req, res) => {
     // A letter whose move is pending is read at its source until the MOVE (moveQueue.js).
     const loc = await imapManager.moveQueue.serverLocation(message, account);
     if (!loc) return sendMovePending(res);
-    const { html, text, attachments } = await fetchWithTimeout(
+    const { html, text, attachments, cidsComplete } = await fetchWithTimeout(
       imapManager.fetchMessageBody(account, loc.uid, loc.folder),
       BODY_FETCH_TIMEOUT_MS
     );
@@ -627,7 +633,8 @@ router.get('/messages/:id/body', async (req, res) => {
          SET body_html = $1, body_text = $2, attachments = $3,
              snippet = CASE WHEN $5 != '' THEN $5 ELSE snippet END
          WHERE id = $4`,
-        [safeHtml, safeText, JSON.stringify(attachments || []), id, snip]
+        // Stored settled when its cid: references can never resolve (utils/cidRefs.js).
+        [settleCids(safeHtml, cidsComplete), safeText, JSON.stringify(attachments || []), id, snip]
       );
     }
 

@@ -45,6 +45,22 @@ describe('GET /messages/:id/body and cid: references', () => {
     expect(body.html).not.toContain('cids-settled');
   });
 
+  // The cached path rewrites an old body (head stripped, bare hrefs normalised) and writes it back
+  // with the single-column UPDATE. The marker must survive that write, or the next view fetches.
+  it('keeps the marker when the cached body is rewritten and written back', async () => {
+    const old = `<html><head><title>t</title></head><body><a href="example.com">x</a>${MISSING}</body></html>${CIDS_SETTLED}`;
+    query.mockResolvedValue({ rows: [row(old)] });
+    const body = await get();
+    expect(imapManager.fetchMessageBody).not.toHaveBeenCalled();
+    const rewrites = query.mock.calls.filter(([sql]) => /SET body_html = \$1 WHERE id = \$2/.test(sql));
+    expect(rewrites.length).toBeGreaterThan(0);
+    for (const [, [html]] of rewrites) {
+      expect(html).not.toContain('<head>');
+      expect(html).toContain(CIDS_SETTLED);
+    }
+    expect(body.html).not.toContain('cids-settled');
+  });
+
   it('does not fetch a body again for the text "CID:" in it', async () => {
     query.mockResolvedValue({ rows: [row('<p>Your CID: 4521</p>')] });
     await get();

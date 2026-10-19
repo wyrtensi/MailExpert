@@ -137,3 +137,50 @@ describe('the draft destroyed by deleting the conversation around it', () => {
     assert.deepEqual(got, [draftRow]);
   });
 });
+
+// A conversation comes back from every folder. Deleting it from the Inbox took its copies already
+// in Trash, where a delete expunges for good, and moving it pulled them back out.
+describe('resolveThreadMessages: Trash and Spam copies stay where they are', () => {
+  const folders = { acc: [{ path: 'Corbeille', special_use: '\\Trash' }, { path: 'Pourriel', special_use: '\\Junk' }, { path: 'INBOX' }] };
+  const inThread = [
+    { id: 'old', account_id: 'acc', folder: 'Corbeille' },
+    { id: 'junk', account_id: 'acc', folder: 'Pourriel' },
+    { id: 'new', account_id: 'acc', folder: 'INBOX' },
+    { id: 'mine', account_id: 'acc', folder: 'Sent' },
+  ];
+  const fetchAll = () => Promise.resolve({ messages: inThread });
+  const act = (anchor, extra = {}) => resolveThreadMessages({
+    message: { id: anchor, thread_id: 't1' }, isThreadRow: true, cached, fetchThread: fetchAll, folders, ...extra,
+  });
+
+  test('deleting, moving or archiving from another folder leaves the Trash and Spam copies', async () => {
+    const got = await act('new', { excludeDrafts: true });
+    assert.deepEqual(got.map(m => m.id), ['new', 'mine']);
+  });
+
+  test('acting from Trash or Spam itself still takes the whole conversation', async () => {
+    assert.deepEqual((await act('old', { excludeDrafts: true })).map(m => m.id), ['old', 'junk', 'new', 'mine']);
+  });
+
+  test('reading and starring still cover every copy', async () => {
+    assert.deepEqual((await act('new')).map(m => m.id), ['old', 'junk', 'new', 'mine']);
+  });
+
+  test('knows Trash by name when the folder list has not loaded', async () => {
+    const list = [{ id: 'old', account_id: 'b', folder: 'Deleted Items' }, { id: 'new', account_id: 'b', folder: 'INBOX' }];
+    const got = await resolveThreadMessages({
+      message: { id: 'new', thread_id: 't1' }, isThreadRow: true, excludeDrafts: true,
+      fetchThread: () => Promise.resolve({ messages: list }),
+    });
+    assert.deepEqual(got.map(m => m.id), ['new']);
+  });
+
+  test('a thread with nothing outside Trash keeps everything, so the action is never empty', async () => {
+    const list = [{ id: 'a', account_id: 'acc', folder: 'Corbeille' }, { id: 'b', account_id: 'acc', folder: 'Corbeille' }];
+    const got = await resolveThreadMessages({
+      message: { id: 'zzz', thread_id: 't1' }, isThreadRow: true, excludeDrafts: true, folders,
+      fetchThread: () => Promise.resolve({ messages: list }),
+    });
+    assert.deepEqual(got.map(m => m.id), ['a', 'b']);
+  });
+});

@@ -806,6 +806,15 @@ describe('ensureMailbox — case-insensitive casing resolution', () => {
     expect(client.list).not.toHaveBeenCalled();
   });
 
+  it('prefers an exact match to a case variant listed before it (case-sensitive server)', async () => {
+    const client = {
+      mailboxCreate: vi.fn().mockResolvedValue({ path: 'INBOX.Snoozed', created: false }),
+      list: vi.fn().mockResolvedValue([{ path: 'INBOX' }, { path: 'INBOX.snoozed' }, { path: 'INBOX.Snoozed' }]),
+    };
+    const res = await ensureMailbox(client, 'Snoozed', { resolvePath: true });
+    expect(res).toEqual({ path: 'INBOX.Snoozed', created: false });
+  });
+
   it('falls back to the known path when the LIST has no case-insensitive match', async () => {
     const client = {
       mailboxCreate: vi.fn().mockResolvedValue({ path: 'Todo', created: false }),

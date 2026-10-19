@@ -56,6 +56,22 @@ describe('names DNS does not know', () => {
     expect(fs.readFile).not.toHaveBeenCalled();
   });
 
+  it.each(['ａｌｉａｓ.example', 'alias\u00ad.example', 'alias\u3002example'])('rejects the private hosts entry behind the IDNA spelling %s', async host => {
+    fs.readFile.mockResolvedValue('127.0.0.1 alias.example\n');
+    expect(await validateHost(host)).toMatch(/private|reserved/i);
+    await expect(resolveForConnection(host)).rejects.toThrow(/private|reserved/i);
+  });
+
+  it('pins the public hosts entry behind an IDNA spelling', async () => {
+    fs.readFile.mockResolvedValue('203.0.113.9 alias.example\n');
+    const result = await resolveForConnection('ａｌｉａｓ.example');
+    expect(result).toMatchObject({ host: '203.0.113.9', addresses: ['203.0.113.9'] });
+    const addresses = await new Promise((resolve, reject) => {
+      result.lookup('alias.example', { all: true }, (err, found) => err ? reject(err) : resolve(found));
+    });
+    expect(addresses).toEqual([{ address: '203.0.113.9', family: 4 }]);
+  });
+
   it('ask the system resolver at most two at a time', async () => {
     const pending = [];
     dns.lookup.mockImplementation(() => new Promise(resolve => pending.push(resolve)));

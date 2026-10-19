@@ -154,12 +154,15 @@ export async function validateHost(host, { allowPrivate = false } = {}) {
 // the system resolver, which also answers it from sources other than files and DNS, at most
 // SYSTEM_LOOKUPS_AT_ONCE at a time; a name with dots is looked up in the hosts file itself.
 async function resolveAddresses(bare) {
+  // Compare the same ASCII name getaddrinfo uses, including when DNS misses and
+  // only the hosts file knows a Unicode spelling's normalized name.
+  const canonical = /[^\p{ASCII}]/u.test(bare) ? domainToASCII(bare) : bare;
   const [v4, v6] = await Promise.all([
-    dnsPromises.resolve4(bare).catch(() => []),
-    dnsPromises.resolve6(bare).catch(() => []),
+    dnsPromises.resolve4(canonical).catch(() => []),
+    dnsPromises.resolve6(canonical).catch(() => []),
   ]);
   if (v4.length || v6.length) return [...v4, ...v6];
-  const name = bare.replace(/\.+$/, '');
+  const name = canonical.replace(/\.+$/, '');
   if (name.includes('.')) return hostsFileAddresses(name);
   const looked = await systemLookup(name).catch(() => []);
   return (Array.isArray(looked) ? looked : []).map(a => a.address).filter(Boolean);

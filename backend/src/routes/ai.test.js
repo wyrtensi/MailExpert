@@ -257,6 +257,19 @@ describe('admin ChatGPT device lifecycle', () => {
     expect(service).not.toHaveBeenCalled();
   });
 
+  // The frontend signs the user out on any 401 outside /auth/, so ChatGPT rejecting its token (or
+  // needing reconnection) must not reach the browser as one: the panel session is still valid.
+  it.each([
+    ['/api/admin/ai/codex/status', 'GET', 'getCodexStatus'],
+    ['/api/admin/ai/test', 'POST', 'testAiProvider'],
+    ['/api/ai/status', 'GET', 'getAiStatus'],
+  ])('answers a service 401 from %s as 409 with its message', async (path, method, mock) => {
+    mocks[mock].mockRejectedValue(Object.assign(new Error('ChatGPT authorization requires reconnection'), { status: 401 }));
+    const response = await request(path, { method });
+    expect(response.status).toBe(409);
+    expect(await response.json()).toEqual({ error: 'ChatGPT authorization requires reconnection' });
+  });
+
   it('preserves sanitized service status codes for missing or wrong-session flows', async () => {
     mocks.pollDeviceFlow.mockRejectedValue(Object.assign(new Error('Device authorization not found'), { status: 404 }));
     const response = await request('/api/admin/ai/codex/device/poll', {

@@ -13,6 +13,18 @@ import sanitizeHtml from 'sanitize-html';
 // extracting <style> blocks so that Outlook-only CSS rules (e.g. mso-* properties,
 // table layout overrides) are not applied in browser rendering, where they can break
 // font sizes, spacing, and colors that the email author tuned for non-Outlook clients.
+
+// Case-insensitive indexOf for an ASCII needle, searched in the string itself. Searching a
+// toLowerCase() copy instead gives wrong positions once the text holds a character whose lowercase
+// is longer (İ becomes two characters): offsets drifted by one per İ, so text was cut at the wrong
+// place and a following block could be skipped.
+function indexOfCi(str, needle, from) {
+  const re = new RegExp(needle.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), 'gi');
+  re.lastIndex = from;
+  const m = re.exec(str);
+  return m ? m.index : -1;
+}
+
 // Replace every `<tag …>content</tag>` span in linear time. A lazy
 // `<tag\b[^>]*>[\s\S]*?</tag>` /g regex is O(n²) on hostile email HTML on TWO axes:
 // the `[^>]*>` opener backtracks futilely when a tag has no `>`, and the lazy
@@ -25,8 +37,6 @@ import sanitizeHtml from 'sanitize-html';
 // `>` or close exists at/after an opener, none exists for any later opener either
 // (positions only advance), so we stop — exactly what the regex would leave unmatched.
 function scanPaired(str, openNameRe, closeLiteral, transform) {
-  const lower = str.toLowerCase();
-  const close = closeLiteral.toLowerCase();
   let out = '';
   let pos = 0;
   let m;
@@ -35,7 +45,7 @@ function scanPaired(str, openNameRe, closeLiteral, transform) {
     const gt = str.indexOf('>', m.index);
     if (gt === -1) break; // unterminated opening tag — no match, like [^>]*> would fail
     const contentStart = gt + 1;
-    const closeIdx = lower.indexOf(close, contentStart);
+    const closeIdx = indexOfCi(str, closeLiteral, contentStart);
     if (closeIdx === -1) break;
     const spanEnd = closeIdx + closeLiteral.length;
     out += str.slice(pos, m.index) + transform(str.slice(m.index, contentStart), str.slice(contentStart, closeIdx), str.slice(closeIdx, spanEnd));
@@ -45,12 +55,103 @@ function scanPaired(str, openNameRe, closeLiteral, transform) {
   return out + str.slice(pos);
 }
 
+// Every start tag in sanitized HTML with its attributes, read as the HTML tokenizer reads them:
+// a value runs to its own closing quote, so text that looks like an attribute inside another
+// attribute's value (title=" style='…' href=javascript:… ") is part of that value, never an
+// attribute. Patterns over the markup (\sstyle=('|")…) matched such text, and the quotes of their
+// rewrite closed the outer value, turning the rest of it into real attributes.
+//
+// map(tag, attrs) gets the lowercased tag name and its attributes as { name, value, raw }: value is
+// as written (entities not decoded), null for a bare attribute, and raw the attribute's source
+// text. It returns null to leave the tag byte for byte, or the attributes to write back: an entry
+// that keeps its raw is written as it was, any other as name="value" (value already encoded).
+// The text of raw-text elements (<style>) is skipped, not read as tags. Linear: every search moves
+// forward, and an unterminated quote or tag ends the walk with the rest left as it is.
+const RAW_TEXT_TAGS = new Set(['style', 'script', 'textarea', 'title', 'xmp', 'iframe', 'noembed', 'noframes', 'noscript']);
+const isHtmlSpace = (c) => c === ' ' || c === '\t' || c === '\n' || c === '\r' || c === '\f';
+
+function mapStartTags(html, map) {
+  const n = html.length;
+  const tagName = /[a-zA-Z][^\s/>]*/y;
+  let out = '';
+  let pos = 0;
+  let i = 0;
+  while (i < n) {
+    const lt = html.indexOf('<', i);
+    if (lt === -1) break;
+    tagName.lastIndex = lt + 1;
+    const nm = tagName.exec(html);
+    if (!nm) { i = lt + 1; continue; }
+    const tag = nm[0].toLowerCase();
+    const attrs = [];
+    let j = tagName.lastIndex;
+    let end = -1;
+    while (j < n) {
+      while (j < n && (isHtmlSpace(html[j]) || html[j] === '/')) j += 1;
+      if (j >= n) break;
+      if (html[j] === '>') { end = j + 1; break; }
+      const start = j;
+      j += 1; // an attribute name may start with any character but space, / and >
+      while (j < n && !isHtmlSpace(html[j]) && html[j] !== '/' && html[j] !== '>' && html[j] !== '=') j += 1;
+      const name = html.slice(start, j);
+      let k = j;
+      while (k < n && isHtmlSpace(html[k])) k += 1;
+      if (html[k] !== '=') { attrs.push({ name, value: null, raw: name }); continue; }
+      k += 1;
+      while (k < n && isHtmlSpace(html[k])) k += 1;
+      let value;
+      if (html[k] === '"' || html[k] === "'") {
+        const close = html.indexOf(html[k], k + 1);
+        if (close === -1) break; // unterminated value: end stays -1 and the walk stops
+        value = html.slice(k + 1, close);
+        j = close + 1;
+      } else {
+        const from = k;
+        while (k < n && !isHtmlSpace(html[k]) && html[k] !== '>') k += 1;
+        value = html.slice(from, k);
+        j = k;
+      }
+      attrs.push({ name, value, raw: html.slice(start, j) });
+    }
+    if (end === -1) break;
+    const next = map(tag, attrs);
+    if (next) {
+      const selfClosing = html[end - 2] === '/';
+      out += html.slice(pos, lt) + '<' + nm[0]
+        + next.map(a => ` ${a.raw ?? `${a.name}="${a.value}"`}`).join('')
+        + (selfClosing ? ' />' : '>');
+      pos = end;
+    }
+    i = end;
+    if (RAW_TEXT_TAGS.has(tag)) {
+      const close = indexOfCi(html, `</${tag}`, end);
+      if (close === -1) break;
+      i = close;
+    }
+  }
+  return out + html.slice(pos);
+}
+
+// Rewrites the text of every <style> block, then seals it. The rewrites run on sanitized output and
+// delete parts of the CSS (a declaration, a url(), a whole @media block); a deletion joins the text
+// on either side of it, and `</` before one with `style` after it made a real end tag, closing the
+// block early so whatever followed it in the CSS (tags sanitize-html had only seen as style text:
+// <a href="javascript:…">, <form>, <base>) reached the body as markup. Sealing turns any `</style`
+// left in the text into `<\/style`, the same characters to CSS and no end tag to the HTML parser.
+// An opening `<style` is escaped the same way (`<\style`).
+export function sealStyleText(css) {
+  return css.replace(/<(\/?)(style)/gi, '<\\$1$2');
+}
+
+function rewriteStyleBlocks(html, rewrite) {
+  return scanPaired(html, /<style\b/gi, '</style>', (open, content, close) => open + sealStyleText(rewrite(content)) + close);
+}
+
 // Strip MSO-positive conditional comments (<!--[if mso]>…<![endif]-->) linearly,
 // preserving <!--[if !mso]> blocks (browser-targeted CSS). Mirrors the old regex
 // /<!--\[if(?!\s*!)[^\]]*\]>[\s\S]*?<!\[endif\]-->/gi without its backtracking.
 function stripMsoConditionals(hc) {
   const END = '<![endif]-->';
-  const lower = hc.toLowerCase();
   const openRe = /<!--\[if/gi;
   let out = '';
   let pos = 0;
@@ -63,7 +164,7 @@ function stripMsoConditionals(hc) {
     const rb = hc.indexOf(']', after);
     if (rb === -1) break;
     if (hc[rb + 1] !== '>') { openRe.lastIndex = after; continue; } // ']' not immediately '>' — no match
-    const endIdx = lower.indexOf(END.toLowerCase(), rb + 2);
+    const endIdx = indexOfCi(hc, END, rb + 2);
     if (endIdx === -1) break;
     out += hc.slice(pos, m.index);
     pos = endIdx + END.length;
@@ -113,15 +214,20 @@ function normalizeHref(href) {
 // stored before href normalisation was added to sanitizeEmail().
 export function rewriteAnchorHrefs(html) {
   if (!html) return html;
-  return html.replace(
-    /(<a\b[^>]*?\s)href=(["'])([^"']*)\2/gi,
-    (match, pre, q, raw) => {
+  return mapStartTags(html, (tag, attrs) => {
+    if (tag !== 'a') return null;
+    let changed = false;
+    const next = [];
+    for (const attr of attrs) {
+      if (attr.name.toLowerCase() !== 'href' || attr.value === null) { next.push(attr); continue; }
+      const raw = decodeAttr(attr.value);
       const normalized = normalizeHref(raw);
-      if (normalized === null) return pre; // drop the href attribute
-      if (normalized === raw) return match;
-      return `${pre}href=${q}${normalized}${q}`;
+      changed ||= normalized !== raw;
+      if (normalized === null) continue; // drop the href attribute
+      next.push(normalized === raw ? attr : { name: attr.name, value: encodeAttr(normalized) });
     }
-  );
+    return changed ? next : null;
+  });
 }
 
 // eBay's imageser service (svcs.ebay.com/imageser) wraps real product images
@@ -144,23 +250,23 @@ function unwrapEbayImgUrl(url) {
 // Rewrite any eBay imageser src URLs remaining in already-cached HTML.
 // Applied at serve-time for emails stored before this fix was deployed.
 // The src attribute value in stored HTML has & escaped as &amp;, so we decode
-// it before parsing the URL.
+// it before parsing the URL, and encode the direct URL (decoded from the query, so it
+// may hold a ") before writing it back.
 export function rewriteEbayImageserUrls(html) {
   if (!html || !html.includes('svcs.ebay.com/imageser')) return html;
-  return html.replace(
-    /(<img\b[^>]*?\s)src=(["'])(https:\/\/svcs\.ebay\.com\/imageser\/[^"']*)\2/gi,
-    (match, pre, q, url) => {
-      try {
-        const cleanUrl = url.replace(/&amp;/g, '&');
-        const u = new URL(cleanUrl);
-        if (u.hostname === 'svcs.ebay.com' && u.pathname.startsWith('/imageser/')) {
-          const direct = u.searchParams.get('imageUrl');
-          if (direct && direct.startsWith('https://')) return `${pre}src=${q}${direct}${q}`;
-        }
-      } catch { /* invalid URL — leave src unchanged */ }
-      return match;
-    }
-  );
+  return mapStartTags(html, (tag, attrs) => {
+    if (tag !== 'img') return null;
+    let changed = false;
+    const next = attrs.map(attr => {
+      if (attr.name.toLowerCase() !== 'src' || attr.value === null) return attr;
+      const url = decodeAttr(attr.value);
+      const direct = unwrapEbayImgUrl(url);
+      if (direct === url) return attr;
+      changed = true;
+      return { name: attr.name, value: encodeAttr(direct) };
+    });
+    return changed ? next : null;
+  });
 }
 
 // Upgrade http:// → https:// inside CSS url() expressions.
@@ -175,9 +281,7 @@ function upgradeStyleUrls(style) {
 // the user's remote image blocking preference.  data: and cid: URIs are left intact.
 function stripExternalStyleBlockUrls(html) {
   if (!html) return html;
-  return scanPaired(html, /<style\b/gi, '</style>', (open, content, close) =>
-    open + stripExternalCssUrls(content) + close
-  );
+  return rewriteStyleBlocks(html, asCssReads(stripExternalCssUrls));
 }
 
 // Mirrors /url\s*\(\s*(['"]?)https?:\/\/[^)]*\1\s*\)/gi without its backtracking: from every
@@ -214,9 +318,7 @@ function stripExternalCssUrls(css) {
 // block CSS must be handled separately after sanitization.
 function upgradeStyleBlocks(html) {
   if (!html) return html;
-  return scanPaired(html, /<style\b/gi, '</style>', (open, content, close) =>
-    open + content.replace(/url\(\s*(['"]?)http:\/\//gi, (_, q) => `url(${q}https://`) + close
-  );
+  return rewriteStyleBlocks(html, content => content.replace(/url\(\s*(['"]?)http:\/\//gi, (_, q) => `url(${q}https://`));
 }
 
 // Strip dark-mode CSS from a <style> block's text content.
@@ -322,9 +424,16 @@ function stripInvertFilters(css) {
 
 function stripDarkModeStyleBlocks(html) {
   if (!html) return html;
-  return scanPaired(html, /<style\b/gi, '</style>', (open, content, close) =>
-    open + stripDarkModeCss(content) + close
-  );
+  return rewriteStyleBlocks(html, stripDarkModeCss);
+}
+
+// A URL attribute as the browser reads it: the URL standard drops every tab and line break inside
+// a URL and trims control characters and spaces from its ends. Left in, `ht&#x0A;tps://…` hid an
+// image from remote-image blocking, which matches the URL as written, while the browser still
+// fetched it from the sender.
+function asBrowserUrl(value) {
+  // eslint-disable-next-line no-control-regex -- the C0 controls the URL standard trims
+  return String(value).replace(/[\t\n\r]/g, '').replace(/^[\u0000- ]+|[\u0000- ]+$/g, '');
 }
 
 // Sanitize HTML email body — permissive but safe.
@@ -380,11 +489,11 @@ export function sanitizeEmail(html) {
       // mixed content on an https host, causing images to silently fail.
       'img': (tagName, attribs) => {
         const out = { ...attribs };
-        if (out.src)    out.src    = unwrapEbayImgUrl(upgradeUrl(out.src));
+        if (out.src)    out.src    = unwrapEbayImgUrl(upgradeUrl(asBrowserUrl(out.src)));
         // Simple regex replacement avoids split(',') corrupting data: URIs that
         // contain commas (e.g. data:image/png;base64,abc 2x).
         if (out.srcset) out.srcset = out.srcset.replace(/\bhttp:\/\//g, 'https://');
-        if (out.background) out.background = upgradeUrl(out.background);
+        if (out.background) out.background = upgradeUrl(asBrowserUrl(out.background));
         if (out.style) out.style = upgradeStyleUrls(out.style);
         // Defer loading of remote images; skip cid:/data: which are already local.
         const isLocal = out.src && /^(cid:|data:)/i.test(out.src);
@@ -400,7 +509,7 @@ export function sanitizeEmail(html) {
       // and CSS background-image declarations.
       '*': (tagName, attribs) => {
         const out = { ...attribs };
-        if (out.background) out.background = upgradeUrl(out.background);
+        if (out.background) out.background = upgradeUrl(asBrowserUrl(out.background));
         if (out.style) out.style = upgradeStyleUrls(out.style);
         return { tagName, attribs: out };
       },
@@ -514,24 +623,182 @@ export function sanitizeSignature(html) {
   });
 }
 
-// Returns true if the sanitized HTML contains any remote http/https image references,
-// including CSS @import with a bare quoted URL (not wrapped in url()) which bypasses
-// the url() pattern check but still causes an outbound stylesheet request.
+// Remote here means http(s) or protocol-relative ("//host/...", which the email frame resolves to
+// https); browsers ignore leading whitespace in a URL, so the patterns below do too.
+
+const REMOTE_URL = /^\s*(?:https?:)?\/\//i;
+const isCssSpace = (c) => c === ' ' || c === '\t' || c === '\n' || c === '\r' || c === '\f';
+
+// Every remote URL in CSS text, rewritten by `rewrite(kind, url)`, which returns the text that
+// replaces the whole token: kind 'url' for url(...), 'string' for a quoted URL inside image-set(),
+// 'import' for an @import rule (through its ';'). Anything else is copied as it is.
+//
+// One pass from left to right that never reads text twice: every search for a closing character
+// remembers where it last looked. Patterns that scan ahead from each candidate (url\(...\)) cost
+// time in proportion to candidates times length, and a <style> of 40,000 unclosed url( held the
+// event loop for half a minute. Here time grows only with the length of the CSS.
+// Case-insensitive needles are searched with regexes over the CSS itself, not over a lowercased
+// copy: lowercasing can change the length of a string (İ becomes two characters), and positions in
+// the copy would then point at the wrong text.
+const CSS_NEEDLES = { 'url(': /url\(/gi, 'image-set(': /image-set\(/gi, '@import': /@import/gi };
+const startsWithCi = (text, at, needle) => text.slice(at, at + needle.length).toLowerCase() === needle;
+
+function rewriteCssUrls(css, rewrite) {
+  const n = css.length;
+  const found = new Map();
+  // The next index of `needle` at or after `from`. A result is reused while it still answers the
+  // question, so a search never covers the same text twice as long as `from` only grows.
+  const next = (needle, from) => {
+    const hit = found.get(needle);
+    if (hit && hit.from <= from && (hit.at === -1 || hit.at >= from)) return hit.at;
+    let at;
+    const re = CSS_NEEDLES[needle];
+    if (re) {
+      re.lastIndex = from;
+      const m = re.exec(css);
+      at = m ? m.index : -1;
+    } else {
+      at = css.indexOf(needle, from);
+    }
+    found.set(needle, { from, at });
+    return at;
+  };
+  // A url( token starting at `start` (the 'u'): its value and the index after its ')', or null.
+  const urlToken = (start) => {
+    let j = start + 4;
+    while (j < n && isCssSpace(css[j])) j += 1;
+    let value;
+    let k;
+    if (css[j] === '"' || css[j] === "'") {
+      const close = next(css[j], j + 1);
+      if (close === -1) return null;
+      value = css.slice(j + 1, close);
+      k = close + 1;
+    } else {
+      k = j;
+      while (k < n && css[k] !== ')' && css[k] !== '(' && css[k] !== '"' && css[k] !== "'" && !isCssSpace(css[k])) k += 1;
+      value = css.slice(j, k);
+    }
+    while (k < n && isCssSpace(css[k])) k += 1;
+    return css[k] === ')' ? { value, end: k + 1 } : null;
+  };
+
+  let out = '';
+  let i = 0;
+  while (i < n) {
+    const candidates = [['url', next('url(', i)], ['set', next('image-set(', i)], ['import', next('@import', i)]]
+      .filter(([, at]) => at !== -1);
+    if (!candidates.length) break;
+    const [kind, at] = candidates.reduce((a, b) => (b[1] < a[1] ? b : a));
+    out += css.slice(i, at);
+    if (kind === 'url') {
+      const token = urlToken(at);
+      if (token && REMOTE_URL.test(token.value)) { out += rewrite('url', token.value.trim()); i = token.end; continue; }
+      out += css.slice(at, at + 4);
+      i = at + 4;
+    } else if (kind === 'import') {
+      const semi = next(';', at);
+      const end = semi === -1 ? n : semi + 1;
+      let j = at + 7;
+      // Spaces and comments may stand between @import and its URL (@import/**/"https://…").
+      for (;;) {
+        while (j < end && isCssSpace(css[j])) j += 1;
+        if (!css.startsWith('/*', j)) break;
+        const close = next('*/', j + 2);
+        j = close === -1 ? n : close + 2;
+      }
+      let target = '';
+      if (startsWithCi(css, j, 'url(')) target = urlToken(j)?.value ?? '';
+      else if (css[j] === '"' || css[j] === "'") { const close = next(css[j], j + 1); target = close === -1 ? '' : css.slice(j + 1, close); }
+      if (REMOTE_URL.test(target)) { out += rewrite('import', target.trim()); i = end; continue; }
+      out += css.slice(at, at + 7);
+      i = at + 7;
+    } else {
+      // image-set( ... ): to its matching ')', its quoted URLs and url() tokens rewritten.
+      const open = at + 'image-set('.length;
+      out += css.slice(at, open);
+      let depth = 1;
+      let k = open;
+      while (k < n && depth > 0) {
+        const c = css[k];
+        if (c === '"' || c === "'") {
+          const close = next(c, k + 1);
+          const stop = close === -1 ? n : close + 1;
+          const value = css.slice(k + 1, close === -1 ? n : close);
+          out += REMOTE_URL.test(value) ? rewrite('string', value.trim()) : css.slice(k, stop);
+          k = stop;
+        } else if (startsWithCi(css, k, 'url(')) {
+          const token = urlToken(k);
+          if (token && REMOTE_URL.test(token.value)) { out += rewrite('url', token.value.trim()); k = token.end; }
+          else { out += css.slice(k, k + 4); k += 4; depth += 1; }
+        } else {
+          if (c === '(') depth += 1;
+          else if (c === ')') depth -= 1;
+          out += c;
+          k += 1;
+        }
+      }
+      i = k;
+    }
+  }
+  return out + css.slice(i);
+}
+
+// CSS text with its escapes decoded, as the browser's CSS tokenizer decodes them: \75 rl( and
+// u\72l( are url(, \68ttps: is https:. A backslash and a newline (a string continuation) go.
+function unescapeCss(css) {
+  return css.replace(/\\(?:([0-9a-fA-F]{1,6})(?:\r\n|[ \t\n\r\f])?|(\r\n|[\n\r\f])|([\s\S]))/g, (_, hex, newline, char) => {
+    if (newline !== undefined) return '';
+    if (char !== undefined) return char;
+    const code = parseInt(hex, 16);
+    return code === 0 || code > 0x10ffff || (code >= 0xd800 && code <= 0xdfff) ? '�' : String.fromCodePoint(code);
+  });
+}
+
+// A CSS URL rewrite that also sees URLs hidden behind escapes. CSS without a backslash, or whose
+// escapes hide nothing the rewrite changes, is rewritten as written; otherwise the decoded CSS is
+// rewritten instead, which may change how its other escapes read: acceptable for CSS that hid a
+// remote URL that way. The result is still sealed (rewriteStyleBlocks) or encoded for an attribute.
+function asCssReads(rewrite) {
+  return (css) => {
+    if (css.includes('\\')) {
+      const decoded = unescapeCss(css);
+      const rewritten = rewrite(decoded);
+      if (rewritten !== decoded) return rewritten;
+    }
+    return rewrite(css);
+  };
+}
+
+// Remote loads in CSS text made inert: url(...) and quoted URLs in image-set() become data:,
+// (which draws nothing) and remote @imports are dropped. url(data:,) carries no quotes, so it is
+// safe inside any attribute or style block.
+const blockCssUrls = asCssReads((css) =>
+  rewriteCssUrls(css, (kind) => (kind === 'import' ? '' : kind === 'url' ? 'url(data:,)' : '"data:,"')));
+
+// An attribute value as written in the HTML, and back. Sanitized HTML writes values in double
+// quotes with " as &quot;, & as &amp; and < > as &lt; &gt;; a CSS URL quoted with " is only
+// visible once decoded, and what was decoded is encoded again the same way.
+const decodeAttr = (v) => v
+  .replace(/&quot;|&#0*34;|&#x0*22;/gi, '"').replace(/&#0*39;|&#x0*27;|&apos;/gi, "'")
+  .replace(/&lt;/gi, '<').replace(/&gt;/gi, '>').replace(/&amp;/gi, '&');
+const encodeAttr = (v) => v.replace(/&/g, '&amp;').replace(/"/g, '&quot;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+
+// Whether the HTML loads anything remote that blockRemoteImages would stop: exactly when blocking
+// would change it, so the two can never disagree.
 export function hasRemoteImages(html) {
   if (!html) return false;
-  return (
-    /<img\b[^>]*\ssrc=["']https?:\/\//i.test(html) ||
-    /<img\b[^>]*\ssrcset=["'][^"']*https?:\/\//i.test(html) ||
-    /\sbackground=["']https?:\/\//i.test(html) ||
-    /url\(\s*['"]?https?:\/\//i.test(html) ||
-    /@import\s+["']https?:\/\//i.test(html)
-  );
+  return blockRemoteImages(html) !== html;
 }
 
 // Rewrite remote http/https image references so the browser makes no network requests.
 // data: and cid: sources are always left intact.
 // Never call this on HTML that will be written back to the database — apply only at
 // response time so the canonical cached body remains unmodified.
+//
+// This is the first line only: the email frame also forbids remote images, fonts and media in its
+// Content-Security-Policy whenever a body is served blocked (remoteImagesBlocked), which stops what
+// no pattern here can foresee (CSS escapes, for one).
 export function blockRemoteImages(html) {
   if (!html) return html;
 
@@ -540,58 +807,52 @@ export function blockRemoteImages(html) {
   // height:auto CSS (like marketing templates) would then collapse all images to 0px tall,
   // making the entire email appear blank.  Reading the explicit width/height attributes
   // lets us generate a grey rectangle that matches the layout slot the author intended.
-  let out = html.replace(
-    /(<img\b[^>]*?)\ssrc=(["'])(https?:\/\/[^\s"']*)\2/gi,
-    (match, pre) => {
-      const wMatch = pre.match(/\bwidth=["']?(\d+)["']?/i);
-      const hMatch = pre.match(/\bheight=["']?(\d+)["']?/i);
-      const w = wMatch ? parseInt(wMatch[1], 10) : 600;
-      const h = hMatch ? parseInt(hMatch[1], 10) : 200;
-      const svg = encodeURIComponent(
-        `<svg xmlns="http://www.w3.org/2000/svg" width="${w}" height="${h}"><rect width="100%" height="100%" fill="#e8e8e8"/></svg>`
-      );
-      return `${pre} src="data:image/svg+xml,${svg}"`;
+  //
+  // Only real attributes of real tags are read (mapStartTags), each value as the browser reads it
+  // (entities decoded, tabs and line breaks dropped), and a tag with nothing to block is left byte
+  // for byte.
+  const isRemote = (value) => REMOTE_URL.test(asBrowserUrl(decodeAttr(value)));
+  const placeholder = (attrs) => {
+    const size = (name, fallback) => {
+      const attr = attrs.find(a => a.name.toLowerCase() === name && a.value !== null);
+      const m = attr && /^\s*(\d+)/.exec(decodeAttr(attr.value));
+      return m ? parseInt(m[1], 10) : fallback;
+    };
+    return `data:image/svg+xml,${encodeURIComponent(
+      `<svg xmlns="http://www.w3.org/2000/svg" width="${size('width', 600)}" height="${size('height', 200)}"><rect width="100%" height="100%" fill="#e8e8e8"/></svg>`
+    )}`;
+  };
+  let out = mapStartTags(html, (tag, attrs) => {
+    let changed = false;
+    const next = [];
+    for (const attr of attrs) {
+      const name = attr.name.toLowerCase();
+      if (attr.value === null) { next.push(attr); continue; }
+      if (tag === 'img' && name === 'src' && isRemote(attr.value)) {
+        next.push({ name: attr.name, value: placeholder(attrs) });
+        changed = true;
+      } else if (tag === 'img' && name === 'srcset' && /(?:^|[\s,])(?:https?:)?\/\//i.test(decodeAttr(attr.value))) {
+        changed = true; // a remote candidate drops the whole srcset
+      } else if (name === 'background' && isRemote(attr.value)) {
+        // Table-based marketing layouts: the background image is blanked.
+        next.push({ name: attr.name, value: '' });
+        changed = true;
+      } else if (name === 'style') {
+        // CSS url(https://...) and image-set() in an inline style, read as the browser reads them.
+        const css = decodeAttr(attr.value);
+        const blocked = blockCssUrls(css);
+        if (blocked === css) next.push(attr);
+        else { next.push({ name: attr.name, value: encodeAttr(blocked) }); changed = true; }
+      } else {
+        next.push(attr);
+      }
     }
-  );
-
-  // Remove img srcset entirely when it contains any remote URLs.
-  out = out.replace(
-    /(<img\b[^>]*?)\ssrcset=(["'])([^"']*)\2/gi,
-    (_, pre, q, val) =>
-      /https?:\/\//i.test(val)
-        ? pre
-        : `${pre} srcset=${q}${val}${q}`
-  );
-
-  // Blank background="https://..." attribute (table-based marketing email layouts).
-  out = out.replace(
-    /(\s)background=(["'])(https?:\/\/[^\s"']*)\2/gi,
-    '$1background=$2$2'
-  );
-
-  // Block CSS url(https://...) in inline style= attributes.
-  out = out.replace(
-    /\sstyle="([^"]*)"/gi,
-    (_, styleVal) => {
-      const blocked = styleVal.replace(
-        /url\(\s*(['"]?)https?:\/\/[^'")]+\1\s*\)/gi,
-        'url("data:,")'
-      );
-      return ` style="${blocked}"`;
-    }
-  );
-
-  // Block remote CSS loads inside <style> blocks:
-  // 1. Strip @import "https://..." (bare quoted form — not caught by url() pattern).
-  // 2. Strip @import url(https://...) (url() form).
-  // 3. Replace remaining url(https://...) CSS property values with data:,.
-  out = scanPaired(out, /<style\b/gi, '</style>', (open, content, close) => {
-    const blocked = content
-      .replace(/@import\s+["']https?:\/\/[^"']*["']\s*;?/gi, '')
-      .replace(/@import\s+url\(\s*["']?https?:\/\/[^"')]*["']?\s*\)\s*;?/gi, '')
-      .replace(/url\(\s*(['"]?)https?:\/\/[^'")]+\1\s*\)/gi, 'url("data:,")');
-    return open + blocked + close;
+    return changed ? next : null;
   });
+
+  // Block remote CSS loads inside <style> blocks: remote @imports dropped, url(...) and
+  // image-set() URLs made inert.
+  out = rewriteStyleBlocks(out, blockCssUrls);
 
   return out;
 }

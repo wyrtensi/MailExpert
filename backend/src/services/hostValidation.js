@@ -1,5 +1,7 @@
 import { BlockList, isIPv4, isIPv6 } from 'net';
 import { promises as dnsPromises } from 'dns';
+import { promises as fsPromises } from 'fs';
+import { domainToASCII } from 'url';
 
 function ipv4ToLong(ip) {
   const parts = ip.split('.').map(Number);
@@ -76,16 +78,40 @@ function isPrivateIPv6(ip) {
   return PRIVATE_IPV6.check(g.map(x => x.toString(16)).join(':'), 'ipv6');
 }
 
+// getaddrinfo (glibc, musl) reads 2130706433, 0x7f000001, 0177.0.0.1 and 127.1 as IPv4
+// addresses, but net.isIPv4 accepts only the dotted quad. The URL parser reads the same
+// inet_aton forms, so use it to find the address the socket would connect to.
+function inetAtonIPv4(host) {
+  if (!/^[0-9a-fx.]+$/.test(host)) return null;
+  try {
+    const { hostname } = new URL(`http://${host}/`);
+    return isIPv4(hostname) ? hostname : null;
+  } catch {
+    return null;
+  }
+}
+
 // Synchronous check: literal IPs and reserved hostnames.
 export function validateHostLiteral(host, { allowPrivate = false } = {}) {
   if (!host || typeof host !== 'string') return null;
   if (allowPrivate) return null;
-  const h = host.trim().toLowerCase();
-  if (h === 'localhost' || h.endsWith('.local') || h.endsWith('.localhost') || h.endsWith('.internal')) {
+  let h = host.trim();
+  // dns.lookup converts a non-ASCII host to ASCII before getaddrinfo reads it, so
+  // １２７.０.０.１ reaches 127.0.0.1 and ::１ reaches ::1. Check the converted form, and
+  // refuse a host that domainToASCII rejects, as it does every Unicode spelling of IPv6.
+  if (/[^\p{ASCII}]/u.test(h)) {
+    h = domainToASCII(h);
+    if (!h) return 'Host is not a valid hostname';
+  }
+  h = h.toLowerCase();
+  // A trailing dot makes a name fully qualified, not a different one: localhost. is localhost.
+  const name = h.replace(/\.+$/, '');
+  if (name === 'localhost' || name.endsWith('.local') || name.endsWith('.localhost') || name.endsWith('.internal')) {
     return 'Host cannot be a local address';
   }
   const bare = h.startsWith('[') && h.endsWith(']') ? h.slice(1, -1) : h;
-  if (isIPv4(bare) && isPrivateIPv4(bare)) return 'Host cannot be a private or reserved IP address';
+  const v4 = isIPv4(bare) ? bare : inetAtonIPv4(bare);
+  if (v4 && isPrivateIPv4(v4)) return 'Host cannot be a private or reserved IP address';
   if (isIPv6(bare) && isPrivateIPv6(bare)) return 'Host cannot be a private or reserved IP address';
   return null;
 }
@@ -102,22 +128,78 @@ export async function validateHost(host, { allowPrivate = false } = {}) {
   // Already a literal IP — validated above.
   if (isIPv4(bare) || isIPv6(bare)) return null;
 
-  // Resolve A and AAAA records. Ignore DNS errors — if the host can't be resolved,
+  // Resolve the host's addresses. Ignore resolver errors — if the host can't be resolved,
   // the IMAP/SMTP connection will fail naturally; the concern is hosts that DO resolve
   // to private ranges.
-  const [v4, v6] = await Promise.all([
-    dnsPromises.resolve4(bare).catch(() => []),
-    dnsPromises.resolve6(bare).catch(() => []),
-  ]);
+  const resolved = await resolveAddresses(bare);
 
   if (!allowPrivate) {
-    for (const addr of [...v4, ...v6]) {
+    for (const addr of resolved) {
       if (isIPv4(addr) && isPrivateIPv4(addr)) return 'Host resolves to a private or reserved IP address';
       if (isIPv6(addr) && isPrivateIPv6(addr)) return 'Host resolves to a private or reserved IP address';
     }
   }
 
   return null;
+}
+
+// A host's addresses: from DNS, and when DNS has none, from the system resolver. The connection
+// itself resolves through the system resolver (getaddrinfo), which also reads /etc/hosts, so a name
+// only that file knows (ip6-localhost in the container image, or an alias an operator added) was let
+// through unchecked and then connected to loopback or a private address.
+//
+// getaddrinfo runs on libuv's thread pool (four threads, shared with fs and crypto), and names
+// DNS does not know are easy to supply (a List-Unsubscribe host in someone's mail), so it is not
+// asked about every miss. A single-label name (ip6-localhost, _gateway, a bare hostname) goes to
+// the system resolver, which also answers it from sources other than files and DNS, at most
+// SYSTEM_LOOKUPS_AT_ONCE at a time; a name with dots is looked up in the hosts file itself.
+async function resolveAddresses(bare) {
+  // Compare the same ASCII name getaddrinfo uses, including when DNS misses and
+  // only the hosts file knows a Unicode spelling's normalized name.
+  const canonical = /[^\p{ASCII}]/u.test(bare) ? domainToASCII(bare) : bare;
+  const [v4, v6] = await Promise.all([
+    dnsPromises.resolve4(canonical).catch(() => []),
+    dnsPromises.resolve6(canonical).catch(() => []),
+  ]);
+  if (v4.length || v6.length) return [...v4, ...v6];
+  const name = canonical.replace(/\.+$/, '');
+  if (name.includes('.')) return hostsFileAddresses(name);
+  const looked = await systemLookup(name).catch(() => []);
+  return (Array.isArray(looked) ? looked : []).map(a => a.address).filter(Boolean);
+}
+
+const HOSTS_FILE = process.platform === 'win32'
+  ? `${process.env.SystemRoot || 'C:\\Windows'}\\System32\\drivers\\etc\\hosts`
+  : '/etc/hosts';
+
+// The addresses the hosts file gives `name` (case-insensitive, a trailing dot ignored).
+async function hostsFileAddresses(name) {
+  const text = await fsPromises.readFile(HOSTS_FILE, 'utf8').catch(() => '');
+  const wanted = name.toLowerCase();
+  const addresses = [];
+  for (const line of String(text).split(/\r?\n/)) {
+    const [address, ...names] = line.replace(/#.*/, '').trim().split(/\s+/);
+    if (!address || !(isIPv4(address) || isIPv6(address))) continue;
+    if (names.some(n => n.toLowerCase().replace(/\.+$/, '') === wanted)) addresses.push(address);
+  }
+  return addresses;
+}
+
+const SYSTEM_LOOKUPS_AT_ONCE = 2;
+let systemLookups = 0;
+const waitingLookups = [];
+
+async function systemLookup(name) {
+  if (systemLookups >= SYSTEM_LOOKUPS_AT_ONCE) await new Promise(resolve => waitingLookups.push(resolve));
+  else systemLookups += 1;
+  try {
+    return await dnsPromises.lookup(name, { all: true, verbatim: true });
+  } finally {
+    // Hand the slot straight to the next waiter, or free it.
+    const next = waitingLookups.shift();
+    if (next) next();
+    else systemLookups -= 1;
+  }
 }
 
 export function createPinnedLookup(addresses) {
@@ -163,20 +245,17 @@ export async function resolveForConnection(hostname, { allowPrivate = false } = 
   // Already a literal IP — validated above, no DNS resolution needed.
   if (isIPv4(bare) || isIPv6(bare)) return { host: h, servername: null };
 
-  const [v4, v6] = await Promise.all([
-    dnsPromises.resolve4(bare).catch(() => []),
-    dnsPromises.resolve6(bare).catch(() => []),
-  ]);
+  const resolved = await resolveAddresses(bare);
 
   if (!allowPrivate) {
-    for (const addr of [...v4, ...v6]) {
+    for (const addr of resolved) {
       if (isIPv4(addr) && isPrivateIPv4(addr)) throw new Error('Host resolves to a private or reserved IP address');
       if (isIPv6(addr) && isPrivateIPv6(addr)) throw new Error('Host resolves to a private or reserved IP address');
     }
   }
 
-  const all = [...new Set([...v4, ...v6])];
-  // DNS failed — let the connection attempt fail naturally (NXDOMAIN etc.).
+  const all = [...new Set(resolved)];
+  // No resolver knows the name — let the connection attempt fail naturally (NXDOMAIN etc.).
   if (!all.length) return { host: h, servername: null };
 
   // Expose only prevalidated addresses to the connection layer. No later DNS query can

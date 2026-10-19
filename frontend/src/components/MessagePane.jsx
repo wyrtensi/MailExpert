@@ -61,6 +61,7 @@ import { formatDateTime, localeTag } from '../utils/formatDate.js';
 import { mailboxBusyOr, mailboxBusyText, isMailboxBusy } from '../utils/mailboxBusy.js';
 import { splitByConfirmed } from '../utils/optimisticRemoval.js';
 import AddAccountButton from './addAccount/AddAccountButton.jsx';
+import { emailFrameCsp, printWindowCsp } from '../utils/remoteImagePolicy.js';
 
 function parseAddressField(raw) {
   try {
@@ -411,8 +412,10 @@ export default function MessagePane({ windowMessageId = null, onWindowClose = nu
   // no flash of empty content between skeleton-gone and email-shown.
   const prepared = useMemo(() => {
     if (!USE_DIV_RENDER || !body?.html || safeView) return null;
-    return prepareEmailHtml(body.html, windowMode ? `w${message?.id ?? 'preview'}` : String(message?.id ?? 'preview'));
-  }, [body?.html, message?.id, windowMode, safeView]);
+    return prepareEmailHtml(body.html, windowMode ? `w${message?.id ?? 'preview'}` : String(message?.id ?? 'preview'), {
+      remoteImagesBlocked: body.remoteImagesBlocked === true,
+    });
+  }, [body?.html, body?.remoteImagesBlocked, message?.id, windowMode, safeView]);
   const outerRef = useRef(null);
   const scaleRef = useRef(null);
   const innerRef = useRef(null);
@@ -1236,6 +1239,8 @@ export default function MessagePane({ windowMessageId = null, onWindowClose = nu
       body: '',
       quotedBody: quotedText,
       quotedBodyHtml,
+      // The quote sits in the app's page: keep images blocked there if the body was served so.
+      quotedImagesBlocked: body?.remoteImagesBlocked === true,
       quoteMeta,
       quoteLang,
       inReplyTo: message.message_id,
@@ -1262,6 +1267,7 @@ export default function MessagePane({ windowMessageId = null, onWindowClose = nu
       body: '',
       quotedBody: fwdText,
       quotedBodyHtml: fwdHtml,
+      quotedImagesBlocked: body?.remoteImagesBlocked === true,
       quoteMeta,
       quoteLang,
       quoteExtra,
@@ -1358,8 +1364,9 @@ export default function MessagePane({ windowMessageId = null, onWindowClose = nu
     const win = window.open('', '_blank');
     if (!win) return;
     // CSP blocks any script execution in this same-origin print window (it has no
-    // sandbox); combined with the DOMPurify pass above this neutralizes email HTML.
-    win.document.write(`<!DOCTYPE html><html><head><meta charset="utf-8"><meta http-equiv="Content-Security-Policy" content="script-src 'none'; object-src 'none'; base-uri 'none'"><title>${esc(message.subject)}</title>
+    // sandbox); combined with the DOMPurify pass above this neutralizes email HTML. A body
+    // served with remote images blocked prints without them (utils/remoteImagePolicy.js).
+    win.document.write(`<!DOCTYPE html><html><head><meta charset="utf-8"><meta http-equiv="Content-Security-Policy" content="${printWindowCsp(body?.remoteImagesBlocked === true)}"><title>${esc(message.subject)}</title>
 <style>
   body { font-family: Arial, sans-serif; font-size: 14px; color: #111; margin: 32px; }
   .header { border-bottom: 1px solid #ccc; padding-bottom: 16px; margin-bottom: 24px; }
@@ -3236,7 +3243,7 @@ ${bodyContent}
                 srcDoc={`<!DOCTYPE html><html><head><meta charset="utf-8">
                 <meta name="viewport" content="width=device-width,initial-scale=1">
                 <meta name="color-scheme" content="only light">
-                <meta http-equiv="Content-Security-Policy" content="script-src 'none'; object-src 'none'; frame-src 'none'; form-action 'none'; style-src 'unsafe-inline';">
+                <meta http-equiv="Content-Security-Policy" content="${emailFrameCsp(body.remoteImagesBlocked === true)}">
                 <base target="_blank">
               </head><body><div id="mf-scale-wrapper">${
                 body.html.replace(/<a(\s)/gi, '<a rel="noopener noreferrer"$1')

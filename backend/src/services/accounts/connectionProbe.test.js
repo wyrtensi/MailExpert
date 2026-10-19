@@ -2,7 +2,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 vi.mock('imapflow', () => ({ ImapFlow: vi.fn() }));
 vi.mock('../connectionPolicy.js', () => ({ getConnectionPolicy: vi.fn() }));
-vi.mock('node:dns', () => ({ promises: { resolve4: vi.fn(), resolve6: vi.fn() } }));
+vi.mock('node:dns', () => ({ promises: { resolve4: vi.fn(), resolve6: vi.fn(), lookup: vi.fn() } }));
 vi.mock('./smtpProbeProcess.js', () => ({ probeSmtpInChild: vi.fn() }));
 
 import { ImapFlow } from 'imapflow';
@@ -27,6 +27,8 @@ beforeEach(() => {
   getConnectionPolicy.mockResolvedValue({ allowPrivateHosts: false, allowNonstandardPorts: false, allowInsecureTls: true });
   dns.resolve4.mockResolvedValue(['203.0.113.10', '203.0.113.11']);
   dns.resolve6.mockResolvedValue([]);
+  // A name DNS does not know is looked up in the system resolver (/etc/hosts); here none knows it.
+  dns.lookup.mockRejectedValue(Object.assign(new Error('ENOTFOUND'), { code: 'ENOTFOUND' }));
 });
 afterEach(() => vi.useRealTimers());
 

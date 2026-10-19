@@ -24,6 +24,10 @@ function quoteSource(message, body, { accounts = [], folders = [], safeLabels } 
   return { text: body?.text, html: body?.html };
 }
 
+// Whether the quoted body was served with remote images blocked: the composer then keeps them
+// blocked in the quote (utils/appEmailHtml.js), which sits in the app's page, not the email frame.
+const quotedImagesBlocked = (body) => body?.remoteImagesBlocked === true;
+
 // The options a caller with t() and the account's folders passes to the two helpers below.
 export function safeQuoteOptions(t, folders) {
   return {
@@ -91,6 +95,7 @@ export async function openReplyFromMessage(message, { accounts, openCompose, get
     body: '',
     quotedBody: quotedText,
     quotedBodyHtml,
+    quotedImagesBlocked: quotedImagesBlocked(replyBody),
     quoteMeta,
     quoteLang,
     inReplyTo: message.message_id,
@@ -119,6 +124,7 @@ export async function openForwardFromMessage(message, { openCompose, getMessageB
     body: '',
     quotedBody: fwdText,
     quotedBodyHtml: fwdHtml,
+    quotedImagesBlocked: quotedImagesBlocked(fwdBody),
     quoteMeta,
     quoteLang,
     quoteExtra,

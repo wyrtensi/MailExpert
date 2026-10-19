@@ -350,6 +350,23 @@ describe('API-key provider regression', () => {
     expect(cancelled).toBe(true);
   });
 
+  // The base URL is the address the admin chose. A redirect would send the request (the email
+  // text in its body and, on a 307/308, the API key on a same-origin hop) to an address that was
+  // never chosen, over plaintext http too: AI requests do not require https.
+  it('does not follow a redirect from the provider', async () => {
+    const fetchFn = vi.fn().mockResolvedValue(new Response(null, { status: 307, headers: { Location: 'http://other.example/v1/chat/completions' } }));
+    const { provider } = factory({ initial: legacy, fetchFn });
+    const err = await provider.completeText([{ role: 'user', content: 'Hi' }]).catch((e) => e);
+    expect(fetchFn.mock.calls[0][1].redirect).toBe('manual');
+    expect(err.status).toBe(502);
+    expect(err.expose).toBe(true);
+    expect(err.message).toMatch(/redirected the request \(307\)/);
+    const streamFn = vi.fn().mockResolvedValue(new Response(null, { status: 302, headers: { Location: 'http://other.example/' } }));
+    const streaming = factory({ initial: legacy, fetchFn: streamFn }).provider;
+    await expect(collect(streaming.streamChat([{ role: 'user', content: 'Hi' }]))).rejects.toThrow(/redirected the request \(302\)/);
+    expect(streamFn.mock.calls[0][1].redirect).toBe('manual');
+  });
+
   it('bounds non-2xx provider errors without exposing the configured key', async () => {
     let cancelled = false;
     const fetchFn = vi.fn().mockResolvedValue(sseResponse(
@@ -391,6 +408,34 @@ describe('API-key provider connection policy on every request', () => {
       expect(local.hits()).toBe(0);
     } finally {
       await local.close();
+    }
+  });
+
+  it("never reaches a redirect's target through safeFetch", async () => {
+    const hits = [];
+    const target = createServer((req, res) => {
+      let body = '';
+      req.on('data', (chunk) => { body += chunk; });
+      req.on('end', () => { hits.push({ authorization: req.headers.authorization, body }); res.end('{}'); });
+    });
+    await new Promise(resolve => target.listen(0, '127.0.0.1', resolve));
+    const origin = createServer((req, res) => {
+      res.writeHead(307, { Location: `http://127.0.0.1:${target.address().port}/v1/chat/completions` });
+      res.end();
+    });
+    await new Promise(resolve => origin.listen(0, '127.0.0.1', resolve));
+    try {
+      const { provider } = factory({
+        initial: { enabled: true, baseUrl: `http://127.0.0.1:${origin.address().port}/v1`, apiKey: 'encrypted:api-secret', model: 'm' },
+        getConnectionPolicyFn: vi.fn().mockResolvedValue({ allowPrivateHosts: true }),
+        fetchFn: undefined,
+      });
+      const err = await provider.completeText([{ role: 'user', content: 'Hi' }]).catch((e) => e);
+      expect(err.message).toMatch(/redirected the request \(307\)/);
+      expect(hits).toEqual([]);
+    } finally {
+      await new Promise(resolve => origin.close(resolve));
+      await new Promise(resolve => target.close(resolve));
     }
   });
 

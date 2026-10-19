@@ -38,6 +38,11 @@ describe('conversationSrcDoc', () => {
     assert.doesNotMatch(conversationSrcDoc('<p>Hi</p>', { showQuote: true }), /\.gmail_quote/);
   });
 
+  it('forbids remote images only for a body served with them blocked', () => {
+    assert.match(conversationSrcDoc('<p>Hi</p>', { remoteImagesBlocked: true }), /style-src 'unsafe-inline'; img-src 'self' data: blob:;/);
+    assert.doesNotMatch(conversationSrcDoc('<p>Hi</p>'), /img-src/);
+  });
+
   it('opens links outside with noopener', () => {
     assert.match(conversationSrcDoc('<a href="https://x.example">x</a>'), /<a rel="noopener noreferrer" href=/);
   });

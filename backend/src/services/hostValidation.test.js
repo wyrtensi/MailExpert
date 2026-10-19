@@ -7,17 +7,89 @@ vi.mock('dns', () => ({
   promises: {
     resolve4: vi.fn().mockResolvedValue([]),
     resolve6: vi.fn().mockResolvedValue([]),
+    lookup: vi.fn().mockRejectedValue(Object.assign(new Error('ENOTFOUND'), { code: 'ENOTFOUND' })),
   },
 }));
 
+vi.mock('fs', () => ({ promises: { readFile: vi.fn() } }));
+
 // Pull the mocked fns for per-test control.
 const { promises: dns } = await import('dns');
+const { promises: fs } = await import('fs');
 
 beforeEach(() => {
   dns.resolve4.mockClear();
   dns.resolve6.mockClear();
   dns.resolve4.mockResolvedValue([]);
   dns.resolve6.mockResolvedValue([]);
+  dns.lookup.mockReset();
+  dns.lookup.mockRejectedValue(Object.assign(new Error('ENOTFOUND'), { code: 'ENOTFOUND' }));
+  fs.readFile.mockReset();
+  fs.readFile.mockResolvedValue('127.0.0.1 localhost\n');
+});
+
+// A name only /etc/hosts knows: DNS has no answer, the system resolver (which the connection uses)
+// has loopback. It was let through unchecked. The system resolver (getaddrinfo) runs on libuv's
+// small thread pool, so it is asked only about single-label names (ip6-localhost, _gateway), a few
+// at a time; a name with dots is looked up in the hosts file itself.
+describe('names DNS does not know', () => {
+  it('are checked through the system resolver when they have a single label', async () => {
+    dns.lookup.mockResolvedValue([{ address: '::1', family: 6 }]);
+    expect(await validateHost('ip6-localhost')).toMatch(/private|reserved/i);
+    await expect(resolveForConnection('ip6-localhost')).rejects.toThrow(/private|reserved/i);
+  });
+
+  it('with dots are checked against the hosts file, never the system resolver', async () => {
+    fs.readFile.mockResolvedValue('# comment\n127.0.0.1\tlocalhost\n10.0.0.5 evil.alias.example other # trailing\n203.0.113.9 mail.internal-alias\n');
+    expect(await validateHost('evil.alias.example')).toMatch(/private|reserved/i);
+    await expect(resolveForConnection('EVIL.alias.example.')).rejects.toThrow(/private|reserved/i);
+    const r = await resolveForConnection('mail.internal-alias');
+    expect(r).toMatchObject({ host: '203.0.113.9', servername: 'mail.internal-alias', addresses: ['203.0.113.9'] });
+    expect(dns.lookup).not.toHaveBeenCalled();
+  });
+
+  it('are not looked up anywhere else when DNS answers', async () => {
+    dns.resolve4.mockResolvedValue(['203.0.113.10']);
+    await resolveForConnection('imap.example.com');
+    await resolveForConnection('imap');
+    expect(dns.lookup).not.toHaveBeenCalled();
+    expect(fs.readFile).not.toHaveBeenCalled();
+  });
+
+  it.each(['ａｌｉａｓ.example', 'alias\u00ad.example', 'alias\u3002example'])('rejects the private hosts entry behind the IDNA spelling %s', async host => {
+    fs.readFile.mockResolvedValue('127.0.0.1 alias.example\n');
+    expect(await validateHost(host)).toMatch(/private|reserved/i);
+    await expect(resolveForConnection(host)).rejects.toThrow(/private|reserved/i);
+  });
+
+  it('pins the public hosts entry behind an IDNA spelling', async () => {
+    fs.readFile.mockResolvedValue('203.0.113.9 alias.example\n');
+    const result = await resolveForConnection('ａｌｉａｓ.example');
+    expect(result).toMatchObject({ host: '203.0.113.9', addresses: ['203.0.113.9'] });
+    const addresses = await new Promise((resolve, reject) => {
+      result.lookup('alias.example', { all: true }, (err, found) => err ? reject(err) : resolve(found));
+    });
+    expect(addresses).toEqual([{ address: '203.0.113.9', family: 4 }]);
+  });
+
+  it('ask the system resolver at most two at a time', async () => {
+    const pending = [];
+    dns.lookup.mockImplementation(() => new Promise(resolve => pending.push(resolve)));
+    const checks = ['a', 'b', 'c', 'd', 'e'].map(name => validateHost(name));
+    await new Promise(resolve => setTimeout(resolve, 10));
+    expect(dns.lookup).toHaveBeenCalledTimes(2);
+    while (pending.length) {
+      pending.shift()([]);
+      await new Promise(resolve => setTimeout(resolve, 10));
+    }
+    expect(await Promise.all(checks)).toEqual([null, null, null, null, null]);
+    expect(dns.lookup).toHaveBeenCalledTimes(5);
+  });
+
+  it('are left to fail at connect when no resolver knows them', async () => {
+    expect(await validateHost('nowhere.invalid')).toBeNull();
+    expect(await resolveForConnection('nowhere.invalid')).toEqual({ host: 'nowhere.invalid', servername: null });
+  });
 });
 
 // ── validateHostLiteral ────────────────────────────────────────────────────
@@ -47,6 +119,11 @@ describe('validateHostLiteral', () => {
     ['mail.local'],
     ['server.internal'],
     ['host.localhost'],
+    ['ｌｏｃａｌｈｏｓｔ'],  // fullwidth, which dns.lookup converts to localhost
+    ['localhost.'],     // fully qualified, the same name
+    ['foo.localhost.'],
+    ['mail.local.'],
+    ['metadata.google.internal.'],
   ])('blocks reserved hostname %s', host => {
     expect(validateHostLiteral(host)).toMatch(/local/i);
   });
@@ -81,6 +158,45 @@ describe('validateHostLiteral', () => {
     ['::ffff:10.0.0.1'],  // IPv4-mapped private
   ])('blocks private IPv6 %s', ip => {
     expect(validateHostLiteral(ip)).toMatch(/private|reserved/i);
+  });
+
+  // net.isIPv4 accepts only the dotted quad, but getaddrinfo reads these as IPv4 too.
+  it.each([
+    ['0'],                // 0.0.0.0
+    ['2130706433'],       // 127.0.0.1 as one decimal number
+    ['0x7f000001'],       // 127.0.0.1 in hex
+    ['0177.0.0.1'],       // octal part
+    ['127.1'],            // a.b shorthand
+    ['127.000.000.001'],  // zero-padded parts
+    ['0x0a000001'],       // 10.0.0.1
+    ['2852039166'],       // 169.254.169.254
+    // dns.lookup converts a non-ASCII host to ASCII before getaddrinfo reads it.
+    ['１２７.０.０.１'],  // fullwidth digits
+    ['127。0。0。1'],     // ideographic full stops
+    ['127.0.0.1­'],  // a trailing soft hyphen, which the conversion drops
+    ['０x7f000001'],      // a fullwidth 0 in the hex form
+  ])('blocks private IPv4 written as %s', host => {
+    expect(validateHostLiteral(host)).toMatch(/private|reserved/i);
+  });
+
+  // dns.lookup converts these to ::1, but a hostname cannot hold a colon.
+  it.each([
+    ['::１'],       // a fullwidth 1
+    ['：：1'],      // fullwidth colons
+    ['::1­'],  // a trailing soft hyphen
+  ])('refuses the Unicode spelling %s of an IPv6 address', host => {
+    expect(validateHostLiteral(host)).toMatch(/not a valid hostname/i);
+  });
+
+  it.each([
+    ['134744072'],                  // 8.8.8.8 as one decimal number
+    ['deadbeef'],                   // a hostname, not a number
+    ['2001:db8::1%a:b:c:d:e:f:1'],  // a zone ID with colons
+    ['８.８.８.８'],                // fullwidth digits
+    ['mail.münchen.de'],            // an internationalised name
+    ['mail.example.com.'],          // a fully qualified public name
+  ])('passes public address %s', host => {
+    expect(validateHostLiteral(host)).toBeNull();
   });
 
   // Bracket-wrapped IPv6
@@ -132,6 +248,11 @@ describe('validateHost', () => {
     expect(dns.resolve4).not.toHaveBeenCalled();
   });
 
+  it('blocks a private IPv4 in a spelling net.isIPv4 rejects, before DNS', async () => {
+    expect(await validateHost('0x7f000001')).toMatch(/private|reserved/i);
+    expect(dns.resolve4).not.toHaveBeenCalled();
+  });
+
   it('short-circuits on reserved hostname before DNS', async () => {
     expect(await validateHost('localhost')).not.toBeNull();
     expect(dns.resolve4).not.toHaveBeenCalled();
@@ -180,6 +301,13 @@ describe('resolveForConnection', () => {
 
   it('throws for a literal private IP', async () => {
     await expect(resolveForConnection('10.0.0.1')).rejects.toThrow(/private|reserved/i);
+    expect(dns.resolve4).not.toHaveBeenCalled();
+  });
+
+  it('throws for other spellings of a private literal, before DNS', async () => {
+    await expect(resolveForConnection('2130706433')).rejects.toThrow(/private|reserved/i);
+    await expect(resolveForConnection('０x7f000001')).rejects.toThrow(/private|reserved/i);
+    await expect(resolveForConnection('１２７.０.０.１')).rejects.toThrow(/private|reserved/i);
     expect(dns.resolve4).not.toHaveBeenCalled();
   });
 

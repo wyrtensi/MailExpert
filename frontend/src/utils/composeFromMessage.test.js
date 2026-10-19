@@ -339,3 +339,22 @@ describe('quoted body templates', () => {
     );
   });
 });
+
+// The quote is placed in the app's own page, whose CSP allows any https image: the composer must
+// know when the quoted body was served with remote images blocked, so it keeps them blocked.
+describe('quoted images and remote image blocking', () => {
+  const message = { id: 'm1', account_id: 'a', from_email: 'f@example.com', subject: 'S' };
+  const run = async (open, body) => {
+    const h = harness(body);
+    await open(message, { accounts: [], openCompose: h.openCompose, getMessageBody: h.getMessageBody });
+    return h.payload();
+  };
+
+  it('passes the body flag on, for a reply and a forward', async () => {
+    for (const open of [openReplyFromMessage, openForwardFromMessage]) {
+      assert.equal((await run(open, { html: '<p>x</p>', remoteImagesBlocked: true })).quotedImagesBlocked, true);
+      assert.equal((await run(open, { html: '<p>x</p>', remoteImagesBlocked: false })).quotedImagesBlocked, false);
+      assert.equal((await run(open, null)).quotedImagesBlocked, false);
+    }
+  });
+});

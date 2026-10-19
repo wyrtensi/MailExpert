@@ -258,7 +258,7 @@ function ThreadLetterBody({ id, onOpen, inSpamFolder, nodeMailbox, t }) {
         {warning}
         {verdict}
         <div ref={contentRef} tabIndex={-1} style={{ padding: '0 14px', background: 'white' }}>
-          <LetterFrame html={body.html} showQuote={showQuote} title={t('message.emailFrameTitle')} />
+          <LetterFrame html={body.html} remoteImagesBlocked={body.remoteImagesBlocked === true} showQuote={showQuote} title={t('message.emailFrameTitle')} />
         </div>
         {footer(htmlHasQuote(body.html))}
       </>
@@ -300,11 +300,14 @@ function LinkifiedText({ text }) {
 // frame is (utils/emailFrameHeight.js): from the content wrapper, never from documentElement,
 // whose height is floored by the frame itself, so hiding the quote again shrinks the frame.
 // Links open in a real browser tab, as in the open letter; relative ones go nowhere.
-function LetterFrame({ html, showQuote, title }) {
+function LetterFrame({ html, remoteImagesBlocked, showQuote, title }) {
   const ref = useRef(null);
   const [height, setHeight] = useState(80);
   const font = useMemo(() => emailFontFor(), []);
-  const srcDoc = useMemo(() => conversationSrcDoc(html, { font, showQuote }), [html, font, showQuote]);
+  const srcDoc = useMemo(
+    () => conversationSrcDoc(html, { font, showQuote, remoteImagesBlocked }),
+    [html, font, showQuote, remoteImagesBlocked],
+  );
 
   useEffect(() => {
     const frame = ref.current;

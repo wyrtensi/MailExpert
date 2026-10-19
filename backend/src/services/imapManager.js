@@ -7409,6 +7409,9 @@ export class ImapManager {
               console.warn(`fetchMessageBody: uid=${uid} folder=${folder} account=${logAccount(account)}: left ${overBudget} repeated inline image reference(s) as cid:, past the ${INLINE_IMAGE_REPEAT_BUDGET / (1024 * 1024)} MB repeat budget`);
             }
           }
+          // A Content-ID counts as missing only when no part sharing it loaded: a reference left
+          // over the repeat budget names an image that did arrive, and another fetch changes nothing.
+          for (const key of dataUris.keys()) missingImages.delete(key);
           if (missingImages.size > 0) {
             for (const [, cid] of html.matchAll(CID_REFERENCE_RE)) {
               if (missingImages.has(cid.toLowerCase())) { cidsComplete = false; break; }

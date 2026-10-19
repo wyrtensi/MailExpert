@@ -8675,6 +8675,21 @@ describe('fetchMessageBody inline images', () => {
     expect(body.cidsComplete).toBe(false);
   });
 
+  it('is complete when one part of a shared Content-ID did not arrive but another did', async () => {
+    const { mgr, account } = arrange([image('2', 'logo@x'), image('3', 'logo@x')], { 1: '<img src="cid:logo@x">', 3: 'iVBORw0KGgo=' });
+    const body = await mgr.fetchMessageBody(account, 42, 'INBOX');
+    expect(body.html).toBe('<img src="data:image/png;base64,iVBORw0KGgo=">');
+    expect(body.cidsComplete).toBe(true);
+    // A reference left over the repeat budget names an image that did arrive: another fetch
+    // leaves it exactly as it is, so the body is complete.
+    vi.spyOn(console, 'warn').mockImplementation(() => {});
+    const big = 'QUFB'.repeat(Math.ceil(INLINE_IMAGE_REPEAT_BUDGET / 4));
+    const over = arrange([image('2', 'logo@x'), image('3', 'logo@x')], { 1: '<img src="cid:logo@x">'.repeat(3), 3: big });
+    const overBody = await over.mgr.fetchMessageBody(over.account, 42, 'INBOX');
+    expect(overBody.html).toContain('cid:logo@x');
+    expect(overBody.cidsComplete).toBe(true);
+  });
+
   it('is complete when every referenced image was embedded', async () => {
     const { mgr, account } = arrange([image('2', 'logo@x')], { 1: '<img src="cid:logo@x">', 2: 'iVBORw0KGgo=' });
     expect((await mgr.fetchMessageBody(account, 42, 'INBOX')).cidsComplete).toBe(true);

@@ -55,6 +55,21 @@ function scanPaired(str, openNameRe, closeLiteral, transform) {
   return out + str.slice(pos);
 }
 
+// Rewrites the text of every <style> block, then seals it. The rewrites run on sanitized output and
+// delete parts of the CSS (a declaration, a url(), a whole @media block); a deletion joins the text
+// on either side of it, and `</` before one with `style` after it made a real end tag, closing the
+// block early so whatever followed it in the CSS (tags sanitize-html had only seen as style text:
+// <a href="javascript:…">, <form>, <base>) reached the body as markup. Sealing turns any `</style`
+// left in the text into `<\/style`, the same characters to CSS and no end tag to the HTML parser.
+// An opening `<style` is escaped the same way (`<\style`).
+export function sealStyleText(css) {
+  return css.replace(/<(\/?)(style)/gi, '<\\$1$2');
+}
+
+function rewriteStyleBlocks(html, rewrite) {
+  return scanPaired(html, /<style\b/gi, '</style>', (open, content, close) => open + sealStyleText(rewrite(content)) + close);
+}
+
 // Strip MSO-positive conditional comments (<!--[if mso]>…<![endif]-->) linearly,
 // preserving <!--[if !mso]> blocks (browser-targeted CSS). Mirrors the old regex
 // /<!--\[if(?!\s*!)[^\]]*\]>[\s\S]*?<!\[endif\]-->/gi without its backtracking.
@@ -184,9 +199,7 @@ function upgradeStyleUrls(style) {
 // the user's remote image blocking preference.  data: and cid: URIs are left intact.
 function stripExternalStyleBlockUrls(html) {
   if (!html) return html;
-  return scanPaired(html, /<style\b/gi, '</style>', (open, content, close) =>
-    open + stripExternalCssUrls(content) + close
-  );
+  return rewriteStyleBlocks(html, stripExternalCssUrls);
 }
 
 // Mirrors /url\s*\(\s*(['"]?)https?:\/\/[^)]*\1\s*\)/gi without its backtracking: from every
@@ -223,9 +236,7 @@ function stripExternalCssUrls(css) {
 // block CSS must be handled separately after sanitization.
 function upgradeStyleBlocks(html) {
   if (!html) return html;
-  return scanPaired(html, /<style\b/gi, '</style>', (open, content, close) =>
-    open + content.replace(/url\(\s*(['"]?)http:\/\//gi, (_, q) => `url(${q}https://`) + close
-  );
+  return rewriteStyleBlocks(html, content => content.replace(/url\(\s*(['"]?)http:\/\//gi, (_, q) => `url(${q}https://`));
 }
 
 // Strip dark-mode CSS from a <style> block's text content.
@@ -331,9 +342,16 @@ function stripInvertFilters(css) {
 
 function stripDarkModeStyleBlocks(html) {
   if (!html) return html;
-  return scanPaired(html, /<style\b/gi, '</style>', (open, content, close) =>
-    open + stripDarkModeCss(content) + close
-  );
+  return rewriteStyleBlocks(html, stripDarkModeCss);
+}
+
+// A URL attribute as the browser reads it: the URL standard drops every tab and line break inside
+// a URL and trims control characters and spaces from its ends. Left in, `ht&#x0A;tps://…` hid an
+// image from remote-image blocking, which matches the URL as written, while the browser still
+// fetched it from the sender.
+function asBrowserUrl(value) {
+  // eslint-disable-next-line no-control-regex -- the C0 controls the URL standard trims
+  return String(value).replace(/[\t\n\r]/g, '').replace(/^[\u0000- ]+|[\u0000- ]+$/g, '');
 }
 
 // Sanitize HTML email body — permissive but safe.
@@ -389,11 +407,11 @@ export function sanitizeEmail(html) {
       // mixed content on an https host, causing images to silently fail.
       'img': (tagName, attribs) => {
         const out = { ...attribs };
-        if (out.src)    out.src    = unwrapEbayImgUrl(upgradeUrl(out.src));
+        if (out.src)    out.src    = unwrapEbayImgUrl(upgradeUrl(asBrowserUrl(out.src)));
         // Simple regex replacement avoids split(',') corrupting data: URIs that
         // contain commas (e.g. data:image/png;base64,abc 2x).
         if (out.srcset) out.srcset = out.srcset.replace(/\bhttp:\/\//g, 'https://');
-        if (out.background) out.background = upgradeUrl(out.background);
+        if (out.background) out.background = upgradeUrl(asBrowserUrl(out.background));
         if (out.style) out.style = upgradeStyleUrls(out.style);
         // Defer loading of remote images; skip cid:/data: which are already local.
         const isLocal = out.src && /^(cid:|data:)/i.test(out.src);
@@ -409,7 +427,7 @@ export function sanitizeEmail(html) {
       // and CSS background-image declarations.
       '*': (tagName, attribs) => {
         const out = { ...attribs };
-        if (out.background) out.background = upgradeUrl(out.background);
+        if (out.background) out.background = upgradeUrl(asBrowserUrl(out.background));
         if (out.style) out.style = upgradeStyleUrls(out.style);
         return { tagName, attribs: out };
       },
@@ -717,7 +735,7 @@ export function blockRemoteImages(html) {
 
   // Block remote CSS loads inside <style> blocks: remote @imports dropped, url(...) and
   // image-set() URLs made inert.
-  out = scanPaired(out, /<style\b/gi, '</style>', (open, content, close) => open + blockCssUrls(content) + close);
+  out = rewriteStyleBlocks(out, blockCssUrls);
 
   return out;
 }

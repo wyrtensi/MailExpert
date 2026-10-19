@@ -1,6 +1,7 @@
 import { describe, it, expect } from 'vitest';
 import {
   stripEmailHead,
+  sealStyleText,
   sanitizeEmail,
   sanitizeSignature,
   sanitizeComposeBody,
@@ -497,6 +498,67 @@ describe('remote image blocking stays fast on hostile CSS', () => {
     hasRemoteImages(html);
     blockRemoteImages(html);
     expect(performance.now() - started).toBeLessThan(2000);
+  });
+});
+
+// The clean-ups that run on <style> text after sanitize-html delete parts of the CSS, and a deletion
+// joins the text around it: `</` before a removed declaration and `style>` after it made a real end
+// tag, so CSS text the allowlist never saw as markup came out of the sanitizer as markup.
+describe('style blocks stay closed after the dark-mode and URL clean-ups', () => {
+  const ELEMENTS = /<(a|form|input|base|img)\b/i;
+  // The markup outside every <style> block, where the HTML parser would build elements.
+  const outsideStyles = (html) => {
+    let out = '';
+    let pos = 0;
+    const open = /<style\b[^>]*>/gi;
+    let m;
+    while ((m = open.exec(html))) {
+      out += html.slice(pos, m.index);
+      const close = html.toLowerCase().indexOf('</style', open.lastIndex);
+      pos = close === -1 ? html.length : html.indexOf('>', close) + 1;
+      open.lastIndex = pos;
+    }
+    return out + html.slice(pos);
+  };
+
+  it.each([
+    ['an invert() filter', '<style>p{color:red}</filter:invert(1);style><a href="javascript:alert(1)">x</a><form action=https://evil.example><input name=p></form><base href="https://evil.example/"></style><p>after</p>'],
+    ['a color-scheme declaration', '<style>p{color:red}</color-scheme:dark;style><img src=x onerror=alert(1)><base href="https://evil.example/"></style><p>after</p>'],
+    ['a dark @media block', '<style>p{color:red}</@media (prefers-color-scheme: dark){p{color:#fff}}style><a href="javascript:alert(1)">x</a></style><p>after</p>'],
+    ['an Outlook dark rule', '<style>p{color:red}</[data-ogsc] .h{color:#fff}style><a href="javascript:alert(1)">x</a></style><p>after</p>'],
+    ['an external url()', '<style>p{color:red}</url(https://evil.example/x.png)style><a href="javascript:alert(1)">x</a></style><p>after</p>'],
+  ])('removing %s cannot close the block early', (_label, html) => {
+    const out = sanitizeEmail(html);
+    expect(outsideStyles(out)).not.toMatch(ELEMENTS);
+    expect(out).toContain('<p>after</p>');
+  });
+
+  it('a blocked url() in a style block cannot close it early either', () => {
+    const out = blockRemoteImages('<style>p{color:red}</@import "https://evil.example/a.css";style><a href="javascript:alert(1)">x</a></style><p>after</p>');
+    expect(outsideStyles(out)).not.toMatch(ELEMENTS);
+  });
+
+  it('sealing leaves ordinary CSS as it was, and a sealed body as it is', () => {
+    expect(sealStyleText('p{color:red} a:hover{color:blue}')).toBe('p{color:red} a:hover{color:blue}');
+    expect(sealStyleText('x</STYLE')).toBe('x<\\/STYLE');
+    expect(sealStyleText('<style')).toBe('<\\style');
+    const once = sanitizeEmail('<style>p{color:red}</filter:invert(1);style><a href="javascript:alert(1)">x</a></style><p>after</p>');
+    expect(sanitizeEmail(once)).toBe(once);
+  });
+});
+
+// The URL standard drops tabs and line breaks inside a URL and trims control characters from its
+// ends. An image written `ht&#x0A;tps://…` was not recognized by remote-image blocking, while the
+// browser still fetched it from the sender.
+describe('image URLs are read as the browser reads them', () => {
+  it.each([
+    ['a line break in the scheme', '<img src="ht&#x0A;tps://evil.example/a.gif">'],
+    ['a tab and a leading space', '<img src=" &#x09;https://evil.example/a.gif">'],
+    ['a carriage return in a background', '<table><tr><td background="ht&#x0D;tps://evil.example/a.gif">x</td></tr></table>'],
+  ])('%s is blocked like any remote image', (_label, html) => {
+    const out = sanitizeEmail(html);
+    expect(out).toContain('https://evil.example/a.gif');
+    expect(blockRemoteImages(out)).not.toContain('evil.example');
   });
 });
 

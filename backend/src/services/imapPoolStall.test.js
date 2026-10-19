@@ -32,7 +32,7 @@ vi.mock('../utils/redact.js', () => ({ redactEmail: vi.fn(() => 'a***@example.co
 vi.mock('./hostValidation.js', () => ({ resolveForConnection: vi.fn(), createPinnedLookup: vi.fn() }));
 vi.mock('./connectionPolicy.js', () => ({ getConnectionPolicy: vi.fn() }));
 
-import { ImapManager, withFreshClient, evictPool, isConnectionRefusal, POOL_STALL_TIMEOUT_MS } from './imapManager.js';
+import { ImapManager, withFreshClient, evictPool, isConnectionRefusal, POOL_STALL_TIMEOUT_MS, SLOW_COMMAND_STALL_TIMEOUT_MS } from './imapManager.js';
 import { query } from './db.js';
 import { resolveForConnection } from './hostValidation.js';
 import { getConnectionPolicy } from './connectionPolicy.js';
@@ -48,8 +48,9 @@ const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 //   progress line every everyMs (null forMs: forever), then answers it.
 // resetFetch: the connection is reset instead.
 // appendAckMs: delays the reply to an APPEND whose message has arrived in full.
+// ignoreNoop: a NOOP is read and never answered.
 function startFakeImap() {
-  const state = { stallFetch: false, trickleFetch: null, resetFetch: false, appendAckMs: 0, appended: 0, commands: [], connections: 0, sockets: new Set(), timers: new Set() };
+  const state = { ignoreNoop: false, stallFetch: false, trickleFetch: null, resetFetch: false, appendAckMs: 0, appended: 0, commands: [], connections: 0, sockets: new Set(), timers: new Set() };
   const server = net.createServer((socket) => {
     state.connections += 1;
     state.sockets.add(socket);
@@ -109,6 +110,8 @@ function startFakeImap() {
         } else if (verb === 'APPEND') {
           literal = { tag, remaining: Number(/\{(\d+)\}$/.exec(line)[1]) };
           socket.write('+ go ahead\r\n');
+        } else if (verb === 'NOOP' && state.ignoreNoop) {
+          // read, never answered
         } else if (verb === 'LOGOUT') {
           socket.end(`* BYE\r\n${tag} OK done\r\n`);
         } else {
@@ -139,7 +142,8 @@ beforeAll(async () => {
     enabled: true,
   };
   vi.spyOn(net.Socket.prototype, 'setTimeout').mockImplementation(function (ms, ...rest) {
-    return realSetTimeout.call(this, ms === POOL_STALL_TIMEOUT_MS ? STALL_MS : ms, ...rest);
+    const scaledMs = ms === POOL_STALL_TIMEOUT_MS ? STALL_MS : ms === SLOW_COMMAND_STALL_TIMEOUT_MS ? scaled(SLOW_COMMAND_STALL_TIMEOUT_MS) : ms;
+    return realSetTimeout.call(this, scaledMs, ...rest);
   });
 });
 
@@ -152,7 +156,7 @@ beforeEach(() => {
   getConnectionPolicy.mockResolvedValue({ allowPrivateHosts: true, allowInsecureTls: true });
   resolveForConnection.mockResolvedValue({ host: '127.0.0.1', addresses: ['127.0.0.1'], servername: null });
   query.mockResolvedValue({ rows: [] });
-  Object.assign(fake.state, { stallFetch: false, trickleFetch: null, resetFetch: false, appendAckMs: 0, appended: 0, commands: [], connections: 0 });
+  Object.assign(fake.state, { ignoreNoop: false, stallFetch: false, trickleFetch: null, resetFetch: false, appendAckMs: 0, appended: 0, commands: [], connections: 0 });
   // connectImapClient logs every client 'error'; a stall is expected to be one.
   vi.spyOn(console, 'error').mockImplementation(() => {});
   vi.spyOn(console, 'warn').mockImplementation(() => {});
@@ -336,5 +340,92 @@ describe('opting out of the idle timer', () => {
     fake.state.trickleFetch = { everyMs: STALL_MS * 3, forMs: STALL_MS * 3 };
     const rows = await withFreshClient(ACCOUNT, fetchFlags, { stallTimeout: false });
     expect(rows).toEqual([1]);
+  });
+});
+
+describe('a quiet lease whose keepalive NOOP gets no answer', () => {
+  it('is cut off within about two idle timeouts', async () => {
+    // Holding a lock, the session is quiet for a reason, so the first timeout sends a NOOP. A dead
+    // server never answers it; the next timeout finds that NOOP stuck and closes the session.
+    fake.state.ignoreNoop = true;
+    let leased;
+    let closedAfter = null;
+    const started = Date.now();
+    const outcome = await withFreshClient(ACCOUNT, async (client) => {
+      leased = client;
+      client.once('close', () => { closedAfter = Date.now() - started; });
+      const lock = await client.getMailboxLock('INBOX');
+      try {
+        await sleep(STALL_MS * 4);
+        return await fetchFlags(client);
+      } finally {
+        lock.release();
+      }
+    }).then(() => 'answered', (err) => err);
+    expect(fake.state.commands).toContain('NOOP');
+    expect(closedAfter).not.toBeNull();
+    expect(closedAfter).toBeLessThan(STALL_MS * 3);
+    expect(leased.usable).toBe(false);
+    expect(outcome).toBeInstanceOf(Error);
+    expect(outcome.message).toBe(IDLE_ERROR);
+  });
+});
+
+describe('a numeric stallTimeout', () => {
+  const slowError = `IMAP command timed out: nothing received for ${SLOW_COMMAND_STALL_TIMEOUT_MS / 1000}s`;
+
+  it('is the idle limit for that lease: quiet past the default survives, quiet past it is cut', async () => {
+    expect(SLOW_COMMAND_STALL_TIMEOUT_MS).toBe(120000);
+    const slowMs = scaled(SLOW_COMMAND_STALL_TIMEOUT_MS);
+    // Silent for twice the default idle limit, under the slow one: answered.
+    fake.state.trickleFetch = { everyMs: STALL_MS * 2, forMs: STALL_MS * 2 };
+    let during;
+    const rows = await withFreshClient(ACCOUNT, (client) => { during = client.socket.timeout; return fetchFlags(client); },
+      { stallTimeout: SLOW_COMMAND_STALL_TIMEOUT_MS });
+    expect(rows).toEqual([1]);
+    expect(during).toBe(slowMs);
+
+    // Silent for good: cut at the slow limit, and the error names it.
+    fake.state.trickleFetch = null;
+    fake.state.stallFetch = true;
+    const started = Date.now();
+    const outcome = await withFreshClient(ACCOUNT, fetchFlags, { stallTimeout: SLOW_COMMAND_STALL_TIMEOUT_MS })
+      .then(() => 'answered', (err) => err);
+    expect(outcome).toBeInstanceOf(Error);
+    expect(outcome.message).toBe(slowError);
+    expect(Date.now() - started).toBeGreaterThanOrEqual(slowMs - 5);
+  });
+});
+
+describe('ending a lease whose socket is already gone', () => {
+  it('does not touch a destroyed socket', async () => {
+    let socket;
+    await withFreshClient(ACCOUNT, async (client) => {
+      socket = client.socket;
+      socket.destroy();
+      await sleep(10);
+    }).catch(() => {});
+    expect(socket.destroyed).toBe(true);
+    const spy = net.Socket.prototype.setTimeout;
+    const callsOnIt = spy.mock.contexts.filter(c => c === socket).length;
+    // Once by imapflow at connect, once by the lease at its start; none after the destroy.
+    expect(callsOnIt).toBe(2);
+  });
+});
+
+describe('which pooled work takes the longer idle limit', () => {
+  // The spy records the limit asked for, before scaling.
+  const limitsSet = () => net.Socket.prototype.setTimeout.mock.calls.map(([ms]) => ms);
+  it.each([
+    ['findUidByMessageId (header SEARCH)', (m) => m.findUidByMessageId(ACCOUNT, 'INBOX', '<a@x>')],
+    ['findMessageIdInFolders (header SEARCH per folder)', (m) => m.findMessageIdInFolders(ACCOUNT, ['INBOX'], '<a@x>')],
+    ['markAllReadImap (chunked STORE)', (m) => m.markAllReadImap(ACCOUNT, 'INBOX')],
+    ['emptyFolder (chunked STORE and EXPUNGE)', (m) => m.emptyFolder(ACCOUNT, 'INBOX')],
+  ])('%s', async (_label, run) => {
+    net.Socket.prototype.setTimeout.mockClear();
+    const manager = Object.create(ImapManager.prototype);
+    await run(manager).catch(() => {});
+    expect(limitsSet()).toContain(SLOW_COMMAND_STALL_TIMEOUT_MS);
+    expect(limitsSet()).not.toContain(POOL_STALL_TIMEOUT_MS);
   });
 });

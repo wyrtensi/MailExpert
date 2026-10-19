@@ -33,6 +33,8 @@ import { getImapSnapshot, _resetImapMetrics } from './imapMetrics.js';
 import { GMAIL_KEY_PREFIX } from './threading/threadId.js';
 import { readDeliveryReports } from './deliveryReport.js';
 import { STAND_DSN_STRUCTURE } from './deliveryReport.fixtures.js';
+import { sanitizeEmail } from './emailSanitizer.js';
+import { CIDS_SETTLED } from '../utils/cidRefs.js';
 
 const account = (imap_host, oauth_provider = null) => ({ imap_host, oauth_provider });
 
@@ -804,6 +806,15 @@ describe('ensureMailbox — case-insensitive casing resolution', () => {
     const res = await ensureMailbox(client, 'Todo');
     expect(res).toEqual({ path: 'Todo', created: false });
     expect(client.list).not.toHaveBeenCalled();
+  });
+
+  it('prefers an exact match to a case variant listed before it (case-sensitive server)', async () => {
+    const client = {
+      mailboxCreate: vi.fn().mockResolvedValue({ path: 'INBOX.Snoozed', created: false }),
+      list: vi.fn().mockResolvedValue([{ path: 'INBOX' }, { path: 'INBOX.snoozed' }, { path: 'INBOX.Snoozed' }]),
+    };
+    const res = await ensureMailbox(client, 'Snoozed', { resolvePath: true });
+    expect(res).toEqual({ path: 'INBOX.Snoozed', created: false });
   });
 
   it('falls back to the known path when the LIST has no case-insensitive match', async () => {
@@ -5514,6 +5525,18 @@ describe('prefetchFolderBodies stops instead of hammering a refusing server', ()
     await mgr.prefetchFolderBodies(acct.id, ids);
     expect(mgr.fetchMessageBody).toHaveBeenCalledTimes(6);
   });
+
+  // A prefetched body is cached like a clicked one: settled when its cid: references can never
+  // resolve, so the first click does not fetch it again (utils/cidRefs.js).
+  it.each([[true, true], [false, false]])('stores a body with cidsComplete %s settled: %s', async (complete, settled) => {
+    sanitizeEmail.mockImplementationOnce(html => html);
+    const mgr = ladderManager();
+    const html = '<p>hi</p><img src="cid:missing@x">';
+    mgr.fetchMessageBody = vi.fn().mockResolvedValue({ html, text: 'hi', attachments: [], cidsComplete: complete });
+    await mgr.prefetchFolderBodies(acct.id, ['m1']);
+    const write = query.mock.calls.find(([sql]) => /SET body_html = \$1, body_text = \$2/.test(sql));
+    expect(write[1][0]).toBe(settled ? `${html}${CIDS_SETTLED}` : html);
+  });
 });
 
 describe('body prefetch and a rejected password', () => {
@@ -8650,6 +8673,41 @@ describe('fetchMessageBody inline images', () => {
   }
   const image = (part, cid, type = 'image/png') => ({ part, type, encoding: 'base64', id: `<${cid}>` });
   afterEach(() => { vi.restoreAllMocks(); });
+
+  // Whether a cid: reference left in the HTML could resolve on another fetch.
+  it('is complete when a reference names a Content-ID no part has: it can never resolve', async () => {
+    const { mgr, account } = arrange([image('2', 'logo@x')], { 1: '<img src="cid:logo@x"><img src="cid:missing@x">', 2: 'iVBORw0KGgo=' });
+    const body = await mgr.fetchMessageBody(account, 42, 'INBOX');
+    expect(body.html).toBe('<img src="data:image/png;base64,iVBORw0KGgo="><img src="cid:missing@x">');
+    expect(body.cidsComplete).toBe(true);
+  });
+
+  it('is not complete when an image the HTML references did not arrive: another fetch may get it', async () => {
+    const { mgr, account } = arrange([image('2', 'logo@x')], { 1: '<img src="cid:logo@x">' });
+    const body = await mgr.fetchMessageBody(account, 42, 'INBOX');
+    expect(body.html).toBe('<img src="cid:logo@x">');
+    expect(body.cidsComplete).toBe(false);
+  });
+
+  it('is complete when one part of a shared Content-ID did not arrive but another did', async () => {
+    const { mgr, account } = arrange([image('2', 'logo@x'), image('3', 'logo@x')], { 1: '<img src="cid:logo@x">', 3: 'iVBORw0KGgo=' });
+    const body = await mgr.fetchMessageBody(account, 42, 'INBOX');
+    expect(body.html).toBe('<img src="data:image/png;base64,iVBORw0KGgo=">');
+    expect(body.cidsComplete).toBe(true);
+    // A reference left over the repeat budget names an image that did arrive: another fetch
+    // leaves it exactly as it is, so the body is complete.
+    vi.spyOn(console, 'warn').mockImplementation(() => {});
+    const big = 'QUFB'.repeat(Math.ceil(INLINE_IMAGE_REPEAT_BUDGET / 4));
+    const over = arrange([image('2', 'logo@x'), image('3', 'logo@x')], { 1: '<img src="cid:logo@x">'.repeat(3), 3: big });
+    const overBody = await over.mgr.fetchMessageBody(over.account, 42, 'INBOX');
+    expect(overBody.html).toContain('cid:logo@x');
+    expect(overBody.cidsComplete).toBe(true);
+  });
+
+  it('is complete when every referenced image was embedded', async () => {
+    const { mgr, account } = arrange([image('2', 'logo@x')], { 1: '<img src="cid:logo@x">', 2: 'iVBORw0KGgo=' });
+    expect((await mgr.fetchMessageBody(account, 42, 'INBOX')).cidsComplete).toBe(true);
+  });
 
   it('embeds bracketed, upper-case and CSS references to an inline image', async () => {
     const outlook = 'image001.png@01DA1B2C.3D4E5F60';

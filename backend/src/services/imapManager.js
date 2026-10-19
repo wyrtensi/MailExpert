@@ -10,6 +10,7 @@ import { createPluginMailFacade } from '../plugins/mailEngineFacade.js';
 import { ensureFreshOAuthAccount, OAuthTokenError } from './oauth/tokenManager.js';
 import { isOAuthAccount, OAUTH_REFRESH_MAX_TOKEN_CALLS, PROVIDER_FETCH_TIMEOUT_MS } from './oauth/constants.js';
 import { sanitizeEmail } from './emailSanitizer.js';
+import { settleCids } from '../utils/cidRefs.js';
 import { renderInviteHtml } from './icsInvite.js';
 import { logger } from './logger.js';
 import { recordBroadcast, recordWarning, recordSyncSignal } from './diagnosticsRing.js';
@@ -1514,7 +1515,8 @@ export const POOL_SIZE = 4;
 // How long an interactive operation (a click: body, move, delete) waits for a pooled connection
 // before failing with poolExhausted, which the routes answer with 503 mailbox_busy. Short on
 // purpose: a reader would rather see "busy, try again" than a spinner, and a stalled connection
-// is freed by POOLED_OPERATION_TIMEOUT_MS, not by waiting longer here.
+// is freed by the lease's own bounds (the idle limit POOL_STALL_TIMEOUT_MS, and the duration cap
+// POOLED_OPERATION_TIMEOUT_MS or the caller's timeoutMs), not by waiting longer here.
 export const ACQUIRE_TIMEOUT_MS = 15000;
 
 // Background work (the folder status monitor, integrity sync, flag sync, delete reconcile, the
@@ -1533,6 +1535,32 @@ export const POOLED_OPERATION_TIMEOUT_MS = 120000;
 // A body fetch gives up well inside the route's 40s budget, so a stalled fetch frees its slot
 // at about the time the reader is told it failed.
 export const BODY_FETCH_POOL_TIMEOUT_MS = 30000;
+// How long a leased pooled connection may receive nothing at all before it is closed. The
+// duration cap above bounds how long an operation may RUN, and a whole-folder pass may run for
+// minutes; a dead socket under it held its slot for all of them (Yahoo's only one). This bounds
+// silence instead, so a long FETCH that keeps receiving data is never cut off by it, while a
+// connection that has gone quiet mid-command is (guardPoolLease). It cannot tell a hung server
+// from a slow one: a server silent this long while it works on one command is cut off too, so
+// 45s leaves room for a 500-UID MOVE or a cold UID SEARCH. Work that can be quiet for longer on a
+// healthy server takes SLOW_COMMAND_STALL_TIMEOUT_MS, and an upload takes none (appendToFolder).
+// Residual risks, where only the duration cap stands:
+// - a STATUS that a slow server (Exchange-type) works on silently for more than 45s is cut off,
+//   where before it could take up to the 2-minute cap;
+// - per-row work inside a FETCH loop that keeps imapflow from reading for 45s (a stalled DB
+//   write) loses the connection, since imapflow stops reading while the loop body runs;
+// - no lock and no command in flight for 45s (caller-side work between commands) closes the
+//   session, as imapflow then has no reason to keep it with a NOOP;
+// - auto-IDLE: pooled sessions keep imapflow's default auto-IDLE, which starts after 15s of quiet
+//   with a mailbox selected, no lock held and nothing in flight. A lease that sits that quiet
+//   ends up in IDLE, which imapflow treats as quiet for a reason and answers with a NOOP, and an
+//   IDLE caught before the server's "+" is an edge left to the duration cap.
+// Upstream maathimself/mailflow@13790f8c, @7fb20acc.
+export const POOL_STALL_TIMEOUT_MS = 45000;
+// The idle limit for pooled work that is silent for longer on a healthy server: a header SEARCH
+// by Message-ID reads every message's headers on a server without a search index, and a chunked
+// STORE or UID EXPUNGE of 500 UIDs can take well over 45s on Exchange/Outlook. Still a bound, so
+// a dead socket under it frees Yahoo's single pool slot in 2 minutes, not socketTimeout's 5.
+export const SLOW_COMMAND_STALL_TIMEOUT_MS = 120000;
 // Whole-account or whole-folder background passes.
 export const LONG_POOLED_OPERATION_TIMEOUT_MS = 5 * 60 * 1000;
 // How long setFlag waits for the persistent IDLE session (its INBOX lock, then the STORE)
@@ -1754,7 +1782,8 @@ export function makeClientCfg(account, resolved, { enableIdle = false, policy = 
     // No commandTimeout: imapflow 2.0.x has no such option (it used to be set here and was
     // silently ignored). Its only built-in bound is a 5-minute socket inactivity timeout, so a
     // stalled command is bounded by its caller instead: the sync tick's wall clock, the flag-scan
-    // sub-budgets, and withFreshClient's POOLED_OPERATION_TIMEOUT_MS for pooled work.
+    // sub-budgets, and withFreshClient's POOLED_OPERATION_TIMEOUT_MS and POOL_STALL_TIMEOUT_MS for
+    // pooled work.
     // No self-identification in IMAP ID; see IMAP_CLIENT_INFO.
     clientInfo: { ...IMAP_CLIENT_INFO },
   };
@@ -2212,15 +2241,54 @@ export function evictPool(accountId) {
   connectionPools.delete(accountId);
 }
 
-// poolOpts: { background, timeoutMs }. background queues behind interactive work (see
-// acquirePooledClient); timeoutMs bounds the operation (POOLED_OPERATION_TIMEOUT_MS by default).
-async function withFreshClient(account, fn, poolOpts = {}) {
-  const { timeoutMs = POOLED_OPERATION_TIMEOUT_MS, ...acquireOpts } = poolOpts;
+// Puts an idle limit (idleLimitMs) on the socket for the length of a lease, then restores the client's
+// configured timeout. Only while leased: an unused pooled session needs the long value, since
+// imapflow closes an idle session with no mailbox selected when the timer fires, and a short one
+// there would cost a fresh login each time on providers that ration them. The lease starts after
+// acquirePooledClient returns, so the NOOP that refreshes a reused session runs on the normal
+// timeout, and it restores client.socketTimeout (the configured value, never what the socket
+// holds now), so a session never carries one lease's timer into the next.
+// When the timer fires, imapflow sends a NOOP if the session is quiet for a reason (a held lock,
+// an open download) and no command is waiting on a reply; otherwise it emits an ETIMEOUT error
+// and closes the connection, the command in flight rejects, and withFreshClient's catch evicts
+// the session exactly as for the duration cap. That includes a FETCH held up by its own loop
+// body: imapflow stops reading while the body works on a row.
+// client.socket and client.socketTimeout are imapflow internals: without them this does nothing,
+// and imapPoolStall.test.js runs a real ImapFlow so an upgrade that moves them fails there.
+function guardPoolLease(client, idleLimitMs) {
+  const socket = client.socket;
+  const idleMs = client.socketTimeout;
+  const lease = { stalled: false, limitMs: idleLimitMs, end() {} };
+  if (typeof socket?.setTimeout !== 'function' || !Number.isFinite(idleMs)) return lease;
+  const onError = (err) => { if (err?.code === 'ETIMEOUT') lease.stalled = true; };
+  client.on('error', onError);
+  socket.setTimeout(idleLimitMs);
+  lease.end = () => {
+    client.off('error', onError);
+    // A socket imapflow (or the caller) already tore down has no timer left to restore.
+    if (!socket.destroyed) socket.setTimeout(idleMs);
+  };
+  return lease;
+}
+
+// poolOpts: { background, timeoutMs, stallTimeout }. background queues behind interactive work
+// (see acquirePooledClient); timeoutMs bounds how long the operation may run
+// (POOLED_OPERATION_TIMEOUT_MS by default); stallTimeout is the idle limit: POOL_STALL_TIMEOUT_MS
+// by default, a number of ms for work that can be quiet longer on a healthy server
+// (SLOW_COMMAND_STALL_TIMEOUT_MS), or false for none (an upload, see appendToFolder).
+export async function withFreshClient(account, fn, poolOpts = {}) {
+  const { timeoutMs = POOLED_OPERATION_TIMEOUT_MS, stallTimeout = POOL_STALL_TIMEOUT_MS, ...acquireOpts } = poolOpts;
+  const idleLimitMs = stallTimeout === true ? POOL_STALL_TIMEOUT_MS : stallTimeout;
+  if (idleLimitMs !== false && !(Number.isFinite(idleLimitMs) && idleLimitMs > 0)) {
+    throw new TypeError(`withFreshClient: stallTimeout must be false or a positive number of ms, got ${stallTimeout}`);
+  }
   const client = await acquirePooledClient(account, acquireOpts);
+  const lease = idleLimitMs === false ? { stalled: false, end() {} } : guardPoolLease(client, idleLimitMs);
   try {
     // Bounded, because nothing else bounds a stalled command (see POOLED_OPERATION_TIMEOUT_MS).
     // On expiry the catch below evicts the session and the release closes it, which aborts the
-    // command still running on it.
+    // command still running on it. The idle timer is the inner bound: on silence imapflow closes
+    // the session, the command rejects, and the same catch evicts it.
     return await raceTimeout(fn(client), timeoutMs, 'Pooled IMAP operation');
   } catch (err) {
     // On error, evict this client from pool so next call gets a fresh one.
@@ -2234,8 +2302,17 @@ async function withFreshClient(account, fn, poolOpts = {}) {
       pool.clients = pool.clients.filter(c => c !== client);
       drainWaiters(pool);
     }
+    // A command cut off by the idle timer rejects with imapflow's 'Connection not available',
+    // which isConnectionRefusal reads as the provider refusing us: callers would arm the refusal
+    // backoff. Name it for what was measured instead: nothing arrived, which a slow server or a
+    // busy fetch loop body causes as well as a hung one. 'timed out' is also what
+    // fetchMessageBody retries on a fresh login.
+    if (lease.stalled) {
+      throw new Error(`IMAP command timed out: nothing received for ${lease.limitMs / 1000}s`, { cause: err });
+    }
     throw err;
   } finally {
+    lease.end();
     releasePooledClient(account, client);
   }
 }
@@ -2317,8 +2394,8 @@ async function withFreshLogin(account, fn) {
 // insertCopiedSibling) so the namespace / already-exists matrix is unit-testable with a
 // mock client and no live pool.
 // resolvePath (default off) makes the already-exists branches resolve the server's real
-// casing via a LIST. Only the /folders/ensure route sets it — it PERSISTS the returned path,
-// so wrong casing there is durable; classify/snooze discard the path and skip the extra LIST.
+// casing via a LIST. Callers that PERSIST the returned path set it (folder create/ensure,
+// snooze), since wrong casing there is durable; classify discards it and skips the LIST.
 export async function ensureMailbox(client, path, { resolvePath = false } = {}) {
   const requested = String(path);
   // A flat-namespace server (personal-namespace delimiter null/empty) cannot represent a
@@ -2358,14 +2435,18 @@ export async function ensureMailbox(client, path, { resolvePath = false } = {}) 
 // lookup against the folder LIST. On a case-insensitive server "TODO" can already exist when
 // "Todo" was requested; imapflow's already-exists result echoes the REQUESTED casing, which,
 // if persisted (planGtdFolderPersist), never case-matches the synced rows' folder value and
-// silently zeroes the state. Best-effort: any list failure (or a client without list) falls
-// back to the caller's known path — never throws.
+// silently zeroes the state. An exact match wins: a case-sensitive server can hold both
+// "Snoozed" and a user's own "snoozed", and the CREATE collided with the exact one.
+// Best-effort: any list failure (or a client without list) falls back to the caller's known
+// path — never throws.
 async function resolveServerFolderCasing(client, knownPath) {
   if (typeof client.list !== 'function') return knownPath;
   try {
     const wanted = knownPath.toLowerCase();
     const boxes = await client.list();
-    const match = (Array.isArray(boxes) ? boxes : []).find(b => (b?.path || '').toLowerCase() === wanted);
+    const list = Array.isArray(boxes) ? boxes : [];
+    const match = list.find(b => b?.path === knownPath)
+      || list.find(b => (b?.path || '').toLowerCase() === wanted);
     return match?.path || knownPath;
   } catch {
     return knownPath;
@@ -2613,6 +2694,7 @@ export class ImapManager {
     this._flagDebounceTimers   = new Map(); // accountId -> debounce timer for flag-change syncs
     this._expungeDebounceTimers = new Map(); // accountId -> debounce timer for expunge reconciles
     this._pendingFlagSync = new Set(); // accountId — flag sync was skipped because a full sync was running; drain after sync
+    this._pendingNewMail = new Set(); // accountId — new mail (EXISTS) arrived while a sync was running; sync again after it
     // accountId -> Map<`${messageId}:${flag}`, { messageId, flag, attempts }>: local read/star
     // changes whose IMAP push failed and must be retried until the server confirms them.
     this._pendingFlagPush = new Map();
@@ -3115,7 +3197,13 @@ export class ImapManager {
       if (typeof count === 'number' && typeof prevCount === 'number') {
         this.broadcast({ type: 'exists_hint', accountId: account.id, delta: count - prevCount });
       }
-      if (this.syncingAccounts.has(account.id)) return;
+      if (this.syncingAccounts.has(account.id)) {
+        // The running sync may already have read the mailbox, so this message could miss it and
+        // wait for the next interval tick, a minute away. Two messages a moment apart, or new
+        // mail while a fresh account's first syncs run, did exactly that. Sync again once it ends.
+        this._pendingNewMail.add(account.id);
+        return;
+      }
       // Named for the IMAP response that fired it, NOT for IDLE. An untagged EXISTS arrives
       // during IDLE *or* as an unsolicited response to any polled command, so the old
       // "IMAP IDLE:" prefix asserted push was working on connections that were only polling —
@@ -3403,6 +3491,7 @@ export class ImapManager {
     // disconnect) so a re-added account writes through instead of trusting a stale cache entry.
     this._syncErrorState.delete(accountId);
     this._pendingFlagSync.delete(accountId);
+    this._pendingNewMail.delete(accountId);
     const flagTimer = this._flagDebounceTimers.get(accountId);
     if (flagTimer) { clearTimeout(flagTimer); this._flagDebounceTimers.delete(accountId); }
     const expungeTimer = this._expungeDebounceTimers.get(accountId);
@@ -4192,7 +4281,19 @@ export class ImapManager {
     } finally {
       this.syncingAccounts.delete(account.id);
       this.syncStartedAt.delete(account.id);
+      this._syncAgainIfMailArrived(account);
     }
+  }
+
+  // New mail that arrived while a sync was running (the `exists` listener queued it): sync once more.
+  _syncAgainIfMailArrived(account) {
+    if (!this._pendingNewMail.delete(account.id)) return;
+    console.log(`IMAP EXISTS: new mail for ${logAccount(account)} arrived during a sync, syncing again`);
+    setImmediate(() => {
+      this._syncTick(account).catch(err =>
+        console.warn(`IDLE-triggered sync error for ${logAccount(account)}:`, err.message)
+      );
+    });
   }
 
   // Bulk-apply is_read/is_starred from a fetched {uid, isRead, isStarred}[] onto existing rows
@@ -6720,7 +6821,11 @@ export class ImapManager {
       const result = await client.append(folder, rawMessage, flags);
       if (result === false) throw new Error('IMAP append returned false — server did not confirm message was stored');
       if (result && typeof result.uid === 'number') uid = result.uid;
-    }, { timeoutMs: LONG_POOLED_OPERATION_TIMEOUT_MS });
+      // Off the idle timer (POOL_STALL_TIMEOUT_MS). Node counts an upload as activity only while
+      // part of it is still queued in this process, so the tail draining from the kernel's send
+      // buffer and the server storing the message both read as silence: a large APPEND on a slow
+      // uplink would be closed with the server still receiving it.
+    }, { timeoutMs: LONG_POOLED_OPERATION_TIMEOUT_MS, stallTimeout: false });
     console.log(`Appended to IMAP ${logAccount(account)}/${folder} uid=${uid}`);
     return { uid, folder };
   }
@@ -6893,7 +6998,9 @@ export class ImapManager {
       } finally {
         lock.release();
       }
-    }, poolOpts);
+      // The longer idle limit: a header SEARCH on a large cold folder is silent for as long as
+      // the server takes to read every message's headers (SLOW_COMMAND_STALL_TIMEOUT_MS).
+    }, { ...poolOpts, stallTimeout: SLOW_COMMAND_STALL_TIMEOUT_MS });
   }
 
   // Syncs the most recent messages in a specific folder on demand.
@@ -7136,7 +7243,7 @@ export class ImapManager {
         );
         if (!live || live.cached || Number(live.uid) !== Number(msg.uid) || live.folder !== msg.folder) continue;
 
-        const { html, text, attachments } = await this.fetchMessageBody(account, msg.uid, msg.folder, { background: true });
+        const { html, text, attachments, cidsComplete } = await this.fetchMessageBody(account, msg.uid, msg.folder, { background: true });
         const safeHtml = html ? sanitizeEmail(html) : null;
         if (safeHtml || text) {
           const snip = snippetFromBody(text, safeHtml || html);
@@ -7145,7 +7252,8 @@ export class ImapManager {
              SET body_html = $1, body_text = $2, attachments = $3,
                  snippet = CASE WHEN $5 != '' THEN $5 ELSE snippet END
              WHERE id = $4`,
-            [sanitizeStr(safeHtml), sanitizeStr(text), JSON.stringify(attachments || []), msg.id, sanitizeStr(snip)]
+            // Settled when its cid: references can never resolve (utils/cidRefs.js).
+            [sanitizeStr(settleCids(safeHtml, cidsComplete)), sanitizeStr(text), JSON.stringify(attachments || []), msg.id, sanitizeStr(snip)]
           );
         }
       } catch (err) {
@@ -7226,6 +7334,10 @@ export class ImapManager {
       let html;
       let text;
       let attachments;
+      // False when a cid: reference is left in the HTML because its image's bytes did not arrive,
+      // so a later view should fetch again; a reference no part answers, or one over the repeat
+      // budget, stays whatever happens and leaves this true (utils/cidRefs.js).
+      let cidsComplete = true;
       // Always address by UID string with uid:true option — direct UID FETCH avoids
       // the two-step SEARCH+FETCH path that object-range syntax triggers, which can
       // silently return nothing on stale connections or when a server-side search
@@ -7341,12 +7453,13 @@ export class ImapManager {
         // images render inside the sandboxed srcdoc iframe
         if (html && inlineImages.length > 0) {
           const dataUris = new Map();
+          const missingImages = new Set();
           for (const img of inlineImages) {
             if (!img.cid) continue;
             const key = img.cid.toLowerCase();
             if (dataUris.has(key)) continue;
             const buf = prefetched.get(img.part);
-            if (!buf || looksLikeTextPayload(buf)) continue;
+            if (!buf || looksLikeTextPayload(buf)) { missingImages.add(key); continue; }
             const enc = (img.encoding || '').toLowerCase();
             const b64 = enc === 'base64'
               ? buf.toString('ascii').replace(/\s/g, '')
@@ -7378,6 +7491,14 @@ export class ImapManager {
               console.warn(`fetchMessageBody: uid=${uid} folder=${folder} account=${logAccount(account)}: left ${overBudget} repeated inline image reference(s) as cid:, past the ${INLINE_IMAGE_REPEAT_BUDGET / (1024 * 1024)} MB repeat budget`);
             }
           }
+          // A Content-ID counts as missing only when no part sharing it loaded: a reference left
+          // over the repeat budget names an image that did arrive, and another fetch changes nothing.
+          for (const key of dataUris.keys()) missingImages.delete(key);
+          if (missingImages.size > 0) {
+            for (const [, cid] of html.matchAll(CID_REFERENCE_RE)) {
+              if (missingImages.has(cid.toLowerCase())) { cidsComplete = false; break; }
+            }
+          }
         }
       } finally {
         lock.release();
@@ -7385,7 +7506,7 @@ export class ImapManager {
 
       // Some malformed emails include NUL bytes that PostgreSQL rejects in text
       // columns. Strip them once here so all callers are safe.
-      return { html: sanitizeStr(html), text: sanitizeStr(text), attachments };
+      return { html: sanitizeStr(html), text: sanitizeStr(text), attachments, cidsComplete };
     });
 
     // Providers flagged preferFreshBodyFetch (e.g. PurelyMail) skip the shared pool on the
@@ -7956,8 +8077,9 @@ export class ImapManager {
         lock.release();
       }
       // Long bound: chunked deletes over a folder of thousands of messages (the route runs this
-      // in the background for that reason).
-    }, { timeoutMs: LONG_POOLED_OPERATION_TIMEOUT_MS });
+      // in the background for that reason). The longer idle limit too: one 500-UID STORE or UID
+      // EXPUNGE can be silent for more than 45s on Exchange/Outlook.
+    }, { timeoutMs: LONG_POOLED_OPERATION_TIMEOUT_MS, stallTimeout: SLOW_COMMAND_STALL_TIMEOUT_MS });
   }
 
   // Apply a whole-folder IMAP write to every matching message in the currently-locked
@@ -8034,8 +8156,9 @@ export class ImapManager {
         lock.release();
       }
       // Long bound: a STORE cut off partway is undone by the next flag sync, so give a large
-      // folder the time it needs.
-    }, { timeoutMs: LONG_POOLED_OPERATION_TIMEOUT_MS });
+      // folder the time it needs. The longer idle limit too: one 500-UID STORE can be silent for
+      // more than 45s on Exchange/Outlook.
+    }, { timeoutMs: LONG_POOLED_OPERATION_TIMEOUT_MS, stallTimeout: SLOW_COMMAND_STALL_TIMEOUT_MS });
   }
 
   async moveMessage(account, uid, fromFolder, toFolder) {
@@ -8336,8 +8459,17 @@ export class ImapManager {
           try { return await client.search({ uid: `${destUidNextBefore}:*` }, { uid: true }); }
           finally { lock.release(); }
         }, poolOpts);
+        // A non-array result (undefined: no mailbox selected, false: SEARCH failed) leaves the
+        // destination unverified. Read as empty, it would report the whole batch stale.
+        if (!Array.isArray(destNew)) throw new Error(`destination UID SEARCH returned ${destNew}`);
+        // The filter guards the RFC 3501 `n:*` quirk: when nothing arrived, the server still
+        // returns the destination's newest existing message, and a stale UID in the batch would
+        // be counted as having landed there and mapped onto it.
+        destNew = destNew.filter(u => u >= destUidNextBefore);
         destArrived = destNew.length;
       } catch (destErr) {
+        // Whatever the search returned is not a destination list; never zip it into a uidMap.
+        destNew = [];
         console.warn(`bulkMoveMessages: destination verification failed (${destErr.message}) — trusting source-absence`);
       }
     }
@@ -8405,7 +8537,8 @@ export class ImapManager {
         if (Array.isArray(uids) && uids.length) found.push({ folder, uids: uids.map(Number) });
       }
       return found;
-    }, { timeoutMs: LONG_POOLED_OPERATION_TIMEOUT_MS, ...poolOpts });
+      // The longer idle limit, like findUidByMessageId: each folder is a header SEARCH.
+    }, { timeoutMs: LONG_POOLED_OPERATION_TIMEOUT_MS, ...poolOpts, stallTimeout: SLOW_COMMAND_STALL_TIMEOUT_MS });
   }
 
   // Permanently delete a batch of UIDs already in the given folder (two-step:
@@ -8553,6 +8686,7 @@ export class ImapManager {
       } finally {
         this.syncingAccounts.delete(account.id);
         this.syncStartedAt.delete(account.id);
+        this._syncAgainIfMailArrived(account);
       }
     } finally {
       this.broadcast({ type: 'sync_complete', accountId: account.id });
@@ -8600,7 +8734,7 @@ export class ImapManager {
   async _runSnoozeWakeup() {
     // Find snoozed messages whose snooze_until has passed and which are still in
     // the snoozed folder (joined via stable Message-ID header).
-    const due = await query(`
+    const dueSql = `
       SELECT sm.id AS snooze_id, sm.account_id,
              sm.message_id_header, sm.original_folder, sm.snoozed_folder, m.uid, m.is_read
       FROM snoozed_messages sm
@@ -8612,10 +8746,18 @@ export class ImapManager {
                      -- letter is not in the snoozed folder on the server yet. It wakes once moved.
                      AND m.uid > 0
       WHERE sm.snooze_until <= NOW()
-    `);
+    `;
+    const due = await query(dueSql);
 
-    for (const row of due.rows) {
+    for (const listed of due.rows) {
       try {
+        // `listed` can be out of date: the sweep reads every due snooze first and wakes them one
+        // by one, each over IMAP, and the reader may move a letter out of Snoozed by hand (or
+        // delete it) in between. Read it again when its turn comes. No longer live: nothing to do,
+        // where waking it would move a UID that is not there and count the letter back into its
+        // folder a second time. Otherwise go on with its UID and read state as they are now.
+        const { rows: [row] } = await query(`${dueSql} AND sm.id = $1`, [listed.snooze_id]);
+        if (!row) continue;
         const accountResult = await query('SELECT * FROM email_accounts WHERE id = $1', [row.account_id]);
         if (!accountResult.rows.length) continue;
         const account = accountResult.rows[0];
@@ -8657,7 +8799,8 @@ export class ImapManager {
                 } finally {
                   lock.release();
                 }
-              }, { background: true });
+                // The longer idle limit, like findUidByMessageId: a header SEARCH.
+              }, { background: true, stallTimeout: SLOW_COMMAND_STALL_TIMEOUT_MS });
             } catch (err) {
               console.warn(`Snooze wakeup: could not mark message unread on server (no UIDPLUS): ${err.message}`);
             }
@@ -8696,7 +8839,7 @@ export class ImapManager {
 
         console.log(`Snooze wakeup: message ${row.message_id_header} restored to ${row.original_folder}`);
       } catch (err) {
-        console.error(`Snooze wakeup failed for snooze_id ${row.snooze_id}:`, err.message);
+        console.error(`Snooze wakeup failed for snooze_id ${listed.snooze_id}:`, err.message);
       }
     }
 

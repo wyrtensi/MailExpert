@@ -12,6 +12,7 @@ const imapManager = vi.hoisted(() => ({
 vi.mock('../index.js', () => ({ imapManager }));
 
 import express from 'express';
+import { imageProxyPath } from '../services/imageProxy.js';
 import draftRoutes from './draft.js';
 import { query } from '../services/db.js';
 
@@ -46,6 +47,18 @@ describe('POST /api/mail/draft — local row persistence', () => {
     query.mockResolvedValueOnce({ rows: [{ path: 'Drafts' }] });
     imapManager.appendToFolder.mockResolvedValue({ uid: 5, folder: 'Drafts' });
     imapManager.upsertDraftMessageRecord.mockResolvedValue(undefined);
+  });
+
+  it('stores authentic original image references in the local draft', async () => {
+    const path = imageProxyPath('4d479e4f-9b21-4013-9c07-3fbc35f275b1', 'https://img.example/a.png?x=1&amp;y=2', 'user-1');
+    const response = await fetch(`${base}/api/mail/draft`, {
+      method: 'POST', headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ accountId: ACCOUNT_ID, bodyIsHtml: true, body: `<img src="${path}">`, quotedBodyHtml: `<img src="${path}">` }),
+    });
+    expect(response.status).toBe(200);
+    const meta = imapManager.upsertDraftMessageRecord.mock.calls[0][3];
+    expect(meta.bodyHtml).not.toContain('/api/mail/messages/');
+    expect(meta.bodyHtml).toContain('https://img.example/a.png?x=1&amp;y=2');
   });
 
   it.each([true, false])('preserves reply headers in appended MIME and local metadata (reply=%s)', async reply => {

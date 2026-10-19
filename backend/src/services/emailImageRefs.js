@@ -31,7 +31,7 @@ export function remoteUrlOf(text) {
 // The URLs of a srcset value as the browser reads them (HTML's srcset parsing): a URL runs to the
 // next whitespace less any trailing commas, then descriptors run to a comma outside parentheses.
 // `replace(url)` returns the text for one URL.
-function mapSrcsetUrls(value, replace) {
+export function mapSrcsetUrls(value, replace) {
   const n = value.length;
   let out = '';
   let i = 0;
@@ -176,8 +176,8 @@ function trackerTest(html) {
 
 // Every remote image of sanitized HTML through the image proxy: each remote reference becomes
 // `toProxy(raw, ref)` (routes/mail.js, services/imageProxy.js imageProxyPath), which carries the
-// reference as it was written, so the frontend can put the original back exactly when the HTML
-// leaves for the server (a reply, a forward, a draft). Trackers are not loaded: they become
+// reference as it was written, so send/save can authenticate it and restore the original
+// (restoreOutgoingImages.js). Trackers are not loaded: they become
 // BLANK_IMAGE, and `stats.trackers` counts the distinct ones.
 export function proxyRemoteImages(html, toProxy, stats = {}) {
   stats.trackers = 0;

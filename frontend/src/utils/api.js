@@ -1,4 +1,3 @@
-import { outgoingImagePayload } from './imageProxy.js';
 import { demoRequest } from '../demo/index.js';
 import { isDemoMode } from '../demo/mode.js';
 import { exitDeleteBodies } from './deleteIntent.js';
@@ -17,7 +16,6 @@ const messageBodyRequests = new Map();
 const attemptHeader = (id) => (id ? { 'Idempotency-Key': id } : undefined);
 
 async function request(method, path, body, extraHeaders, signal) {
-  if (body && method === 'POST' && ['/mail/send', '/mail/draft'].includes(path)) body = outgoingImagePayload(body);
   if (isDemoMode) return demoRequest(method, path, body);
   const opts = {
     method,

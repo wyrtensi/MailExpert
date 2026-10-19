@@ -9,6 +9,7 @@ vi.mock('../services/sendQueue.js', async (importOriginal) => ({
   existingSendJob: vi.fn(async () => null),
 }));
 import express from 'express';
+import { imageProxyPath } from '../services/imageProxy.js';
 import routes from './send.js';
 import { query } from '../services/db.js';
 import { enqueueOutgoingSend } from '../services/sendQueue.js';
@@ -55,5 +56,17 @@ describe('send signature wrapper (#432)', () => {
     expect(built(0).html).toContain(wrapSignatureHtml('<i>Edited</i>'));
     await post({ editedSignature: '' });
     expect(built(1).html).not.toContain('mailexpert-signature');
+  });
+});
+
+
+describe('authenticated proxy restoration before queueing', () => {
+  it('restores authentic image references in the queued letter and its undo metadata', async () => {
+    const path = imageProxyPath('4d479e4f-9b21-4013-9c07-3fbc35f275b1', 'https://img.example/a.png?x=1&amp;y=2', 'u1');
+    expect((await post({ body: `<img src="${path}">`, quotedBodyHtml: `<img src="${path}">` })).status).toBe(200);
+    expect(built().html).not.toContain('/api/mail/messages/');
+    expect(built().html).toContain('https://img.example/a.png?x=1&amp;y=2');
+    const compose = enqueueOutgoingSend.mock.calls[0][0].compose;
+    expect(compose.body).toContain('https://img.example/a.png?x=1&amp;y=2');
   });
 });

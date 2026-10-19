@@ -56,11 +56,12 @@ export function parseImageProxyToken(token) {
   return m ? { exp: Number(m[1]), sig: m[2] } : null;
 }
 
-export function verifyImageProxyToken(token, { userId, messageId, raw, now = Date.now(), allowBlocked = false }) {
+// Restoration authenticates old quotes without granting permission to fetch an expired URL.
+export function verifyImageProxyToken(token, { userId, messageId, raw, now = Date.now(), allowBlocked = false, purpose = 'fetch' }) {
   const parsed = parseImageProxyToken(token);
   if (!parsed || !userId) return false;
   const expMs = parsed.exp * 1000;
-  if (expMs < now || expMs - now > IMAGE_PROXY_TOKEN_TTL_MS + HOUR_MS) return false;
+  if (purpose !== 'restore' && (expMs < now || expMs - now > IMAGE_PROXY_TOKEN_TTL_MS + HOUR_MS)) return false;
   const expected = Buffer.from(sign(userId, messageId, raw, parsed.exp, allowBlocked));
   const given = Buffer.from(parsed.sig);
   return given.length === expected.length && timingSafeEqual(given, expected);
@@ -70,8 +71,8 @@ export function verifyImageProxyToken(token, { userId, messageId, raw, now = Dat
 // is rounded to the hour, so a body read again within the hour gets the same URLs and the browser
 // keeps its copies. The reference is percent-encoded beyond encodeURIComponent (which leaves
 // ! ' ( ) * alone), so the URL is safe in any attribute, inline style or <style> block: only
-// letters, digits, - . _ ~ % / ? = remain. The frontend reverses it (utils/imageProxy.js); the
-// two must agree.
+// letters, digits, - . _ ~ % / ? = remain. restoreOutgoingImages.js authenticates and reverses
+// it at send/save time; the composer keeps the signed URL.
 export function imageProxyPath(messageId, raw, userId, { now = Date.now(), allowBlocked = false } = {}) {
   const exp = Math.floor((Math.ceil(now / HOUR_MS) * HOUR_MS + IMAGE_PROXY_TOKEN_TTL_MS) / 1000);
   const encoded = encodeURIComponent(raw).replace(/[!'()*]/g, (c) => `%${c.charCodeAt(0).toString(16).toUpperCase()}`);

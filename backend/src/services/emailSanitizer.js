@@ -648,7 +648,9 @@ const isCssSpace = (c) => c === ' ' || c === '\t' || c === '\n' || c === '\r' ||
 const CSS_NEEDLES = { 'url(': /url\(/gi, 'image-set(': /image-set\(/gi, '@import': /@import/gi };
 const startsWithCi = (text, at, needle) => text.slice(at, at + needle.length).toLowerCase() === needle;
 
-export function rewriteCssUrls(css, rewrite) {
+// localUrls also visits signed panel image references during outgoing restoration.
+export function rewriteCssUrls(css, rewrite, { localUrls = false } = {}) {
+  const eligible = value => localUrls || REMOTE_URL.test(value);
   const n = css.length;
   const found = new Map();
   // The next index of `needle` at or after `from`. A result is reused while it still answers the
@@ -706,7 +708,7 @@ export function rewriteCssUrls(css, rewrite) {
     out += css.slice(i, at);
     if (kind === 'url') {
       const token = urlToken(at);
-      if (token && REMOTE_URL.test(token.value)) { out += rewrite('url', token.value.trim(), token.token); i = token.end; continue; }
+      if (token && eligible(token.value)) { out += rewrite('url', token.value.trim(), token.token); i = token.end; continue; }
       out += css.slice(at, at + 4);
       i = at + 4;
     } else if (kind === 'import') {
@@ -722,7 +724,7 @@ export function rewriteCssUrls(css, rewrite) {
       let target = '';
       if (startsWithCi(css, j, 'url(')) target = urlToken(j)?.value ?? '';
       else if (css[j] === '"' || css[j] === "'") { const close = next(css[j], j + 1); target = close === -1 ? '' : css.slice(j + 1, close); }
-      if (REMOTE_URL.test(target)) {
+      if (eligible(target)) {
         const text = css.slice(at, end);
         out += rewrite('import', target.trim(), { text, before: text, value: '', after: '' });
         i = end;
@@ -742,13 +744,13 @@ export function rewriteCssUrls(css, rewrite) {
           const close = next(c, k + 1);
           const stop = close === -1 ? n : close + 1;
           const value = css.slice(k + 1, close === -1 ? n : close);
-          out += REMOTE_URL.test(value)
+          out += eligible(value)
             ? rewrite('string', value.trim(), { text: css.slice(k, stop), before: c, value, after: close === -1 ? '' : c })
             : css.slice(k, stop);
           k = stop;
         } else if (startsWithCi(css, k, 'url(')) {
           const token = urlToken(k);
-          if (token && REMOTE_URL.test(token.value)) { out += rewrite('url', token.value.trim(), token.token); k = token.end; }
+          if (token && eligible(token.value)) { out += rewrite('url', token.value.trim(), token.token); k = token.end; }
           else { out += css.slice(k, k + 4); k += 4; depth += 1; }
         } else {
           if (c === '(') depth += 1;

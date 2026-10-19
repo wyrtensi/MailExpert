@@ -100,15 +100,28 @@ function providerRequestError(error, request, callerSignal) {
   );
 }
 
+// Redirects are not followed. The base URL is the address the admin saved; a redirect would send
+// the request, the email text in its body and on a same-origin 307/308 the API key too, to an
+// address nobody chose, over plaintext http as well, since AI requests do not require https.
+// safeFetch re-checks every hop against the private-host policy, but not against that choice.
 async function openProviderRequest(fetchFn, url, init, { signal, timeoutMs = DEFAULT_TIMEOUT_MS } = {}) {
   const request = createRequestSignal(signal, timeoutMs, 'AI request timed out');
+  let response;
   try {
-    const response = await fetchFn(url, { ...init, signal: request.signal });
-    return { ...request, response };
+    response = await fetchFn(url, { ...init, redirect: 'manual', signal: request.signal });
   } catch (error) {
     request.cleanup();
     throw providerRequestError(error, request, signal);
   }
+  if (response.status >= 300 && response.status < 400) {
+    request.cleanup();
+    response.body?.cancel().catch(() => {});
+    throw new AiProviderError(
+      `AI provider redirected the request (${response.status}); set the API base URL to the address it redirects to`,
+      { status: 502, expose: true },
+    );
+  }
+  return { ...request, response };
 }
 
 async function* parseChatCompletionsSse(response, { signal, secrets } = {}) {

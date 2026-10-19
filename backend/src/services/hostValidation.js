@@ -125,22 +125,33 @@ export async function validateHost(host, { allowPrivate = false } = {}) {
   // Already a literal IP — validated above.
   if (isIPv4(bare) || isIPv6(bare)) return null;
 
-  // Resolve A and AAAA records. Ignore DNS errors — if the host can't be resolved,
+  // Resolve the host's addresses. Ignore resolver errors — if the host can't be resolved,
   // the IMAP/SMTP connection will fail naturally; the concern is hosts that DO resolve
   // to private ranges.
-  const [v4, v6] = await Promise.all([
-    dnsPromises.resolve4(bare).catch(() => []),
-    dnsPromises.resolve6(bare).catch(() => []),
-  ]);
+  const resolved = await resolveAddresses(bare);
 
   if (!allowPrivate) {
-    for (const addr of [...v4, ...v6]) {
+    for (const addr of resolved) {
       if (isIPv4(addr) && isPrivateIPv4(addr)) return 'Host resolves to a private or reserved IP address';
       if (isIPv6(addr) && isPrivateIPv6(addr)) return 'Host resolves to a private or reserved IP address';
     }
   }
 
   return null;
+}
+
+// A host's addresses: from DNS, and when DNS has none, from the system resolver. The connection
+// itself resolves through the system resolver (getaddrinfo), which also reads /etc/hosts, so a name
+// only that file knows (ip6-localhost in the container image, or an alias an operator added) was let
+// through unchecked and then connected to loopback or a private address.
+async function resolveAddresses(bare) {
+  const [v4, v6] = await Promise.all([
+    dnsPromises.resolve4(bare).catch(() => []),
+    dnsPromises.resolve6(bare).catch(() => []),
+  ]);
+  if (v4.length || v6.length) return [...v4, ...v6];
+  const looked = await dnsPromises.lookup(bare, { all: true, verbatim: true }).catch(() => []);
+  return (Array.isArray(looked) ? looked : []).map(a => a.address).filter(Boolean);
 }
 
 export function createPinnedLookup(addresses) {
@@ -186,20 +197,17 @@ export async function resolveForConnection(hostname, { allowPrivate = false } = 
   // Already a literal IP — validated above, no DNS resolution needed.
   if (isIPv4(bare) || isIPv6(bare)) return { host: h, servername: null };
 
-  const [v4, v6] = await Promise.all([
-    dnsPromises.resolve4(bare).catch(() => []),
-    dnsPromises.resolve6(bare).catch(() => []),
-  ]);
+  const resolved = await resolveAddresses(bare);
 
   if (!allowPrivate) {
-    for (const addr of [...v4, ...v6]) {
+    for (const addr of resolved) {
       if (isIPv4(addr) && isPrivateIPv4(addr)) throw new Error('Host resolves to a private or reserved IP address');
       if (isIPv6(addr) && isPrivateIPv6(addr)) throw new Error('Host resolves to a private or reserved IP address');
     }
   }
 
-  const all = [...new Set([...v4, ...v6])];
-  // DNS failed — let the connection attempt fail naturally (NXDOMAIN etc.).
+  const all = [...new Set(resolved)];
+  // No resolver knows the name — let the connection attempt fail naturally (NXDOMAIN etc.).
   if (!all.length) return { host: h, servername: null };
 
   // Expose only prevalidated addresses to the connection layer. No later DNS query can

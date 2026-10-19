@@ -8384,6 +8384,8 @@ export class ImapManager {
         destNew = destNew.filter(u => u >= destUidNextBefore);
         destArrived = destNew.length;
       } catch (destErr) {
+        // Whatever the search returned is not a destination list; never zip it into a uidMap.
+        destNew = [];
         console.warn(`bulkMoveMessages: destination verification failed (${destErr.message}) — trusting source-absence`);
       }
     }

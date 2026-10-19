@@ -11,8 +11,9 @@
 export const CIDS_SETTLED = '<!--mailexpert-cids-settled-->';
 
 // A cid: reference where a URL goes (src="cid:...", url(cid:...)), not the text "CID: 4521" in a
-// support email, which used to send every view of it to the mail server too.
-const CID_REFERENCE = /["'(]\s*cid:/i;
+// support email, which used to send every view of it to the mail server too. The sanitizer writes
+// a quote inside a style attribute as an entity (url(&quot;cid:...&quot;)), so those count too.
+const CID_REFERENCE = /(?:["'(]|&quot;|&#0*39;)\s*cid:/i;
 
 export const hasCidReference = (html) => typeof html === 'string' && CID_REFERENCE.test(html);
 

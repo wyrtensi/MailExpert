@@ -1,6 +1,7 @@
 // Inline images and the cached message body (#595).
 import { describe, it, expect } from 'vitest';
 import { CIDS_SETTLED, hasCidReference, needsCidRefetch, settleCids, withoutCidMarker } from './cidRefs.js';
+import { sanitizeEmail } from '../services/emailSanitizer.js';
 
 describe('hasCidReference', () => {
   it('finds a cid: reference where a URL goes', () => {
@@ -39,5 +40,22 @@ describe('the settled marker', () => {
   it('never leaves MailExpert', () => {
     expect(withoutCidMarker(settleCids(body, true))).toBe(body);
     expect(withoutCidMarker(null)).toBe(null);
+  });
+});
+
+describe('hasCidReference on sanitized HTML', () => {
+  it('finds a CSS reference the sanitizer wrote with &quot; quotes', () => {
+    const html = sanitizeEmail('<div style=\'background:url("cid:bg@x")\'>a</div>');
+    expect(html).toContain('url(&quot;cid:bg@x&quot;)');
+    expect(hasCidReference(html)).toBe(true);
+  });
+  it('finds a reference written with a numeric apostrophe entity', () => {
+    expect(hasCidReference('<div style="background:url(&#39;cid:bg@x&#39;)">')).toBe(true);
+    expect(hasCidReference('<div style="background:url(&#039;cid:bg@x&#039;)">')).toBe(true);
+  });
+  it('finds the other sanitized forms too', () => {
+    for (const raw of ['<img src="cid:a@x">', '<div style="background:url(\'cid:bg@x\')">a</div>', '<div style="background:url(cid:bg@x)">a</div>']) {
+      expect(hasCidReference(sanitizeEmail(raw))).toBe(true);
+    }
   });
 });

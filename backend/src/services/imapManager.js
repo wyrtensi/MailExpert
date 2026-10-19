@@ -8640,7 +8640,7 @@ export class ImapManager {
   async _runSnoozeWakeup() {
     // Find snoozed messages whose snooze_until has passed and which are still in
     // the snoozed folder (joined via stable Message-ID header).
-    const due = await query(`
+    const dueSql = `
       SELECT sm.id AS snooze_id, sm.account_id,
              sm.message_id_header, sm.original_folder, sm.snoozed_folder, m.uid, m.is_read
       FROM snoozed_messages sm
@@ -8652,10 +8652,18 @@ export class ImapManager {
                      -- letter is not in the snoozed folder on the server yet. It wakes once moved.
                      AND m.uid > 0
       WHERE sm.snooze_until <= NOW()
-    `);
+    `;
+    const due = await query(dueSql);
 
-    for (const row of due.rows) {
+    for (const listed of due.rows) {
       try {
+        // `listed` can be out of date: the sweep reads every due snooze first and wakes them one
+        // by one, each over IMAP, and the reader may move a letter out of Snoozed by hand (or
+        // delete it) in between. Read it again when its turn comes. No longer live: nothing to do,
+        // where waking it would move a UID that is not there and count the letter back into its
+        // folder a second time. Otherwise go on with its UID and read state as they are now.
+        const { rows: [row] } = await query(`${dueSql} AND sm.id = $1`, [listed.snooze_id]);
+        if (!row) continue;
         const accountResult = await query('SELECT * FROM email_accounts WHERE id = $1', [row.account_id]);
         if (!accountResult.rows.length) continue;
         const account = accountResult.rows[0];
@@ -8736,7 +8744,7 @@ export class ImapManager {
 
         console.log(`Snooze wakeup: message ${row.message_id_header} restored to ${row.original_folder}`);
       } catch (err) {
-        console.error(`Snooze wakeup failed for snooze_id ${row.snooze_id}:`, err.message);
+        console.error(`Snooze wakeup failed for snooze_id ${listed.snooze_id}:`, err.message);
       }
     }
 

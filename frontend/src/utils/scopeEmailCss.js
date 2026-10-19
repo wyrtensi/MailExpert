@@ -16,7 +16,13 @@ const REMOVE_ATRULES = new Set([
 // forms so the full prefix is removed in one pass.
 const LEADING_BODY_RE = /^(?:html(?:[\s>+~]+(?:body|:root))?|body|:root)(?=[\s>+~]|$)/i;
 
-export function scopeEmailCss(cssText, prefix) {
+// A declaration value that can load an image: url(), image-set()/image() strings, and var() or a
+// CSS escape, behind which either can hide.
+const LOADS_IMAGE = /url\(|image-set\(|image\(|var\(|\\/i;
+
+// remoteImagesBlocked: the body was served with remote images blocked, and this CSS lands in the
+// app's page, whose CSP allows any https: image; every declaration that can load one is dropped.
+export function scopeEmailCss(cssText, prefix, { remoteImagesBlocked = false } = {}) {
   let root;
   try { root = postcss.parse(cssText); } catch { return ''; }
 
@@ -25,8 +31,15 @@ export function scopeEmailCss(cssText, prefix) {
   // PostCSS is mutation-safe during traversal: removing a node (and its subtree)
   // does not skip or re-process adjacent siblings.
   root.walkAtRules(atRule => {
-    if (REMOVE_ATRULES.has(atRule.name.toLowerCase())) atRule.remove();
+    // An escaped name (@\69mport) is the same at-rule to the browser.
+    if (REMOVE_ATRULES.has(atRule.name.toLowerCase()) || atRule.name.includes('\\')) atRule.remove();
   });
+
+  if (remoteImagesBlocked) {
+    root.walkDecls(decl => {
+      if (LOADS_IMAGE.test(decl.value) || decl.prop.includes('\\')) decl.remove();
+    });
+  }
 
   // Pass 2 — scope every remaining rule.
   // walkRules recurses through @media / @supports / @layer automatically.
@@ -54,7 +67,7 @@ export function prepareEmailHtml(rawHtml, uid, { remoteImagesBlocked = false } =
   const stripped = rawHtml.replace(
     /<style[^>]*>([\s\S]*?)<\/style>/gi,
     (_, css) => {
-      const scoped = scopeEmailCss(css, prefix);
+      const scoped = scopeEmailCss(css, prefix, { remoteImagesBlocked });
       if (scoped) styleBlocks.push(scoped);
       return '';
     }

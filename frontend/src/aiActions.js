@@ -45,6 +45,9 @@ export const DEFAULT_AI_ACTIONS = [
 // Field limits — kept in sync with the backend validation in auth.js PATCH /preferences.
 export const AI_ACTION_LIMITS = { max: 30, label: 60, prompt: 2000 };
 
+// Per-message content limit enforced by routes/ai.js POST /ai/chat.
+export const AI_MESSAGE_MAX_CHARS = 32_000;
+
 export function newAiAction(label = '', prompt = '') {
   const id = globalThis.crypto?.randomUUID?.()
     || `a-${Date.now()}-${Math.floor(Math.random() * 1e6)}`;

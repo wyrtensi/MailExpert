@@ -232,6 +232,7 @@
       "aiDismiss": "Dismiss",
       "aiGenerating": "Generating…",
       "aiError": "AI error: {{message}}",
+      "aiTooLong": "This draft is too long for AI editing ({{length}} characters; maximum {{max}}). Shorten it and try again. Your draft has not changed.",
       "bold": "Bold",
       "italic": "Italic",
       "underline": "Underline",

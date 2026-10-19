@@ -878,9 +878,10 @@ export default function MessageList() {
       cached: threadMessages[cacheKey],
       allowCache,
       excludeDrafts,
+      folders,
       fetchThread: () => api.getThread(tid, effectiveFolder, isUnified, message.account_id),
     });
-  }, [isThreadListRow, threadMessages, selectedAccountId, selectedFolder, isUnified]);
+  }, [isThreadListRow, threadMessages, selectedAccountId, selectedFolder, isUnified, folders]);
 
   // cacheKey is a threadCacheKey(message) — `${account_id}:${thread_id or id}`, not a bare
   // thread id: the same conversation in two mailboxes caches separately.

@@ -12,6 +12,8 @@ export const SIGN_OUT_CLEARED_KEYS = [
   'mailexpert_hover_quick_actions', 'mailexpert_swipe_actions',
   'mailexpert_expanded_accounts', 'mailexpert_collapsed_folders', 'mailexpert_pinned_accounts',
   'mailexpert_sort_accounts_by_latest',
+  'mailexpert_favorite_folders', 'mailexpert_recent_folders',
+  'mailexpert_default_sender', 'mailexpert_last_from_account',
 ];
 
 // Signing out from the sidebar and from the lock screen. When the session signed in through

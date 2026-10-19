@@ -11,8 +11,11 @@ vi.mock('dns', () => ({
   },
 }));
 
+vi.mock('fs', () => ({ promises: { readFile: vi.fn() } }));
+
 // Pull the mocked fns for per-test control.
 const { promises: dns } = await import('dns');
+const { promises: fs } = await import('fs');
 
 beforeEach(() => {
   dns.resolve4.mockClear();
@@ -21,27 +24,50 @@ beforeEach(() => {
   dns.resolve6.mockResolvedValue([]);
   dns.lookup.mockReset();
   dns.lookup.mockRejectedValue(Object.assign(new Error('ENOTFOUND'), { code: 'ENOTFOUND' }));
+  fs.readFile.mockReset();
+  fs.readFile.mockResolvedValue('127.0.0.1 localhost\n');
 });
 
 // A name only /etc/hosts knows: DNS has no answer, the system resolver (which the connection uses)
-// has loopback. It was let through unchecked.
+// has loopback. It was let through unchecked. The system resolver (getaddrinfo) runs on libuv's
+// small thread pool, so it is asked only about single-label names (ip6-localhost, _gateway), a few
+// at a time; a name with dots is looked up in the hosts file itself.
 describe('names DNS does not know', () => {
-  it('are checked through the system resolver, as the connection would resolve them', async () => {
+  it('are checked through the system resolver when they have a single label', async () => {
     dns.lookup.mockResolvedValue([{ address: '::1', family: 6 }]);
     expect(await validateHost('ip6-localhost')).toMatch(/private|reserved/i);
     await expect(resolveForConnection('ip6-localhost')).rejects.toThrow(/private|reserved/i);
   });
 
-  it('connect to the address the system resolver gave, pinned, when it is public', async () => {
-    dns.lookup.mockResolvedValue([{ address: '203.0.113.9', family: 4 }]);
+  it('with dots are checked against the hosts file, never the system resolver', async () => {
+    fs.readFile.mockResolvedValue('# comment\n127.0.0.1\tlocalhost\n10.0.0.5 evil.alias.example other # trailing\n203.0.113.9 mail.internal-alias\n');
+    expect(await validateHost('evil.alias.example')).toMatch(/private|reserved/i);
+    await expect(resolveForConnection('EVIL.alias.example.')).rejects.toThrow(/private|reserved/i);
     const r = await resolveForConnection('mail.internal-alias');
     expect(r).toMatchObject({ host: '203.0.113.9', servername: 'mail.internal-alias', addresses: ['203.0.113.9'] });
+    expect(dns.lookup).not.toHaveBeenCalled();
   });
 
-  it('are not looked up in the system resolver when DNS answers', async () => {
+  it('are not looked up anywhere else when DNS answers', async () => {
     dns.resolve4.mockResolvedValue(['203.0.113.10']);
     await resolveForConnection('imap.example.com');
+    await resolveForConnection('imap');
     expect(dns.lookup).not.toHaveBeenCalled();
+    expect(fs.readFile).not.toHaveBeenCalled();
+  });
+
+  it('ask the system resolver at most two at a time', async () => {
+    const pending = [];
+    dns.lookup.mockImplementation(() => new Promise(resolve => pending.push(resolve)));
+    const checks = ['a', 'b', 'c', 'd', 'e'].map(name => validateHost(name));
+    await new Promise(resolve => setTimeout(resolve, 10));
+    expect(dns.lookup).toHaveBeenCalledTimes(2);
+    while (pending.length) {
+      pending.shift()([]);
+      await new Promise(resolve => setTimeout(resolve, 10));
+    }
+    expect(await Promise.all(checks)).toEqual([null, null, null, null, null]);
+    expect(dns.lookup).toHaveBeenCalledTimes(5);
   });
 
   it('are left to fail at connect when no resolver knows them', async () => {

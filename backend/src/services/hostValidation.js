@@ -1,5 +1,6 @@
 import { BlockList, isIPv4, isIPv6 } from 'net';
 import { promises as dnsPromises } from 'dns';
+import { promises as fsPromises } from 'fs';
 import { domainToASCII } from 'url';
 
 function ipv4ToLong(ip) {
@@ -146,14 +147,56 @@ export async function validateHost(host, { allowPrivate = false } = {}) {
 // itself resolves through the system resolver (getaddrinfo), which also reads /etc/hosts, so a name
 // only that file knows (ip6-localhost in the container image, or an alias an operator added) was let
 // through unchecked and then connected to loopback or a private address.
+//
+// getaddrinfo runs on libuv's thread pool (four threads, shared with fs and crypto), and names
+// DNS does not know are easy to supply (a List-Unsubscribe host in someone's mail), so it is not
+// asked about every miss. A single-label name (ip6-localhost, _gateway, a bare hostname) goes to
+// the system resolver, which also answers it from sources other than files and DNS, at most
+// SYSTEM_LOOKUPS_AT_ONCE at a time; a name with dots is looked up in the hosts file itself.
 async function resolveAddresses(bare) {
   const [v4, v6] = await Promise.all([
     dnsPromises.resolve4(bare).catch(() => []),
     dnsPromises.resolve6(bare).catch(() => []),
   ]);
   if (v4.length || v6.length) return [...v4, ...v6];
-  const looked = await dnsPromises.lookup(bare, { all: true, verbatim: true }).catch(() => []);
+  const name = bare.replace(/\.+$/, '');
+  if (name.includes('.')) return hostsFileAddresses(name);
+  const looked = await systemLookup(name).catch(() => []);
   return (Array.isArray(looked) ? looked : []).map(a => a.address).filter(Boolean);
+}
+
+const HOSTS_FILE = process.platform === 'win32'
+  ? `${process.env.SystemRoot || 'C:\\Windows'}\\System32\\drivers\\etc\\hosts`
+  : '/etc/hosts';
+
+// The addresses the hosts file gives `name` (case-insensitive, a trailing dot ignored).
+async function hostsFileAddresses(name) {
+  const text = await fsPromises.readFile(HOSTS_FILE, 'utf8').catch(() => '');
+  const wanted = name.toLowerCase();
+  const addresses = [];
+  for (const line of String(text).split(/\r?\n/)) {
+    const [address, ...names] = line.replace(/#.*/, '').trim().split(/\s+/);
+    if (!address || !(isIPv4(address) || isIPv6(address))) continue;
+    if (names.some(n => n.toLowerCase().replace(/\.+$/, '') === wanted)) addresses.push(address);
+  }
+  return addresses;
+}
+
+const SYSTEM_LOOKUPS_AT_ONCE = 2;
+let systemLookups = 0;
+const waitingLookups = [];
+
+async function systemLookup(name) {
+  if (systemLookups >= SYSTEM_LOOKUPS_AT_ONCE) await new Promise(resolve => waitingLookups.push(resolve));
+  else systemLookups += 1;
+  try {
+    return await dnsPromises.lookup(name, { all: true, verbatim: true });
+  } finally {
+    // Hand the slot straight to the next waiter, or free it.
+    const next = waitingLookups.shift();
+    if (next) next();
+    else systemLookups -= 1;
+  }
 }
 
 export function createPinnedLookup(addresses) {

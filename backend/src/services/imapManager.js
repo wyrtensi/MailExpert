@@ -2613,6 +2613,7 @@ export class ImapManager {
     this._flagDebounceTimers   = new Map(); // accountId -> debounce timer for flag-change syncs
     this._expungeDebounceTimers = new Map(); // accountId -> debounce timer for expunge reconciles
     this._pendingFlagSync = new Set(); // accountId — flag sync was skipped because a full sync was running; drain after sync
+    this._pendingNewMail = new Set(); // accountId — new mail (EXISTS) arrived while a sync was running; sync again after it
     // accountId -> Map<`${messageId}:${flag}`, { messageId, flag, attempts }>: local read/star
     // changes whose IMAP push failed and must be retried until the server confirms them.
     this._pendingFlagPush = new Map();
@@ -3115,7 +3116,13 @@ export class ImapManager {
       if (typeof count === 'number' && typeof prevCount === 'number') {
         this.broadcast({ type: 'exists_hint', accountId: account.id, delta: count - prevCount });
       }
-      if (this.syncingAccounts.has(account.id)) return;
+      if (this.syncingAccounts.has(account.id)) {
+        // The running sync may already have read the mailbox, so this message could miss it and
+        // wait for the next interval tick, a minute away. Two messages a moment apart, or new
+        // mail while a fresh account's first syncs run, did exactly that. Sync again once it ends.
+        this._pendingNewMail.add(account.id);
+        return;
+      }
       // Named for the IMAP response that fired it, NOT for IDLE. An untagged EXISTS arrives
       // during IDLE *or* as an unsolicited response to any polled command, so the old
       // "IMAP IDLE:" prefix asserted push was working on connections that were only polling —
@@ -3403,6 +3410,7 @@ export class ImapManager {
     // disconnect) so a re-added account writes through instead of trusting a stale cache entry.
     this._syncErrorState.delete(accountId);
     this._pendingFlagSync.delete(accountId);
+    this._pendingNewMail.delete(accountId);
     const flagTimer = this._flagDebounceTimers.get(accountId);
     if (flagTimer) { clearTimeout(flagTimer); this._flagDebounceTimers.delete(accountId); }
     const expungeTimer = this._expungeDebounceTimers.get(accountId);
@@ -4192,7 +4200,19 @@ export class ImapManager {
     } finally {
       this.syncingAccounts.delete(account.id);
       this.syncStartedAt.delete(account.id);
+      this._syncAgainIfMailArrived(account);
     }
+  }
+
+  // New mail that arrived while a sync was running (the `exists` listener queued it): sync once more.
+  _syncAgainIfMailArrived(account) {
+    if (!this._pendingNewMail.delete(account.id)) return;
+    console.log(`IMAP EXISTS: new mail for ${logAccount(account)} arrived during a sync, syncing again`);
+    setImmediate(() => {
+      this._syncTick(account).catch(err =>
+        console.warn(`IDLE-triggered sync error for ${logAccount(account)}:`, err.message)
+      );
+    });
   }
 
   // Bulk-apply is_read/is_starred from a fetched {uid, isRead, isStarred}[] onto existing rows
@@ -8553,6 +8573,7 @@ export class ImapManager {
       } finally {
         this.syncingAccounts.delete(account.id);
         this.syncStartedAt.delete(account.id);
+        this._syncAgainIfMailArrived(account);
       }
     } finally {
       this.broadcast({ type: 'sync_complete', accountId: account.id });

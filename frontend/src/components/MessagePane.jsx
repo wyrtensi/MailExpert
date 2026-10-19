@@ -61,6 +61,7 @@ import { formatDateTime, localeTag } from '../utils/formatDate.js';
 import { mailboxBusyOr, mailboxBusyText, isMailboxBusy } from '../utils/mailboxBusy.js';
 import { splitByConfirmed } from '../utils/optimisticRemoval.js';
 import AddAccountButton from './addAccount/AddAccountButton.jsx';
+import { emailFrameCsp, printWindowCsp } from '../utils/remoteImagePolicy.js';
 
 function parseAddressField(raw) {
   try {
@@ -1358,8 +1359,9 @@ export default function MessagePane({ windowMessageId = null, onWindowClose = nu
     const win = window.open('', '_blank');
     if (!win) return;
     // CSP blocks any script execution in this same-origin print window (it has no
-    // sandbox); combined with the DOMPurify pass above this neutralizes email HTML.
-    win.document.write(`<!DOCTYPE html><html><head><meta charset="utf-8"><meta http-equiv="Content-Security-Policy" content="script-src 'none'; object-src 'none'; base-uri 'none'"><title>${esc(message.subject)}</title>
+    // sandbox); combined with the DOMPurify pass above this neutralizes email HTML. A body
+    // served with remote images blocked prints without them (utils/remoteImagePolicy.js).
+    win.document.write(`<!DOCTYPE html><html><head><meta charset="utf-8"><meta http-equiv="Content-Security-Policy" content="${printWindowCsp(body?.remoteImagesBlocked === true)}"><title>${esc(message.subject)}</title>
 <style>
   body { font-family: Arial, sans-serif; font-size: 14px; color: #111; margin: 32px; }
   .header { border-bottom: 1px solid #ccc; padding-bottom: 16px; margin-bottom: 24px; }
@@ -3236,7 +3238,7 @@ ${bodyContent}
                 srcDoc={`<!DOCTYPE html><html><head><meta charset="utf-8">
                 <meta name="viewport" content="width=device-width,initial-scale=1">
                 <meta name="color-scheme" content="only light">
-                <meta http-equiv="Content-Security-Policy" content="script-src 'none'; object-src 'none'; frame-src 'none'; form-action 'none'; style-src 'unsafe-inline';">
+                <meta http-equiv="Content-Security-Policy" content="${emailFrameCsp(body.remoteImagesBlocked === true)}">
                 <base target="_blank">
               </head><body><div id="mf-scale-wrapper">${
                 body.html.replace(/<a(\s)/gi, '<a rel="noopener noreferrer"$1')

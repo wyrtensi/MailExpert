@@ -575,11 +575,14 @@ router.get('/messages/:id/body', async (req, res) => {
     const skipBlocking = req.query.remoteImages === '1';
     let responseHtml = html;
     let hasBlockedRemoteImages = false;
-    if (!skipBlocking && html && shouldBlockImages(message.preferences, message) && hasRemoteImages(html)) {
+    // Whether remote images are blocked for this message at all, whatever was found: the email
+    // frame then forbids remote loads outright, behind blockRemoteImages.
+    const remoteImagesBlocked = !skipBlocking && shouldBlockImages(message.preferences, message);
+    if (remoteImagesBlocked && html && hasRemoteImages(html)) {
       responseHtml = blockRemoteImages(html);
       hasBlockedRemoteImages = true;
     }
-    return res.json({ html: responseHtml, text: message.body_text, attachments, hasBlockedRemoteImages, senderEmail: message.sender_email, senderName: message.sender_name, eopCategory: message.eop_category ?? null, inReplyTo: message.in_reply_to ?? null, references: message.thread_references ?? null, bccAddresses: Array.isArray(message.bcc_addresses) ? message.bcc_addresses : [] });
+    return res.json({ html: responseHtml, text: message.body_text, attachments, hasBlockedRemoteImages, remoteImagesBlocked, senderEmail: message.sender_email, senderName: message.sender_name, eopCategory: message.eop_category ?? null, inReplyTo: message.in_reply_to ?? null, references: message.thread_references ?? null, bccAddresses: Array.isArray(message.bcc_addresses) ? message.bcc_addresses : [] });
   }
 
   // Fetch from IMAP — signal user activity so background jobs back off during this request.
@@ -617,11 +620,12 @@ router.get('/messages/:id/body', async (req, res) => {
     const skipBlocking = req.query.remoteImages === '1';
     let responseHtml = safeHtml;
     let hasBlockedRemoteImages = false;
-    if (!skipBlocking && safeHtml && shouldBlockImages(message.preferences, message) && hasRemoteImages(safeHtml)) {
+    const remoteImagesBlocked = !skipBlocking && shouldBlockImages(message.preferences, message);
+    if (remoteImagesBlocked && safeHtml && hasRemoteImages(safeHtml)) {
       responseHtml = blockRemoteImages(safeHtml);
       hasBlockedRemoteImages = true;
     }
-    res.json({ html: responseHtml, text: safeText, attachments: attachments || [], hasBlockedRemoteImages, senderEmail: message.sender_email, senderName: message.sender_name, eopCategory: message.eop_category ?? null, inReplyTo: message.in_reply_to ?? null, references: message.thread_references ?? null, bccAddresses: Array.isArray(message.bcc_addresses) ? message.bcc_addresses : [] });
+    res.json({ html: responseHtml, text: safeText, attachments: attachments || [], hasBlockedRemoteImages, remoteImagesBlocked, senderEmail: message.sender_email, senderName: message.sender_name, eopCategory: message.eop_category ?? null, inReplyTo: message.in_reply_to ?? null, references: message.thread_references ?? null, bccAddresses: Array.isArray(message.bcc_addresses) ? message.bcc_addresses : [] });
   } catch (err) {
     const msg = err.message || 'Unknown error';
     console.error(`Body fetch error for message ${id} (account ${message.account_id}):`, msg);

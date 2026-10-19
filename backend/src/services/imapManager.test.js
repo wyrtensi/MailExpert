@@ -8651,6 +8651,26 @@ describe('fetchMessageBody inline images', () => {
   const image = (part, cid, type = 'image/png') => ({ part, type, encoding: 'base64', id: `<${cid}>` });
   afterEach(() => { vi.restoreAllMocks(); });
 
+  // Whether a cid: reference left in the HTML could resolve on another fetch.
+  it('is complete when a reference names a Content-ID no part has: it can never resolve', async () => {
+    const { mgr, account } = arrange([image('2', 'logo@x')], { 1: '<img src="cid:logo@x"><img src="cid:missing@x">', 2: 'iVBORw0KGgo=' });
+    const body = await mgr.fetchMessageBody(account, 42, 'INBOX');
+    expect(body.html).toBe('<img src="data:image/png;base64,iVBORw0KGgo="><img src="cid:missing@x">');
+    expect(body.cidsComplete).toBe(true);
+  });
+
+  it('is not complete when an image the HTML references did not arrive: another fetch may get it', async () => {
+    const { mgr, account } = arrange([image('2', 'logo@x')], { 1: '<img src="cid:logo@x">' });
+    const body = await mgr.fetchMessageBody(account, 42, 'INBOX');
+    expect(body.html).toBe('<img src="cid:logo@x">');
+    expect(body.cidsComplete).toBe(false);
+  });
+
+  it('is complete when every referenced image was embedded', async () => {
+    const { mgr, account } = arrange([image('2', 'logo@x')], { 1: '<img src="cid:logo@x">', 2: 'iVBORw0KGgo=' });
+    expect((await mgr.fetchMessageBody(account, 42, 'INBOX')).cidsComplete).toBe(true);
+  });
+
   it('embeds bracketed, upper-case and CSS references to an inline image', async () => {
     const outlook = 'image001.png@01DA1B2C.3D4E5F60';
     const symbols = 'logo+v2.$[1]{2}^*?|x@a.b';

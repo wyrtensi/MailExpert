@@ -12,6 +12,7 @@ import { query } from './db.js';
 import { createAccountSmtpTransport } from './smtpTransport.js';
 import { callWorker } from './proton/workerClient.js';
 import { parseRawHeaders } from './messageParser.js';
+import { CIDS_SETTLED } from '../utils/cidRefs.js';
 import {
   buildForwardMessage,
   forwardRuleMessage,
@@ -270,6 +271,19 @@ describe('forwardRuleMessage', () => {
     await expect(forwardRuleMessage(input)).resolves.toBe('sent');
     expect(transport.sendMail).toHaveBeenCalledTimes(1);
     expect(query.mock.calls.at(-1)[0]).toContain("status = 'sent'");
+  });
+
+  it('forwards a cached body without the settled cid: marker, which is for the cache only', async () => {
+    query
+      .mockResolvedValueOnce(SENDABLE)
+      .mockResolvedValueOnce({ rows: [{ id: 'delivery-1' }] })
+      .mockResolvedValueOnce({ rows: [{ ...messageRow, body_html: `<p>Original body</p><img src="cid:gone@x">${CIDS_SETTLED}` }] })
+      .mockResolvedValueOnce({ rows: [] });
+
+    await expect(forwardRuleMessage(input)).resolves.toBe('sent');
+    const sent = JSON.stringify(transport.sendMail.mock.calls[0][0]);
+    expect(sent).toContain('Original body');
+    expect(sent).not.toContain('cids-settled');
   });
 
   it('returns duplicate without sending when the existing reservation is sent', async () => {

@@ -39,6 +39,10 @@ let flagListReloadPending = false;
 let flagCategoriesPending = false;
 const BACKOFF_BASE = 1000;
 const BACKOFF_MAX = 30000;
+// How long a socket must stay open before the backoff starts over. One the server accepts and then
+// closes at once (an address other than APP_URL is refused, 1008) otherwise reset it on every open
+// and was retried every second or two, each retry refetching the message list.
+const STABLE_MS = 10000;
 
 export function useWebSocket(enabled = true) {
   const { t } = useTranslation();
@@ -64,6 +68,7 @@ export function useWebSocket(enabled = true) {
     if (wsRef.current && wsRef.current.readyState !== WebSocket.CLOSED) {
       wsRef.current.onclose = null;  // prevent old socket's close from scheduling another reconnect
       clearInterval(wsRef.current._pingInterval);
+      clearTimeout(wsRef.current._stableTimer);
       wsRef.current.close();
     }
     const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
@@ -77,7 +82,7 @@ export function useWebSocket(enabled = true) {
       }
       const wasReconnect = hasConnectedBefore.current;
       hasConnectedBefore.current = true;
-      reconnectAttempt.current = 0;
+      ws._stableTimer = setTimeout(() => { reconnectAttempt.current = 0; }, STABLE_MS);
       ws._lastActivity = Date.now();
       // Ping every 30s. If no message (including the server's pong) has arrived in ~2.5 intervals,
       // the socket is half-open — common after sleep/network blips, where onclose never fires and
@@ -117,6 +122,7 @@ export function useWebSocket(enabled = true) {
 
     ws.onclose = (event) => {
       clearInterval(ws._pingInterval);
+      clearTimeout(ws._stableTimer);
       if (!enabledRef.current || !mountedRef.current) return;
       const action = wsCloseAction(event);
       if (action === WS_CLOSE_ACTIONS.STOP) return;

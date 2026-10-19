@@ -94,3 +94,24 @@ it('keeps quoted proxy images local even when the sender hides a direct URL', ()
   assert.match(out, /src="\/api\/mail\/messages/);
   assert.doesNotMatch(out, /sender.example/);
 });
+
+
+const { openReplyFromMessage, openForwardFromMessage } = await import('./composeFromMessage.js');
+for (const [name, open] of [['reply', openReplyFromMessage], ['forward', openForwardFromMessage]]) {
+  it(`keeps a proxied ${name} from the list from loading escaped remote CSS in the composer`, async () => {
+    let compose;
+    await open({ id: 'message-1', account_id: 'account-1', from_email: 'sender@example.com', subject: 'Hello' }, {
+      accounts: [], openCompose: value => { compose = value; },
+      getMessageBody: async () => ({
+        html: String.raw`<img src="/api/mail/messages/m/image/1.sig?u=x"><div style="background:url(\68ttps://sender.example/a.png)">Hello</div>`,
+        text: 'Hello', remoteImagesBlocked: false, remoteImagesProxied: true,
+      }),
+    });
+    const shown = sanitizeQuoteHtml(compose.quotedBodyHtml, {
+      imagesBlocked: compose.quotedImagesBlocked === true,
+      imagesProxied: compose.quotedImagesProxied === true,
+    });
+    assert.doesNotMatch(shown, /sender.example\/a.png/);
+    assert.match(shown, /src="\/api\/mail\/messages/);
+  });
+}

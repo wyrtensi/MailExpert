@@ -4,6 +4,7 @@ import { onComposeCloseRequest } from '../utils/composeCloseRequest.js';
 import { shouldCommitPendingInput } from '../utils/pendingRecipient.js';
 import { useTranslation } from 'react-i18next';
 import DOMPurify from 'dompurify';
+import { sanitizeQuoteHtml } from '../utils/appEmailHtml.js';
 import { useStore } from '../store/index.js';
 import { isForeignNodeAlias } from '../utils/mailNode.js';
 import { api } from '../utils/api.js';
@@ -363,11 +364,13 @@ export default function ComposeModal() {
   // The rich quote as the writer last left it. The quote's contentEditable is unmounted while the
   // composer is minimized or switches between the mobile and desktop layouts; it is filled from
   // here whenever it mounts and saved back here when it unmounts, so the quote survives both.
-  // <style> blocks are stripped: marketing emails use global rules like "div { margin: 0 !important }"
-  // that leak out of contentEditable into the app UI. Inline style attributes are preserved.
+  // utils/appEmailHtml.js: <style> blocks stripped, and a quote of a body served with remote
+  // images blocked keeps them blocked, since this is the app's page, not the email frame.
   const lastQuoteHtmlRef = useRef(undefined);
   if (lastQuoteHtmlRef.current === undefined) {
-    lastQuoteHtmlRef.current = quotedBodyHtml ? DOMPurify.sanitize(quotedBodyHtml, { FORBID_TAGS: ['style'] }) : null;
+    lastQuoteHtmlRef.current = quotedBodyHtml
+      ? sanitizeQuoteHtml(quotedBodyHtml, { imagesBlocked: composeData?.quotedImagesBlocked === true })
+      : null;
   }
   // Ref-based rather than React-rendered content, to avoid React cursor conflicts.
   const attachQuotedHtml = useCallback((el) => {
@@ -402,7 +405,9 @@ export default function ComposeModal() {
     ...resolveFrom(fromValue),
     priority,
     quotedBody,
-    quotedBodyHtml: plaintextEmail ? null : (quotedHtmlRef.current?.innerHTML ?? quotedBodyHtml),
+    // The quote as on screen, or as last left while its editor is unmounted (minimized): already
+    // sanitized, images kept blocked if they were, so a draft reopened later carries no more.
+    quotedBodyHtml: plaintextEmail ? null : (quotedHtmlRef.current?.innerHTML ?? lastQuoteHtmlRef.current ?? quotedBodyHtml),
     editedSignature: plaintextEmail ? plainSig : signatureContentRef.current,
   });
 

@@ -412,8 +412,10 @@ export default function MessagePane({ windowMessageId = null, onWindowClose = nu
   // no flash of empty content between skeleton-gone and email-shown.
   const prepared = useMemo(() => {
     if (!USE_DIV_RENDER || !body?.html || safeView) return null;
-    return prepareEmailHtml(body.html, windowMode ? `w${message?.id ?? 'preview'}` : String(message?.id ?? 'preview'));
-  }, [body?.html, message?.id, windowMode, safeView]);
+    return prepareEmailHtml(body.html, windowMode ? `w${message?.id ?? 'preview'}` : String(message?.id ?? 'preview'), {
+      remoteImagesBlocked: body.remoteImagesBlocked === true,
+    });
+  }, [body?.html, body?.remoteImagesBlocked, message?.id, windowMode, safeView]);
   const outerRef = useRef(null);
   const scaleRef = useRef(null);
   const innerRef = useRef(null);
@@ -1237,6 +1239,8 @@ export default function MessagePane({ windowMessageId = null, onWindowClose = nu
       body: '',
       quotedBody: quotedText,
       quotedBodyHtml,
+      // The quote sits in the app's page: keep images blocked there if the body was served so.
+      quotedImagesBlocked: body?.remoteImagesBlocked === true,
       quoteMeta,
       quoteLang,
       inReplyTo: message.message_id,
@@ -1263,6 +1267,7 @@ export default function MessagePane({ windowMessageId = null, onWindowClose = nu
       body: '',
       quotedBody: fwdText,
       quotedBodyHtml: fwdHtml,
+      quotedImagesBlocked: body?.remoteImagesBlocked === true,
       quoteMeta,
       quoteLang,
       quoteExtra,

@@ -547,9 +547,12 @@ export function sanitizeSignature(html) {
 const REMOTE_URL = /^\s*(?:https?:)?\/\//i;
 const isCssSpace = (c) => c === ' ' || c === '\t' || c === '\n' || c === '\r' || c === '\f';
 
-// Every remote URL in CSS text, rewritten by `rewrite(kind, url)`, which returns the text that
-// replaces the whole token: kind 'url' for url(...), 'string' for a quoted URL inside image-set(),
-// 'import' for an @import rule (through its ';'). Anything else is copied as it is.
+// Every remote URL in CSS text, rewritten by `rewrite(kind, url, token)`, which returns the text
+// that replaces the whole token: kind 'url' for url(...), 'string' for a quoted URL inside
+// image-set(), 'import' for an @import rule (through its ';'). `token` is { text, before, value,
+// after }: the token as written, split around the URL's own characters (`value`, untrimmed), so a
+// rewrite can replace the URL alone (the image proxy, emailImageRefs.js). Anything else is copied
+// as it is.
 //
 // One pass from left to right that never reads text twice: every search for a closing character
 // remembers where it last looked. Patterns that scan ahead from each candidate (url\(...\)) cost
@@ -561,7 +564,7 @@ const isCssSpace = (c) => c === ' ' || c === '\t' || c === '\n' || c === '\r' ||
 const CSS_NEEDLES = { 'url(': /url\(/gi, 'image-set(': /image-set\(/gi, '@import': /@import/gi };
 const startsWithCi = (text, at, needle) => text.slice(at, at + needle.length).toLowerCase() === needle;
 
-function rewriteCssUrls(css, rewrite) {
+export function rewriteCssUrls(css, rewrite) {
   const n = css.length;
   const found = new Map();
   // The next index of `needle` at or after `from`. A result is reused while it still answers the
@@ -581,24 +584,32 @@ function rewriteCssUrls(css, rewrite) {
     found.set(needle, { from, at });
     return at;
   };
-  // A url( token starting at `start` (the 'u'): its value and the index after its ')', or null.
+  // A url( token starting at `start` (the 'u'): its pieces and the index after its ')', or null.
   const urlToken = (start) => {
     let j = start + 4;
     while (j < n && isCssSpace(css[j])) j += 1;
-    let value;
+    let valueStart;
+    let valueEnd;
     let k;
     if (css[j] === '"' || css[j] === "'") {
       const close = next(css[j], j + 1);
       if (close === -1) return null;
-      value = css.slice(j + 1, close);
+      valueStart = j + 1;
+      valueEnd = close;
       k = close + 1;
     } else {
       k = j;
       while (k < n && css[k] !== ')' && css[k] !== '(' && css[k] !== '"' && css[k] !== "'" && !isCssSpace(css[k])) k += 1;
-      value = css.slice(j, k);
+      valueStart = j;
+      valueEnd = k;
     }
     while (k < n && isCssSpace(css[k])) k += 1;
-    return css[k] === ')' ? { value, end: k + 1 } : null;
+    if (css[k] !== ')') return null;
+    const end = k + 1;
+    return {
+      value: css.slice(valueStart, valueEnd), end,
+      token: { text: css.slice(start, end), before: css.slice(start, valueStart), value: css.slice(valueStart, valueEnd), after: css.slice(valueEnd, end) },
+    };
   };
 
   let out = '';
@@ -611,7 +622,7 @@ function rewriteCssUrls(css, rewrite) {
     out += css.slice(i, at);
     if (kind === 'url') {
       const token = urlToken(at);
-      if (token && REMOTE_URL.test(token.value)) { out += rewrite('url', token.value.trim()); i = token.end; continue; }
+      if (token && REMOTE_URL.test(token.value)) { out += rewrite('url', token.value.trim(), token.token); i = token.end; continue; }
       out += css.slice(at, at + 4);
       i = at + 4;
     } else if (kind === 'import') {
@@ -622,7 +633,12 @@ function rewriteCssUrls(css, rewrite) {
       let target = '';
       if (startsWithCi(css, j, 'url(')) target = urlToken(j)?.value ?? '';
       else if (css[j] === '"' || css[j] === "'") { const close = next(css[j], j + 1); target = close === -1 ? '' : css.slice(j + 1, close); }
-      if (REMOTE_URL.test(target)) { out += rewrite('import', target.trim()); i = end; continue; }
+      if (REMOTE_URL.test(target)) {
+        const text = css.slice(at, end);
+        out += rewrite('import', target.trim(), { text, before: text, value: '', after: '' });
+        i = end;
+        continue;
+      }
       out += css.slice(at, at + 7);
       i = at + 7;
     } else {
@@ -637,11 +653,13 @@ function rewriteCssUrls(css, rewrite) {
           const close = next(c, k + 1);
           const stop = close === -1 ? n : close + 1;
           const value = css.slice(k + 1, close === -1 ? n : close);
-          out += REMOTE_URL.test(value) ? rewrite('string', value.trim()) : css.slice(k, stop);
+          out += REMOTE_URL.test(value)
+            ? rewrite('string', value.trim(), { text: css.slice(k, stop), before: c, value, after: close === -1 ? '' : c })
+            : css.slice(k, stop);
           k = stop;
         } else if (startsWithCi(css, k, 'url(')) {
           const token = urlToken(k);
-          if (token && REMOTE_URL.test(token.value)) { out += rewrite('url', token.value.trim()); k = token.end; }
+          if (token && REMOTE_URL.test(token.value)) { out += rewrite('url', token.value.trim(), token.token); k = token.end; }
           else { out += css.slice(k, k + 4); k += 4; depth += 1; }
         } else {
           if (c === '(') depth += 1;
@@ -665,10 +683,10 @@ const blockCssUrls = (css) =>
 // An attribute value as written in the HTML, and back. Sanitized HTML writes values in double
 // quotes with " as &quot;, & as &amp; and < > as &lt; &gt;; a CSS URL quoted with " is only
 // visible once decoded, and what was decoded is encoded again the same way.
-const decodeAttr = (v) => v
+export const decodeAttr = (v) => v
   .replace(/&quot;|&#0*34;|&#x0*22;/gi, '"').replace(/&#0*39;|&#x0*27;|&apos;/gi, "'")
   .replace(/&lt;/gi, '<').replace(/&gt;/gi, '>').replace(/&amp;/gi, '&');
-const encodeAttr = (v) => v.replace(/&/g, '&amp;').replace(/"/g, '&quot;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+export const encodeAttr = (v) => v.replace(/&/g, '&amp;').replace(/"/g, '&quot;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
 
 // Whether the HTML loads anything remote that blockRemoteImages would stop: exactly when blocking
 // would change it, so the two can never disagree.

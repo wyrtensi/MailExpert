@@ -13,7 +13,8 @@ import { rewriteCssUrls, decodeAttr, encodeAttr } from './emailSanitizer.js';
 const REMOTE = /^\s*(?:https?:)?\/\//i;
 const isSpace = (c) => c === ' ' || c === '\t' || c === '\n' || c === '\r' || c === '\f';
 
-// An image that draws nothing: what a panel URL an email wrote itself, or a tracker, becomes.
+// An image that draws nothing, one pixel: what a tracker, or a panel URL an email wrote itself,
+// becomes, so the layout stays as sent.
 export const BLANK_IMAGE = 'data:image/gif;base64,R0lGODlhAQABAIAAAAAAAP///yH5BAEAAAAALAAAAAABAAEAAAIBRAA7';
 
 // The URL a remote reference loads, from its decoded text: protocol-relative ("//host/...") is
@@ -153,20 +154,109 @@ function visitImageRefs(html, visit) {
   );
 }
 
+// Open-tracking images. The image proxy hides the reader's address, but fetching a tracking pixel
+// still tells the sender the email was opened, so MailExpert does not fetch these at all, even
+// with images allowed: an <img> the email itself sizes at 2x2 px or less (width and height, as
+// attributes or inline style), and the open-tracking addresses of the common sending platforms.
+// Images hidden with display:none are not counted: senders hide a dark-mode logo that way.
+const TINY = 2;
+const IMAGE_FILE = /\.(?:png|jpe?g|gif|webp|avif|bmp|svg)$/i;
+const OPEN_SEGMENT = /^open(?:ed)?(?:\.(?:gif|png|jpe?g|php|aspx?))?$/i;
+const TRACKER_FILE = /^(?:pixel|beacon|track(?:ing)?|open)\.(?:gif|png)$/i;
+const TOKEN = /^[\w.=~-]{16,}$/;
+
+// Whether `url` is a known open-tracking address. Only the path is read.
+export function isTrackingUrl(url) {
+  let path;
+  try {
+    path = new URL(url).pathname;
+  } catch {
+    return false;
+  }
+  const segs = path.split('/').filter(Boolean);
+  if (!segs.length) return false;
+  const last = segs[segs.length - 1];
+  if (TRACKER_FILE.test(last)) return true;
+  // .../open, .../open.php, .../open/<token> (SendGrid /wf/open, Mailchimp /track/open.php,
+  // Salesforce /open.aspx, /api/notifications/v1/open/<token>), but not /open/images/logo.png.
+  for (let i = Math.max(0, segs.length - 2); i < segs.length; i += 1) {
+    if (OPEN_SEGMENT.test(segs[i]) && (i === segs.length - 1 || !IMAGE_FILE.test(last))) return true;
+  }
+  // Mailgun /o/<token>, Customer.io /e/o/<token>, Amazon SES /I0/<token> and /CI0/<token>.
+  if (segs.length >= 2 && ['o', 'I0', 'CI0'].includes(segs[segs.length - 2]) && TOKEN.test(last) && !IMAGE_FILE.test(last)) return true;
+  return false;
+}
+
+const PIXELS = /^(\d+(?:\.\d+)?)(?:px)?$/i;
+const STYLE_PIXELS = /^(\d+(?:\.\d+)?)px$/i;
+
+// An img's width or height in pixels, from its attribute or its inline style, or null.
+function dimension(attrs, name) {
+  const attr = attrs.get(name);
+  if (attr !== undefined) {
+    const m = PIXELS.exec(decodeAttr(attr).trim());
+    if (m) return Number(m[1]);
+  }
+  const style = attrs.get('style');
+  if (style === undefined) return null;
+  let found = null;
+  for (const decl of decodeAttr(style).split(';')) {
+    const colon = decl.indexOf(':');
+    if (colon === -1 || decl.slice(0, colon).trim().toLowerCase() !== name) continue;
+    const m = STYLE_PIXELS.exec(decl.slice(colon + 1).replace(/!important/i, '').trim());
+    if (m) found = Number(m[1]);
+  }
+  return found;
+}
+
+const isTinyImage = (attrs) => {
+  const w = dimension(attrs, 'width');
+  const h = dimension(attrs, 'height');
+  return w !== null && h !== null && w <= TINY && h <= TINY;
+};
+
+// Whether a remote reference is a tracker: its address is one, or an <img> the email sizes as a
+// pixel loads it (wherever else the same reference is used).
+function trackerTest(html) {
+  const tiny = new Set();
+  visitImageRefs(html, (raw, ref) => {
+    if (ref.remote && ref.where === 'src' && isTinyImage(ref.attrs)) tiny.add(raw);
+    return undefined;
+  });
+  return (raw, url) => tiny.has(raw) || isTrackingUrl(url);
+}
+
 // Every remote image of sanitized HTML through the image proxy: each remote reference becomes
 // `toProxy(raw, ref)` (routes/mail.js, services/imageProxy.js imageProxyPath), which carries the
 // reference as it was written, so the frontend can put the original back exactly when the HTML
-// leaves for the server (a reply, a forward, a draft).
-export function proxyRemoteImages(html, toProxy) {
-  return visitImageRefs(html, (raw, ref) => (ref.remote ? toProxy(raw, ref) : undefined));
+// leaves for the server (a reply, a forward, a draft). Trackers are not loaded: they become
+// BLANK_IMAGE, and `stats.trackers` counts the distinct ones.
+export function proxyRemoteImages(html, toProxy, stats = {}) {
+  stats.trackers = 0;
+  if (!html) return html;
+  const isTracker = trackerTest(html);
+  const trackers = new Set();
+  const out = visitImageRefs(html, (raw, ref) => {
+    if (!ref.remote) return undefined;
+    const url = remoteUrlOf(ref.url);
+    if (!isTracker(raw, url)) return toProxy(raw, ref);
+    trackers.add(url);
+    return BLANK_IMAGE;
+  });
+  stats.trackers = trackers.size;
+  return out;
 }
 
 // The remote image references of sanitized HTML, as written, with what each loads: the only URLs
-// the image proxy fetches for a message.
+// the image proxy fetches for a message. Trackers are left out.
 export function remoteImageRefs(html) {
   const refs = new Map();
+  if (!html) return refs;
+  const isTracker = trackerTest(html);
   visitImageRefs(html, (raw, ref) => {
-    if (ref.remote && !refs.has(raw)) refs.set(raw, remoteUrlOf(ref.url));
+    if (!ref.remote || refs.has(raw)) return undefined;
+    const url = remoteUrlOf(ref.url);
+    if (!isTracker(raw, url)) refs.set(raw, url);
     return undefined;
   });
   return refs;

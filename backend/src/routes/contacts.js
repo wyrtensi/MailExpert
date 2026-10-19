@@ -111,6 +111,15 @@ router.get('/', async (req, res) => {
 
 const PHOTO_TYPES = new Set(['image/jpeg', 'image/png', 'image/gif', 'image/webp']);
 
+// Contact photos (from synced vCards) and Gravatar images (any image/*, SVG included) are served on
+// the panel's own origin: never as anything but an image, whatever proxy sits in front (nginx adds
+// nosniff too, a custom one may not), and never run as a page if opened on their own.
+const IMAGE_SAFETY_HEADERS = {
+  'X-Content-Type-Options': 'nosniff',
+  'Content-Security-Policy': "sandbox; default-src 'none'",
+  'Cross-Origin-Resource-Policy': 'same-origin',
+};
+
 // GET /api/contacts/photo?email=:email
 // Returns the contact photo for the given sender email as image bytes.
 // This route must remain ABOVE /:id to prevent Express matching "photo" as an id.
@@ -131,9 +140,7 @@ router.get('/photo', async (req, res) => {
 
     const photoData = result.rows[0].photo_data;
     res.set('Cache-Control', 'private, max-age=86400');
-    // The bytes come from synced vCards; never let them run as a page on the panel's origin.
-    res.set('X-Content-Type-Options', 'nosniff');
-    res.set('Content-Security-Policy', "sandbox; default-src 'none'");
+    res.set(IMAGE_SAFETY_HEADERS);
 
     if (photoData.startsWith('data:')) {
       const commaIdx = photoData.indexOf(',');
@@ -174,6 +181,7 @@ router.get('/gravatar', async (req, res) => {
   if (cached && cached.expires > now) {
     if (cached.miss) return res.status(404).end();
     res.set('Cache-Control', 'private, max-age=86400');
+    res.set(IMAGE_SAFETY_HEADERS);
     res.set('Content-Type', cached.type);
     return res.send(cached.buf);
   }
@@ -195,6 +203,7 @@ router.get('/gravatar', async (req, res) => {
     if (buf.length === 0 || buf.length > 512 * 1024) return res.status(502).end();
     gravatarCacheSet(hash, { buf, type, expires: now + GRAVATAR_TTL_MS });
     res.set('Cache-Control', 'private, max-age=86400');
+    res.set(IMAGE_SAFETY_HEADERS);
     res.set('Content-Type', type);
     return res.send(buf);
   } catch {

@@ -205,7 +205,11 @@ export const useStore = create((set, get) => ({
     const leaving = get().user != null && get().user.id !== user?.id;
     if (leaving) {
       localStorage.removeItem('mailexpert_locked_message');
-      for (const key of ['mailexpert_pinned_accounts', 'mailexpert_sort_accounts_by_latest', 'mailexpert_expanded_accounts']) {
+      for (const key of [
+        'mailexpert_pinned_accounts', 'mailexpert_sort_accounts_by_latest', 'mailexpert_expanded_accounts',
+        'mailexpert_favorite_folders', 'mailexpert_recent_folders', 'mailexpert_collapsed_folders',
+        'mailexpert_default_sender', 'mailexpert_last_from_account',
+      ]) {
         localStorage.removeItem(key);
       }
     }
@@ -213,6 +217,8 @@ export const useStore = create((set, get) => ({
       user,
       ...(leaving ? {
         pinnedAccounts: [], sortAccountsByLatest: true, expandedAccounts: {},
+        // Shared mailboxes still have personal shortcuts and sender choices.
+        favoriteFolders: [], recentFolders: [], collapsedFolders: [], defaultSender: '',
         autoLockMinutes: 0, blockRemoteImages: false,
         imageWhitelist: { addresses: [], domains: [] }, shortcuts: {}, hiddenFolders: {},
         aiActions: null, enabledPlugins: [], categorizationEnabled: false, gtdPetSlug: null,

@@ -45,8 +45,8 @@ function key() {
   return signingKey;
 }
 
-const sign = (userId, messageId, raw, exp) => createHmac('sha256', key())
-  .update(`${userId}\0${messageId}\0${exp}\0${raw}`)
+const sign = (userId, messageId, raw, exp, allowBlocked = false) => createHmac('sha256', key())
+  .update(`${userId}\0${messageId}\0${exp}\0${allowBlocked ? 1 : 0}\0${raw}`)
   .digest('base64url');
 
 // "<exp>.<signature>": exp in seconds since the epoch.
@@ -56,12 +56,12 @@ export function parseImageProxyToken(token) {
   return m ? { exp: Number(m[1]), sig: m[2] } : null;
 }
 
-export function verifyImageProxyToken(token, { userId, messageId, raw, now = Date.now() }) {
+export function verifyImageProxyToken(token, { userId, messageId, raw, now = Date.now(), allowBlocked = false }) {
   const parsed = parseImageProxyToken(token);
   if (!parsed || !userId) return false;
   const expMs = parsed.exp * 1000;
   if (expMs < now || expMs - now > IMAGE_PROXY_TOKEN_TTL_MS + HOUR_MS) return false;
-  const expected = Buffer.from(sign(userId, messageId, raw, parsed.exp));
+  const expected = Buffer.from(sign(userId, messageId, raw, parsed.exp, allowBlocked));
   const given = Buffer.from(parsed.sig);
   return given.length === expected.length && timingSafeEqual(given, expected);
 }
@@ -72,10 +72,10 @@ export function verifyImageProxyToken(token, { userId, messageId, raw, now = Dat
 // ! ' ( ) * alone), so the URL is safe in any attribute, inline style or <style> block: only
 // letters, digits, - . _ ~ % / ? = remain. The frontend reverses it (utils/imageProxy.js); the
 // two must agree.
-export function imageProxyPath(messageId, raw, userId, { now = Date.now() } = {}) {
+export function imageProxyPath(messageId, raw, userId, { now = Date.now(), allowBlocked = false } = {}) {
   const exp = Math.floor((Math.ceil(now / HOUR_MS) * HOUR_MS + IMAGE_PROXY_TOKEN_TTL_MS) / 1000);
   const encoded = encodeURIComponent(raw).replace(/[!'()*]/g, (c) => `%${c.charCodeAt(0).toString(16).toUpperCase()}`);
-  return `/api/mail/messages/${messageId}/image/${exp}.${sign(userId, messageId, raw, exp)}?u=${encoded}`;
+  return `/api/mail/messages/${messageId}/image/${exp}.${sign(userId, messageId, raw, exp, allowBlocked)}?u=${encoded}${allowBlocked ? "&allow=1" : ""}`;
 }
 
 // The image type from the file's first bytes, or null: the upstream Content-Type is not trusted.

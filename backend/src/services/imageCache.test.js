@@ -104,6 +104,14 @@ describe('createImageCache', () => {
     expect(calls).toBe(1);
   });
 
+  it('finishes storing before load resolves, so clearing cannot resurrect images', async () => {
+    const cache = createImageCache({ dir: dir() });
+    await cache.load(key('finished'), async () => png(10));
+    expect(cache.stats().entries).toBe(1);
+    await cache.clear();
+    expect(await cache.get(key('finished'))).toBeNull();
+  });
+
   it('carries on without the disk when it cannot write there', async () => {
     const d = dir();
     writeFileSync(join(d, 'blocker'), '');

@@ -99,6 +99,18 @@ describe('GET /messages/:id/body and the image proxy', () => {
     expect(blocked.html).not.toContain('/image/');
   });
 
+  it('loads only signed explicit overrides while blocking is enabled', async () => {
+    answer(row(PHOTO, { blockRemoteImages: true }));
+    const body = await get('?remoteImages=1');
+    const path = /src="([^"]*\/image\/[^"]*)"/.exec(body.html)[1].replace(/&amp;/g, '&');
+    query.mockResolvedValue({ rows: [row(PHOTO, { blockRemoteImages: true })] });
+    safeFetch.mockResolvedValue(upstream(PNG));
+    expect((await fetch(`${base}${path}`)).status).toBe(200);
+    expect((await fetch(`${base}${path.replace('&allow=1', '')}`)).status).toBe(403);
+    const defaultPath = imageProxyPath(MESSAGE_ID, '//img.example/photo.jpg', 'user-1');
+    expect((await fetch(`${base}${defaultPath}&allow=1`)).status).toBe(403);
+  });
+
   it('takes out proxy URLs the email wrote itself, blocked or not', async () => {
     answer(row(OWN_PROXY));
     expect((await get()).html).not.toContain('/api/mail/');
@@ -129,7 +141,17 @@ describe('GET /messages/:id/image/:token, the image proxy', () => {
     expect(res.headers.get('cache-control')).toBe('private, max-age=2592000, immutable');
     expect(res.headers.get('set-cookie')).toBeNull();
     expect(Buffer.compare(Buffer.from(await res.arrayBuffer()), PNG)).toBe(0);
-    expect(query.mock.calls[0][1]).toEqual([MESSAGE_ID]);
+    expect(query.mock.calls[0][1]).toEqual([MESSAGE_ID, 'user-1']);
+  });
+
+  it('denies a previously issued URL after the reader blocks images, even on cache hits', async () => {
+    query.mockResolvedValue({ rows: [row(BODY)] });
+    safeFetch.mockResolvedValue(upstream(PNG));
+    const path = imageProxyPath(MESSAGE_ID, '//img.example/b.gif', 'user-1');
+    expect((await fetch(`${base}${path}`)).status).toBe(200);
+    query.mockResolvedValue({ rows: [row(BODY, { blockRemoteImages: true })] });
+    expect((await fetch(`${base}${path}`)).status).toBe(403);
+    expect(safeFetch).toHaveBeenCalledTimes(1);
   });
 
   it('passes nothing of the sender\'s answer on but the image', async () => {

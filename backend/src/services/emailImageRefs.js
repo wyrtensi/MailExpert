@@ -6,9 +6,10 @@
 // It reads sanitize-html's output only: every attribute value is double-quoted, with " written
 // as &quot;. A single-quoted value is not that output, and rewriting inside one could let a URL
 // close the attribute, so only double-quoted values are touched. Markup is scanned left to right,
-// tag by tag, and <style> blocks are read as CSS, never as tags; every search moves forward only,
+// tag by tag with the shared sanitizer tokenizer, and <style> blocks are read as CSS, never as tags;
+// every search moves forward only,
 // so time grows with the length of the HTML.
-import { rewriteCssUrls, decodeAttr, encodeAttr } from './emailSanitizer.js';
+import { mapStartTags, rewriteCssUrls, decodeAttr, encodeAttr } from './emailSanitizer.js';
 
 const REMOTE = /^\s*(?:https?:)?\/\//i;
 const isSpace = (c) => c === ' ' || c === '\t' || c === '\n' || c === '\r' || c === '\f';
@@ -21,63 +22,10 @@ export const BLANK_IMAGE = 'data:image/gif;base64,R0lGODlhAQABAIAAAAAAAP///yH5BA
 // https, as the email frame resolves it, and plain http is upgraded as sanitizeEmail upgrades it
 // (the image proxy fetches over https only).
 export function remoteUrlOf(text) {
-  const url = text.trim();
+  const url = text.replace(/[\t\n\r]/g, '').trim();
   if (url.startsWith('//')) return `https:${url}`;
   if (/^http:/i.test(url)) return `https:${url.slice(5)}`;
   return url;
-}
-
-// The <style> blocks of `html` passed to onStyle(css), everything else to onMarkup(markup); the
-// results joined. A block with no end runs to the end of the document, as the browser reads it.
-function mapStyleBlocks(html, onMarkup, onStyle) {
-  const open = /<style\b/gi;
-  const close = /<\/style\s*>/gi;
-  let out = '';
-  let pos = 0;
-  let m;
-  while ((m = open.exec(html)) !== null) {
-    const gt = html.indexOf('>', m.index);
-    if (gt === -1) break;
-    out += onMarkup(html.slice(pos, gt + 1));
-    close.lastIndex = gt + 1;
-    const end = close.exec(html);
-    if (!end) {
-      out += onStyle(html.slice(gt + 1));
-      return out;
-    }
-    out += onStyle(html.slice(gt + 1, end.index)) + end[0];
-    pos = end.index + end[0].length;
-    open.lastIndex = pos;
-  }
-  return out + onMarkup(html.slice(pos));
-}
-
-// Every tag of `markup` passed to onTag(name, text); text between tags is kept as it is.
-function mapTags(markup, onTag) {
-  const tag = /<([a-zA-Z][a-zA-Z0-9]*)/g;
-  let out = '';
-  let pos = 0;
-  let m;
-  while ((m = tag.exec(markup)) !== null) {
-    const gt = markup.indexOf('>', m.index);
-    if (gt === -1) break;
-    out += markup.slice(pos, m.index) + onTag(m[1].toLowerCase(), markup.slice(m.index, gt + 1));
-    pos = gt + 1;
-    tag.lastIndex = pos;
-  }
-  return out + markup.slice(pos);
-}
-
-// A tag's attributes as sanitize-html writes them: name="value" or a bare name.
-const ATTR = /(\s)([^\s"'>/=]+)(?:(\s*=\s*)"([^"]*)")?/g;
-
-export function tagAttributes(text) {
-  const attrs = new Map();
-  for (const m of text.matchAll(ATTR)) {
-    const name = m[2].toLowerCase();
-    if (m[4] !== undefined && !attrs.has(name)) attrs.set(name, m[4]);
-  }
-  return attrs;
 }
 
 // The URLs of a srcset value as the browser reads them (HTML's srcset parsing): a URL runs to the
@@ -126,32 +74,32 @@ function visitImageRefs(html, visit) {
     const out = visit(raw, { url: decodeAttr(raw), remote: true, where });
     return out === undefined ? token.text : `${token.before}${out}${token.after}`;
   };
-  const onTag = (name, text) => text.replace(ATTR, (match, space, attrName, eq, value) => {
-    if (value === undefined) return match;
-    const attr = attrName.toLowerCase();
-    const at = (where, raw, attrs) => {
-      const url = decodeAttr(raw);
-      return visit(raw, { url, remote: REMOTE.test(url), where, attrs });
-    };
-    let next = value;
-    if (name === 'img' && attr === 'src') {
-      next = at('src', value, tagAttributes(text)) ?? value;
-    } else if (name === 'img' && attr === 'srcset') {
-      next = mapSrcsetUrls(value, (raw) => at('srcset', raw) ?? raw);
-    } else if (attr === 'background') {
-      next = at('background', value) ?? value;
-    } else if (attr === 'style') {
-      const css = decodeAttr(value);
-      const rewritten = rewriteCssUrls(css, cssRewrite(encodeAttr, 'style'));
-      if (rewritten !== css) next = encodeAttr(rewritten);
-    }
-    return next === value ? match : `${space}${attrName}${eq}"${next}"`;
-  });
-  return mapStyleBlocks(
-    html,
-    (markup) => mapTags(markup, onTag),
-    (css) => rewriteCssUrls(css, cssRewrite((v) => v, 'css')),
-  );
+  return mapStartTags(html, (name, attrs) => {
+    const imgAttrs = new Map(attrs.filter(a => a.value !== null).map(a => [a.name.toLowerCase(), a.value]));
+    let changed = false;
+    const nextAttrs = attrs.map(attribute => {
+      const { name: attrName, value } = attribute;
+      if (value === null || !attribute.raw.includes('="')) return attribute;
+      const attr = attrName.toLowerCase();
+      const at = (where, raw, imageAttrs) => {
+        const url = decodeAttr(raw);
+        return visit(raw, { url, remote: REMOTE.test(url), where, attrs: imageAttrs });
+      };
+      let next = value;
+      if (name === 'img' && attr === 'src') next = at('src', value, imgAttrs) ?? value;
+      else if (name === 'img' && attr === 'srcset') next = mapSrcsetUrls(value, raw => at('srcset', raw, imgAttrs) ?? raw);
+      else if (attr === 'background') next = at('background', value) ?? value;
+      else if (attr === 'style') {
+        const css = decodeAttr(value);
+        const rewritten = rewriteCssUrls(css, cssRewrite(encodeAttr, 'style'));
+        if (rewritten !== css) next = encodeAttr(rewritten);
+      }
+      if (next === value) return attribute;
+      changed = true;
+      return { name: attrName, value: next };
+    });
+    return changed ? nextAttrs : null;
+  }, { onStyle: css => rewriteCssUrls(css, cssRewrite(v => v, 'css')) });
 }
 
 // Open-tracking images. The image proxy hides the reader's address, but fetching a tracking pixel
@@ -220,7 +168,7 @@ const isTinyImage = (attrs) => {
 function trackerTest(html) {
   const tiny = new Set();
   visitImageRefs(html, (raw, ref) => {
-    if (ref.remote && ref.where === 'src' && isTinyImage(ref.attrs)) tiny.add(raw);
+    if (ref.remote && (ref.where === 'src' || ref.where === 'srcset') && isTinyImage(ref.attrs)) tiny.add(raw);
     return undefined;
   });
   return (raw, url) => tiny.has(raw) || isTrackingUrl(url);

@@ -177,6 +177,11 @@ describe('rewriteAnchorHrefs', () => {
     expect(out).not.toContain('href="/"');
   });
 
+  it('rewrites only a real href, never href text inside a title', () => {
+    const html = `<a title=" href='/x' onclick=alert(1) " href="https://ok.example/">x</a>`;
+    expect(rewriteAnchorHrefs(html)).toBe(html);
+  });
+
   it('returns falsy input unchanged', () => {
     expect(rewriteAnchorHrefs(null)).toBeNull();
     expect(rewriteAnchorHrefs('')).toBe('');
@@ -466,6 +471,76 @@ describe('blockRemoteImages', () => {
 
 // Detection is defined as "blocking would change something", so the two cannot disagree: a body
 // that needs blocking is always detected, and the blocked-images notice always shows for it.
+// Blocking runs on sanitized HTML and must rewrite only real attributes of real tags. sanitize-html
+// writes values in double quotes and leaves ' as it is, so attribute-looking text inside another
+// attribute's value (or in the text) matched the old patterns, and the rewrite's own quotes closed
+// that value: a javascript: href or an onerror handler came out as a real attribute.
+describe('blockRemoteImages rewrites only real attributes', () => {
+  const pipeline = (html) => blockRemoteImages(sanitizeEmail(html));
+
+  it.each([
+    ['style text in a title', `<div title=" style='background:url(https://e.example/x)' onmouseover=alert(1) ">hi</div>`],
+    ['style text in a link title', `<a href="https://ok.example/" title=" style='background:url(//e.example/x)' href=javascript:alert(1) ">click</a>`],
+    ['style text in a title, no href', `<a title=" style='background:url(//e.example/x)' href=javascript:alert(1) ">click</a>`],
+    ['src text in an alt', `<img alt=" src='https://e.example/a' onerror=alert(1) " src="cid:x">`],
+    ['style text in the body text', `<p> style="background:url(https://e.example/x)" </p>`],
+  ])('leaves %s alone', (_, html) => {
+    const sanitized = sanitizeEmail(html);
+    expect(blockRemoteImages(sanitized)).toBe(sanitized);
+    expect(hasRemoteImages(sanitized)).toBe(false);
+  });
+
+  it('blocks a real src with an apostrophe in its URL and keeps the alt as it was', () => {
+    const out = pipeline(`<img alt=" src='https://e.example/a'" src="https://e.example/b'c.png">`);
+    expect(out).toContain(`alt=" src='https://e.example/a'"`);
+    expect(out).not.toContain("b'c.png");
+    expect(out).toContain('src="data:image/svg+xml,');
+  });
+
+  it('blocks a srcset with an apostrophe in its URL', () => {
+    const out = pipeline(`<img srcset="https://e.example/x'y.png 1x">`);
+    expect(out).not.toContain('e.example');
+  });
+
+  it('blocks a remote background behind a line break in the scheme, in a body stored before it was trimmed', () => {
+    const out = blockRemoteImages('<table background="ht\ntps://e.example/bg.png"><tr><td>x</td></tr></table>');
+    expect(out).not.toContain('e.example');
+  });
+});
+
+// CSS escapes: the browser decodes \75 rl( to url( and u\72l( to url(, which no url( pattern reads.
+// With blocking on, CSS that hides a remote URL behind escapes is blocked as the browser reads it.
+describe('blockRemoteImages and CSS escapes', () => {
+  it.each([
+    ['an escaped url( in an inline style', `<div style="background:\\75 rl(https://e.example/x)">x</div>`],
+    ['an escaped letter in url(', `<div style="background:u\\72l(https://e.example/x)">x</div>`],
+    ['an escaped scheme', `<div style="background:url(\\68ttps://e.example/x)">x</div>`],
+  ])('blocks %s', (_, html) => {
+    const sanitized = sanitizeEmail(html);
+    expect(hasRemoteImages(sanitized)).toBe(true);
+    expect(blockRemoteImages(sanitized)).not.toContain('e.example');
+  });
+
+  it('blocks an escaped url( in a style block of a body stored as it is', () => {
+    expect(blockRemoteImages('<style>p{background:\\75 rl(//e.example/x)}</style>')).toBe('<style>p{background:url(data:,)}</style>');
+  });
+
+  // Style blocks lose external url()s at sanitize time whatever the image preference; an escape
+  // hid one from that too.
+  it('sanitizing strips an external url() hidden behind escapes from a style block', () => {
+    expect(sanitizeEmail('<style>p{background:\\75 rl(https://e.example/x)}</style>')).toBe('<style>p{background:url()}</style>');
+  });
+
+  it('leaves escapes alone when nothing remote hides behind them', () => {
+    const html = '<style>p::before{content:"\\201C"}</style>';
+    expect(blockRemoteImages(html)).toBe(html);
+  });
+
+  it('strips an @import written with a comment before its URL', () => {
+    expect(blockRemoteImages('<style>@import/**/"https://e.example/x.css";p{}</style>')).toBe('<style>p{}</style>');
+  });
+});
+
 describe('hasRemoteImages and blockRemoteImages agree', () => {
   it.each([
     '<img src="//tracker.example/p.gif">',
@@ -493,6 +568,9 @@ describe('remote image blocking stays fast on hostile CSS', () => {
     ['unclosed @import', `<style>${'@import url("//x '.repeat(n)}</style>`],
     ['url( with nothing remote', `<style>${'a{background:url(x'.repeat(n)}</style>`],
     ['unclosed url( in an inline style', `<div style="${'background:url(https://x'.repeat(n)}">x</div>`],
+    ['escaped unclosed url(', `<style>${'a{background:\\75 rl(//x'.repeat(n)}</style>`],
+    ['@import with unclosed comments', `<style>${'@import/*'.repeat(n)}</style>`],
+    ['many unterminated attributes', `<img alt="${" src='//a".repeat(n)}" src="cid:x">`],
   ])('%s', (_, html) => {
     const started = performance.now();
     hasRemoteImages(html);
@@ -596,6 +674,18 @@ describe('rewriteEbayImageserUrls', () => {
 
   it('returns HTML without imageser unchanged (fast path)', () => {
     const html = '<p>No images here</p>';
+    expect(rewriteEbayImageserUrls(html)).toBe(html);
+  });
+
+  // The direct URL comes from the query, decoded, so it can hold a " that would close the attribute.
+  it('writes a direct URL with a quote in it back as one attribute value', () => {
+    const html = '<img src="https://svcs.ebay.com/imageser/1/r?imageUrl=https://i.ebayimg.com/a%22onerror%3Dalert(1)%20x">';
+    const out = rewriteEbayImageserUrls(html);
+    expect(out).toBe('<img src="https://i.ebayimg.com/a&quot;onerror=alert(1) x">');
+  });
+
+  it('leaves src text inside another attribute alone', () => {
+    const html = `<img alt=" src='https://svcs.ebay.com/imageser/1/r?imageUrl=https://i.ebayimg.com/a%22onerror%3Dalert(1)%20x' " src="cid:x">`;
     expect(rewriteEbayImageserUrls(html)).toBe(html);
   });
 });

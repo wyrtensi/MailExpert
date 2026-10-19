@@ -78,6 +78,18 @@ describe('proxyRemoteImages', () => {
     expect(restore(proxied)).toBe(html);
   });
 
+  it('leaves attribute-looking text and tag-looking style titles untouched', () => {
+    for (const html of [
+      `<img alt=" src='https://img.example/fake.png' " src="cid:x">`,
+      `<p title="<style>ignored</style>" style="background:url(https://img.example/real.png)">x</p>`,
+      `<img title="a > b" src="https://img.example/real.png">`,
+    ]) {
+      expect(restore(proxyRemoteImages(html, toProxy))).toBe(html);
+    }
+    expect(remoteImageRefs(`<img alt=" src='https://img.example/fake.png' " src="cid:x">`).size).toBe(0);
+    expect(remoteImageRefs(`<img title="a > b" src="https://img.example/real.png">`).size).toBe(1);
+  });
+
   it('stays fast on hostile input', () => {
     const hostile = [
       `<style>${'a{background:url(//x'.repeat(40000)}</style>`,

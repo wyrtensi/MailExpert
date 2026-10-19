@@ -158,7 +158,7 @@ export function createImageCache({
       const work = (async () => {
         try {
           const image = await produce();
-          put(key, image).catch(() => {});
+          await put(key, image);
           return { ...image, hit: false };
         } finally {
           inFlight.delete(key);

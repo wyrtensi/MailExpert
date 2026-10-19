@@ -507,14 +507,14 @@ async function queueMove(accountId, rows, dest, { allMail = false, movedBy = nul
 // each remote image becomes a proxy URL signed for this reader, so nothing loads from the
 // sender's server, and open-tracking images are not loaded at all (trackersBlocked); the frame
 // then loads images from the panel alone (remoteImagesProxied).
-function presentRemoteImages(html, { blocked, messageId, userId }) {
+function presentRemoteImages(html, { blocked, messageId, userId, allowBlocked = false }) {
   const own = html ? stripPanelImageRefs(html) : html;
   if (blocked) {
     const inert = own ? blockRemoteImages(own) : own;
     return { html: inert, hasBlockedRemoteImages: Boolean(own) && inert !== own, remoteImagesProxied: false, trackersBlocked: 0 };
   }
   const stats = {};
-  const proxied = own ? proxyRemoteImages(own, (raw) => imageProxyPath(messageId, raw, userId), stats) : own;
+  const proxied = own ? proxyRemoteImages(own, (raw) => imageProxyPath(messageId, raw, userId, { allowBlocked }), stats) : own;
   return { html: proxied, hasBlockedRemoteImages: false, remoteImagesProxied: true, trackersBlocked: stats.trackers ?? 0 };
 }
 
@@ -597,7 +597,7 @@ router.get('/messages/:id/body', async (req, res) => {
     // Whether remote images are blocked for this message at all, whatever was found: the email
     // frame then forbids remote loads outright, behind blockRemoteImages.
     const remoteImagesBlocked = !skipBlocking && shouldBlockImages(message.preferences, message);
-    const images = presentRemoteImages(html, { blocked: remoteImagesBlocked, messageId: id, userId: req.session.userId });
+    const images = presentRemoteImages(html, { blocked: remoteImagesBlocked, messageId: id, userId: req.session.userId, allowBlocked: skipBlocking });
     return res.json({ html: images.html, text: message.body_text, attachments, hasBlockedRemoteImages: images.hasBlockedRemoteImages, remoteImagesBlocked, remoteImagesProxied: images.remoteImagesProxied, trackersBlocked: images.trackersBlocked, senderEmail: message.sender_email, senderName: message.sender_name, eopCategory: message.eop_category ?? null, inReplyTo: message.in_reply_to ?? null, references: message.thread_references ?? null, bccAddresses: Array.isArray(message.bcc_addresses) ? message.bcc_addresses : [] });
   }
 
@@ -635,7 +635,7 @@ router.get('/messages/:id/body', async (req, res) => {
     // was written to the DB cache above, preserving the canonical body.
     const skipBlocking = req.query.remoteImages === '1';
     const remoteImagesBlocked = !skipBlocking && shouldBlockImages(message.preferences, message);
-    const images = presentRemoteImages(safeHtml, { blocked: remoteImagesBlocked, messageId: id, userId: req.session.userId });
+    const images = presentRemoteImages(safeHtml, { blocked: remoteImagesBlocked, messageId: id, userId: req.session.userId, allowBlocked: skipBlocking });
     res.json({ html: images.html, text: safeText, attachments: attachments || [], hasBlockedRemoteImages: images.hasBlockedRemoteImages, remoteImagesBlocked, remoteImagesProxied: images.remoteImagesProxied, trackersBlocked: images.trackersBlocked, senderEmail: message.sender_email, senderName: message.sender_name, eopCategory: message.eop_category ?? null, inReplyTo: message.in_reply_to ?? null, references: message.thread_references ?? null, bccAddresses: Array.isArray(message.bcc_addresses) ? message.bcc_addresses : [] });
   } catch (err) {
     const msg = err.message || 'Unknown error';
@@ -867,9 +867,9 @@ router.get('/messages/:id/attachments.zip', async (req, res) => {
 //
 // The references are read from the stored body, and also from it as the body route serves it
 // (head stripped, eBay image links unwrapped, bare hrefs normalised): the route writes that version
-// back without waiting, so on a first view an image request can arrive before it is stored. Kept
-// for a few minutes per message, as an email's images arrive together; a reference not found there
-// is looked up afresh.
+// back without waiting, so on a first view an image request can arrive before it is stored.
+// Current message references and reader preferences are checked before any cached answer too;
+// an explicit Load images override is part of the signed capability.
 //
 // The image itself comes from the image cache (services/imageCache.js) when it is there, so a
 // later view, on this device or another, does not ask the sender again; a failure is remembered
@@ -877,9 +877,6 @@ router.get('/messages/:id/attachments.zip', async (req, res) => {
 // given URL, so the browser may keep it a month without asking, and asking with its ETag is
 // answered at once.
 const imageProxyLimiter = createUserLimiter();
-const imageRefsCache = new Map();
-const IMAGE_REFS_TTL_MS = 5 * 60_000;
-const IMAGE_REFS_MAX = 200;
 // Fetches from senders' servers, per user and minute: a large newsletter is a few dozen.
 const IMAGE_PROXY_RATE = 300;
 // Every answer is the image or nothing: none of the sender's headers are passed on.
@@ -892,17 +889,9 @@ const IMAGE_PROXY_HEADERS = {
 const IMAGE_CACHE_CONTROL = 'private, max-age=2592000, immutable';
 const IMAGE_FAILURE_CACHE_CONTROL = 'private, max-age=600';
 const RATE_LIMITED = 429;
-function cachedImageRefs(messageId) {
-  const hit = imageRefsCache.get(messageId);
-  return hit && Date.now() - hit.at < IMAGE_REFS_TTL_MS ? hit.refs : null;
-}
-function imageRefsFor(messageId, stored) {
+function imageRefsFor(stored) {
   const served = rewriteAnchorHrefs(rewriteEbayImageserUrls(stripEmailHead(stored)));
-  const refs = new Map([...remoteImageRefs(served), ...remoteImageRefs(stored)]);
-  imageRefsCache.delete(messageId);
-  imageRefsCache.set(messageId, { refs, at: Date.now() });
-  if (imageRefsCache.size > IMAGE_REFS_MAX) imageRefsCache.delete(imageRefsCache.keys().next().value);
-  return refs;
+  return new Map([...remoteImageRefs(served), ...remoteImageRefs(stored)]);
 }
 
 router.get('/messages/:id/image/:token', async (req, res) => {
@@ -911,15 +900,18 @@ router.get('/messages/:id/image/:token', async (req, res) => {
   const raw = typeof req.query.u === 'string' ? req.query.u : '';
   if (!UUID_RE.test(id) || !raw || raw.length > 8192) return res.status(400).end();
   const userId = req.session.userId;
-  if (!verifyImageProxyToken(token, { userId, messageId: id, raw })) return res.status(403).end();
+  const allowBlocked = req.query.allow === '1';
+  if (!verifyImageProxyToken(token, { userId, messageId: id, raw, allowBlocked })) return res.status(403).end();
 
-  let url = cachedImageRefs(id)?.get(raw);
-  if (!url) {
-    const result = await query('SELECT body_html FROM messages WHERE id = $1', [id]);
-    const stored = result.rows[0]?.body_html;
-    if (!stored) return res.status(404).end();
-    url = imageRefsFor(id, stored).get(raw);
-  }
+  const result = await query(`
+    SELECT m.body_html, m.from_email, u.preferences FROM messages m
+    LEFT JOIN users u ON u.id = $2
+    WHERE m.id = $1
+  `, [id, userId]);
+  const message = result.rows[0];
+  if (!message?.body_html) return res.status(404).end();
+  if (!allowBlocked && shouldBlockImages(message.preferences, message)) return res.status(403).end();
+  const url = imageRefsFor(message.body_html).get(raw);
   if (!url) return res.status(404).end();
 
   const key = imageCacheKey(userId, url);

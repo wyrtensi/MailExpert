@@ -414,8 +414,9 @@ export default function MessagePane({ windowMessageId = null, onWindowClose = nu
     if (!USE_DIV_RENDER || !body?.html || safeView) return null;
     return prepareEmailHtml(body.html, windowMode ? `w${message?.id ?? 'preview'}` : String(message?.id ?? 'preview'), {
       remoteImagesBlocked: body.remoteImagesBlocked === true,
+      remoteImagesProxied: body.remoteImagesProxied === true,
     });
-  }, [body?.html, body?.remoteImagesBlocked, message?.id, windowMode, safeView]);
+  }, [body?.html, body?.remoteImagesBlocked, body?.remoteImagesProxied, message?.id, windowMode, safeView]);
   const outerRef = useRef(null);
   const scaleRef = useRef(null);
   const innerRef = useRef(null);
@@ -1241,6 +1242,7 @@ export default function MessagePane({ windowMessageId = null, onWindowClose = nu
       quotedBodyHtml,
       // The quote sits in the app's page: keep images blocked there if the body was served so.
       quotedImagesBlocked: body?.remoteImagesBlocked === true,
+      quotedImagesProxied: body?.remoteImagesProxied === true,
       quoteMeta,
       quoteLang,
       inReplyTo: message.message_id,
@@ -1268,6 +1270,7 @@ export default function MessagePane({ windowMessageId = null, onWindowClose = nu
       quotedBody: fwdText,
       quotedBodyHtml: fwdHtml,
       quotedImagesBlocked: body?.remoteImagesBlocked === true,
+      quotedImagesProxied: body?.remoteImagesProxied === true,
       quoteMeta,
       quoteLang,
       quoteExtra,
@@ -1366,7 +1369,7 @@ export default function MessagePane({ windowMessageId = null, onWindowClose = nu
     // CSP blocks any script execution in this same-origin print window (it has no
     // sandbox); combined with the DOMPurify pass above this neutralizes email HTML. A body
     // served with remote images blocked prints without them (utils/remoteImagePolicy.js).
-    win.document.write(`<!DOCTYPE html><html><head><meta charset="utf-8"><meta http-equiv="Content-Security-Policy" content="${printWindowCsp(body?.remoteImagesBlocked === true)}"><title>${esc(message.subject)}</title>
+    win.document.write(`<!DOCTYPE html><html><head><meta charset="utf-8"><meta http-equiv="Content-Security-Policy" content="${printWindowCsp(body?.remoteImagesBlocked === true, body?.remoteImagesProxied === true)}"><title>${esc(message.subject)}</title>
 <style>
   body { font-family: Arial, sans-serif; font-size: 14px; color: #111; margin: 32px; }
   .header { border-bottom: 1px solid #ccc; padding-bottom: 16px; margin-bottom: 24px; }
@@ -2826,6 +2829,18 @@ ${bodyContent}
                         {formatDateTime(message.date, { withYear: !isMobile })}
                       </span>
                     </div>
+                    {!body?.hasBlockedRemoteImages && body?.trackersBlocked > 0 && (
+                      <div title={t('message.trackersBlockedHint')} style={{
+                        fontSize: 11, marginTop: 4, display: 'flex', alignItems: 'center', gap: 4,
+                        color: 'var(--text-tertiary)',
+                      }}>
+                        <svg width="11" height="11" viewBox="0 0 24 24" fill="none"
+                          stroke="currentColor" strokeWidth="2" style={{ flexShrink: 0 }} aria-hidden="true">
+                          <path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/>
+                        </svg>
+                        <span>{t('message.trackersBlocked', { count: body.trackersBlocked })}</span>
+                      </div>
+                    )}
                   </>
                 );
               })()}
@@ -3243,7 +3258,7 @@ ${bodyContent}
                 srcDoc={`<!DOCTYPE html><html><head><meta charset="utf-8">
                 <meta name="viewport" content="width=device-width,initial-scale=1">
                 <meta name="color-scheme" content="only light">
-                <meta http-equiv="Content-Security-Policy" content="${emailFrameCsp(body.remoteImagesBlocked === true)}">
+                <meta http-equiv="Content-Security-Policy" content="${emailFrameCsp(body.remoteImagesBlocked === true, body.remoteImagesProxied === true)}">
                 <base target="_blank">
               </head><body><div id="mf-scale-wrapper">${
                 body.html.replace(/<a(\s)/gi, '<a rel="noopener noreferrer"$1')

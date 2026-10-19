@@ -369,7 +369,7 @@ export default function ComposeModal() {
   const lastQuoteHtmlRef = useRef(undefined);
   if (lastQuoteHtmlRef.current === undefined) {
     lastQuoteHtmlRef.current = quotedBodyHtml
-      ? sanitizeQuoteHtml(quotedBodyHtml, { imagesBlocked: composeData?.quotedImagesBlocked === true })
+      ? sanitizeQuoteHtml(quotedBodyHtml, { imagesBlocked: composeData?.quotedImagesBlocked === true, imagesProxied: composeData?.quotedImagesProxied === true })
       : null;
   }
   // Ref-based rather than React-rendered content, to avoid React cursor conflicts.

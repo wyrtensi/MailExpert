@@ -288,6 +288,8 @@
     "noContent": "No message content found.",
     "remoteImagesBlocked": "Remote images were blocked.",
     "loadImages": "Load images",
+    "trackersBlocked": "Trackers blocked: {{count}}",
+    "trackersBlockedHint": "Images that tell the sender you opened this email were not loaded.",
     "allowSender": "Always allow from {{email}}",
     "allowDomain": "Always allow from @{{domain}}",
     "downloading": "Downloading…",

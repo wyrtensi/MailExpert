@@ -33,6 +33,8 @@ import { getImapSnapshot, _resetImapMetrics } from './imapMetrics.js';
 import { GMAIL_KEY_PREFIX } from './threading/threadId.js';
 import { readDeliveryReports } from './deliveryReport.js';
 import { STAND_DSN_STRUCTURE } from './deliveryReport.fixtures.js';
+import { sanitizeEmail } from './emailSanitizer.js';
+import { CIDS_SETTLED } from '../utils/cidRefs.js';
 
 const account = (imap_host, oauth_provider = null) => ({ imap_host, oauth_provider });
 
@@ -5522,6 +5524,18 @@ describe('prefetchFolderBodies stops instead of hammering a refusing server', ()
       .mockResolvedValueOnce({ html: null, text: 'ok', attachments: [] });
     await mgr.prefetchFolderBodies(acct.id, ids);
     expect(mgr.fetchMessageBody).toHaveBeenCalledTimes(6);
+  });
+
+  // A prefetched body is cached like a clicked one: settled when its cid: references can never
+  // resolve, so the first click does not fetch it again (utils/cidRefs.js).
+  it.each([[true, true], [false, false]])('stores a body with cidsComplete %s settled: %s', async (complete, settled) => {
+    sanitizeEmail.mockImplementationOnce(html => html);
+    const mgr = ladderManager();
+    const html = '<p>hi</p><img src="cid:missing@x">';
+    mgr.fetchMessageBody = vi.fn().mockResolvedValue({ html, text: 'hi', attachments: [], cidsComplete: complete });
+    await mgr.prefetchFolderBodies(acct.id, ['m1']);
+    const write = query.mock.calls.find(([sql]) => /SET body_html = \$1, body_text = \$2/.test(sql));
+    expect(write[1][0]).toBe(settled ? `${html}${CIDS_SETTLED}` : html);
   });
 });
 

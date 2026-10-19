@@ -68,6 +68,13 @@ function keepOnlyLocalImages(node) {
       if (node.hasAttribute(attr) && !keptUrl(node.getAttribute(attr))) node.removeAttribute(attr);
     }
   }
+  // A URL behind var() or a CSS escape does not show in the parsed longhands: var(--u, \75 rl(…))
+  // keeps its raw text, a shorthand holding var() leaves every longhand empty, a custom property
+  // carries its URL to wherever var() reads it, and \68ttps: reads as a relative path here. The
+  // browser resolves all of them when it draws. Such a style is dropped whole.
+  if (node.hasAttribute('style') && /\\|var\(/i.test(node.getAttribute('style'))) {
+    node.removeAttribute('style');
+  }
   if (node.hasAttribute('style')) {
     // The browser's own reading of the declarations, escapes decoded and shorthands expanded.
     const style = node.style;

@@ -48,6 +48,22 @@ describe('sanitizeEmailForApp', () => {
     assert.equal(out.querySelector('#x').style.color, 'red');
   });
 
+  // The parsed longhands do not show a URL behind var() or CSS escapes: var(--u, \75 rl(...)) keeps
+  // its raw text, and a shorthand with var() leaves every longhand empty while the browser still
+  // resolves it. Such a style is dropped whole; this runs only for a body served blocked.
+  for (const [label, css] of [
+    ['an escaped url( in a var() fallback', 'background-image: var(--u, \\75 rl(https://evil.example/x))'],
+    ['a shorthand with var()', 'background: var(--u, url(https://evil.example/x))'],
+    ['an escaped url( alone', 'background-image: \\75 rl(https://evil.example/x)'],
+    ['an escaped scheme', 'background-image: url(\\68ttps://evil.example/x)'],
+    ['a custom property used later', '--u: url(https://evil.example/x); background-image: var(--u)'],
+  ]) {
+    it(`drops a style that hides a URL behind ${label}`, () => {
+      const out = parse(sanitizeEmailForApp(`<div id="x" style="color: red; ${css.replace(/"/g, '&quot;')}">x</div>`));
+      assert.equal(out.querySelector('#x').hasAttribute('style'), false);
+    });
+  }
+
   it('leaves other sanitizes alone', () => {
     sanitizeEmailForApp('<p>x</p>');
     assert.match(DOMPurify.sanitize('<img src="https://example.com/a.png">'), /https:\/\/example\.com\/a\.png/);

@@ -39,6 +39,15 @@ export async function resolveThreadMessages({ message, isThreadRow, cached, fetc
   return data?.messages?.length ? withoutDrafts(data.messages, excludeDrafts, message, folders) : [message];
 }
 
+// The ids a drag of a thread row onto a folder moves: what the server says the thread holds, less its
+// drafts and its Trash and Spam copies (as for any move), and only the dragged row's account, since a
+// folder path is account-specific and the server silently skips messages whose account lacks it.
+export async function resolveThreadMoveIds({ row, fetchThread, folders }) {
+  const messages = await resolveThreadMessages({ message: row, isThreadRow: true, fetchThread, excludeDrafts: true, folders });
+  const ids = [...new Set(messages.filter(m => m?.account_id === row.account_id).map(m => m.id).filter(Boolean))];
+  return ids.length ? ids : [row.id];
+}
+
 // Deleting a thread expunges its drafts outright — the bulk-delete route permanently deletes
 // anything in a Drafts folder instead of moving it to Trash — and moving or archiving a thread
 // drags the draft out of Drafts, where it stops being editable as a draft. Neither is what the

@@ -1,6 +1,6 @@
 import { test, describe } from 'node:test';
 import assert from 'node:assert/strict';
-import { resolveThreadMessages } from './threadActions.js';
+import { resolveThreadMessages, resolveThreadMoveIds } from './threadActions.js';
 
 const row = { id: 'row', thread_id: 't1' };
 const cached = [{ id: 'a', is_read: false }, { id: 'b', is_read: false }];
@@ -182,5 +182,29 @@ describe('resolveThreadMessages: Trash and Spam copies stay where they are', () 
       fetchThread: () => Promise.resolve({ messages: list }),
     });
     assert.deepEqual(got.map(m => m.id), ['a', 'b']);
+  });
+});
+
+// Dragging a thread row onto a folder moves its messages, so it leaves drafts and Trash/Spam copies
+// where they are, like the context-menu move, and moves only the dragged row's account.
+describe('resolveThreadMoveIds', () => {
+  const folders = { acc: [{ path: 'Corbeille', special_use: '\\Trash' }] };
+  const row = { id: 'new', thread_id: 't1', account_id: 'acc' };
+  const thread = [
+    { id: 'old', account_id: 'acc', folder: 'Corbeille' },
+    { id: 'draft', account_id: 'acc', folder: 'Drafts', is_draft: true },
+    { id: 'new', account_id: 'acc', folder: 'INBOX' },
+    { id: 'sent', account_id: 'acc', folder: 'Sent' },
+    { id: 'other', account_id: 'b', folder: 'INBOX' },
+  ];
+  const fetchThread = () => Promise.resolve({ messages: thread });
+
+  test('takes neither drafts, Trash and Spam copies nor another account', async () => {
+    assert.deepEqual(await resolveThreadMoveIds({ row, fetchThread, folders }), ['new', 'sent']);
+  });
+
+  test('falls back to the row itself when nothing else qualifies', async () => {
+    const got = await resolveThreadMoveIds({ row, fetchThread: () => Promise.resolve({ messages: [] }), folders });
+    assert.deepEqual(got, ['new']);
   });
 });

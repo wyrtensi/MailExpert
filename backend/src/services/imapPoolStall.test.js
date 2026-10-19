@@ -344,15 +344,20 @@ describe('opting out of the idle timer', () => {
 });
 
 describe('a quiet lease whose keepalive NOOP gets no answer', () => {
-  it('is cut off within about two idle timeouts', async () => {
+  it.each([0, STALL_MS * 3])('is cut off within about two idle timeouts after acquisition delayed by %ims', async (acquireDelayMs) => {
     // Holding a lock, the session is quiet for a reason, so the first timeout sends a NOOP. A dead
     // server never answers it; the next timeout finds that NOOP stuck and closes the session.
     fake.state.ignoreNoop = true;
+    resolveForConnection.mockImplementationOnce(async () => {
+      await sleep(acquireDelayMs);
+      return { host: '127.0.0.1', addresses: ['127.0.0.1'], servername: null };
+    });
     let leased;
     let closedAfter = null;
-    const started = Date.now();
     const outcome = await withFreshClient(ACCOUNT, async (client) => {
       leased = client;
+      // The lease timer starts after acquisition, so connection setup is outside this bound.
+      const started = Date.now();
       client.once('close', () => { closedAfter = Date.now() - started; });
       const lock = await client.getMailboxLock('INBOX');
       try {

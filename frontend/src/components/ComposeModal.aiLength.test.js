@@ -110,4 +110,3 @@ describe('AI tools on a long draft (#633)', () => {
     });
   }
 });
-

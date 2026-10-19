@@ -1,5 +1,6 @@
 import { BlockList, isIPv4, isIPv6 } from 'net';
 import { promises as dnsPromises } from 'dns';
+import { domainToASCII } from 'url';
 
 function ipv4ToLong(ip) {
   const parts = ip.split('.').map(Number);
@@ -76,16 +77,38 @@ function isPrivateIPv6(ip) {
   return PRIVATE_IPV6.check(g.map(x => x.toString(16)).join(':'), 'ipv6');
 }
 
+// getaddrinfo (glibc, musl) reads 2130706433, 0x7f000001, 0177.0.0.1 and 127.1 as IPv4
+// addresses, but net.isIPv4 accepts only the dotted quad. The URL parser reads the same
+// inet_aton forms, so use it to find the address the socket would connect to.
+function inetAtonIPv4(host) {
+  if (!/^[0-9a-fx.]+$/.test(host)) return null;
+  try {
+    const { hostname } = new URL(`http://${host}/`);
+    return isIPv4(hostname) ? hostname : null;
+  } catch {
+    return null;
+  }
+}
+
 // Synchronous check: literal IPs and reserved hostnames.
 export function validateHostLiteral(host, { allowPrivate = false } = {}) {
   if (!host || typeof host !== 'string') return null;
   if (allowPrivate) return null;
-  const h = host.trim().toLowerCase();
+  let h = host.trim();
+  // dns.lookup converts a non-ASCII host to ASCII before getaddrinfo reads it, so
+  // １２７.０.０.１ reaches 127.0.0.1 and ::１ reaches ::1. Check the converted form, and
+  // refuse a host that domainToASCII rejects, as it does every Unicode spelling of IPv6.
+  if (/[^\p{ASCII}]/u.test(h)) {
+    h = domainToASCII(h);
+    if (!h) return 'Host is not a valid hostname';
+  }
+  h = h.toLowerCase();
   if (h === 'localhost' || h.endsWith('.local') || h.endsWith('.localhost') || h.endsWith('.internal')) {
     return 'Host cannot be a local address';
   }
   const bare = h.startsWith('[') && h.endsWith(']') ? h.slice(1, -1) : h;
-  if (isIPv4(bare) && isPrivateIPv4(bare)) return 'Host cannot be a private or reserved IP address';
+  const v4 = isIPv4(bare) ? bare : inetAtonIPv4(bare);
+  if (v4 && isPrivateIPv4(v4)) return 'Host cannot be a private or reserved IP address';
   if (isIPv6(bare) && isPrivateIPv6(bare)) return 'Host cannot be a private or reserved IP address';
   return null;
 }

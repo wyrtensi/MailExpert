@@ -7,6 +7,7 @@ vi.mock('dns', () => ({
   promises: {
     resolve4: vi.fn().mockResolvedValue([]),
     resolve6: vi.fn().mockResolvedValue([]),
+    lookup: vi.fn().mockRejectedValue(Object.assign(new Error('ENOTFOUND'), { code: 'ENOTFOUND' })),
   },
 }));
 
@@ -18,6 +19,8 @@ beforeEach(() => {
   dns.resolve6.mockClear();
   dns.resolve4.mockResolvedValue([]);
   dns.resolve6.mockResolvedValue([]);
+  dns.lookup.mockReset();
+  dns.lookup.mockRejectedValue(Object.assign(new Error('ENOTFOUND'), { code: 'ENOTFOUND' }));
 });
 
 // ── validateHostLiteral ────────────────────────────────────────────────────
@@ -47,6 +50,7 @@ describe('validateHostLiteral', () => {
     ['mail.local'],
     ['server.internal'],
     ['host.localhost'],
+    ['ｌｏｃａｌｈｏｓｔ'],  // fullwidth, which dns.lookup converts to localhost
   ])('blocks reserved hostname %s', host => {
     expect(validateHostLiteral(host)).toMatch(/local/i);
   });
@@ -81,6 +85,44 @@ describe('validateHostLiteral', () => {
     ['::ffff:10.0.0.1'],  // IPv4-mapped private
   ])('blocks private IPv6 %s', ip => {
     expect(validateHostLiteral(ip)).toMatch(/private|reserved/i);
+  });
+
+  // net.isIPv4 accepts only the dotted quad, but getaddrinfo reads these as IPv4 too.
+  it.each([
+    ['0'],                // 0.0.0.0
+    ['2130706433'],       // 127.0.0.1 as one decimal number
+    ['0x7f000001'],       // 127.0.0.1 in hex
+    ['0177.0.0.1'],       // octal part
+    ['127.1'],            // a.b shorthand
+    ['127.000.000.001'],  // zero-padded parts
+    ['0x0a000001'],       // 10.0.0.1
+    ['2852039166'],       // 169.254.169.254
+    // dns.lookup converts a non-ASCII host to ASCII before getaddrinfo reads it.
+    ['１２７.０.０.１'],  // fullwidth digits
+    ['127。0。0。1'],     // ideographic full stops
+    ['127.0.0.1­'],  // a trailing soft hyphen, which the conversion drops
+    ['０x7f000001'],      // a fullwidth 0 in the hex form
+  ])('blocks private IPv4 written as %s', host => {
+    expect(validateHostLiteral(host)).toMatch(/private|reserved/i);
+  });
+
+  // dns.lookup converts these to ::1, but a hostname cannot hold a colon.
+  it.each([
+    ['::１'],       // a fullwidth 1
+    ['：：1'],      // fullwidth colons
+    ['::1­'],  // a trailing soft hyphen
+  ])('refuses the Unicode spelling %s of an IPv6 address', host => {
+    expect(validateHostLiteral(host)).toMatch(/not a valid hostname/i);
+  });
+
+  it.each([
+    ['134744072'],                  // 8.8.8.8 as one decimal number
+    ['deadbeef'],                   // a hostname, not a number
+    ['2001:db8::1%a:b:c:d:e:f:1'],  // a zone ID with colons
+    ['８.８.８.８'],                // fullwidth digits
+    ['mail.münchen.de'],            // an internationalised name
+  ])('passes public address %s', host => {
+    expect(validateHostLiteral(host)).toBeNull();
   });
 
   // Bracket-wrapped IPv6
@@ -132,6 +174,11 @@ describe('validateHost', () => {
     expect(dns.resolve4).not.toHaveBeenCalled();
   });
 
+  it('blocks a private IPv4 in a spelling net.isIPv4 rejects, before DNS', async () => {
+    expect(await validateHost('0x7f000001')).toMatch(/private|reserved/i);
+    expect(dns.resolve4).not.toHaveBeenCalled();
+  });
+
   it('short-circuits on reserved hostname before DNS', async () => {
     expect(await validateHost('localhost')).not.toBeNull();
     expect(dns.resolve4).not.toHaveBeenCalled();
@@ -180,6 +227,13 @@ describe('resolveForConnection', () => {
 
   it('throws for a literal private IP', async () => {
     await expect(resolveForConnection('10.0.0.1')).rejects.toThrow(/private|reserved/i);
+    expect(dns.resolve4).not.toHaveBeenCalled();
+  });
+
+  it('throws for other spellings of a private literal, before DNS', async () => {
+    await expect(resolveForConnection('2130706433')).rejects.toThrow(/private|reserved/i);
+    await expect(resolveForConnection('０x7f000001')).rejects.toThrow(/private|reserved/i);
+    await expect(resolveForConnection('１２７.０.０.１')).rejects.toThrow(/private|reserved/i);
     expect(dns.resolve4).not.toHaveBeenCalled();
   });
 

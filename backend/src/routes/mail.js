@@ -14,7 +14,10 @@ import { MAILBOX_BUSY_CODE, mailboxBusyBody, sendMailboxBusy, sendMovePending, m
 import { isPendingUid } from '../services/moveQueue.js';
 import { isManagedProtonAccount } from '../services/proton/mailEndpoint.js';
 import { normalizeProtonFolderPath, ProtonFolderError } from '../services/proton/folders.js';
-import { sanitizeEmail, stripEmailHead, hasRemoteImages, blockRemoteImages, rewriteEbayImageserUrls, rewriteAnchorHrefs } from '../services/emailSanitizer.js';
+import { sanitizeEmail, stripEmailHead, blockRemoteImages, rewriteEbayImageserUrls, rewriteAnchorHrefs } from '../services/emailSanitizer.js';
+import { proxyRemoteImages, remoteImageRefs, stripPanelImageRefs } from '../services/emailImageRefs.js';
+import { imageProxyPath, verifyImageProxyToken, fetchProxiedImage, createUserLimiter } from '../services/imageProxy.js';
+import { consume } from '../services/rateLimiter.js';
 import { snippetFromBody, decodeMimeWords, parseRawHeaders, parseMailboxList, buildHeadersFromMessage } from '../services/messageParser.js';
 import { resolveTrashFolder, resolveAllTrashPaths, resolveAllDraftsPaths, resolveArchiveFolder, isAllMailFolder, resolveSpamFolder, resolveAllSpamPaths, getDeleteStrategy, adjustFolderCounts, fanOutReadToSiblings, fanOutStarToSiblings, fanOutBulkReadToSiblings } from '../utils/mailUtils.js';
 import { pluginRegistry } from '../plugins/registry.js';
@@ -497,6 +500,23 @@ async function queueMove(accountId, rows, dest, { allMail = false, movedBy = nul
   return moved;
 }
 
+// The remote images of a body as served (services/imageProxy.js). Proxy URLs the email wrote
+// itself are taken out first, whatever else applies. Blocked: every remote image the server
+// recognizes is made inert, and the frame's CSP stops the rest (remoteImagesBlocked). Otherwise
+// each remote image becomes a proxy URL signed for this reader, so nothing loads from the
+// sender's server, and open-tracking images are not loaded at all (trackersBlocked); the frame
+// then loads images from the panel alone (remoteImagesProxied).
+function presentRemoteImages(html, { blocked, messageId, userId }) {
+  const own = html ? stripPanelImageRefs(html) : html;
+  if (blocked) {
+    const inert = own ? blockRemoteImages(own) : own;
+    return { html: inert, hasBlockedRemoteImages: Boolean(own) && inert !== own, remoteImagesProxied: false, trackersBlocked: 0 };
+  }
+  const stats = {};
+  const proxied = own ? proxyRemoteImages(own, (raw) => imageProxyPath(messageId, raw, userId), stats) : own;
+  return { html: proxied, hasBlockedRemoteImages: false, remoteImagesProxied: true, trackersBlocked: stats.trackers ?? 0 };
+}
+
 router.get('/messages/:id/body', async (req, res) => {
   const { id } = req.params;
   if (!UUID_RE.test(id)) return res.status(400).json({ error: 'Invalid message id' });
@@ -573,16 +593,11 @@ router.get('/messages/:id/body', async (req, res) => {
     // Apply remote-image blocking at response time — never write the blocked variant
     // back to the DB so the canonical cached HTML always has images intact.
     const skipBlocking = req.query.remoteImages === '1';
-    let responseHtml = html;
-    let hasBlockedRemoteImages = false;
     // Whether remote images are blocked for this message at all, whatever was found: the email
     // frame then forbids remote loads outright, behind blockRemoteImages.
     const remoteImagesBlocked = !skipBlocking && shouldBlockImages(message.preferences, message);
-    if (remoteImagesBlocked && html && hasRemoteImages(html)) {
-      responseHtml = blockRemoteImages(html);
-      hasBlockedRemoteImages = true;
-    }
-    return res.json({ html: responseHtml, text: message.body_text, attachments, hasBlockedRemoteImages, remoteImagesBlocked, senderEmail: message.sender_email, senderName: message.sender_name, eopCategory: message.eop_category ?? null, inReplyTo: message.in_reply_to ?? null, references: message.thread_references ?? null, bccAddresses: Array.isArray(message.bcc_addresses) ? message.bcc_addresses : [] });
+    const images = presentRemoteImages(html, { blocked: remoteImagesBlocked, messageId: id, userId: req.session.userId });
+    return res.json({ html: images.html, text: message.body_text, attachments, hasBlockedRemoteImages: images.hasBlockedRemoteImages, remoteImagesBlocked, remoteImagesProxied: images.remoteImagesProxied, trackersBlocked: images.trackersBlocked, senderEmail: message.sender_email, senderName: message.sender_name, eopCategory: message.eop_category ?? null, inReplyTo: message.in_reply_to ?? null, references: message.thread_references ?? null, bccAddresses: Array.isArray(message.bcc_addresses) ? message.bcc_addresses : [] });
   }
 
   // Fetch from IMAP — signal user activity so background jobs back off during this request.
@@ -618,14 +633,9 @@ router.get('/messages/:id/body', async (req, res) => {
     // Apply remote-image blocking at response time — safeHtml (unblocked) is what
     // was written to the DB cache above, preserving the canonical body.
     const skipBlocking = req.query.remoteImages === '1';
-    let responseHtml = safeHtml;
-    let hasBlockedRemoteImages = false;
     const remoteImagesBlocked = !skipBlocking && shouldBlockImages(message.preferences, message);
-    if (remoteImagesBlocked && safeHtml && hasRemoteImages(safeHtml)) {
-      responseHtml = blockRemoteImages(safeHtml);
-      hasBlockedRemoteImages = true;
-    }
-    res.json({ html: responseHtml, text: safeText, attachments: attachments || [], hasBlockedRemoteImages, remoteImagesBlocked, senderEmail: message.sender_email, senderName: message.sender_name, eopCategory: message.eop_category ?? null, inReplyTo: message.in_reply_to ?? null, references: message.thread_references ?? null, bccAddresses: Array.isArray(message.bcc_addresses) ? message.bcc_addresses : [] });
+    const images = presentRemoteImages(safeHtml, { blocked: remoteImagesBlocked, messageId: id, userId: req.session.userId });
+    res.json({ html: images.html, text: safeText, attachments: attachments || [], hasBlockedRemoteImages: images.hasBlockedRemoteImages, remoteImagesBlocked, remoteImagesProxied: images.remoteImagesProxied, trackersBlocked: images.trackersBlocked, senderEmail: message.sender_email, senderName: message.sender_name, eopCategory: message.eop_category ?? null, inReplyTo: message.in_reply_to ?? null, references: message.thread_references ?? null, bccAddresses: Array.isArray(message.bcc_addresses) ? message.bcc_addresses : [] });
   } catch (err) {
     const msg = err.message || 'Unknown error';
     console.error(`Body fetch error for message ${id} (account ${message.account_id}):`, msg);
@@ -845,6 +855,75 @@ router.get('/messages/:id/attachments.zip', async (req, res) => {
     if (res.headersSent) return;
     if (isMailboxBusyError(err)) return sendMailboxBusy(res, err);
     res.status(500).json({ error: 'Failed to create ZIP' });
+  }
+});
+
+// The image proxy (services/imageProxy.js): one remote image of a message, fetched by the panel.
+// `token` is the signature the body route issued to this reader for this message and reference;
+// `u` is the reference exactly as the message's HTML writes it, and only a reference that HTML
+// holds is fetched. Every signed-in user reads every mailbox, so the message is looked up as the
+// body route looks it up.
+//
+// The references are read from the stored body, and also from it as the body route serves it
+// (head stripped, eBay image links unwrapped, bare hrefs normalised): the route writes that version
+// back without waiting, so on a first view an image request can arrive before it is stored. Kept
+// for a few minutes per message, as an email's images arrive together; a reference not found there
+// is looked up afresh.
+const imageProxyLimiter = createUserLimiter();
+const imageRefsCache = new Map();
+const IMAGE_REFS_TTL_MS = 5 * 60_000;
+const IMAGE_REFS_MAX = 200;
+// Fetches from senders' servers, per user and minute: a large newsletter is a few dozen.
+const IMAGE_PROXY_RATE = 300;
+// Every answer is the image or nothing: none of the sender's headers are passed on.
+const IMAGE_PROXY_HEADERS = {
+  'X-Content-Type-Options': 'nosniff',
+  'Content-Security-Policy': "sandbox; default-src 'none'",
+  'Cross-Origin-Resource-Policy': 'same-origin',
+  'Referrer-Policy': 'no-referrer',
+};
+const IMAGE_FAILURE_CACHE_CONTROL = 'private, max-age=600';
+function cachedImageRefs(messageId) {
+  const hit = imageRefsCache.get(messageId);
+  return hit && Date.now() - hit.at < IMAGE_REFS_TTL_MS ? hit.refs : null;
+}
+function imageRefsFor(messageId, stored) {
+  const served = rewriteAnchorHrefs(rewriteEbayImageserUrls(stripEmailHead(stored)));
+  const refs = new Map([...remoteImageRefs(served), ...remoteImageRefs(stored)]);
+  imageRefsCache.delete(messageId);
+  imageRefsCache.set(messageId, { refs, at: Date.now() });
+  if (imageRefsCache.size > IMAGE_REFS_MAX) imageRefsCache.delete(imageRefsCache.keys().next().value);
+  return refs;
+}
+
+router.get('/messages/:id/image/:token', async (req, res) => {
+  res.set(IMAGE_PROXY_HEADERS);
+  const { id, token } = req.params;
+  const raw = typeof req.query.u === 'string' ? req.query.u : '';
+  if (!UUID_RE.test(id) || !raw || raw.length > 8192) return res.status(400).end();
+  const userId = req.session.userId;
+  if (!verifyImageProxyToken(token, { userId, messageId: id, raw })) return res.status(403).end();
+
+  let url = cachedImageRefs(id)?.get(raw);
+  if (!url) {
+    const result = await query('SELECT body_html FROM messages WHERE id = $1', [id]);
+    const stored = result.rows[0]?.body_html;
+    if (!stored) return res.status(404).end();
+    url = imageRefsFor(id, stored).get(raw);
+  }
+  if (!url) return res.status(404).end();
+
+  const limit = await consume(`image-proxy:${userId}`, IMAGE_PROXY_RATE, 60_000);
+  if (limit.limited) {
+    res.set('Retry-After', String(Math.max(1, Math.ceil(limit.resetMs / 1000))));
+    return res.status(429).end();
+  }
+  try {
+    const { bytes, type } = await imageProxyLimiter(userId, () => fetchProxiedImage(url));
+    res.set({ 'Content-Type': type, 'Content-Length': String(bytes.length), 'Cache-Control': 'private, max-age=86400' });
+    return res.send(bytes);
+  } catch (err) {
+    return res.status(err?.status || 502).set('Cache-Control', IMAGE_FAILURE_CACHE_CONTROL).end();
   }
 });
 

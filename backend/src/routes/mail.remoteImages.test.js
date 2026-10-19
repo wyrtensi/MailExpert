@@ -73,12 +73,15 @@ describe('GET /api/mail/messages/:id/body and blocked remote images', () => {
     answer(row(PIXEL, {}));
     const byDefault = await get();
     expect(byDefault.remoteImagesBlocked).toBe(false);
-    expect(byDefault.html).toContain('//tracker.example/p.gif');
+    // Not blocked, so loaded through the image proxy, where a 1x1 pixel is never loaded at all
+    // (mail.imageProxy.test.js).
+    expect(byDefault.remoteImagesProxied).toBe(true);
+    expect(byDefault.trackersBlocked).toBe(1);
     answer(row(PIXEL));
     expect((await get('?remoteImages=1')).remoteImagesBlocked).toBe(false);
     answer(row(PIXEL, { ...BLOCKING, imageWhitelist: { domains: ['sender.example'] } }));
     const allowed = await get();
     expect(allowed.remoteImagesBlocked).toBe(false);
-    expect(allowed.html).toContain('//tracker.example/p.gif');
+    expect(allowed.remoteImagesProxied).toBe(true);
   });
 });

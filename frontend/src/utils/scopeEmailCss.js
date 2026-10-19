@@ -1,6 +1,6 @@
 import postcss from 'postcss';
 import DOMPurify from 'dompurify';
-import { sanitizeEmailForApp } from './appEmailHtml.js';
+import { sanitizeEmailForApp, keptCssValue } from './appEmailHtml.js';
 
 // At-rules stripped entirely before scoping. @import/@charset are semantically
 // wrong inside an inlined style block. @font-face and @keyframes are injected
@@ -22,7 +22,7 @@ const LOADS_IMAGE = /url\(|image-set\(|image\(|var\(|\\/i;
 
 // remoteImagesBlocked: the body was served with remote images blocked, and this CSS lands in the
 // app's page, whose CSP allows any https: image; every declaration that can load one is dropped.
-export function scopeEmailCss(cssText, prefix, { remoteImagesBlocked = false } = {}) {
+export function scopeEmailCss(cssText, prefix, { remoteImagesBlocked = false, remoteImagesProxied = false } = {}) {
   let root;
   try { root = postcss.parse(cssText); } catch { return ''; }
 
@@ -38,6 +38,12 @@ export function scopeEmailCss(cssText, prefix, { remoteImagesBlocked = false } =
   if (remoteImagesBlocked) {
     root.walkDecls(decl => {
       if (LOADS_IMAGE.test(decl.value) || decl.prop.includes('\\')) decl.remove();
+    });
+  }
+
+  if (remoteImagesProxied && !remoteImagesBlocked) {
+    root.walkDecls(decl => {
+      if (/\\|var\(/i.test(decl.value) || decl.prop.includes('\\') || !keptCssValue(decl.value)) decl.remove();
     });
   }
 
@@ -60,14 +66,14 @@ export function scopeEmailCss(cssText, prefix, { remoteImagesBlocked = false } =
 
 // remoteImagesBlocked: the body was served with remote images blocked, which this page, unlike the
 // email frame, does not enforce by CSP (utils/appEmailHtml.js).
-export function prepareEmailHtml(rawHtml, uid, { remoteImagesBlocked = false } = {}) {
+export function prepareEmailHtml(rawHtml, uid, { remoteImagesBlocked = false, remoteImagesProxied = false } = {}) {
   const prefix = `email-${uid}`;
   const styleBlocks = [];
 
   const stripped = rawHtml.replace(
     /<style[^>]*>([\s\S]*?)<\/style>/gi,
     (_, css) => {
-      const scoped = scopeEmailCss(css, prefix, { remoteImagesBlocked });
+      const scoped = scopeEmailCss(css, prefix, { remoteImagesBlocked, remoteImagesProxied });
       if (scoped) styleBlocks.push(scoped);
       return '';
     }
@@ -123,7 +129,7 @@ export function prepareEmailHtml(rawHtml, uid, { remoteImagesBlocked = false } =
   // the primary gate; this second pass neutralizes any sanitizer bypass / mutation
   // XSS or a legacy row stored before server sanitization existed.
   const config = { ADD_ATTR: ['target'], FORBID_TAGS: ['style'] };
-  const safe = remoteImagesBlocked ? sanitizeEmailForApp(withRel, config) : DOMPurify.sanitize(withRel, config);
+  const safe = (remoteImagesBlocked || remoteImagesProxied) ? sanitizeEmailForApp(withRel, config) : DOMPurify.sanitize(withRel, config);
 
   return { prefix, styleBlocks, html: safe };
 }

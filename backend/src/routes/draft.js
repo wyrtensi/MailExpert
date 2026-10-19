@@ -1,3 +1,4 @@
+import { restoreOutgoingImagePayload } from '../services/restoreOutgoingImages.js';
 import nodemailer from 'nodemailer';
 import { randomBytes } from 'crypto';
 import { Router } from 'express';
@@ -179,7 +180,7 @@ async function findReplacedDraft(account, draftsFolder, { existingUid, existingF
 }
 
 router.post('/draft', async (req, res) => {
-  const { accountId, aliasId, to, cc, bcc, subject, body, bodyIsHtml = false, quotedBody, quotedBodyHtml, editedSignature, priority, inReplyTo, references, existingUid, existingFolder, existingAccountId } = req.body;
+  const { accountId, aliasId, to, cc, bcc, subject, body, bodyIsHtml = false, quotedBody, quotedBodyHtml, editedSignature, priority, inReplyTo, references, existingUid, existingFolder, existingAccountId } = restoreOutgoingImagePayload(req.body, req.session.userId);
   if (!accountId) return res.status(400).json({ error: 'accountId required' });
   if (!isUuid(accountId)) return res.status(400).json({ error: 'Invalid account id', code: 'invalid_account' });
 

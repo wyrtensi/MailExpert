@@ -1,3 +1,4 @@
+import { restoreOutgoingImagePayload } from '../services/restoreOutgoingImages.js';
 // POST /send builds and checks a letter while the writer waits, then hands it to the durable job
 // queue (services/sendQueue.js): it goes out SEND_UNDO_WINDOW_MS later, so the writer can undo it,
 // or at the time they chose (send later). services/sendDelivery.js sends it from the job.
@@ -87,7 +88,7 @@ router.use(requireAuth);
 
 
 router.post('/send', async (req, res) => {
-  const { accountId, aliasId, to, cc = [], bcc = [], subject, body, bodyIsHtml = false, quotedBody, quotedBodyHtml, inReplyTo, references, attachments, editedSignature, forwardedAttachments, priority } = req.body;
+  const { accountId, aliasId, to, cc = [], bcc = [], subject, body, bodyIsHtml = false, quotedBody, quotedBodyHtml, inReplyTo, references, attachments, editedSignature, forwardedAttachments, priority } = restoreOutgoingImagePayload(req.body, req.session.userId);
   const VALID_PRIORITIES = new Set(['high', 'normal', 'low']);
   const emailPriority = VALID_PRIORITIES.has(priority) ? priority : 'normal';
   if (!accountId) return res.status(400).json({ error: 'accountId required' });

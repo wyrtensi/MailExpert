@@ -41,7 +41,7 @@ const unescapeCss = s => s.replace(/\\(.)/g, '$1');
 
 // A declaration value that loads something (url(), or image-set() with a plain string) and
 // anything it loads is not kept: drop the declaration. A url() the pattern cannot read is dropped too.
-function keptCssValue(value) {
+export function keptCssValue(value) {
   if (!/url\(|image-set\(|image\(/i.test(value)) return true;
   let found = false;
   for (const m of value.matchAll(CSS_URL)) {
@@ -100,7 +100,7 @@ export function sanitizeEmailForApp(html, config = {}) {
 // The composer's quoted HTML. <style> blocks are stripped: marketing emails use global rules like
 // "div { margin: 0 !important }" that leak out of contentEditable into the app UI; inline style
 // attributes are preserved. imagesBlocked: the quoted body was served with remote images blocked.
-export function sanitizeQuoteHtml(html, { imagesBlocked = false } = {}) {
+export function sanitizeQuoteHtml(html, { imagesBlocked = false, imagesProxied = false } = {}) {
   const config = { FORBID_TAGS: ['style'] };
-  return imagesBlocked ? sanitizeEmailForApp(html, config) : DOMPurify.sanitize(html, config);
+  return (imagesBlocked || imagesProxied) ? sanitizeEmailForApp(html, config) : DOMPurify.sanitize(html, config);
 }

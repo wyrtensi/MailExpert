@@ -613,3 +613,48 @@ describe('Safe view of letters in Spam and of phishing anywhere (R-41)', () => {
     assert.ok(pane().querySelector('iframe'), 'the HTML body is rendered');
   });
 });
+
+describe('blocked trackers', () => {
+  const BODIES = {
+    t7: { html: '<p>hi</p>', text: 'hi', attachments: [], remoteImagesProxied: true, trackersBlocked: 2 },
+    u8: { html: '<p>hi</p>', text: 'hi', attachments: [], remoteImagesProxied: true, trackersBlocked: 0 },
+    v9: { html: '<p>hi</p>', text: 'hi', attachments: [], remoteImagesBlocked: true, hasBlockedRemoteImages: true, trackersBlocked: 0 },
+  };
+  let originalFetch;
+  before(() => {
+    globalThis.requestAnimationFrame ??= cb => setTimeout(() => cb(Date.now()), 0);
+    globalThis.cancelAnimationFrame ??= id => clearTimeout(id);
+    dom.window.requestAnimationFrame ??= globalThis.requestAnimationFrame;
+    dom.window.cancelAnimationFrame ??= globalThis.cancelAnimationFrame;
+    originalFetch = globalThis.fetch;
+    globalThis.fetch = async (url) => {
+      const id = /\/messages\/([^/]+)\/body/.exec(String(url))?.[1];
+      return { ok: true, status: 200, json: async () => BODIES[id] ?? {}, text: async () => '' };
+    };
+    useStore.getState().setMessages?.(Object.keys(BODIES).map((id, i) => ({ ...MSG_A, id, uid: 70 + i, subject: id })));
+  });
+  after(() => { globalThis.fetch = originalFetch; });
+
+  async function open(id) {
+    await React.act(async () => {
+      useStore.getState().setSelectedMessage(id);
+      root.render(React.createElement(MessagePane));
+    });
+    await React.act(async () => { await new Promise(r => setTimeout(r, 0)); });
+  }
+  const text = () => document.getElementById('root').textContent;
+
+  test('says how many trackers were not loaded when images are allowed', async () => {
+    await open('t7');
+    assert.ok(text().includes('message.trackersBlocked'), 'the note is shown');
+    assert.ok(document.querySelector('[title="message.trackersBlockedHint"]'), 'it explains itself on hover');
+  });
+
+  test('says nothing with no trackers, or while images are blocked anyway', async () => {
+    await open('u8');
+    assert.ok(!text().includes('message.trackersBlocked'));
+    await open('v9');
+    assert.ok(!text().includes('message.trackersBlocked'));
+    assert.ok(text().includes('message.remoteImagesBlocked'), 'the blocked-images notice is shown instead');
+  });
+});

@@ -10,15 +10,21 @@
 // inline part served from the panel rather than as a data: URI.
 export const BLOCKED_REMOTE_LOADS = "img-src 'self' data: blob:; font-src 'self' data:; media-src 'self' data: blob:;";
 
-// The directives to add to a document's CSP, after a directive ending in ';'.
-export const remoteLoadsCsp = (blocked) => (blocked ? ` ${BLOCKED_REMOTE_LOADS}` : '');
+// Firefox needs the panel origin named explicitly inside srcdoc frames.
+export function proxiedRemoteLoads(origin) {
+  let own = '';
+  try {
+    const url = new URL(origin);
+    if (['https:', 'http:'].includes(url.protocol) && url.origin === origin) own = ` ${origin}`;
+  } catch { /* no usable browser origin */ }
+  return `img-src 'self'${own} data: blob:; font-src 'self' data:; media-src 'self' data: blob:;`;
+}
 
-// The email frame (the open letter and each letter of a conversation): no scripts, plugins, frames
-// or form posts, inline styles allowed, and remote loads forbidden when the body was served blocked.
-export const emailFrameCsp = (remoteBlocked) =>
-  `script-src 'none'; object-src 'none'; frame-src 'none'; form-action 'none'; style-src 'unsafe-inline';${remoteLoadsCsp(remoteBlocked)}`;
+export const remoteLoadsCsp = (blocked, proxied = false, origin = globalThis.window?.location?.origin) =>
+  blocked ? ` ${BLOCKED_REMOTE_LOADS}` : proxied ? ` ${proxiedRemoteLoads(origin)}` : '';
 
-// The print window is same-origin with no sandbox: scripts are always forbidden, and a body served
-// blocked prints without its remote images.
-export const printWindowCsp = (remoteBlocked) =>
-  `script-src 'none'; object-src 'none'; base-uri 'none';${remoteLoadsCsp(remoteBlocked)}`;
+export const emailFrameCsp = (remoteBlocked, proxied = false) =>
+  `script-src 'none'; object-src 'none'; frame-src 'none'; form-action 'none'; style-src 'unsafe-inline';${remoteLoadsCsp(remoteBlocked, proxied)}`;
+
+export const printWindowCsp = (remoteBlocked, proxied = false) =>
+  `script-src 'none'; object-src 'none'; base-uri 'none';${remoteLoadsCsp(remoteBlocked, proxied)}`;

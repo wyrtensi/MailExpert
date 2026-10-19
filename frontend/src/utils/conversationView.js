@@ -35,11 +35,11 @@ export function htmlHasQuote(html) {
 // The srcdoc for one stacked letter: the same sandboxing as the open letter (no scripts, links
 // open outside), the interface font, a white page, and the quote hidden unless asked for.
 // remoteImagesBlocked: the body was served with remote images blocked (utils/remoteImagePolicy.js).
-export function conversationSrcDoc(html, { font = { family: '', css: '' }, showQuote = false, remoteImagesBlocked = false } = {}) {
+export function conversationSrcDoc(html, { font = { family: '', css: '' }, showQuote = false, remoteImagesBlocked = false, remoteImagesProxied = false } = {}) {
   const body = String(html ?? '').replace(/<a(\s)/gi, '<a rel="noopener noreferrer"$1');
   return `<!DOCTYPE html><html><head><meta charset="utf-8">
 <meta name="color-scheme" content="only light">
-<meta http-equiv="Content-Security-Policy" content="${emailFrameCsp(remoteImagesBlocked)}">
+<meta http-equiv="Content-Security-Policy" content="${emailFrameCsp(remoteImagesBlocked, remoteImagesProxied)}">
 <base target="_blank">
 </head><body><div id="mf-scale-wrapper">${body}</div><style>
   html, body { height: auto !important; min-height: 0 !important; overflow: hidden !important; }

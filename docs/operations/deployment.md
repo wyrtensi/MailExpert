@@ -132,7 +132,7 @@ DinD требует привилегированного контейнера, �
 | Пакеты | нет | `ca-certificates curl git jq ufw iproute2 util-linux unattended-upgrades`; Docker Engine и Compose (`docker-ce`, `docker-ce-cli`, `containerd.io`, `docker-buildx-plugin`, `docker-compose-plugin`) из download.docker.com, если Compose нет или он старее 2.24.4. Если стоит `docker.io` из Ubuntu со старым Compose — остановка с просьбой удалить его |
 | Файрвол | нет | `ufw`: входящие закрыты (`default deny incoming`), открыты порты SSH и, если работает Caddy, `80/tcp`, `443/tcp`, `443/udp`; `ufw` включается, только если на одном из этих портов SSH действительно слушает, а уже существующие правила для порта SSH не расширяются |
 | Контейнеры | проект `mailexpert`: `mailexpert-frontend`, `-backend`, `-postgres`, `-redis`, `-proton-worker` (управляемый Proton, в версиях, где он есть), `-tenant-worker` (профиль `tenant`) — имена задаёт `container_name` от имени проекта; проект `mailexpert-edge`: `mailexpert-edge-caddy-1`, `mailexpert-edge-cloudflared-1`; временные: `mailexpert-verify-<id>` (проверка восстановлением, сеть `none`), безымянные `--rm` контейнеры restic и образа backend | — |
-| Сети и тома | сеть `mailexpert_mailexpert` (bridge); тома `mailexpert_postgres_data`, `mailexpert_redis_data`, `mailexpert_proton_state` (состояние Proton Bridge, только у `proton-worker`), `mailexpert_proton_runtime` (сокет worker, только у `backend` и `proton-worker`) и, с Caddy, `mailexpert-edge_caddy_data`, `mailexpert-edge_caddy_config`. Caddy и cloudflared работают в сети хоста | — |
+| Сети и тома | сеть `mailexpert_mailexpert` (bridge); тома `mailexpert_postgres_data`, `mailexpert_redis_data`, `mailexpert_proton_state` (состояние Proton Bridge, только у `proton-worker`), `mailexpert_proton_runtime` (сокет worker, только у `backend` и `proton-worker`), `mailexpert_image_cache` (кэш прокси изображений писем, только у `backend`) и, с Caddy, `mailexpert-edge_caddy_data`, `mailexpert-edge_caddy_config`. Caddy и cloudflared работают в сети хоста | — |
 | Образы | `ghcr.io/wyrtensi/mailexpert-{backend,frontend,edge,tenant-worker,proton-worker}:sha-<12>`, `postgres:16-alpine`, `redis:7-alpine`, `cloudflare/cloudflared:<версия>`, `restic/restic:0.18.0` | — |
 | Порты | `127.0.0.1:8080` (frontend). Caddy (`direct`, `both`): 80/tcp, 443/tcp и 443/udp на всех адресах хоста. cloudflared (`cf`, `both`) входящих портов не открывает, только слушатель метрик в сети хоста ([ports.md, раздел 1](ports.md)). PostgreSQL, Redis, tenant-worker и proton-worker на хост не публикуются; proton-worker работает в сетевом namespace backend, его IMAP/SMTP и focus-порт Bridge слушают только 127.0.0.1 внутри этого namespace | — |
 | Проверки | `git curl jq ss sha256sum timeout flock`, Docker доступен, Compose 2.24.4+, чужие объекты в своих compose-проектах, порты (ниже) | Ubuntu 24.04; ресурсы 2 vCPU / 4 ГБ / 20 ГБ свободно (первая установка с нехваткой останавливается, повторная — предупреждает) |
@@ -605,7 +605,9 @@ MailExpert подключает Gmail-ящики пользователей, н�
   ключами S3 — прочитать все секреты панели, поэтому ключ восстановления храните как самый ценный
   секрет (менеджер паролей, не на этом сервере). Не входят в снимок и не нужны для восстановления:
   сертификаты Caddy (выпускаются заново), имя хоста restic (`state/restic-host`, у каждого сервера
-  своё), локальные дампы в `backups/`.
+  своё), локальные дампы в `backups/`, кэш прокси изображений (том `image_cache`, предел
+  `IMAGE_CACHE_MAX_MB`, по умолчанию 512 МБ): это только кэш, после восстановления он пуст, и
+  картинки писем загружаются заново; том можно удалить в любой момент.
 
 - **Что означают пинги.** И бэкап, и проверка здоровья шлют `start`/`success`/`fail` на
   `HEALTHCHECK_PING_URL` (бэкап — на отдельный `BACKUP_PING_URL`, если он задан). Успех — пинг

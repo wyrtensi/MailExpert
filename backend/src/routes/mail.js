@@ -17,6 +17,7 @@ import { normalizeProtonFolderPath, ProtonFolderError } from '../services/proton
 import { sanitizeEmail, stripEmailHead, blockRemoteImages, rewriteEbayImageserUrls, rewriteAnchorHrefs } from '../services/emailSanitizer.js';
 import { proxyRemoteImages, remoteImageRefs, stripPanelImageRefs } from '../services/emailImageRefs.js';
 import { imageProxyPath, verifyImageProxyToken, fetchProxiedImage, createUserLimiter } from '../services/imageProxy.js';
+import { imageCache, imageCacheKey } from '../services/imageCache.js';
 import { consume } from '../services/rateLimiter.js';
 import { snippetFromBody, decodeMimeWords, parseRawHeaders, parseMailboxList, buildHeadersFromMessage } from '../services/messageParser.js';
 import { resolveTrashFolder, resolveAllTrashPaths, resolveAllDraftsPaths, resolveArchiveFolder, isAllMailFolder, resolveSpamFolder, resolveAllSpamPaths, getDeleteStrategy, adjustFolderCounts, fanOutReadToSiblings, fanOutStarToSiblings, fanOutBulkReadToSiblings } from '../utils/mailUtils.js';
@@ -869,6 +870,12 @@ router.get('/messages/:id/attachments.zip', async (req, res) => {
 // back without waiting, so on a first view an image request can arrive before it is stored. Kept
 // for a few minutes per message, as an email's images arrive together; a reference not found there
 // is looked up afresh.
+//
+// The image itself comes from the image cache (services/imageCache.js) when it is there, so a
+// later view, on this device or another, does not ask the sender again; a failure is remembered
+// for ten minutes. The rate limit counts fetches from senders only. An image never changes for a
+// given URL, so the browser may keep it a month without asking, and asking with its ETag is
+// answered at once.
 const imageProxyLimiter = createUserLimiter();
 const imageRefsCache = new Map();
 const IMAGE_REFS_TTL_MS = 5 * 60_000;
@@ -882,7 +889,9 @@ const IMAGE_PROXY_HEADERS = {
   'Cross-Origin-Resource-Policy': 'same-origin',
   'Referrer-Policy': 'no-referrer',
 };
+const IMAGE_CACHE_CONTROL = 'private, max-age=2592000, immutable';
 const IMAGE_FAILURE_CACHE_CONTROL = 'private, max-age=600';
+const RATE_LIMITED = 429;
 function cachedImageRefs(messageId) {
   const hit = imageRefsCache.get(messageId);
   return hit && Date.now() - hit.at < IMAGE_REFS_TTL_MS ? hit.refs : null;
@@ -913,17 +922,28 @@ router.get('/messages/:id/image/:token', async (req, res) => {
   }
   if (!url) return res.status(404).end();
 
-  const limit = await consume(`image-proxy:${userId}`, IMAGE_PROXY_RATE, 60_000);
-  if (limit.limited) {
-    res.set('Retry-After', String(Math.max(1, Math.ceil(limit.resetMs / 1000))));
-    return res.status(429).end();
-  }
+  const key = imageCacheKey(userId, url);
+  const etag = `"${key.slice(0, 40)}"`;
+  if (req.get('If-None-Match') === etag) return res.status(304).set({ ETag: etag, 'Cache-Control': IMAGE_CACHE_CONTROL }).end();
+  const failed = imageCache.failure(key);
+  if (failed) return res.status(failed).set('Cache-Control', IMAGE_FAILURE_CACHE_CONTROL).end();
+
   try {
-    const { bytes, type } = await imageProxyLimiter(userId, () => fetchProxiedImage(url));
-    res.set({ 'Content-Type': type, 'Content-Length': String(bytes.length), 'Cache-Control': 'private, max-age=86400' });
+    const { bytes, type } = await imageCache.load(key, async () => {
+      const limit = await consume(`image-proxy:${userId}`, IMAGE_PROXY_RATE, 60_000);
+      if (limit.limited) throw Object.assign(new Error('rate limited'), { status: RATE_LIMITED, resetMs: limit.resetMs });
+      return imageProxyLimiter(userId, () => fetchProxiedImage(url));
+    });
+    res.set({ 'Content-Type': type, 'Content-Length': String(bytes.length), 'Cache-Control': IMAGE_CACHE_CONTROL, ETag: etag });
     return res.send(bytes);
   } catch (err) {
-    return res.status(err?.status || 502).set('Cache-Control', IMAGE_FAILURE_CACHE_CONTROL).end();
+    const status = err?.status || 502;
+    if (status === RATE_LIMITED) {
+      res.set('Retry-After', String(Math.max(1, Math.ceil((err.resetMs || 1000) / 1000))));
+      return res.status(status).end();
+    }
+    imageCache.fail(key, status);
+    return res.status(status).set('Cache-Control', IMAGE_FAILURE_CACHE_CONTROL).end();
   }
 });
 

@@ -15,6 +15,14 @@ vi.mock('../index.js', () => ({
 }));
 vi.mock('../services/safeFetch.js', () => ({ safeFetch: vi.fn() }));
 vi.mock('../services/rateLimiter.js', () => ({ consume: vi.fn(async () => ({ limited: false, resetMs: 0 })) }));
+// A real image cache, in a directory of its own, emptied before each test.
+vi.mock('../services/imageCache.js', async (importOriginal) => {
+  const real = await importOriginal();
+  const { mkdtempSync } = await import('node:fs');
+  const { join } = await import('node:path');
+  const { tmpdir } = await import('node:os');
+  return { ...real, imageCache: real.createImageCache({ dir: mkdtempSync(join(tmpdir(), 'me-img-route-')) }) };
+});
 
 import express from 'express';
 import mailRoutes from './mail.js';
@@ -23,6 +31,7 @@ import { imapManager } from '../index.js';
 import { safeFetch } from '../services/safeFetch.js';
 import { consume } from '../services/rateLimiter.js';
 import { imageProxyPath } from '../services/imageProxy.js';
+import { imageCache } from '../services/imageCache.js';
 import { rewriteEbayImageserUrls } from '../services/emailSanitizer.js';
 
 const MESSAGE_ID = '4d479e4f-9b21-4013-9c07-3fbc35f275b1';
@@ -46,7 +55,8 @@ beforeAll(async () => {
   base = `http://127.0.0.1:${server.address().port}`;
 });
 afterAll(async () => { await new Promise(resolve => server.close(resolve)); });
-beforeEach(() => {
+beforeEach(async () => {
+  await imageCache.clear();
   query.mockReset();
   imapManager.fetchMessageBody.mockReset();
   safeFetch.mockReset();
@@ -116,7 +126,7 @@ describe('GET /messages/:id/image/:token, the image proxy', () => {
     expect(res.headers.get('content-security-policy')).toBe("sandbox; default-src 'none'");
     expect(res.headers.get('cross-origin-resource-policy')).toBe('same-origin');
     expect(res.headers.get('referrer-policy')).toBe('no-referrer');
-    expect(res.headers.get('cache-control')).toMatch(/^private, /);
+    expect(res.headers.get('cache-control')).toBe('private, max-age=2592000, immutable');
     expect(res.headers.get('set-cookie')).toBeNull();
     expect(Buffer.compare(Buffer.from(await res.arrayBuffer()), PNG)).toBe(0);
     expect(query.mock.calls[0][1]).toEqual([MESSAGE_ID]);
@@ -187,6 +197,43 @@ describe('GET /messages/:id/image/:token, the image proxy', () => {
     expect(res.headers.get('retry-after')).toBe('30');
     expect(consume.mock.calls[0][0]).toBe('image-proxy:user-1');
     expect(safeFetch).not.toHaveBeenCalled();
+  });
+
+  // Served once, kept: a second view, on this device or another, does not ask the sender again.
+  it('serves an image again from its cache, and a browser that has it gets a 304', async () => {
+    query.mockResolvedValue({ rows: [{ body_html: BODY }] });
+    safeFetch.mockResolvedValue(upstream(PNG));
+    const first = await image('//img.example/b.gif');
+    expect(first.status).toBe(200);
+    const etag = first.headers.get('etag');
+    expect(etag).toMatch(/^"[0-9a-f]{40}"$/);
+    for (let i = 0; i < 200 && imageCache.stats().entries === 0; i += 1) await new Promise(r => setTimeout(r, 10));
+    const again = await image('//img.example/b.gif');
+    expect(again.status).toBe(200);
+    expect(Buffer.compare(Buffer.from(await again.arrayBuffer()), PNG)).toBe(0);
+    expect((await image('//img.example/b.gif', { headers: { 'If-None-Match': etag } })).status).toBe(304);
+    expect(safeFetch).toHaveBeenCalledTimes(1);
+    expect(consume).toHaveBeenCalledTimes(1); // the rate limit counts fetches from the sender only
+  });
+
+  it('keeps each user\'s images apart', async () => {
+    query.mockResolvedValue({ rows: [{ body_html: BODY }] });
+    safeFetch.mockImplementation(async () => upstream(PNG));
+    expect((await image('//img.example/b.gif')).status).toBe(200);
+    for (let i = 0; i < 200 && imageCache.stats().entries === 0; i += 1) await new Promise(r => setTimeout(r, 10));
+    const other = await image('//img.example/b.gif', { user: 'user-2' });
+    expect(other.status).toBe(200);
+    expect(safeFetch).toHaveBeenCalledTimes(2);
+  });
+
+  it('remembers a failure for a while instead of asking the sender again on every open', async () => {
+    query.mockResolvedValue({ rows: [{ body_html: BODY }] });
+    safeFetch.mockResolvedValue(upstream('gone', 'text/html', 404));
+    expect((await image('//img.example/b.gif')).status).toBe(404);
+    const again = await image('//img.example/b.gif');
+    expect(again.status).toBe(404);
+    expect(again.headers.get('cache-control')).toBe('private, max-age=600');
+    expect(safeFetch).toHaveBeenCalledTimes(1);
   });
 
   // The body route writes its served version back without waiting; an image asked for first

@@ -40,12 +40,18 @@ export function mailboxBanner(message, account, folderList) {
   return selfAddressed ? { direction: 'in', via: null } : { direction: 'out', via: null };
 }
 
-// The alias an incoming letter was addressed to, for the pill in the message list, or null. It is
-// the alias "Reply" would send from (matchReplyAlias, fed the same letter fields every reply path
-// passes), so the pill and the reply's From never disagree. Only a current alias of this mailbox
-// counts, never "any address on the domain": the mailboxes share one domain and a neighbour's
-// address cannot be answered from here. Nothing for an outgoing letter, a draft or a mail node
-// mailbox (it sends only from its own address, D-16).
+// The alias an incoming letter was addressed to, for the pill in the message list, as
+// { address, active } or null.
+// - active: a current alias of this mailbox, the one "Reply" sends from (matchReplyAlias, fed the
+//   same letter fields every reply path passes), so the yellow pill and the reply's From never
+//   disagree.
+// - inactive: no current alias matched, but the letter was addressed to another address on the
+//   mailbox's own domain (a removed alias, or a neighbour mailbox: accepted by the owner). The
+//   reply then goes from the mailbox's main address; the pill is gray. Candidates in
+//   matchReplyAlias's order (delivery addresses, then To, then Cc; never From), skipping the
+//   mailbox's own address and anything off the domain; the first hit wins.
+// Nothing for the mailbox's own address, only other domains, an outgoing letter, a draft or a mail
+// node mailbox (it sends only from its own address, D-16).
 export function recipientAliasFor(message, account, folderList) {
   if (!account || account.mail_node === true) return null;
   if (isDraftFolder(message?.folder, account.folder_mappings)) return null;
@@ -59,7 +65,33 @@ export function recipientAliasFor(message, account, folderList) {
     accountEmail: account.email_address || '',
     mailNode: account.mail_node === true,
   });
-  return alias?.email ?? null;
+  if (alias) return { address: alias.email, active: true };
+
+  const own = lower(account.email_address);
+  const domain = domainOf(own);
+  if (!domain) return null;
+  const address = [
+    ...parseAddressListField(message.delivery_addresses),
+    ...parseAddressListField(message.to_addresses),
+    ...parseAddressListField(message.cc_addresses),
+  ].map(entryEmail).find((email) => email && email !== own && domainOf(email) === domain);
+  return address ? { address, active: false } : null;
+}
+
+// Whether `address` is a current alias of this mailbox (not its own address), i.e. what a reply
+// to a letter delivered there would send from; false for a mail node mailbox (D-16). The via line
+// above an open letter colors it like the list's active pill.
+export function isCurrentAlias(address, account) {
+  if (!account || account.mail_node === true) return false;
+  const email = lower(address);
+  if (!email || email === lower(account.email_address)) return false;
+  return (account.aliases || []).some((alias) => lower(alias.email) === email);
+}
+
+// The part after the last @ of a lowercased address, or '' when there is none.
+function domainOf(email) {
+  const at = email.lastIndexOf('@');
+  return at > 0 ? email.slice(at + 1) : '';
 }
 
 // Whether `folder` is the given account's Sent folder. Prefers the account's configured

@@ -658,3 +658,38 @@ describe('blocked trackers', () => {
     assert.ok(text().includes('message.remoteImagesBlocked'), 'the blocked-images notice is shown instead');
   });
 });
+
+describe('The via line above an open letter colors a current alias like the list pill', () => {
+  let savedAccounts;
+  before(() => {
+    savedAccounts = useStore.getState().accounts;
+    useStore.getState().setAccounts([{
+      id: 'acct', enabled: true, email_address: 'x@y.z', color: '#fff',
+      aliases: [{ id: 'al-sales', email: 'sales@y.z' }],
+    }]);
+    useStore.getState().setMessages?.([
+      { ...MSG_A, id: 'via-alias', uid: 81, from_email: 'client@example.net', delivery_addresses: ['sales@y.z'] },
+      { ...MSG_A, id: 'via-removed', uid: 82, from_email: 'client@example.net', delivery_addresses: ['old-sales@y.z'] },
+    ]);
+  });
+  after(() => { useStore.getState().setAccounts(savedAccounts); });
+
+  async function viaSpan(id) {
+    await React.act(async () => {
+      useStore.getState().setSelectedMessage(id);
+      root.render(React.createElement(MessagePane));
+    });
+    await React.act(async () => { await new Promise(r => setTimeout(r, 0)); });
+    return [...document.querySelectorAll('#root span')].find(s => s.textContent === 'message.mailbox.via');
+  }
+
+  test('amber for a current alias, gray otherwise', async () => {
+    const active = await viaSpan('via-alias');
+    assert.ok(active, 'expected the via line for a letter delivered to an alias');
+    assert.match(active.getAttribute('style'), /var\(--amber\)/);
+    const inactive = await viaSpan('via-removed');
+    assert.ok(inactive, 'expected the via line for a letter delivered to a removed alias');
+    assert.match(inactive.getAttribute('style'), /var\(--text-secondary\)/);
+    assert.doesNotMatch(inactive.getAttribute('style'), /--amber/);
+  });
+});

@@ -4725,10 +4725,10 @@ function ThreadRow({ message, account, folderList, isExpanded, threadMsgs, isLoa
                 <>
                 <DirectionBadge direction={rowDirection} compact={isNarrow || isMobile} />
                 {/* Only beside "Received", and from the row object itself: that object is what
-                    this row's own Reply (swipe, context menu) receives, so the pill names the
-                    alias that reply sends from. */}
+                    this row's own Reply (swipe, context menu) receives, so an active (amber)
+                    pill names the alias that reply sends from. */}
                 <RecipientAliasBadge
-                  address={rowDirection === 'in' ? recipientAliasFor(message, account, folderList) : null}
+                  {...(rowDirection === 'in' ? recipientAliasFor(message, account, folderList) : null)}
                   compact={isNarrow || isMobile}
                 />
                 </>
@@ -4847,7 +4847,7 @@ function ThreadRow({ message, account, folderList, isExpanded, threadMsgs, isLoa
                         direction={isDraftFolder(msg.folder, account.folder_mappings) ? 'draft' : mailboxBanner(msg, account, folderList).direction}
                         compact={isNarrow || isMobile}
                       />
-                      <RecipientAliasBadge address={recipientAliasFor(msg, account, folderList)} compact={isNarrow || isMobile} />
+                      <RecipientAliasBadge {...recipientAliasFor(msg, account, folderList)} compact={isNarrow || isMobile} />
                       </>
                     )}
                     <DeliveryMarker state={msg.delivery_state} compact={isNarrow || isMobile} />
@@ -5083,7 +5083,7 @@ function MessageRow({ message, account, folderList, selected, lastViewed, isChec
                   : mailboxBanner(message, account, folderList).direction}
                 compact={isNarrow || isMobile}
               />
-              <RecipientAliasBadge address={recipientAliasFor(message, account, folderList)} compact={isNarrow || isMobile} />
+              <RecipientAliasBadge {...recipientAliasFor(message, account, folderList)} compact={isNarrow || isMobile} />
               </>
             )}
             <DeliveryMarker state={message.delivery_state} compact={isNarrow || isMobile} />

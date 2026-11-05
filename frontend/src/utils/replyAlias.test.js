@@ -225,26 +225,82 @@ describe('recipientAliasFor', () => {
   };
   const incoming = (fields) => ({ account_id: 'acct-1', folder: 'INBOX', from_email: 'client@example.net', ...fields });
 
-  it('recipientAliasFor returns the alias email for an incoming letter addressed to it in To or Cc', () => {
-    assert.equal(recipientAliasFor(incoming({ to_addresses: [{ email: 'Sales@example.com' }] }), account), 'sales@example.com');
-    assert.equal(recipientAliasFor(incoming({
+  const active = (address) => ({ address, active: true });
+  const inactive = (address) => ({ address, active: false });
+
+  it('recipientAliasFor returns the current alias, active, for an incoming letter addressed to it in To or Cc', () => {
+    assert.deepEqual(recipientAliasFor(incoming({ to_addresses: [{ email: 'Sales@example.com' }] }), account), active('sales@example.com'));
+    assert.deepEqual(recipientAliasFor(incoming({
       to_addresses: JSON.stringify([{ email: 'team@example.com' }]),
       cc_addresses: JSON.stringify([{ email: 'support@example.com' }]),
-    }), account), 'support@example.com');
-    assert.equal(recipientAliasFor(incoming({ delivery_addresses: ['support@example.com'] }), account), 'support@example.com');
+    }), account), active('support@example.com'));
+    assert.deepEqual(recipientAliasFor(incoming({ delivery_addresses: ['support@example.com'] }), account), active('support@example.com'));
   });
 
-  it('recipientAliasFor returns null for the mailbox\'s own address, an outgoing letter, an address that is not a current alias, a node mailbox', () => {
+  it('recipientAliasFor returns an inactive address for a letter to another address on the mailbox\'s domain', () => {
+    // A removed alias (or any address on the domain that is not a current alias).
+    assert.deepEqual(recipientAliasFor(incoming({ to_addresses: [{ email: 'billing@example.com' }] }), account), inactive('billing@example.com'));
+    // Also when the mailbox has no aliases at all (every alias removed).
+    assert.deepEqual(recipientAliasFor(incoming({ to_addresses: [{ email: 'billing@example.com' }] }), { ...account, aliases: [] }), inactive('billing@example.com'));
+    // The domain match ignores case, on both sides.
+    assert.deepEqual(recipientAliasFor(incoming({ to_addresses: [{ email: 'Billing@EXAMPLE.COM' }] }), account), inactive('billing@example.com'));
+    assert.deepEqual(recipientAliasFor(incoming({ to_addresses: [{ email: 'billing@example.com' }] }), { ...account, email_address: 'Team@Example.COM' }), inactive('billing@example.com'));
+    // Cc counts too.
+    assert.deepEqual(recipientAliasFor(incoming({ cc_addresses: [{ email: 'billing@example.com' }] }), account), inactive('billing@example.com'));
+  });
+
+  it('recipientAliasFor scans delivery addresses, then To, then Cc, skipping the mailbox\'s own address', () => {
+    // Delivered to the mailbox itself, To names a removed alias: the To address, inactive.
+    assert.deepEqual(recipientAliasFor(incoming({
+      delivery_addresses: ['team@example.com'],
+      to_addresses: [{ email: 'old-sales@example.com' }],
+    }), account), inactive('old-sales@example.com'));
+    // Delivered to a current alias: that one, active, whatever To says.
+    assert.deepEqual(recipientAliasFor(incoming({
+      delivery_addresses: ['support@example.com'],
+      to_addresses: [{ email: 'old-sales@example.com' }],
+    }), account), active('support@example.com'));
+    // Two inactive candidates: the delivery address wins over To, To over Cc.
+    assert.deepEqual(recipientAliasFor(incoming({
+      delivery_addresses: ['old-a@example.com'],
+      to_addresses: [{ email: 'old-b@example.com' }],
+      cc_addresses: [{ email: 'old-c@example.com' }],
+    }), account), inactive('old-a@example.com'));
+    assert.deepEqual(recipientAliasFor(incoming({
+      to_addresses: [{ email: 'client@example.net' }, { email: 'old-b@example.com' }],
+      cc_addresses: [{ email: 'old-c@example.com' }],
+    }), account), inactive('old-b@example.com'));
+    // A current alias anywhere beats an inactive address earlier in the scan (it is the reply's From).
+    assert.deepEqual(recipientAliasFor(incoming({
+      delivery_addresses: ['old-a@example.com'],
+      to_addresses: [{ email: 'sales@example.com' }],
+    }), account), active('sales@example.com'));
+  });
+
+  it('recipientAliasFor returns null for the mailbox\'s own address, another domain, an outgoing letter, a draft, a node mailbox', () => {
     // The mailbox's own address, also when an alias row (a second sender name) carries it.
     assert.equal(recipientAliasFor(incoming({ to_addresses: [{ email: 'team@example.com' }] }), account), null);
-    // An outgoing letter from an alias to a client.
+    assert.equal(recipientAliasFor(incoming({ to_addresses: [{ email: 'TEAM@example.com' }] }), account), null);
+    // Only addresses on another domain.
+    assert.equal(recipientAliasFor(incoming({
+      delivery_addresses: ['team@example.com'],
+      to_addresses: [{ email: 'list@example.org' }],
+      cc_addresses: [{ email: 'someone@sub.example.com' }],
+    }), account), null);
+    // From is never an inactive candidate.
+    assert.equal(recipientAliasFor(incoming({ from_email: 'colleague@example.com', to_addresses: [{ email: 'team@example.com' }] }), account), null);
+    // An outgoing letter from an alias to a client, and from the mailbox to a removed alias.
     assert.equal(recipientAliasFor({
       account_id: 'acct-1', folder: 'Sent', from_email: 'sales@example.com', to_addresses: [{ email: 'client@example.net' }],
     }, { ...account, folder_mappings: { sent: 'Sent' } }), null);
-    // An address on the same domain that is not a current alias of this mailbox.
-    assert.equal(recipientAliasFor(incoming({ to_addresses: [{ email: 'billing@example.com' }] }), account), null);
-    // A mail node mailbox sends only from its own address (D-16).
+    assert.equal(recipientAliasFor({
+      account_id: 'acct-1', folder: 'Sent', from_email: 'team@example.com', to_addresses: [{ email: 'billing@example.com' }],
+    }, { ...account, folder_mappings: { sent: 'Sent' } }), null);
+    // A draft addressed to a removed alias.
+    assert.equal(recipientAliasFor(incoming({ folder: 'Drafts', to_addresses: [{ email: 'billing@example.com' }] }), account), null);
+    // A mail node mailbox sends only from its own address (D-16): no badge, active or not.
     assert.equal(recipientAliasFor(incoming({ to_addresses: [{ email: 'sales@example.com' }] }), { ...account, mail_node: true }), null);
+    assert.equal(recipientAliasFor(incoming({ to_addresses: [{ email: 'billing@example.com' }] }), { ...account, mail_node: true }), null);
     // No account loaded yet.
     assert.equal(recipientAliasFor(incoming({ to_addresses: [{ email: 'sales@example.com' }] }), undefined), null);
   });
@@ -266,6 +322,6 @@ describe('recipientAliasFor', () => {
       accountEmail: account.email_address,
       mailNode: account.mail_node === true,
     });
-    assert.equal(recipientAliasFor(message, account), account.aliases.find(a => a.id === id).email);
+    assert.deepEqual(recipientAliasFor(message, account), { address: account.aliases.find(a => a.id === id).email, active: true });
   });
 });

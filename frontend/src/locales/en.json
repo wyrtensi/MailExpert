@@ -284,6 +284,7 @@
       "draft": "Draft"
     },
     "recipientAlias": "to {{address}}",
+    "recipientAliasInactive": "{{address}}: alias is not active, Reply sends from the mailbox's main address",
     "to": "To:",
     "via": "via",
     "attachment_one": "{{count}} attachment",

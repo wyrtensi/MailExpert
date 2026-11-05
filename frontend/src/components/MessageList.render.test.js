@@ -980,7 +980,7 @@ describe('MessageList — search results past the first page in paginated mode',
 describe('MessageList — recipient alias badge', () => {
   const ALIASED = { ...ACCOUNT, aliases: [{ id: 'al-sales', email: 'sales@example.com' }] };
   const toAlias = { ...MESSAGE, id: 'to-alias', from_email: 'client@example.net', to_addresses: [{ email: 'sales@example.com' }] };
-  const toMailbox = { ...MESSAGE, id: 'to-mailbox', uid: 2, from_email: 'client@example.net', to_addresses: [{ email: 'a@example.com' }] };
+  const toMailbox = { ...MESSAGE, id: 'to-mailbox', uid: 2, message_id: '<m2@example.com>', from_email: 'client@example.net', to_addresses: [{ email: 'a@example.com' }] };
   const badgeIn = (msgid) => container.querySelector(`[data-msgid="${msgid}"] [role="img"][aria-label="sales@example.com"]`);
 
   test('message row shows the recipient alias badge for a letter to an alias; none for a letter to the mailbox itself', async () => {
@@ -988,7 +988,9 @@ describe('MessageList — recipient alias badge', () => {
     const badge = badgeIn('to-alias');
     assert.ok(badge, 'expected the alias pill on the letter addressed to the alias');
     assert.equal(badge.getAttribute('title'), 'sales@example.com');
+    assert.ok(container.querySelector('[data-msgid="to-mailbox"]'), 'expected the row for the letter to the mailbox');
     assert.equal(container.querySelector('[data-msgid="to-mailbox"] [aria-label="sales@example.com"]'), null);
+    assert.equal(container.querySelector('[data-msgid="to-mailbox"] [data-alias-state]'), null);
 
     // Conversations on: the thread row badges the same way.
     const threadToAlias = { ...toAlias, thread_id: 'thr-a', message_count: 2, unread_count: 1 };
@@ -996,5 +998,33 @@ describe('MessageList — recipient alias badge', () => {
     await mount({ rows: [threadToAlias, threadToMailbox], threadedView: true, accounts: [ALIASED] });
     assert.ok(badgeIn('to-alias'), 'expected the alias pill on the conversation row');
     assert.equal(container.querySelector('[data-msgid="to-mailbox"] [aria-label="sales@example.com"]'), null);
+  });
+
+  test('an active alias badge is amber; a letter to another address on the domain gets a gray, inactive one', async () => {
+    const toRemoved = { ...MESSAGE, id: 'to-removed', uid: 3, message_id: '<m3@example.com>', from_email: 'client@example.net', to_addresses: [{ email: 'old-sales@example.com' }] };
+    const toOtherDomain = { ...MESSAGE, id: 'to-other', uid: 4, message_id: '<m4@example.com>', from_email: 'client@example.net', to_addresses: [{ email: 'sales@example.org' }] };
+    await mount({ rows: [toAlias, toRemoved, toOtherDomain], threadedView: false, accounts: [ALIASED] });
+
+    const activeBadge = badgeIn('to-alias');
+    assert.ok(activeBadge, 'expected the active pill');
+    assert.equal(activeBadge.dataset.aliasState, 'active');
+    assert.match(activeBadge.getAttribute('style'), /var\(--amber\)/);
+
+    // The i18n stub returns the key when given options, so the inactive label reads as its key.
+    const inactiveBadge = container.querySelector('[data-msgid="to-removed"] [role="img"][aria-label="message.recipientAliasInactive"]');
+    assert.ok(inactiveBadge, 'expected the inactive pill on the letter to a removed alias');
+    assert.equal(inactiveBadge.getAttribute('title'), 'message.recipientAliasInactive');
+    assert.equal(inactiveBadge.dataset.aliasState, 'inactive');
+    assert.match(inactiveBadge.getAttribute('style'), /var\(--text-secondary\)/);
+    assert.doesNotMatch(inactiveBadge.getAttribute('style'), /--amber/);
+    assert.notEqual(inactiveBadge.getAttribute('style'), activeBadge.getAttribute('style'));
+
+    assert.ok(container.querySelector('[data-msgid="to-other"]'), 'expected the row for the letter to another domain');
+    assert.equal(container.querySelector('[data-msgid="to-other"] [data-alias-state]'), null);
+
+    // Conversations on: the thread row badges the same way.
+    const threadToRemoved = { ...toRemoved, thread_id: 'thr-r', message_count: 2, unread_count: 1 };
+    await mount({ rows: [threadToRemoved], threadedView: true, accounts: [ALIASED] });
+    assert.equal(container.querySelector('[data-msgid="to-removed"] [data-alias-state]')?.dataset.aliasState, 'inactive');
   });
 });

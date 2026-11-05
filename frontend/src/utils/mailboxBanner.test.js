@@ -1,6 +1,6 @@
 import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
-import { mailboxBanner, isSentFolder, isDraftFolder } from './mailboxBanner.js';
+import { mailboxBanner, isSentFolder, isDraftFolder, isCurrentAlias } from './mailboxBanner.js';
 
 const account = {
   email_address: 'Sales@example.com',
@@ -104,5 +104,25 @@ describe('isDraftFolder', () => {
   it('is false for an empty folder', () => {
     assert.equal(isDraftFolder('', { drafts: 'Drafts' }), false);
     assert.equal(isDraftFolder(null, { drafts: 'Drafts' }), false);
+  });
+});
+
+describe('isCurrentAlias', () => {
+  const account = {
+    email_address: 'team@example.com',
+    aliases: [{ id: 'al-1', email: 'Sales@example.com' }, { id: 'al-own', email: 'team@example.com' }],
+  };
+
+  it('is true for a current alias of the mailbox, ignoring case', () => {
+    assert.equal(isCurrentAlias('sales@example.com', account), true);
+    assert.equal(isCurrentAlias('SALES@example.com', account), true);
+  });
+
+  it('is false for the mailbox\'s own address, a removed alias, nothing, a node mailbox', () => {
+    assert.equal(isCurrentAlias('team@example.com', account), false);
+    assert.equal(isCurrentAlias('billing@example.com', account), false);
+    assert.equal(isCurrentAlias(null, account), false);
+    assert.equal(isCurrentAlias('sales@example.com', undefined), false);
+    assert.equal(isCurrentAlias('sales@example.com', { ...account, mail_node: true }), false);
   });
 });

@@ -1,7 +1,7 @@
 {
   "name": "mailexpert-frontend",
   "productName": "MailExpert",
-  "version": "1.1.0",
+  "version": "1.1.1",
   "description": "A self-hosted, unified webmail client.",
   "homepage": "https://github.com/wyrtensi/MailExpert",
   "author": {

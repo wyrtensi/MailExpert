@@ -15,6 +15,7 @@ export const ALIAS_ERRORS = Object.freeze({
   alias_not_found: [404, 'Alias not found'],
   alias_fields_required: [400, 'Name and email required'],
   alias_fields_invalid: [400, 'Fields cannot contain control characters'],
+  alias_managed_by_gmail: [409, 'This alias is synced from Gmail: change it in Gmail'],
   node_alias_address_mismatch: [400, 'A mail node mailbox sends only from its own address: another address is a separate mailbox'],
 });
 
@@ -37,7 +38,7 @@ function fieldsRefusal({ name, email, reply_to: replyTo }) {
 
 export async function listAliases(accountId, db = { query }) {
   const result = await db.query(
-    'SELECT id, account_id, name, email, reply_to, signature, created_at FROM account_aliases WHERE account_id = $1 ORDER BY created_at',
+    'SELECT id, account_id, name, email, reply_to, signature, source, created_at FROM account_aliases WHERE account_id = $1 ORDER BY created_at',
     [accountId],
   );
   return result.rows.map((alias) => ({
@@ -53,10 +54,20 @@ export async function createAlias(accountId, fields, db = { query }) {
   const check = await db.query('SELECT id, email_address, mail_node FROM email_accounts WHERE id = $1', [accountId]);
   if (!check.rows.length) return { error: 'account_not_found' };
   if (isForeignNodeAliasAddress(check.rows[0], fields.email)) return { error: 'node_alias_address_mismatch' };
+  // The address of a Gmail-synced alias of this account (any case) is taken. The check and the
+  // insert are one statement, so a gmail row committed before it starts is always seen. A sync
+  // committing the same address at the same moment is not (READ COMMITTED, and this statement does
+  // not take the account row lock the sync holds): then a manual row stays next to the gmail one.
+  // Later syncs keep updating the gmail row and leave that manual row alone (planSendAsSync adopts
+  // a manual row only when no gmail row has its address), so it stays until it is deleted by hand.
   const result = await db.query(
-    'INSERT INTO account_aliases (account_id, name, email, reply_to, signature) VALUES ($1, $2, $3, $4, $5) RETURNING *',
+    `INSERT INTO account_aliases (account_id, name, email, reply_to, signature, source)
+     SELECT $1::uuid, $2, $3::text, $4, $5, 'manual'
+     WHERE NOT EXISTS (SELECT 1 FROM account_aliases WHERE account_id = $1::uuid AND source = 'gmail' AND lower(email) = lower($3::text))
+     RETURNING *`,
     [accountId, fields.name, aliasAddress(check.rows[0], fields.email), fields.reply_to || null, sanitizeSignature(fields.signature) || null],
   );
+  if (!result.rows.length) return { error: 'alias_managed_by_gmail' };
   return { alias: result.rows[0] };
 }
 
@@ -65,29 +76,36 @@ export async function updateAlias(accountId, aliasId, fields, db = { query }) {
   const refusal = fieldsRefusal(fields);
   if (refusal) return { error: refusal };
   const check = await db.query(
-    `SELECT a.id, a.account_id, e.email_address, e.mail_node FROM account_aliases a
+    `SELECT a.id, a.account_id, a.source, e.email_address, e.mail_node FROM account_aliases a
      JOIN email_accounts e ON a.account_id = e.id
      WHERE a.id = $1 AND e.id = $2`,
     [aliasId, accountId],
   );
   if (!check.rows.length) return { error: 'alias_not_found' };
+  if (check.rows[0].source === 'gmail') return { error: 'alias_managed_by_gmail' };
   if (isForeignNodeAliasAddress(check.rows[0], fields.email)) return { error: 'node_alias_address_mismatch' };
+  // Same as createAlias: the new address must not be one a Gmail-synced alias of the account has.
   const result = await db.query(
-    'UPDATE account_aliases SET name = $1, email = $2, reply_to = $3, signature = $4 WHERE id = $5 RETURNING *',
-    [fields.name, aliasAddress(check.rows[0], fields.email), fields.reply_to || null, sanitizeSignature(fields.signature) || null, aliasId],
+    `UPDATE account_aliases SET name = $1, email = $2, reply_to = $3, signature = $4
+     WHERE id = $5
+       AND NOT EXISTS (SELECT 1 FROM account_aliases g WHERE g.account_id = $6::uuid AND g.source = 'gmail' AND lower(g.email) = lower($2::text))
+     RETURNING *`,
+    [fields.name, aliasAddress(check.rows[0], fields.email), fields.reply_to || null, sanitizeSignature(fields.signature) || null, aliasId, accountId],
   );
+  if (!result.rows.length) return { error: 'alias_managed_by_gmail' };
   return { alias: result.rows[0], accountId: check.rows[0].account_id };
 }
 
 // { ok, accountId } or { error }.
 export async function deleteAlias(accountId, aliasId, db = { query }) {
   const check = await db.query(
-    `SELECT a.id, a.account_id FROM account_aliases a
+    `SELECT a.id, a.account_id, a.source FROM account_aliases a
      JOIN email_accounts e ON a.account_id = e.id
      WHERE a.id = $1 AND e.id = $2`,
     [aliasId, accountId],
   );
   if (!check.rows.length) return { error: 'alias_not_found' };
+  if (check.rows[0].source === 'gmail') return { error: 'alias_managed_by_gmail' };
   await db.query('DELETE FROM account_aliases WHERE id = $1', [aliasId]);
   return { ok: true, accountId: check.rows[0].account_id };
 }

@@ -21,7 +21,8 @@ import RowHoverActions from './RowHoverActions.jsx';
 import GtdTabList from './GtdTabList.jsx';
 import DirectionBadge from './DirectionBadge.jsx';
 import DeliveryMarker from './DeliveryMarker.jsx';
-import { mailboxBanner, isDraftFolder } from '../utils/mailboxBanner.js';
+import RecipientAliasBadge from './RecipientAliasBadge.jsx';
+import { mailboxBanner, isDraftFolder, recipientAliasFor } from '../utils/mailboxBanner.js';
 import MailNodeOutageNotice from './MailNodeOutageNotice.jsx';
 import { isTrashOrJunkFolder } from '../utils/specialFolders.js';
 import { useUiScale, descale } from '../hooks/useUiScale.js';
@@ -4549,6 +4550,17 @@ function ThreadRow({ message, account, folderList, isExpanded, threadMsgs, isLoa
     : (isExpanded ? 'var(--bg-secondary)' : (hovered ? 'var(--bg-tertiary)' : (isLastViewed ? 'var(--accent-glow)' : bgDefault)));
   const leftActionView = getSwipeActionView(swipeRightAction, message, t, unreadCount);
   const rightActionView = getSwipeActionView(swipeLeftAction, message, t, unreadCount);
+  // The direction badge describes the letter this row actually shows — its date and snippet,
+  // i.e. the newest letter within the current view's folder scope (deduped/ranked the same way
+  // message_count/unread_count already are in messageService.js; see latest_from_email there).
+  // It is NOT necessarily the thread's true latest across every folder: our replies live in
+  // Sent, so an "incoming, then our reply" thread viewed from INBOX never includes the reply in
+  // this scope at all and still badges "Received" — correctly, for what this row displays.
+  // latest_from_email still matters within one folder, e.g. a group thread where two different
+  // people wrote into the same INBOX.
+  const rowDirection = account && (isDraftFolder(message.folder, account.folder_mappings)
+    ? 'draft'
+    : mailboxBanner({ ...message, from_email: message.latest_from_email ?? message.from_email }, account, folderList).direction);
 
   return (
     <div data-msgid={message.id} style={{ borderBottom: '1px solid var(--border-subtle)' }}>
@@ -4710,21 +4722,16 @@ function ThreadRow({ message, account, folderList, isExpanded, threadMsgs, isLoa
               display: 'flex', alignItems: 'center', gap: 4, flexShrink: 0, marginLeft: 8,
             }}>
               {account && (
-                <DirectionBadge
-                  // The badge describes the letter this row actually shows — its date and
-                  // snippet, i.e. the newest letter within the current view's folder scope
-                  // (deduped/ranked the same way message_count/unread_count already are in
-                  // messageService.js; see latest_from_email there). It is NOT necessarily the
-                  // thread's true latest across every folder: our replies live in Sent, so an
-                  // "incoming, then our reply" thread viewed from INBOX never includes the
-                  // reply in this scope at all and still badges "Received" — correctly, for
-                  // what this row displays. latest_from_email still matters within one folder,
-                  // e.g. a group thread where two different people wrote into the same INBOX.
-                  direction={isDraftFolder(message.folder, account.folder_mappings)
-                    ? 'draft'
-                    : mailboxBanner({ ...message, from_email: message.latest_from_email ?? message.from_email }, account, folderList).direction}
+                <>
+                <DirectionBadge direction={rowDirection} compact={isNarrow || isMobile} />
+                {/* Only beside "Received", and from the row object itself: that object is what
+                    this row's own Reply (swipe, context menu) receives, so the pill names the
+                    alias that reply sends from. */}
+                <RecipientAliasBadge
+                  address={rowDirection === 'in' ? recipientAliasFor(message, account, folderList) : null}
                   compact={isNarrow || isMobile}
                 />
+                </>
               )}
               <DeliveryMarker state={message.delivery_state} compact={isNarrow || isMobile} />
               {message.has_attachments && (
@@ -4835,10 +4842,13 @@ function ThreadRow({ message, account, folderList, isExpanded, threadMsgs, isLoa
                       // thread is grouped per (account_id, thread_key), never cross-mailbox), so
                       // this is its own real sender — no root-vs-latest ambiguity here, unlike
                       // the collapsed thread row above.
+                      <>
                       <DirectionBadge
                         direction={isDraftFolder(msg.folder, account.folder_mappings) ? 'draft' : mailboxBanner(msg, account, folderList).direction}
                         compact={isNarrow || isMobile}
                       />
+                      <RecipientAliasBadge address={recipientAliasFor(msg, account, folderList)} compact={isNarrow || isMobile} />
+                      </>
                     )}
                     <DeliveryMarker state={msg.delivery_state} compact={isNarrow || isMobile} />
                     <span style={{ fontSize: 11, color: 'var(--text-tertiary)' }}>
@@ -5066,12 +5076,15 @@ function MessageRow({ message, account, folderList, selected, lastViewed, isChec
           </div>
           <div style={{ display: 'flex', alignItems: 'center', gap: 4, flexShrink: 0, marginLeft: 8 }}>
             {account && (
+              <>
               <DirectionBadge
                 direction={isDraftFolder(message.folder, account.folder_mappings)
                   ? 'draft'
                   : mailboxBanner(message, account, folderList).direction}
                 compact={isNarrow || isMobile}
               />
+              <RecipientAliasBadge address={recipientAliasFor(message, account, folderList)} compact={isNarrow || isMobile} />
+              </>
             )}
             <DeliveryMarker state={message.delivery_state} compact={isNarrow || isMobile} />
             {message.has_attachments && (

@@ -148,6 +148,8 @@
   "compose": {
     "newMessage": "New Message",
     "errorNodeAliasStale": "This sender address is not a mailbox of its own: choose another From. An administrator can turn it into a separate mailbox.",
+    "aliasGone": "This alias was removed. Choose From again.",
+    "aliasRemovedOption": "Removed alias — choose From",
     "nodeAliasStaleOption": "not a mailbox, cannot send",
     "reply": "Reply",
     "replyAll": "Reply All",
@@ -281,6 +283,7 @@
       "sent": "Sent",
       "draft": "Draft"
     },
+    "recipientAlias": "to {{address}}",
     "to": "To:",
     "via": "via",
     "attachment_one": "{{count}} attachment",
@@ -1617,7 +1620,13 @@
       "nodeAddressHint": "A different address is a separate mailbox: create one in Add account.",
       "errorNodeAddress": "A mailbox on the mail node sends only from its own address. A different address is a separate mailbox: create one in Add account.",
       "foreignNodeAlias": "Another address: letters are not sent from it. An administrator turns it into a separate mailbox or deletes it in Settings → Administration → Mail node.",
-      "foreignNodeAliasOpen": "Open the list"
+      "foreignNodeAliasOpen": "Open the list",
+      "syncGmail": "Update aliases from Gmail",
+      "syncing": "Syncing…",
+      "syncResult": "Added {{added}}, updated {{updated}}, removed {{removed}}",
+      "syncedAt": "Synced from Gmail: {{date}}",
+      "gmailManaged": "Synced from Gmail, edit it in Gmail",
+      "syncError": "Could not update the aliases from Gmail. Try again later."
     },
     "foreignAliases": {
       "title": "Aliases with another address",
@@ -2504,6 +2513,7 @@
       "loadFailed": "Could not load the audit log: {{message}}",
       "invalidFilter": "Check the filters: a date or value is not valid.",
       "detailProvider": "Signed in with {{provider}}",
+      "detailAliasesSynced": "Added: {{added}}; updated: {{updated}}; removed: {{removed}}",
       "detailFields": "Fields: {{fields}}",
       "detailRule": "Rule \"{{name}}\"",
       "detailRuleForward": "Rule \"{{name}}\", forwards to {{address}}",
@@ -2685,6 +2695,7 @@
       "actionRuleUpdated": "Inbox rule changed",
       "actionRuleDeleted": "Inbox rule deleted",
       "actionMailboxOauthSubjectReset": "OAuth binding reset",
+      "actionMailboxAliasesSynced": "Aliases synced from Gmail",
       "actionRuleRun": "Inbox rules run by hand",
       "actionPanelUpdateRequested": "Panel update requested",
       "actionPanelUpdateStarted": "Panel update started",

@@ -20,7 +20,7 @@ describe('recordAudit', () => {
       'mailbox.added', 'mailbox.reconnected', 'mailbox.deleted', 'mailbox.connection_changed',
       'mailbox.enabled', 'mailbox.disabled', 'mailbox.threading_changed', 'mailbox.password_restored',
       'mailbox.quota_changed', 'mailbox.rate_limit_changed', 'mailbox.deletion_requested', 'mailbox.deletion_cancelled', 'mailbox.deactivated', 'mailbox.activated',
-      'mailbox.oauth_subject_reset', 'mailbox.connection_failed',
+      'mailbox.oauth_subject_reset', 'mailbox.connection_failed', 'mailbox.aliases_synced',
       'message.sent', 'message.deleted', 'message.move_reverted',
       'message.send_queued', 'message.send_cancelled', 'message.send_rescheduled', 'message.send_failed',
       'user.added', 'user.deleted', 'user.enabled', 'user.disabled', 'user.admin_changed',

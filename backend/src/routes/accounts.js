@@ -26,6 +26,8 @@ import {
   MAILBOX_ERRORS, activateNodeMailbox, cancelMailboxDeletion, createNodeMailbox, deactivateNodeMailbox, requestMailboxDeletion,
 } from '../services/mailNode/mailboxActions.js';
 import { routeActor } from '../services/actor.js';
+import { GmailSendAsError, syncGmailSendAs } from '../services/gmailSendAs.js';
+import { OAuthTokenError } from '../services/oauth/tokenManager.js';
 import { mailNodeFailure, onOtherMailHost, refuse as refuseMailNode } from './mailNode.js';
 import { deleteAccount } from '../services/accounts/deleteAccount.js';
 import {
@@ -56,7 +58,7 @@ router.get('/', async (req, res) => {
             categorization_enabled, thread_mode, mail_node,
             deletion_requested_at, deletion_requested_by_email, deletion_reason, delete_after, deletion_last_error,
             deactivated_at, deactivated_by_email, deactivation_reason,
-            last_received_at,
+            last_received_at, gmail_send_as_synced_at,
             (mail_node AND delete_after IS NULL AND deactivated_at IS NULL AND tenant_recipient_at IS NULL AND EXISTS (
               SELECT 1 FROM mail_node_domains d
                WHERE d.domain = split_part(lower(email_address), '@', 2) AND d.state = 'authoritative')) AS tenant_pending
@@ -71,7 +73,7 @@ router.get('/', async (req, res) => {
   let aliasMap = {};
   if (accountIds.length) {
     const aliasResult = await query(
-      `SELECT id, account_id, name, email, reply_to, signature, created_at
+      `SELECT id, account_id, name, email, reply_to, signature, source, created_at
        FROM account_aliases WHERE account_id = ANY($1) ORDER BY created_at`,
       [accountIds]
     );
@@ -502,6 +504,35 @@ router.post('/:id/aliases', async (req, res) => {
   if (result.error) return refuseAlias(res, result.error);
   identityChanged(id);
   res.json(result.alias);
+});
+
+// Reads the mailbox's Gmail send-as list now. syncGmailSendAs journals the change, runs the
+// identity hook and tells open tabs (aliases_changed) itself. Declared before the :aliasId
+// routes; it is a POST on a fixed segment.
+const SYNC_SKIPPED = {
+  not_google: [409, 'This mailbox is not connected through Google'],
+  reconnect_required: [409, 'Reconnect this mailbox to Google first'],
+  not_found: [404, 'Account not found'],
+};
+
+router.post('/:id/aliases/sync-gmail', async (req, res) => {
+  const { id } = req.params;
+  let result;
+  try {
+    result = await syncGmailSendAs(id, { actor: routeActor(req) });
+  } catch (err) {
+    if (!(err instanceof GmailSendAsError) && !(err instanceof OAuthTokenError)) throw err;
+    console.error(`Gmail send-as sync failed: ${err.code || err.name}`);
+    return res.status(502).json({ error: 'Gmail did not answer, try later', code: 'gmail_unavailable' });
+  }
+  if (result.status === 'skipped') {
+    const [status, error] = SYNC_SKIPPED[result.reason] ?? SYNC_SKIPPED.not_found;
+    return res.status(status).json(status === 404 ? { error } : { error, code: result.reason });
+  }
+  res.json({
+    added: result.added, updated: result.updated, removed: result.removed,
+    synced_at: result.syncedAt, aliases: await listAliases(id),
+  });
 });
 
 router.put('/:id/aliases/:aliasId', async (req, res) => {

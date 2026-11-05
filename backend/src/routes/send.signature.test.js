@@ -60,6 +60,21 @@ describe('send signature wrapper (#432)', () => {
 });
 
 
+describe('gmail alias with an empty signature', () => {
+  it('sends without the mailbox signature', async () => {
+    const ALIAS_ID = 'b2b2b2b2-2222-4222-8222-b2b2b2b2b2b2';
+    const alias = { id: ALIAS_ID, name: 'Sales', email: 'sales@example.com', reply_to: null, signature: '', source: 'gmail' };
+    query.mockImplementation(async sql => ({
+      rows: sql.includes('FROM email_accounts') ? [{ ...account, signature: '<p>Mailbox sig</p>' }]
+        : sql.includes('FROM account_aliases') ? [alias] : [{ preferences: {}, id: 'book1' }],
+    }));
+    expect((await post({ aliasId: ALIAS_ID })).status).toBe(200);
+    expect(built().html).not.toContain('Mailbox sig');
+    expect(built().html).not.toContain('mailexpert-signature');
+    expect(built().text).not.toContain('Mailbox sig');
+  });
+});
+
 describe('authenticated proxy restoration before queueing', () => {
   it('restores authentic image references in the queued letter and its undo metadata', async () => {
     const path = imageProxyPath('4d479e4f-9b21-4013-9c07-3fbc35f275b1', 'https://img.example/a.png?x=1&amp;y=2', 'u1');

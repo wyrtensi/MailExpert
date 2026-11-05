@@ -58,6 +58,7 @@ const React = await import('react');
 const { createRoot } = await import('react-dom/client');
 const { useStore } = await import('../store/index.js');
 const { AccountsTab } = await import('./AdminPanel.jsx');
+const { api } = await import('../utils/api.js');
 
 const account = (id, name, email) => ({
   id, name, email_address: email, color: '#7c3aed', protocol: 'imap', enabled: true, health: 'healthy',
@@ -366,5 +367,114 @@ describe('AccountsTab provider details', () => {
     await settle();
     assert.ok(host.textContent.includes('admin.accounts.managedServerNote'));
     assert.equal(host.querySelector('input[placeholder="admin.accounts.imapHostPh"]'), null);
+  });
+});
+
+describe('AccountsTab Gmail aliases', () => {
+  let host, root;
+  const originalSync = api.syncGmailAliases;
+  before(() => {
+    host = dom.window.document.createElement('div');
+    dom.window.document.body.appendChild(host);
+    root = createRoot(host);
+    globalThis.fetch = async () => ({ ok: true, status: 200, json: async () => ({ items: [], total: 0 }), text: async () => '' });
+  });
+  after(async () => {
+    api.syncGmailAliases = originalSync;
+    await React.act(async () => root.unmount());
+    host.remove();
+  });
+  const GMAIL_ALIAS = { id: 'g-al', name: 'Sales', email: 'sales@alias.example', reply_to: null, source: 'gmail' };
+  const MANUAL_ALIAS = { id: 'm-al', name: 'Desk', email: 'desk@alias.example', reply_to: null, source: 'manual' };
+  const GOOGLE = { ...account('g1', 'Gmail box', 'g@example.invalid'), oauth_provider: 'google', gmail_send_as_synced_at: null, aliases: [GMAIL_ALIAS, MANUAL_ALIAS] };
+  const PLAIN = { ...account('i1', 'IMAP box', 'imap@example.invalid'), aliases: [MANUAL_ALIAS] };
+
+  const openAliases = async (accounts, id) => {
+    await React.act(async () => root.render(null));
+    useStore.setState({ accounts, accountsReady: true, user: { id: 'u1', isAdmin: true }, accountSettingsRequested: null, showAddAccountDialog: false });
+    await React.act(async () => { root.render(React.createElement(AccountsTab)); });
+    await settle();
+    const index = accounts.findIndex(a => a.id === id);
+    const button = host.querySelectorAll('button[title="admin.accounts.aliases"]')[index];
+    await React.act(async () => { button.click(); });
+    await settle();
+  };
+  const syncButton = () => [...host.querySelectorAll('button')].find(b => b.textContent.includes('admin.aliases.syncGmail'));
+  const aliasRow = (email) => [...host.querySelectorAll('div')].filter(d => d.textContent.includes(email) && d.querySelector('[title="common.delete"], [data-gmail-managed]'))
+    .sort((a, b) => a.textContent.length - b.textContent.length)[0];
+
+  test('google mailbox shows the sync button; non-google does not', async () => {
+    await openAliases([GOOGLE, PLAIN], 'g1');
+    assert.ok(host.textContent.includes('admin.aliases.title'));
+    assert.ok(syncButton(), 'the sync button is on a Google mailbox');
+    assert.ok(!host.textContent.includes('admin.aliases.syncedAt'), 'never synced: no last-sync line');
+
+    await openAliases([GOOGLE, PLAIN], 'i1');
+    assert.ok(host.textContent.includes('admin.aliases.title'));
+    assert.equal(syncButton(), undefined, 'no sync button on an IMAP mailbox');
+  });
+
+  test('gmail alias row has no edit and delete buttons and shows the gmail-managed note; manual alias keeps them', async () => {
+    await openAliases([GOOGLE], 'g1');
+    const gmailRow = aliasRow('sales@alias.example');
+    assert.ok(gmailRow, 'the gmail alias is listed');
+    assert.ok(gmailRow.textContent.includes('admin.aliases.gmailManaged'));
+    assert.equal(gmailRow.querySelector('button[title="common.edit"]'), null);
+    assert.equal(gmailRow.querySelector('button[title="common.delete"]'), null);
+
+    const manualRow = aliasRow('desk@alias.example');
+    assert.ok(manualRow, 'the manual alias is listed');
+    assert.ok(!manualRow.textContent.includes('admin.aliases.gmailManaged'));
+    assert.ok(manualRow.querySelector('button[title="common.edit"]'));
+    assert.ok(manualRow.querySelector('button[title="common.delete"]'));
+    assert.ok([...host.querySelectorAll('button')].some(b => b.textContent.includes('admin.aliases.addButton')), 'adding an alias stays');
+  });
+
+  test('pressing sync calls syncGmailAliases, shows the result and replaces the alias list', async () => {
+    const synced = [
+      { id: 'n1', name: 'New', email: 'new@alias.example', reply_to: null, source: 'gmail' },
+      { id: 'n2', name: 'Other', email: 'other@alias.example', reply_to: null, source: 'gmail' },
+      MANUAL_ALIAS,
+    ];
+    const calls = [];
+    let finish;
+    api.syncGmailAliases = (id) => {
+      calls.push(id);
+      return new Promise(resolve => { finish = () => resolve({
+        added: ['new@alias.example', 'other@alias.example'], updated: [], removed: ['sales@alias.example'],
+        synced_at: '2026-11-05T10:00:00.000Z', aliases: synced,
+      }); });
+    };
+    await openAliases([GOOGLE], 'g1');
+    await React.act(async () => { syncButton().click(); });
+    assert.deepEqual(calls, ['g1']);
+    const busy = [...host.querySelectorAll('button')].find(b => b.textContent.includes('admin.aliases.syncing'));
+    assert.ok(busy && busy.disabled, 'the button is disabled while the sync runs');
+
+    await React.act(async () => { finish(); });
+    await settle();
+    assert.ok(host.textContent.includes('admin.aliases.syncResult'), 'the result is shown');
+    assert.ok(host.textContent.includes('admin.aliases.syncedAt'), 'with the last-sync time');
+    assert.ok(host.textContent.includes('new@alias.example'));
+    assert.ok(host.textContent.includes('other@alias.example'));
+    assert.ok(!host.textContent.includes('sales@alias.example'), 'the removed alias is gone');
+    const stored = useStore.getState().accounts.find(a => a.id === 'g1');
+    assert.deepEqual(stored.aliases, synced, 'the store has the new list');
+    assert.equal(stored.gmail_send_as_synced_at, '2026-11-05T10:00:00.000Z');
+  });
+
+  test('a failed sync shows a generic error, never the server text, and keeps the aliases', async () => {
+    api.syncGmailAliases = async () => { const e = new Error('upstream said: secret detail'); e.code = 'gmail_unavailable'; e.status = 502; throw e; };
+    await openAliases([GOOGLE], 'g1');
+    await React.act(async () => { syncButton().click(); });
+    await settle();
+    assert.ok(host.textContent.includes('admin.aliases.syncError'));
+    assert.ok(!host.textContent.includes('secret detail'));
+    assert.ok(host.textContent.includes('sales@alias.example'));
+
+    api.syncGmailAliases = async () => { const e = new Error('x'); e.code = 'reconnect_required'; e.status = 409; throw e; };
+    await React.act(async () => { syncButton().click(); });
+    await settle();
+    assert.ok(host.textContent.includes('admin.accounts.oauthReconnectRequired'), 'a lost Google sign-in asks to reconnect');
   });
 });

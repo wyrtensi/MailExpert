@@ -91,3 +91,19 @@ describe('sending from a read-only mail node mailbox (EOP seats design)', () => 
     expect(enqueueOutgoingSend).not.toHaveBeenCalled();
   });
 });
+
+describe('sending from an alias that no longer exists', () => {
+  it('send with unknown aliasId returns 409 alias_gone and sends nothing', async () => {
+    query.mockImplementation(async (sql) => {
+      if (sql.includes('FROM email_accounts')) return { rows: [account] };
+      if (sql.includes('FROM account_aliases')) return { rows: [] };
+      return { rows: [{ preferences: {} }] };
+    });
+    const res = await post();
+    expect(res.status).toBe(409);
+    const body = await res.json();
+    expect(body.code).toBe('alias_gone');
+    expect(body.error).toBe('The sender alias no longer exists: choose From again');
+    expect(enqueueOutgoingSend).not.toHaveBeenCalled();
+  });
+});

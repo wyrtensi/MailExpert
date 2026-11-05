@@ -8,6 +8,7 @@ describe('AUDIT_ACTIONS', () => {
       'mailbox.added', 'mailbox.reconnected', 'mailbox.deleted', 'mailbox.connection_changed',
       'mailbox.enabled', 'mailbox.disabled', 'mailbox.password_restored', 'mailbox.quota_changed',
       'mailbox.rate_limit_changed', 'mailbox.deletion_requested', 'mailbox.deletion_cancelled', 'mailbox.deactivated', 'mailbox.activated', 'mailbox.oauth_subject_reset',
+      'mailbox.aliases_synced',
       'message.sent', 'message.deleted',
       'message.move_reverted', 'message.send_queued', 'message.send_cancelled', 'message.send_rescheduled', 'message.send_failed',
       'user.added', 'user.deleted', 'user.enabled', 'user.disabled', 'user.admin_changed',
@@ -568,6 +569,21 @@ describe('auditDetail for a rules run and an OAuth binding reset', () => {
   it('names the provider of a reset binding', () => {
     assert.deepEqual(auditDetail({ action: 'mailbox.oauth_subject_reset', details: { oauthProvider: 'microsoft' } }), {
       key: 'admin.audit.detailProvider', values: { provider: 'microsoft' },
+    });
+  });
+});
+
+describe('auditDetail for a Gmail alias sync', () => {
+  it('labels the action', () => {
+    assert.equal(auditActionLabelKey('mailbox.aliases_synced'), 'admin.audit.actionMailboxAliasesSynced');
+  });
+
+  it('lists the addresses added, updated and removed, a dash for an empty part', () => {
+    assert.deepEqual(auditDetail({ action: 'mailbox.aliases_synced', details: { added: ['a@example.com', 'b@example.com'], updated: [], removed: ['c@example.com'] } }), {
+      key: 'admin.audit.detailAliasesSynced', values: { added: 'a@example.com, b@example.com', updated: '—', removed: 'c@example.com' },
+    });
+    assert.deepEqual(auditDetail({ action: 'mailbox.aliases_synced', details: {} }), {
+      key: 'admin.audit.detailAliasesSynced', values: { added: '—', updated: '—', removed: '—' },
     });
   });
 });

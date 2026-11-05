@@ -201,7 +201,12 @@ router.post('/send', async (req, res) => {
       'SELECT * FROM account_aliases WHERE id = $1 AND account_id = $2',
       [aliasId, accountId]
     );
-    if (aliasResult.rows.length) {
+    // A vanished alias (removed in Gmail, or by an admin) must not fall back to the mailbox address:
+    // the letter would leave from the wrong identity.
+    if (!aliasResult.rows.length) {
+      return res.status(409).json({ error: 'The sender alias no longer exists: choose From again', code: 'alias_gone' });
+    }
+    {
       const alias = aliasResult.rows[0];
       // A mail node mailbox sends only from its own address (D-16); an alias with another address
       // left from before would be refused by the node's SMTP after the undo window, so say it now.

@@ -974,3 +974,27 @@ describe('MessageList — search results past the first page in paginated mode',
     }
   });
 });
+
+// The pill that says which alias a letter came to. It must name the address "Reply" picks as From,
+// so it is computed by the same matcher (utils/replyAlias.js) from the same row fields.
+describe('MessageList — recipient alias badge', () => {
+  const ALIASED = { ...ACCOUNT, aliases: [{ id: 'al-sales', email: 'sales@example.com' }] };
+  const toAlias = { ...MESSAGE, id: 'to-alias', from_email: 'client@example.net', to_addresses: [{ email: 'sales@example.com' }] };
+  const toMailbox = { ...MESSAGE, id: 'to-mailbox', uid: 2, from_email: 'client@example.net', to_addresses: [{ email: 'a@example.com' }] };
+  const badgeIn = (msgid) => container.querySelector(`[data-msgid="${msgid}"] [role="img"][aria-label="sales@example.com"]`);
+
+  test('message row shows the recipient alias badge for a letter to an alias; none for a letter to the mailbox itself', async () => {
+    await mount({ rows: [toAlias, toMailbox], threadedView: false, accounts: [ALIASED] });
+    const badge = badgeIn('to-alias');
+    assert.ok(badge, 'expected the alias pill on the letter addressed to the alias');
+    assert.equal(badge.getAttribute('title'), 'sales@example.com');
+    assert.equal(container.querySelector('[data-msgid="to-mailbox"] [aria-label="sales@example.com"]'), null);
+
+    // Conversations on: the thread row badges the same way.
+    const threadToAlias = { ...toAlias, thread_id: 'thr-a', message_count: 2, unread_count: 1 };
+    const threadToMailbox = { ...toMailbox, thread_id: 'thr-b', message_count: 2, unread_count: 1 };
+    await mount({ rows: [threadToAlias, threadToMailbox], threadedView: true, accounts: [ALIASED] });
+    assert.ok(badgeIn('to-alias'), 'expected the alias pill on the conversation row');
+    assert.equal(container.querySelector('[data-msgid="to-mailbox"] [aria-label="sales@example.com"]'), null);
+  });
+});

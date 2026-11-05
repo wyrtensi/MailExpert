@@ -21,6 +21,7 @@ export const AUDIT_ACTION_LABEL_KEYS = Object.freeze({
   'mailbox.deactivated': 'admin.audit.actionMailboxDeactivated',
   'mailbox.activated': 'admin.audit.actionMailboxActivated',
   'mailbox.oauth_subject_reset': 'admin.audit.actionMailboxOauthSubjectReset',
+  'mailbox.aliases_synced': 'admin.audit.actionMailboxAliasesSynced',
   'message.sent': 'admin.audit.actionMessageSent',
   'message.deleted': 'admin.audit.actionMessageDeleted',
   'message.move_reverted': 'admin.audit.actionMessageMoveReverted',
@@ -326,6 +327,15 @@ export function auditDetail(entry) {
       return details.oauthProvider
         ? { key: 'admin.audit.detailProvider', values: { provider: details.oauthProvider } }
         : null;
+    // A Gmail send-as sync that changed the mailbox's aliases (backend services/gmailSendAs.js):
+    // the addresses it added, updated and removed.
+    case 'mailbox.aliases_synced': {
+      const list = (value) => (Array.isArray(value) && value.length ? value.join(', ') : '—');
+      return {
+        key: 'admin.audit.detailAliasesSynced',
+        values: { added: list(details.added), updated: list(details.updated), removed: list(details.removed) },
+      };
+    }
     case 'mailbox.deleted': {
       // pending: the deletion job deleted a mailbox someone asked to delete; the entry keeps who
       // asked, when and why, since the mailbox row is gone. nodeWarnings: the node deleted the

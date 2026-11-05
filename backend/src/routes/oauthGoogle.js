@@ -19,6 +19,7 @@ import { GoogleAppSelectionError, releaseGoogleSeat, selectGoogleApp } from '../
 import { consumeGoogleLaunch } from '../services/oauth/googleLaunch.js';
 import { allowedRequestOrigin } from '../utils/publicOrigins.js';
 import { isUuid } from '../utils/uuid.js';
+import { enqueueGmailSendAsSync } from '../services/gmailSendAsJobs.js';
 import { THREAD_MODE_GMAIL } from '../services/threading/threadId.js';
 
 // Mounted at /oauth/google. Redirect targets carry only stable codes — never provider
@@ -179,6 +180,10 @@ router.get('/callback', async (req, res) => {
     }
 
     reconnectAccount(account, result);
+    // Read the mailbox's send-as aliases now (a new mailbox and a reconnect alike); the redirect
+    // never waits for it and a queueing failure is only logged.
+    enqueueGmailSendAsSync(account.id, { reason: 'connect' }).catch((err) =>
+      console.error('Gmail send-as sync could not be queued:', err?.code || err?.message));
     // The second sender name from the form was not kept (same as the main one): say so.
     const notice = senderNameDropped ? '&oauth_notice=sender_name_duplicate' : '';
     res.redirect(`/?oauth_success=${PROVIDER}&oauth_result=${result}${notice}${withAttempt(pending.attemptId)}`);

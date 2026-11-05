@@ -1,6 +1,7 @@
 import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
-import { parseAddressListField, pickReplyAlias } from './replyAlias.js';
+import { matchReplyAlias, parseAddressListField, pickReplyAlias } from './replyAlias.js';
+import { recipientAliasFor } from './mailboxBanner.js';
 
 const aliases = [
   { id: 'alias-1', email: 'sales@example.com' },
@@ -184,5 +185,87 @@ describe('pickReplyAlias for a mail node mailbox (D-16)', () => {
 
   it('still picks it for a mailbox that is not on the mail node', () => {
     assert.equal(pickReplyAlias({ aliases, ...letter }), 'old');
+  });
+});
+
+describe('matchReplyAlias', () => {
+  const letters = [
+    { deliveryAddresses: ['sales@example.com'], toAddresses: [{ email: 'someone-else@example.com' }], fromEmail: 'them@example.com' },
+    { toAddresses: [{ email: 'support@example.com' }], fromEmail: 'them@example.com' },
+    { ccAddresses: [{ email: 'sales@example.com' }], fromEmail: 'them@example.com' },
+    { fromEmail: 'support@example.com' },
+    { toAddresses: [{ email: 'support@example.com' }], ccAddresses: [{ email: 'sales@example.com' }] },
+    { deliveryAddresses: ['support@example.com'], toAddresses: [{ email: 'sales@example.com' }] },
+    { toAddresses: [{ email: 'nobody@example.com' }], fromEmail: 'them@example.com' },
+    { deliveryAddresses: 'not json', toAddresses: 'not json', ccAddresses: 'not json' },
+  ];
+
+  it('pickReplyAlias returns the same ids as before', () => {
+    const expected = ['alias-1', 'alias-2', 'alias-1', 'alias-2', 'alias-1', 'alias-2', null, null];
+    assert.deepEqual(letters.map(letter => pickReplyAlias({ aliases, ...letter })), expected);
+    assert.deepEqual(letters.map(letter => matchReplyAlias({ aliases, ...letter })?.id ?? null), expected);
+  });
+
+  it('matchReplyAlias returns the alias object', () => {
+    assert.equal(matchReplyAlias({ aliases, toAddresses: [{ email: 'support@example.com' }] }), aliases[1]);
+    assert.equal(matchReplyAlias({ aliases, toAddresses: [{ email: 'nobody@example.com' }] }), null);
+    assert.equal(matchReplyAlias({ aliases, toAddresses: [{ email: 'support@example.com' }], mailNode: true }), null);
+  });
+});
+
+describe('recipientAliasFor', () => {
+  const account = {
+    id: 'acct-1',
+    email_address: 'team@example.com',
+    aliases: [
+      { id: 'al-1', email: 'sales@example.com' },
+      { id: 'al-2', email: 'support@example.com' },
+      { id: 'al-own', email: 'Team@Example.com' },
+    ],
+  };
+  const incoming = (fields) => ({ account_id: 'acct-1', folder: 'INBOX', from_email: 'client@example.net', ...fields });
+
+  it('recipientAliasFor returns the alias email for an incoming letter addressed to it in To or Cc', () => {
+    assert.equal(recipientAliasFor(incoming({ to_addresses: [{ email: 'Sales@example.com' }] }), account), 'sales@example.com');
+    assert.equal(recipientAliasFor(incoming({
+      to_addresses: JSON.stringify([{ email: 'team@example.com' }]),
+      cc_addresses: JSON.stringify([{ email: 'support@example.com' }]),
+    }), account), 'support@example.com');
+    assert.equal(recipientAliasFor(incoming({ delivery_addresses: ['support@example.com'] }), account), 'support@example.com');
+  });
+
+  it('recipientAliasFor returns null for the mailbox\'s own address, an outgoing letter, an address that is not a current alias, a node mailbox', () => {
+    // The mailbox's own address, also when an alias row (a second sender name) carries it.
+    assert.equal(recipientAliasFor(incoming({ to_addresses: [{ email: 'team@example.com' }] }), account), null);
+    // An outgoing letter from an alias to a client.
+    assert.equal(recipientAliasFor({
+      account_id: 'acct-1', folder: 'Sent', from_email: 'sales@example.com', to_addresses: [{ email: 'client@example.net' }],
+    }, { ...account, folder_mappings: { sent: 'Sent' } }), null);
+    // An address on the same domain that is not a current alias of this mailbox.
+    assert.equal(recipientAliasFor(incoming({ to_addresses: [{ email: 'billing@example.com' }] }), account), null);
+    // A mail node mailbox sends only from its own address (D-16).
+    assert.equal(recipientAliasFor(incoming({ to_addresses: [{ email: 'sales@example.com' }] }), { ...account, mail_node: true }), null);
+    // No account loaded yet.
+    assert.equal(recipientAliasFor(incoming({ to_addresses: [{ email: 'sales@example.com' }] }), undefined), null);
+  });
+
+  it('recipientAliasFor and pickReplyAlias agree on the same message', () => {
+    // Delivered-To says one alias, To another, Cc a third address: both must pick the same one.
+    const message = incoming({
+      delivery_addresses: ['support@example.com'],
+      to_addresses: [{ email: 'sales@example.com' }],
+      cc_addresses: [{ email: 'team@example.com' }],
+    });
+    // The same fields every reply path (list swipe, context menu, reading pane) passes.
+    const id = pickReplyAlias({
+      aliases: account.aliases,
+      deliveryAddresses: message.delivery_addresses,
+      toAddresses: message.to_addresses,
+      ccAddresses: message.cc_addresses,
+      fromEmail: message.from_email,
+      accountEmail: account.email_address,
+      mailNode: account.mail_node === true,
+    });
+    assert.equal(recipientAliasFor(message, account), account.aliases.find(a => a.id === id).email);
   });
 });

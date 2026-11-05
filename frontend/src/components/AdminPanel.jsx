@@ -48,6 +48,7 @@ import MailNodeOutagesSection from './MailNodeOutagesSection.jsx';
 import PanelUpdateSection from './PanelUpdateSection.jsx';
 import MailNodeQuarantine from './MailNodeQuarantine.jsx';
 import MailNodeForeignAliases from './MailNodeForeignAliases.jsx';
+import GmailAliasSync from './GmailAliasSync.jsx';
 import { accountUpdateFromForm, hasLockedConnection } from '../utils/accountUpdate.js';
 import { accountProviderLabels } from '../utils/accountProvider.js';
 import {
@@ -1029,6 +1030,13 @@ export function AccountsTab() {
           {t(nodeMailbox ? 'admin.aliases.descriptionNode' : 'admin.aliases.description')}
         </div>
 
+        {editTarget.oauth_provider === 'google' && (
+          <GmailAliasSync key={editTarget.id} account={editTarget} onSynced={(changes) => {
+            updateAccount(editTarget.id, changes);
+            setEditTarget(prev => ({ ...prev, ...changes }));
+          }} />
+        )}
+
         <button
           onClick={() => { setAliasFormData({ name: '', email: nodeMailbox ? editTarget.email_address : '', reply_to: '', signature: '' }); setAliasFormMode('add'); }}
           style={{
@@ -1095,8 +1103,14 @@ export function AccountsTab() {
                     {t('admin.aliases.replyToLabel')} {alias.reply_to}
                   </div>
                 )}
+                {alias.source === 'gmail' && (
+                  <div data-gmail-managed style={{ fontSize: 11, color: 'var(--text-tertiary)', marginTop: 2, lineHeight: 1.5 }}>
+                    {t('admin.aliases.gmailManaged')}
+                  </div>
+                )}
               </div>
-              <div style={{ display: 'flex', gap: 6, flexShrink: 0 }}>
+              {/* An alias synced from Gmail is changed only in Gmail: no edit or delete here. */}
+              {alias.source !== 'gmail' && <div style={{ display: 'flex', gap: 6, flexShrink: 0 }}>
                 {!isForeignNodeAlias(editTarget, alias) && (
                   <IconBtn onClick={() => handleAliasEdit(alias)} title={t('common.edit')}>
                     <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
@@ -1111,7 +1125,7 @@ export function AccountsTab() {
                     <path d="M19 6v14a2 2 0 01-2 2H7a2 2 0 01-2-2V6m3 0V4a1 1 0 011-1h4a1 1 0 011 1v2"/>
                   </svg>
                 </IconBtn>
-              </div>
+              </div>}
             </div>
           ))
         )}

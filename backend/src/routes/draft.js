@@ -59,7 +59,10 @@ async function buildRawDraft({ accountId, aliasId, to, cc, bcc, subject, body, b
       'SELECT * FROM account_aliases WHERE id = $1 AND account_id = $2',
       [aliasId, accountId]
     );
-    if (aliasResult.rows.length) {
+    if (!aliasResult.rows.length) {
+      throw Object.assign(new Error('The sender alias no longer exists: choose From again'), { status: 409, code: 'alias_gone' });
+    }
+    {
       const alias = aliasResult.rows[0];
       fromName = alias.name;
       fromEmail = alias.email;
@@ -252,7 +255,7 @@ router.post('/draft', async (req, res) => {
     if (isMailboxBusyError(err)) return sendMailboxBusy(res, err);
     // A refusal this file threw on purpose (err.status) keeps its text; the server's own error
     // stays in the log above.
-    if (err.status) return res.status(err.status).json({ error: err.message });
+    if (err.status) return res.status(err.status).json({ error: err.message, ...(err.code ? { code: err.code } : {}) });
     res.status(500).json({ error: 'Failed to save the draft', code: 'draft_save_failed' });
   }
 });

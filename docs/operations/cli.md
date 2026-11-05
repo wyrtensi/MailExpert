@@ -186,7 +186,9 @@ docker exec -it me-stage docker exec -it stage-backend node src/cli/mailexpert.j
 
 Состояния заданий: `queued`, `running`, `done`, `failed`, `cancelled`, `needs_attention`. Виды заданий
 тенанта (для `jobs list --kind`): `tenant_test_connection`, `tenant_poll`, `tenant_antispam_read`,
-`tenant_seats_read`, `tenant_domain_sync`, `tenant_quarantine_release`.
+`tenant_seats_read`, `tenant_domain_sync`, `tenant_quarantine_release`. Другие виды (например,
+`gmail_send_as_sync`, синхронизация алиасов Gmail раз в час) `jobs list --kind` не принимает и в `jobs list`
+не показывает: итог такой синхронизации виден в журнале действий (`mailbox.aliases_synced`).
 
 `access sync` ставит задание `access_sync` и ждёт его всегда (`--wait` у него нет, только
 `--timeout`), раздел 3.6. `jobs` показывает только задания тенанта.

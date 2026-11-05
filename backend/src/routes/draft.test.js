@@ -498,3 +498,30 @@ describe('DELETE /api/mail/draft/:uid — Drafts folders only', () => {
     expect(query.mock.calls.some(([sql]) => sql.includes('DELETE FROM messages'))).toBe(false);
   });
 });
+
+describe('POST /api/mail/draft — vanished sender alias', () => {
+  let server, base;
+  beforeAll(async () => {
+    await new Promise(r => { server = buildApp().listen(0, r); });
+    base = `http://127.0.0.1:${server.address().port}`;
+  });
+  afterAll(async () => { await new Promise(r => server.close(r)); });
+
+  it('draft save with unknown aliasId returns 409 alias_gone', async () => {
+    imapManager.appendToFolder.mockReset();
+    query.mockReset();
+    query.mockImplementation(async (sql) => {
+      if (sql.includes('SELECT id FROM email_accounts')) return { rows: [{ id: ACCOUNT_ID }] };
+      if (sql.includes('SELECT * FROM email_accounts')) return { rows: [ACCOUNT_ROW] };
+      return { rows: [] };
+    });
+    const response = await fetch(`${base}/api/mail/draft`, {
+      method: 'POST', headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ accountId: ACCOUNT_ID, aliasId: '33333333-3333-4333-8333-333333333333', body: 'Hi' }),
+    });
+    expect(response.status).toBe(409);
+    const body = await response.json();
+    expect(body.code).toBe('alias_gone');
+    expect(imapManager.appendToFolder).not.toHaveBeenCalled();
+  });
+});

@@ -14,7 +14,7 @@ export function parseAddressListField(value) {
 // address left from before is never picked, since sending from it is refused.
 // The alias a reply to this letter goes out from, as the alias object (or null). The one choice
 // behind both "Reply" (pickReplyAlias below) and the recipient pill in the message list
-// (mailboxBanner.js's recipientAliasFor): the pill must name the address the reply will use.
+// (mailboxBanner.js's recipientAliasFor): an active pill must name the address the reply will use.
 export function matchReplyAlias({ aliases, deliveryAddresses, toAddresses, ccAddresses, fromEmail, accountEmail, mailNode = false }) {
   if (mailNode) return null;
   const own = (accountEmail || '').toLowerCase();

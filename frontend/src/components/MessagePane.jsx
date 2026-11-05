@@ -15,7 +15,7 @@ import { getResults, removeResult } from '../aiResults.js';
 import { startRun, cancelRun, getAiState, subscribeRuns } from '../aiRuns.js';
 import { renderMarkdown } from '../utils/renderMarkdown.js';
 import { pickReplyAlias } from '../utils/replyAlias.js';
-import { isDraftFolder, mailboxBanner } from '../utils/mailboxBanner.js';
+import { isCurrentAlias, isDraftFolder, mailboxBanner } from '../utils/mailboxBanner.js';
 import { emailFontFor } from '../utils/emailFont.js';
 import { buildQuote, identityName, quoteMetaFor, senderLanguage } from '../utils/quoteHeader.js';
 import SenderHistory from './SenderHistory.jsx';
@@ -2730,7 +2730,8 @@ ${bodyContent}
                   {message.account_email || account?.email_address}
                 </span>
                 {banner.via && (
-                  <span style={{ fontSize: 13, color: 'var(--text-secondary)' }}>
+                  // Amber when the letter came through a current alias (as the list's active pill).
+                  <span style={{ fontSize: 13, color: isCurrentAlias(banner.via, account) ? 'var(--amber)' : 'var(--text-secondary)' }}>
                     {t('message.mailbox.via', { address: banner.via })}
                   </span>
                 )}

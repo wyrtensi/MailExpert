@@ -2135,6 +2135,14 @@ export async function demoRequest(method, path, body = {}) {
     account.aliases = [...(account.aliases || []), alias];
     return clone(alias);
   }
+  const aliasSyncMatch = pathname.match(/^\/accounts\/([^/]+)\/aliases\/sync-gmail$/);
+  if (verb === 'POST' && aliasSyncMatch) {
+    const account = accountFor(decodeURIComponent(aliasSyncMatch[1]));
+    if (!account) throw demoError('Account not found');
+    const syncedAt = new Date().toISOString();
+    account.gmail_send_as_synced_at = syncedAt;
+    return { added: [], updated: [], removed: [], synced_at: syncedAt, aliases: clone(account.aliases || []) };
+  }
   const aliasItemMatch = pathname.match(/^\/accounts\/([^/]+)\/aliases\/([^/]+)$/);
   if (verb === 'PUT' && aliasItemMatch) {
     const account = accountFor(decodeURIComponent(aliasItemMatch[1]));

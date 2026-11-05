@@ -411,6 +411,10 @@ test('manual IMAP mailbox add, edit, aliases and delete round-trip through ACCOU
   const alias = await answer('/accounts/:param/aliases', 'POST', `/accounts/${id}/aliases`, { name: 'Alt Name', email: 'alt@demo.mailexpert.local' });
   const aliasedEdit = await answer('/accounts/:param/aliases/:param', 'PUT', `/accounts/${id}/aliases/${alias.id}`, { name: 'Alt Renamed', email: alias.email });
   assert.equal(aliasedEdit.name, 'Alt Renamed');
+  const synced = await answer('/accounts/:param/aliases/sync-gmail', 'POST', `/accounts/${id}/aliases/sync-gmail`);
+  assert.deepEqual([synced.added, synced.updated, synced.removed], [[], [], []]);
+  assert.ok(synced.synced_at);
+  assert.equal(synced.aliases.length, 1);
   await answer('/accounts/:param/aliases/:param', 'DELETE', `/accounts/${id}/aliases/${alias.id}`);
   await answer('/accounts/:param', 'DELETE', `/accounts/${id}`);
 });

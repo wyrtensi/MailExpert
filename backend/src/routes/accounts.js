@@ -26,6 +26,8 @@ import {
   MAILBOX_ERRORS, activateNodeMailbox, cancelMailboxDeletion, createNodeMailbox, deactivateNodeMailbox, requestMailboxDeletion,
 } from '../services/mailNode/mailboxActions.js';
 import { routeActor } from '../services/actor.js';
+import { GmailSendAsError, syncGmailSendAs } from '../services/gmailSendAs.js';
+import { OAuthTokenError } from '../services/oauth/tokenManager.js';
 import { mailNodeFailure, onOtherMailHost, refuse as refuseMailNode } from './mailNode.js';
 import { deleteAccount } from '../services/accounts/deleteAccount.js';
 import {
@@ -502,6 +504,34 @@ router.post('/:id/aliases', async (req, res) => {
   if (result.error) return refuseAlias(res, result.error);
   identityChanged(id);
   res.json(result.alias);
+});
+
+// Reads the mailbox's Gmail send-as list now. syncGmailSendAs journals the change and runs the
+// identity hook itself. Declared before the :aliasId routes; it is a POST on a fixed segment.
+const SYNC_SKIPPED = {
+  not_google: [409, 'This mailbox is not connected through Google'],
+  reconnect_required: [409, 'Reconnect this mailbox to Google first'],
+  not_found: [404, 'Account not found'],
+};
+
+router.post('/:id/aliases/sync-gmail', async (req, res) => {
+  const { id } = req.params;
+  let result;
+  try {
+    result = await syncGmailSendAs(id, { actor: routeActor(req) });
+  } catch (err) {
+    if (!(err instanceof GmailSendAsError) && !(err instanceof OAuthTokenError)) throw err;
+    console.error(`Gmail send-as sync failed: ${err.code || err.name}`);
+    return res.status(502).json({ error: 'Gmail did not answer, try later', code: 'gmail_unavailable' });
+  }
+  if (result.status === 'skipped') {
+    const [status, error] = SYNC_SKIPPED[result.reason] ?? SYNC_SKIPPED.not_found;
+    return res.status(status).json(status === 404 ? { error } : { error, code: result.reason });
+  }
+  res.json({
+    added: result.added, updated: result.updated, removed: result.removed,
+    synced_at: result.syncedAt, aliases: await listAliases(id),
+  });
 });
 
 router.put('/:id/aliases/:aliasId', async (req, res) => {

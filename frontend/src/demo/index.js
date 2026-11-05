@@ -94,6 +94,23 @@ let demoDeleteAfterDays = 5;
   }
 }
 
+// One mailbox on its own domain has an alias, so the list shows both alias pills: a letter to the
+// current alias (amber, Reply sends from it) and one to another address on the mailbox's domain
+// that is no longer an alias (gray, see demo-alias-902). Not on a Gmail fleet mailbox: on a public
+// domain such as gmail.com the gray pill never shows (mailboxBanner.js's PUBLIC_MAIL_DOMAINS).
+const DEMO_ALIAS_ACCOUNT = 'demo-ops';
+const DEMO_ALIAS = 'vendors@demo.mailexpert.local';
+const DEMO_REMOVED_ALIAS = 'events@demo.mailexpert.local';
+{
+  const ops = ACCOUNT_FIXTURES.find(account => account.id === DEMO_ALIAS_ACCOUNT);
+  if (ops) {
+    ops.aliases = [...(ops.aliases || []), {
+      id: `${ops.id}-alias-vendors`, account_id: ops.id, name: 'Vendor Desk', email: DEMO_ALIAS,
+      reply_to: null, signature: null, source: 'manual',
+    }];
+  }
+}
+
 const FOLDER_FIXTURES = [
   { path: 'INBOX', name: 'Inbox', special_use: '\\Inbox' },
   { path: 'Sent', name: 'Sent', special_use: '\\Sent' },
@@ -251,6 +268,21 @@ const MESSAGE_FIXTURES = [
     id: 'demo-009', accountId: 'demo-sales', folder: 'Trash', subject: 'Old conference invitation',
     fromName: 'Events Team', fromEmail: 'events@conference.example', date: demoTime('2026-09-10T14:00:00.000Z'),
     snippet: 'Your invitation for the summer conference.', bodyText: 'Your invitation for the summer conference is enclosed.', read: true,
+  }),
+  // The two letters behind the alias pills (DEMO_ALIAS above).
+  message({
+    id: 'demo-alias-901', accountId: DEMO_ALIAS_ACCOUNT, subject: 'Vendor onboarding documents',
+    fromName: 'Kenji Watanabe', fromEmail: 'kenji@harbor.example', date: demoTime('2026-09-15T10:20:00.000Z'),
+    snippet: 'The signed onboarding documents for our company are attached.',
+    bodyText: 'The signed onboarding documents for our company are attached. Please confirm they are complete.',
+    toAddresses: [DEMO_ALIAS],
+  }),
+  message({
+    id: 'demo-alias-902', accountId: DEMO_ALIAS_ACCOUNT, subject: 'New sessions added to our free webinar series',
+    fromName: 'Research Webinars', fromEmail: 'webinars@research-events.example', date: demoTime('2026-09-15T09:05:00.000Z'),
+    snippet: 'Three new sessions for researchers have been added to the autumn schedule.',
+    bodyText: 'Three new sessions for researchers have been added to the autumn schedule.', category: 'newsletter',
+    toAddresses: [DEMO_REMOVED_ALIAS],
   }),
   ...fleetLetters(FLEET_ACCOUNTS).map(message),
   // Mail that just arrived, dated from now (like the pending deletion above), in mailboxes spread

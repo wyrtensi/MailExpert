@@ -284,6 +284,7 @@
       "draft": "Черновик"
     },
     "recipientAlias": "на {{address}}",
+    "recipientAliasInactive": "{{address}}: алиас не активен, «Ответить» отправит с основного адреса ящика",
     "to": "Кому:",
     "via": "через",
     "attachment_one": "{{count}} вложение",

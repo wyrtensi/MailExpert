@@ -64,7 +64,9 @@ function toFields(entry) {
     name: displayName || email.split('@')[0],
     email,
     reply_to: entry.replyToAddress || null,
-    signature: sanitizeSignature(entry.signature || '') || null,
+    // Owner decision: an empty or missing send-as signature is '' (no signature, as in Gmail),
+    // never null, which would inherit the mailbox signature.
+    signature: (typeof entry.signature === 'string' && entry.signature.trim() ? sanitizeSignature(entry.signature) : '') || '',
   };
 }
 
@@ -72,7 +74,7 @@ function sameFields(row, fields) {
   return row.name === fields.name
     && row.email === fields.email
     && blank(row.reply_to) === blank(fields.reply_to)
-    && blank(row.signature) === blank(fields.signature);
+    && (row.signature ?? null) === fields.signature;
 }
 
 export function planSendAsSync({ accountEmail, existing = [], sendAs = [] }) {

@@ -100,7 +100,7 @@ describe('syncGmailSendAs', () => {
     expect(init.headers.Authorization).toBe(`Bearer ${TOKEN}`);
     expect(init.signal).toBeInstanceOf(AbortSignal);
     expect(await aliases()).toEqual([expect.objectContaining({
-      name: 'Name info@example.com', email: 'info@example.com', reply_to: 'reply@example.com', signature: null, source: 'gmail',
+      name: 'Name info@example.com', email: 'info@example.com', reply_to: 'reply@example.com', signature: '', source: 'gmail',
     })]);
     expect(await syncedAt()).toBeInstanceOf(Date);
     const audit = await auditRows();

@@ -74,7 +74,7 @@ describe('planSendAsSync', () => {
     const p = plan({ existing: [row], sendAs: [sa('JSmith@example.com')] });
     expect(p.create).toEqual([]);
     expect(p.remove).toEqual([]);
-    expect(p.update).toEqual([{ id: 'r1', fields: { name: 'JSmith', email: 'JSmith@example.com', reply_to: null, signature: null } }]);
+    expect(p.update).toEqual([{ id: 'r1', fields: { name: 'JSmith', email: 'JSmith@example.com', reply_to: null, signature: '' } }]);
     const same = plan({ existing: [{ ...row, email: 'JSmith@example.com', name: 'JSmith' }], sendAs: [sa('jsmith@example.com')] });
     expect(same.update).toHaveLength(1); // case of the address differs from Gmail
   });
@@ -109,5 +109,22 @@ describe('planSendAsSync', () => {
   it('falls back to local part when displayName is blank', () => {
     const p = plan({ sendAs: [sa('sales@example.com', { displayName: '   ' })] });
     expect(p.create[0].name).toBe('sales');
+  });
+
+  it('stores a missing, empty or sanitized-away send-as signature as an empty string', () => {
+    const p = plan({
+      sendAs: [
+        sa('none@example.com'),
+        sa('empty@example.com', { signature: '' }),
+        sa('script@example.com', { signature: '<script>x</script>' }),
+      ],
+    });
+    expect(p.create.map((f) => f.signature)).toEqual(['', '', '']);
+  });
+
+  it('updates a gmail row holding a null signature to an empty one', () => {
+    const row = { id: 'g1', name: 'a', email: 'a@example.com', reply_to: null, signature: null, source: 'gmail' };
+    const p = plan({ existing: [row], sendAs: [sa('a@example.com', { displayName: 'a' })] });
+    expect(p.update).toEqual([{ id: 'g1', fields: { name: 'a', email: 'a@example.com', reply_to: null, signature: '' } }]);
   });
 });

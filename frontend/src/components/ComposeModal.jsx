@@ -6,6 +6,7 @@ import { useTranslation } from 'react-i18next';
 import DOMPurify from 'dompurify';
 import { sanitizeQuoteHtml } from '../utils/appEmailHtml.js';
 import { useStore } from '../store/index.js';
+import { isAliasGone } from '../utils/aliasGone.js';
 import { isForeignNodeAlias } from '../utils/mailNode.js';
 import { api } from '../utils/api.js';
 import { apiErrorText } from '../utils/apiErrors.js';
@@ -195,6 +196,11 @@ function parseChips(val) {
   const trimmed = current.trim();
   if (trimmed) parts.push(trimmed);
   return parts;
+}
+
+// A refused alias is gone from the server: reload the mailbox list so From stops offering it.
+function reloadAccounts() {
+  api.getAccounts().then(useStore.getState().setAccounts).catch(console.error);
 }
 
 export default function ComposeModal() {
@@ -1028,7 +1034,9 @@ export default function ComposeModal() {
         send_cancelled: 'scheduled.conflict',
         // An alias with another address on a mail node mailbox (D-16): not a mailbox, not sent from.
         node_alias_stale: 'compose.errorNodeAliasStale',
+        alias_gone: 'compose.aliasGone',
       };
+      if (isAliasGone(err)) reloadAccounts();
       if (Object.hasOwn(SEND_ERROR_KEYS, err.code)) {
         // A conflict means this key is spent: the next attempt is a new send.
         if (err.code === 'idempotency_conflict' || err.code === 'send_cancelled') idempotencyKeyRef.current = null;
@@ -1143,10 +1151,12 @@ export default function ComposeModal() {
       }
     } catch (err) {
       console.error('Save draft failed:', err.message);
+      if (isAliasGone(err)) reloadAccounts();
       // A save the user asked for says when the mailbox is busy or its password was rejected;
       // autosave stays quiet and retries on its next interval.
       if (!silent && !closedRef.current) {
-        if (isMailboxBusy(err)) addNotification({ title: mailboxBusyText(err, t) });
+        if (isAliasGone(err)) addNotification({ type: 'error', title: t('compose.draftSaveFailed'), body: t('compose.aliasGone') });
+        else if (isMailboxBusy(err)) addNotification({ title: mailboxBusyText(err, t) });
         else addNotification({ type: 'error', title: t('compose.draftSaveFailed'), body: apiErrorText(err, t, { fallback: t('compose.draftSaveFailedBody') }) });
       }
     } finally {

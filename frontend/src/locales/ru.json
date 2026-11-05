@@ -1654,7 +1654,13 @@
       "nodeAddressHint": "Другой адрес — это отдельный ящик: создайте его в «Добавить аккаунт».",
       "errorNodeAddress": "Ящик почтового узла отправляет только со своего адреса. Другой адрес — это отдельный ящик: создайте его в «Добавить аккаунт».",
       "foreignNodeAlias": "Другой адрес: письма с него не отправляются. Администратор превращает его в отдельный ящик или удаляет в «Настройки → Администрирование → Почтовый узел».",
-      "foreignNodeAliasOpen": "Открыть список"
+      "foreignNodeAliasOpen": "Открыть список",
+      "syncGmail": "Обновить алиасы из Gmail",
+      "syncing": "Синхронизация…",
+      "syncResult": "Добавлено {{added}}, обновлено {{updated}}, удалено {{removed}}",
+      "syncedAt": "Синхронизировано из Gmail: {{date}}",
+      "gmailManaged": "Синхронизируется из Gmail, правьте в Gmail",
+      "syncError": "Не удалось обновить алиасы из Gmail. Попробуйте позже."
     },
     "foreignAliases": {
       "title": "Алиасы с другим адресом",
@@ -2547,6 +2553,7 @@
       "loadFailed": "Не удалось загрузить журнал: {{message}}",
       "invalidFilter": "Проверьте фильтры: дата или значение указаны неверно.",
       "detailProvider": "Вход через {{provider}}",
+      "detailAliasesSynced": "Добавлены: {{added}}; обновлены: {{updated}}; удалены: {{removed}}",
       "detailFields": "Поля: {{fields}}",
       "detailRule": "Правило «{{name}}»",
       "detailRuleForward": "Правило «{{name}}», пересылает на {{address}}",
@@ -2728,6 +2735,7 @@
       "actionRuleUpdated": "Изменено правило входящих",
       "actionRuleDeleted": "Удалено правило входящих",
       "actionMailboxOauthSubjectReset": "Сброшена привязка OAuth",
+      "actionMailboxAliasesSynced": "Алиасы синхронизированы из Gmail",
       "actionRuleRun": "Правила входящих запущены вручную",
       "actionPanelUpdateRequested": "Запрошено обновление панели",
       "actionPanelUpdateStarted": "Обновление панели началось",

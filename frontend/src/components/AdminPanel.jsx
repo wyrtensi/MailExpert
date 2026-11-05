@@ -11,6 +11,7 @@ import { saveConfirmedSwitch } from '../utils/confirmedSwitch.js';
 import { INVITE_ERROR_KEYS, OIDC_ERROR_KEYS, SETTINGS_ERROR_KEYS, SYSTEM_EMAIL_ERROR_KEYS } from '../utils/adminErrors.js';
 import { copyToClipboard } from '../utils/clipboard.js';
 import { isValidFromValue } from '../utils/defaultSender.js';
+import { sortAliasesByName } from '../utils/aliasSort.js';
 import {
   AI_ACCOUNT_PROVIDER_OPTIONS,
   AI_CONNECTION_METHOD_ACCOUNT,
@@ -1015,7 +1016,7 @@ export function AccountsTab() {
       );
     }
 
-    const aliases = editTarget.aliases || [];
+    const aliases = sortAliasesByName(editTarget.aliases);
     return (
       <>
       <div>
@@ -2479,7 +2480,7 @@ export function LayoutsTab() {
             <option key={acc.id} value={`account:${acc.id}`}>
               {acc.sender_name ? `${acc.sender_name} <${acc.email_address}>` : acc.email_address}
             </option>,
-            ...(acc.aliases || []).map(al => (
+            ...sortAliasesByName(acc.aliases).map(al => (
               <option key={al.id} value={`alias:${al.id}:${acc.id}`}>
                 {`\u00a0\u00a0${al.name ? `${al.name} <${al.email}>` : al.email}`}
               </option>

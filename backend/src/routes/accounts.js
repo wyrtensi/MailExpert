@@ -56,7 +56,7 @@ router.get('/', async (req, res) => {
             categorization_enabled, thread_mode, mail_node,
             deletion_requested_at, deletion_requested_by_email, deletion_reason, delete_after, deletion_last_error,
             deactivated_at, deactivated_by_email, deactivation_reason,
-            last_received_at,
+            last_received_at, gmail_send_as_synced_at,
             (mail_node AND delete_after IS NULL AND deactivated_at IS NULL AND tenant_recipient_at IS NULL AND EXISTS (
               SELECT 1 FROM mail_node_domains d
                WHERE d.domain = split_part(lower(email_address), '@', 2) AND d.state = 'authoritative')) AS tenant_pending
@@ -71,7 +71,7 @@ router.get('/', async (req, res) => {
   let aliasMap = {};
   if (accountIds.length) {
     const aliasResult = await query(
-      `SELECT id, account_id, name, email, reply_to, signature, created_at
+      `SELECT id, account_id, name, email, reply_to, signature, source, created_at
        FROM account_aliases WHERE account_id = ANY($1) ORDER BY created_at`,
       [accountIds]
     );

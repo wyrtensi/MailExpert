@@ -6,7 +6,7 @@ import { useTranslation } from 'react-i18next';
 import DOMPurify from 'dompurify';
 import { sanitizeQuoteHtml } from '../utils/appEmailHtml.js';
 import { useStore } from '../store/index.js';
-import { isAliasGone } from '../utils/aliasGone.js';
+import { isAliasGone, isVanishedAliasFrom } from '../utils/aliasGone.js';
 import { isForeignNodeAlias } from '../utils/mailNode.js';
 import { api } from '../utils/api.js';
 import { apiErrorText } from '../utils/apiErrors.js';
@@ -199,8 +199,10 @@ function parseChips(val) {
 }
 
 // A refused alias is gone from the server: reload the mailbox list so From stops offering it.
+// Resolves false when the list could not be read.
 function reloadAccounts() {
-  api.getAccounts().then(useStore.getState().setAccounts).catch(console.error);
+  return api.getAccounts().then((list) => { useStore.getState().setAccounts(list); return true; })
+    .catch((err) => { console.error(err); return false; });
 }
 
 export default function ComposeModal() {
@@ -303,6 +305,20 @@ export default function ComposeModal() {
   };
 
   const fromResolved = resolveFrom(fromValue);
+  // From holds an alias the reloaded mailbox list no longer has (alias_gone): both selects show it
+  // as a disabled "removed alias" option, so what is displayed is what would be sent.
+  const fromVanished = isVanishedAliasFrom(fromValue, accounts);
+  // The From value the mailbox list was last reloaded for after alias_gone: one reload per refused
+  // From, not one per silent autosave tick; choosing another From starts over.
+  const aliasGoneReloadRef = useRef(null);
+  const reloadAfterAliasGone = () => {
+    if (aliasGoneReloadRef.current === fromValue) return;
+    const refused = fromValue;
+    aliasGoneReloadRef.current = refused;
+    reloadAccounts().then((ok) => {
+      if (!ok && aliasGoneReloadRef.current === refused) aliasGoneReloadRef.current = null;
+    });
+  };
   const fromAccount = accounts.find(a => a.id === fromResolved.accountId);
   const fromAlias = fromResolved.aliasId
     ? fromAccount?.aliases?.find(al => al.id === fromResolved.aliasId)
@@ -1036,7 +1052,7 @@ export default function ComposeModal() {
         node_alias_stale: 'compose.errorNodeAliasStale',
         alias_gone: 'compose.aliasGone',
       };
-      if (isAliasGone(err)) reloadAccounts();
+      if (isAliasGone(err)) reloadAfterAliasGone();
       if (Object.hasOwn(SEND_ERROR_KEYS, err.code)) {
         // A conflict means this key is spent: the next attempt is a new send.
         if (err.code === 'idempotency_conflict' || err.code === 'send_cancelled') idempotencyKeyRef.current = null;
@@ -1151,7 +1167,7 @@ export default function ComposeModal() {
       }
     } catch (err) {
       console.error('Save draft failed:', err.message);
-      if (isAliasGone(err)) reloadAccounts();
+      if (isAliasGone(err)) reloadAfterAliasGone();
       // A save the user asked for says when the mailbox is busy or its password was rejected;
       // autosave stays quiet and retries on its next interval.
       if (!silent && !closedRef.current) {
@@ -1520,6 +1536,9 @@ export default function ComposeModal() {
               onChange={e => setFromValue(e.target.value)}
               style={{ ...mobileInputStyle, cursor: 'pointer' }}
             >
+              {fromVanished && (
+                <option value={fromValue} disabled style={{ background: 'var(--bg-tertiary)' }}>{t('compose.aliasRemovedOption')}</option>
+              )}
               {accounts.map(a => {
                 const aliases = a.aliases || [];
                 const displayName = a.sender_name || a.name;
@@ -2170,6 +2189,9 @@ export default function ComposeModal() {
             onChange={e => setFromValue(e.target.value)}
             style={{ flex: 1, padding: '9px 4px', background: 'transparent', border: 'none', color: 'var(--text-primary)', fontSize: 14, fontWeight: 500, outline: 'none', cursor: 'pointer' }}
           >
+            {fromVanished && (
+              <option value={fromValue} disabled style={{ background: 'var(--bg-tertiary)' }}>{t('compose.aliasRemovedOption')}</option>
+            )}
             {accounts.map(a => {
               const aliases = a.aliases || [];
               const displayName = a.sender_name || a.name;

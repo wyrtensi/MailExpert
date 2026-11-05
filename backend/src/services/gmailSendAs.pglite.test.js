@@ -25,6 +25,7 @@ vi.mock('../plugins/registry.js', () => ({ pluginRegistry: { runHook: vi.fn(() =
 const { createRealSchemaDb } = await import('./testing/realSchema.js');
 const { ensureFreshOAuthAccount, OAuthTokenError } = await import('./oauth/tokenManager.js');
 const { pluginRegistry } = await import('../plugins/registry.js');
+const { setMailEngine } = await import('../plugins/mailEngine.js');
 const { sanitizeSignature } = await import('./emailSanitizer.js');
 const { GMAIL_SEND_AS_URL, GmailSendAsError, syncGmailSendAs } = await import('./gmailSendAs.js');
 
@@ -50,6 +51,7 @@ const okResponse = (sendAs) => ({ ok: true, status: 200, json: async () => ({ se
 const errorResponse = (status) => ({ ok: false, status, json: async () => ({ error: { message: 'nope' } }) });
 
 let fetchMock;
+let engine;
 
 beforeEach(async () => {
   vi.restoreAllMocks();
@@ -58,6 +60,8 @@ beforeEach(async () => {
   ensureFreshOAuthAccount.mockReset();
   ensureFreshOAuthAccount.mockImplementation(async (account) => account);
   pluginRegistry.runHook.mockClear();
+  engine = { broadcast: vi.fn() };
+  setMailEngine(engine);
   fetchMock = vi.fn();
   vi.stubGlobal('fetch', fetchMock);
   await db.exec('DELETE FROM mailbox_audit_log; DELETE FROM account_aliases; DELETE FROM email_accounts; DELETE FROM users;');
@@ -110,6 +114,20 @@ describe('syncGmailSendAs', () => {
     }]);
     expect(JSON.stringify(audit)).not.toContain(TOKEN);
     expect(pluginRegistry.runHook).toHaveBeenCalledWith('onAccountIdentityChanged', { accountId: SALES });
+    // Every open tab re-reads the mailbox list, so a reply picks the new alias without a reload.
+    expect(engine.broadcast).toHaveBeenCalledTimes(1);
+    expect(engine.broadcast).toHaveBeenCalledWith({ type: 'aliases_changed', accountId: SALES });
+  });
+
+  it('a failing broadcast does not fail the sync', async () => {
+    engine.broadcast.mockImplementation(() => { throw new Error('socket gone'); });
+    fetchMock.mockResolvedValue(okResponse([PRIMARY, sendAsEntry('info@example.com')]));
+
+    const result = await syncGmailSendAs(SALES);
+
+    expect(result).toMatchObject({ status: 'synced', added: ['info@example.com'] });
+    expect(await aliases()).toEqual([expect.objectContaining({ email: 'info@example.com', source: 'gmail' })]);
+    expect(engine.broadcast).toHaveBeenCalledTimes(1);
   });
 
   it('second run with the same send-as changes nothing and writes no audit', async () => {
@@ -122,6 +140,7 @@ describe('syncGmailSendAs', () => {
     expect(before[0].signature).toBe(sanitizeSignature(signature));
     const firstSyncedAt = await syncedAt();
     pluginRegistry.runHook.mockClear();
+    engine.broadcast.mockClear();
 
     const result = await syncGmailSendAs(SALES);
 
@@ -132,6 +151,7 @@ describe('syncGmailSendAs', () => {
     expect(secondSyncedAt).toBeInstanceOf(Date);
     expect(secondSyncedAt.getTime()).toBeGreaterThanOrEqual(firstSyncedAt.getTime());
     expect(pluginRegistry.runHook).not.toHaveBeenCalled();
+    expect(engine.broadcast).not.toHaveBeenCalled();
   });
 
   it('removes a vanished gmail alias, keeps manual aliases and the second sender name row', async () => {
@@ -244,6 +264,7 @@ describe('syncGmailSendAs', () => {
     expect(await syncedAt()).toBeNull();
     expect(await auditRows()).toEqual([]);
     expect(pluginRegistry.runHook).not.toHaveBeenCalled();
+    expect(engine.broadcast).not.toHaveBeenCalled();
   });
 
   it('two concurrent syncs of one account produce no duplicate aliases', async () => {

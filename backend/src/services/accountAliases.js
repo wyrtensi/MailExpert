@@ -54,8 +54,12 @@ export async function createAlias(accountId, fields, db = { query }) {
   const check = await db.query('SELECT id, email_address, mail_node FROM email_accounts WHERE id = $1', [accountId]);
   if (!check.rows.length) return { error: 'account_not_found' };
   if (isForeignNodeAliasAddress(check.rows[0], fields.email)) return { error: 'node_alias_address_mismatch' };
-  // The address of a Gmail-synced alias of this account (any case) is taken: the same statement
-  // checks and inserts, so a sync between the two cannot slip a duplicate in.
+  // The address of a Gmail-synced alias of this account (any case) is taken. The check and the
+  // insert are one statement, so a gmail row committed before it starts is always seen. A sync
+  // committing the same address at the same moment is not (READ COMMITTED, and this statement does
+  // not take the account row lock the sync holds): then a manual row stays next to the gmail one.
+  // Later syncs keep updating the gmail row and leave that manual row alone (planSendAsSync adopts
+  // a manual row only when no gmail row has its address), so it stays until it is deleted by hand.
   const result = await db.query(
     `INSERT INTO account_aliases (account_id, name, email, reply_to, signature, source)
      SELECT $1::uuid, $2, $3::text, $4, $5, 'manual'

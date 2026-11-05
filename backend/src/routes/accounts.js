@@ -506,8 +506,9 @@ router.post('/:id/aliases', async (req, res) => {
   res.json(result.alias);
 });
 
-// Reads the mailbox's Gmail send-as list now. syncGmailSendAs journals the change and runs the
-// identity hook itself. Declared before the :aliasId routes; it is a POST on a fixed segment.
+// Reads the mailbox's Gmail send-as list now. syncGmailSendAs journals the change, runs the
+// identity hook and tells open tabs (aliases_changed) itself. Declared before the :aliasId
+// routes; it is a POST on a fixed segment.
 const SYNC_SKIPPED = {
   not_google: [409, 'This mailbox is not connected through Google'],
   reconnect_required: [409, 'Reconnect this mailbox to Google first'],

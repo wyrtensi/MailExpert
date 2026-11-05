@@ -6,6 +6,7 @@ import { ensureFreshOAuthAccount, OAuthTokenError } from './oauth/tokenManager.j
 import { PROVIDER_FETCH_TIMEOUT_MS } from './oauth/constants.js';
 import { SYSTEM_ACTOR } from './mailNode/domains.js';
 import { pluginRegistry } from '../plugins/registry.js';
+import { getMailEngine } from '../plugins/mailEngine.js';
 
 // Gmail "send mail as" import: reading users.settings.sendAs.list with the mailbox's OAuth token,
 // planning which account_aliases rows to create, update, adopt or remove (pure), and applying the
@@ -217,6 +218,17 @@ async function applySendAs(client, accountId, sendAs, actor) {
   return { status: 'synced', ...details, syncedAt: stamp.gmail_send_as_synced_at, changed };
 }
 
+// Every open tab re-reads the mailbox list (the hourly job and the connect job have no browser
+// behind them), so a reply picks the alias the letter was addressed to without a page reload.
+// Mailboxes are shared: the event goes to every session. A broadcast failure never fails the sync.
+function notifyAliasesChanged(accountId) {
+  try {
+    getMailEngine().broadcast({ type: 'aliases_changed', accountId });
+  } catch (err) {
+    console.warn('aliases_changed broadcast failed:', err?.message);
+  }
+}
+
 // Reads the mailbox's Gmail send-as list and makes its gmail aliases match it. actor: null for the
 // system (the hourly job), { userId, email } for a user. The request to Google runs before the
 // transaction, so no row lock is held across the network; a failed read changes nothing and
@@ -240,6 +252,7 @@ export async function syncGmailSendAs(accountId, { actor = null } = {}) {
   if (changed) {
     pluginRegistry.runHook('onAccountIdentityChanged', { accountId })
       .catch((err) => console.warn('onAccountIdentityChanged hook failed:', err?.message));
+    notifyAliasesChanged(accountId);
   }
   return synced;
 }

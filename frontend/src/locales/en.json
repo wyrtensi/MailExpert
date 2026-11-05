@@ -149,6 +149,7 @@
     "newMessage": "New Message",
     "errorNodeAliasStale": "This sender address is not a mailbox of its own: choose another From. An administrator can turn it into a separate mailbox.",
     "aliasGone": "This alias was removed. Choose From again.",
+    "aliasRemovedOption": "Removed alias — choose From",
     "nodeAliasStaleOption": "not a mailbox, cannot send",
     "reply": "Reply",
     "replyAll": "Reply All",

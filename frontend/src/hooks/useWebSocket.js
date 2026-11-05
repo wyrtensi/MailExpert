@@ -11,6 +11,7 @@ import { dispatchPluginWsMessage, dispatchPluginReconnect } from '../plugins/eve
 import { recordDiagEvent } from '../utils/diagEvents.js';
 import { notifySendFailed, notifySendRefused, settleSend } from '../utils/sendTracker.js';
 import { WS_CLOSE_ACTIONS, wsCloseAction } from '../utils/wsClose.js';
+import { reconcileAccounts } from '../utils/accountsReconcile.js';
 
 function _applyServerCounts(counts) {
   useStore.getState().setUnreadCounts(counts);
@@ -108,6 +109,8 @@ export function useWebSocket(enabled = true) {
         // sections). Core stays plugin-agnostic. A plugins_changed missed meanwhile is caught up by
         // reading the panel-wide plugin switch again.
         useStore.getState().loadEnabledPlugins();
+        // An aliases_changed missed meanwhile: read the mailbox list (and its aliases) again.
+        reconcileAccounts();
         dispatchPluginReconnect();
       }
     };
@@ -469,6 +472,14 @@ export function useWebSocket(enabled = true) {
       // read the list again so its features appear or go away without a reload.
       case 'plugins_changed': {
         useStore.getState().loadEnabledPlugins();
+        break;
+      }
+
+      // A mailbox's aliases changed without this tab asking (the Gmail send-as sync, backend
+      // services/gmailSendAs.js): read the mailbox list again, so a reply picks the alias the
+      // letter was addressed to and the settings show the new list and sync time.
+      case 'aliases_changed': {
+        reconcileAccounts();
         break;
       }
 

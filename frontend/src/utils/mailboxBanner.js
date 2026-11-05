@@ -47,7 +47,8 @@ export function mailboxBanner(message, account, folderList) {
 //   disagree.
 // - inactive: no current alias matched, but the letter was addressed to another address on the
 //   mailbox's own domain (a removed alias, or a neighbour mailbox: accepted by the owner). The
-//   reply then goes from the mailbox's main address; the pill is gray. Candidates in
+//   reply then goes from the mailbox's main address; the pill is gray. Never on a public mail
+//   domain (PUBLIC_MAIL_DOMAINS: gmail.com and the like). Candidates in
 //   matchReplyAlias's order (delivery addresses, then To, then Cc; never From), skipping the
 //   mailbox's own address and anything off the domain; the first hit wins.
 // Nothing for the mailbox's own address, only other domains, an outgoing letter, a draft or a mail
@@ -69,7 +70,7 @@ export function recipientAliasFor(message, account, folderList) {
 
   const own = lower(account.email_address);
   const domain = domainOf(own);
-  if (!domain) return null;
+  if (!domain || PUBLIC_MAIL_DOMAINS.includes(domain)) return null;
   const address = [
     ...parseAddressListField(message.delivery_addresses),
     ...parseAddressListField(message.to_addresses),
@@ -77,6 +78,15 @@ export function recipientAliasFor(message, account, folderList) {
   ].map(entryEmail).find((email) => email && email !== own && domainOf(email) === domain);
   return address ? { address, active: false } : null;
 }
+
+// Free/public mail domains: there another address on the mailbox's domain is a stranger, never a
+// removed alias, so recipientAliasFor gives no inactive pill on them.
+const PUBLIC_MAIL_DOMAINS = Object.freeze([
+  'gmail.com', 'googlemail.com', 'outlook.com', 'hotmail.com', 'live.com', 'msn.com', 'yahoo.com', 'ymail.com',
+  'icloud.com', 'me.com', 'mac.com', 'aol.com', 'proton.me', 'protonmail.com', 'pm.me', 'gmx.com', 'gmx.net',
+  'gmx.de', 'web.de', 'mail.com', 'zoho.com', 'yandex.ru', 'yandex.com', 'ya.ru', 'mail.ru', 'inbox.ru',
+  'list.ru', 'bk.ru', 'rambler.ru',
+]);
 
 // Whether `address` is a current alias of this mailbox (not its own address), i.e. what a reply
 // to a letter delivered there would send from; false for a mail node mailbox (D-16). The via line

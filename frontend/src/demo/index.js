@@ -94,18 +94,19 @@ let demoDeleteAfterDays = 5;
   }
 }
 
-// One Gmail mailbox has a "send mail as" alias imported from Gmail (source 'gmail'), so the list
-// shows both alias pills: a letter to the current alias (amber, Reply sends from it) and one to
-// another address on the mailbox's domain that is no longer an alias (gray, see demo-alias-902).
-const DEMO_GMAIL_ALIAS_ACCOUNT = 'demo-fx-05';
-const DEMO_GMAIL_ALIAS = 'acme.asia.partners.demo@gmail.com';
-const DEMO_REMOVED_ALIAS = 'acme.asia.events.demo@gmail.com';
+// One mailbox on its own domain has an alias, so the list shows both alias pills: a letter to the
+// current alias (amber, Reply sends from it) and one to another address on the mailbox's domain
+// that is no longer an alias (gray, see demo-alias-902). Not on a Gmail fleet mailbox: on a public
+// domain such as gmail.com the gray pill never shows (mailboxBanner.js's PUBLIC_MAIL_DOMAINS).
+const DEMO_ALIAS_ACCOUNT = 'demo-ops';
+const DEMO_ALIAS = 'vendors@demo.mailexpert.local';
+const DEMO_REMOVED_ALIAS = 'events@demo.mailexpert.local';
 {
-  const gmail = FLEET_ACCOUNTS.find(account => account.id === DEMO_GMAIL_ALIAS_ACCOUNT);
-  if (gmail) {
-    gmail.aliases = [...(gmail.aliases || []), {
-      id: `${gmail.id}-alias-gmail`, account_id: gmail.id, name: 'Asia Partners', email: DEMO_GMAIL_ALIAS,
-      reply_to: null, signature: null, source: 'gmail',
+  const ops = ACCOUNT_FIXTURES.find(account => account.id === DEMO_ALIAS_ACCOUNT);
+  if (ops) {
+    ops.aliases = [...(ops.aliases || []), {
+      id: `${ops.id}-alias-vendors`, account_id: ops.id, name: 'Vendor Desk', email: DEMO_ALIAS,
+      reply_to: null, signature: null, source: 'manual',
     }];
   }
 }
@@ -268,16 +269,16 @@ const MESSAGE_FIXTURES = [
     fromName: 'Events Team', fromEmail: 'events@conference.example', date: demoTime('2026-09-10T14:00:00.000Z'),
     snippet: 'Your invitation for the summer conference.', bodyText: 'Your invitation for the summer conference is enclosed.', read: true,
   }),
-  // The two letters behind the alias pills (DEMO_GMAIL_ALIAS above).
+  // The two letters behind the alias pills (DEMO_ALIAS above).
   message({
-    id: 'demo-alias-901', accountId: DEMO_GMAIL_ALIAS_ACCOUNT, subject: 'Partnership proposal for the APAC region',
+    id: 'demo-alias-901', accountId: DEMO_ALIAS_ACCOUNT, subject: 'Vendor onboarding documents',
     fromName: 'Kenji Watanabe', fromEmail: 'kenji@harbor.example', date: demoTime('2026-09-15T10:20:00.000Z'),
-    snippet: 'We would like to discuss a distribution partnership in the region.',
-    bodyText: 'We would like to discuss a distribution partnership in the region. Are you free next week?',
-    toAddresses: [DEMO_GMAIL_ALIAS],
+    snippet: 'The signed onboarding documents for our company are attached.',
+    bodyText: 'The signed onboarding documents for our company are attached. Please confirm they are complete.',
+    toAddresses: [DEMO_ALIAS],
   }),
   message({
-    id: 'demo-alias-902', accountId: DEMO_GMAIL_ALIAS_ACCOUNT, subject: 'New sessions added to our free webinar series',
+    id: 'demo-alias-902', accountId: DEMO_ALIAS_ACCOUNT, subject: 'New sessions added to our free webinar series',
     fromName: 'Research Webinars', fromEmail: 'webinars@research-events.example', date: demoTime('2026-09-15T09:05:00.000Z'),
     snippet: 'Three new sessions for researchers have been added to the autumn schedule.',
     bodyText: 'Three new sessions for researchers have been added to the autumn schedule.', category: 'newsletter',

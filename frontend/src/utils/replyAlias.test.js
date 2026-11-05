@@ -305,6 +305,22 @@ describe('recipientAliasFor', () => {
     assert.equal(recipientAliasFor(incoming({ to_addresses: [{ email: 'sales@example.com' }] }), undefined), null);
   });
 
+  it('recipientAliasFor gives no inactive badge on a public mail domain, where another address is a stranger', () => {
+    const gmail = {
+      id: 'acct-g', email_address: 'team.demo@gmail.com',
+      aliases: [{ id: 'al-g', email: 'orders.demo@gmail.com' }],
+    };
+    // Another gmail.com address in Cc (or To): a stranger, not a removed alias.
+    assert.equal(recipientAliasFor(incoming({
+      to_addresses: [{ email: 'team.demo@gmail.com' }],
+      cc_addresses: [{ email: 'stranger@gmail.com' }],
+    }), gmail), null);
+    assert.equal(recipientAliasFor(incoming({ to_addresses: [{ email: 'stranger@GMAIL.com' }] }), { ...gmail, email_address: 'Team.Demo@GMail.COM' }), null);
+    assert.equal(recipientAliasFor(incoming({ to_addresses: [{ email: 'someone@outlook.com' }] }), { ...gmail, email_address: 'team@outlook.com' }), null);
+    // A current alias still gets its active badge.
+    assert.deepEqual(recipientAliasFor(incoming({ to_addresses: [{ email: 'orders.demo@gmail.com' }] }), gmail), active('orders.demo@gmail.com'));
+  });
+
   it('recipientAliasFor and pickReplyAlias agree on the same message', () => {
     // Delivered-To says one alias, To another, Cc a third address: both must pick the same one.
     const message = incoming({

@@ -282,6 +282,7 @@
       "sent": "Sent",
       "draft": "Draft"
     },
+    "recipientAlias": "to {{address}}",
     "to": "To:",
     "via": "via",
     "attachment_one": "{{count}} attachment",

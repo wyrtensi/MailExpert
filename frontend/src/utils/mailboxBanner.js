@@ -1,7 +1,7 @@
 // The strip at the top of an open letter that says which mailbox it belongs to: with many shared
 // mailboxes the reader must see at once where a letter arrived (or which one sent it). Pure
 // function, so it runs under `node --test`.
-import { parseAddressListField } from './replyAlias.js';
+import { matchReplyAlias, parseAddressListField } from './replyAlias.js';
 
 const lower = (value) => String(value ?? '').trim().toLowerCase();
 
@@ -38,6 +38,28 @@ export function mailboxBanner(message, account, folderList) {
   const delivered = parseAddressListField(message?.delivery_addresses).map(entryEmail);
   const selfAddressed = [...to, ...cc, ...delivered].some(isOwnAddress);
   return selfAddressed ? { direction: 'in', via: null } : { direction: 'out', via: null };
+}
+
+// The alias an incoming letter was addressed to, for the pill in the message list, or null. It is
+// the alias "Reply" would send from (matchReplyAlias, fed the same letter fields every reply path
+// passes), so the pill and the reply's From never disagree. Only a current alias of this mailbox
+// counts, never "any address on the domain": the mailboxes share one domain and a neighbour's
+// address cannot be answered from here. Nothing for an outgoing letter, a draft or a mail node
+// mailbox (it sends only from its own address, D-16).
+export function recipientAliasFor(message, account, folderList) {
+  if (!account || account.mail_node === true) return null;
+  if (isDraftFolder(message?.folder, account.folder_mappings)) return null;
+  if (mailboxBanner(message, account, folderList).direction !== 'in') return null;
+  const alias = matchReplyAlias({
+    aliases: account.aliases || [],
+    deliveryAddresses: message.delivery_addresses,
+    toAddresses: message.to_addresses,
+    ccAddresses: message.cc_addresses,
+    fromEmail: message.from_email,
+    accountEmail: account.email_address || '',
+    mailNode: account.mail_node === true,
+  });
+  return alias?.email ?? null;
 }
 
 // Whether `folder` is the given account's Sent folder. Prefers the account's configured

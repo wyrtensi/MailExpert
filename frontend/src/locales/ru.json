@@ -282,6 +282,7 @@
       "sent": "Отправлено",
       "draft": "Черновик"
     },
+    "recipientAlias": "на {{address}}",
     "to": "Кому:",
     "via": "через",
     "attachment_one": "{{count}} вложение",

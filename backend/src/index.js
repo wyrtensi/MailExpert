@@ -18,6 +18,7 @@ import scheduledRoutes from './routes/scheduled.js';
 import { startJobWorker, stopJobWorker } from './services/jobQueue.js';
 import { registerSendJobKind } from './services/sendQueue.js';
 import { registerTenantJobKinds, startTenantPoll } from './services/tenant/tenantJobs.js';
+import { registerGmailSendAsJobKind, startGmailSendAsPoll, stopGmailSendAsPoll } from './services/gmailSendAsJobs.js';
 import { registerTenantDomainJobKind } from './services/tenant/tenantDomains.js';
 import { tenantProfileWithoutDriver } from './services/tenant/driver.js';
 import oauthRoutes from './routes/oauth.js';
@@ -299,6 +300,9 @@ registerNodeCheckJobKind();
 // A deleted managed Proton mailbox's worker link (and its native user with the last link) is
 // cleaned up by a durable job, retried while the worker is away (services/proton/lifecycle.js).
 registerProtonJobKinds();
+// A Google mailbox's Gmail "send mail as" aliases, read by a job after connecting and every hour
+// (services/gmailSendAsJobs.js).
+registerGmailSendAsJobKind();
 startJobWorker();
 
 // A failed concurrent build (migration 0061) leaves an unusable index that no later migration repairs.
@@ -352,6 +356,7 @@ startDnsCheckJob();
 // containers, the TERRL budget) every five minutes; the first run comes a little after the start.
 startNodeAlertJob();
 startTenantPoll();
+startGmailSendAsPoll();
 if (tenantProfileWithoutDriver()) {
   console.warn('Tenant worker: COMPOSE_PROFILES has "tenant" but the panel has no tenant driver; set TENANT_WORKER_URL and TENANT_WORKER_TOKEN (32+ characters)');
 }
@@ -403,6 +408,7 @@ process.on('SIGTERM', () => {
   // its running jobs get up to 8 s: a send in progress finishes rather than being cut mid-DATA.
   const workerStopped = stopJobWorker({ waitMs: 8000 }).catch(() => false);
   stopProtonLinkReconciler();
+  stopGmailSendAsPoll();
   httpServer.close(async () => {
     await workerStopped;
     // close() lets pending commands finish before the connection is shut down.

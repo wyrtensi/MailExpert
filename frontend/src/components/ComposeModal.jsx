@@ -7,6 +7,7 @@ import DOMPurify from 'dompurify';
 import { sanitizeQuoteHtml } from '../utils/appEmailHtml.js';
 import { useStore } from '../store/index.js';
 import { isAliasGone, isVanishedAliasFrom } from '../utils/aliasGone.js';
+import { sortAliasesByName } from '../utils/aliasSort.js';
 import { isForeignNodeAlias } from '../utils/mailNode.js';
 import { api } from '../utils/api.js';
 import { apiErrorText } from '../utils/apiErrors.js';
@@ -1540,7 +1541,7 @@ export default function ComposeModal() {
                 <option value={fromValue} disabled style={{ background: 'var(--bg-tertiary)' }}>{t('compose.aliasRemovedOption')}</option>
               )}
               {accounts.map(a => {
-                const aliases = a.aliases || [];
+                const aliases = sortAliasesByName(a.aliases);
                 const displayName = a.sender_name || a.name;
                 if (!aliases.length) {
                   return (
@@ -2193,7 +2194,7 @@ export default function ComposeModal() {
               <option value={fromValue} disabled style={{ background: 'var(--bg-tertiary)' }}>{t('compose.aliasRemovedOption')}</option>
             )}
             {accounts.map(a => {
-              const aliases = a.aliases || [];
+              const aliases = sortAliasesByName(a.aliases);
               const displayName = a.sender_name || a.name;
               if (!aliases.length) {
                 return (

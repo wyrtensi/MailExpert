@@ -2,6 +2,7 @@ import { create } from 'zustand';
 import { api } from '../utils/api.js';
 import { mergeCountSnapshots, adjustCountPending, expireCountPending, settleCountPending, displayCountSnapshot, mergeFolderSnapshots } from '../utils/countSnapshots.js';
 import { resolveSelectedAccount, pruneFolders } from '../utils/accountScope.js';
+import { resolveSelectedAlias } from '../utils/aliasMailboxes.js';
 import { withProvisionalHealth } from '../utils/accountHealth.js';
 import { applyTheme, applyCustomCss, getInitialTheme, resolveSystemTheme, readThemeFollowsSystem, writeThemeFollowsSystem } from '../themes.js';
 import { applyFontSet, applyFontSize, effectiveFontSet, isRetroFont, THEME_FONT, DEFAULT_FONT_SIZE } from '../fonts.js';
@@ -184,6 +185,44 @@ function privateMailState() {
   };
 }
 
+// Alias mailbox counts are re-read a moment after the global counts change (one request for a
+// burst of changes). The generation counter makes only the newest answer apply.
+let aliasCountGeneration = 0;
+let aliasCountTimer = null;
+function cancelAliasCountRefresh() {
+  clearTimeout(aliasCountTimer);
+  aliasCountTimer = null;
+  aliasCountGeneration += 1; // an answer still in flight is stale now
+}
+function scheduleAliasCountRefresh() {
+  clearTimeout(aliasCountTimer);
+  aliasCountTimer = setTimeout(() => {
+    aliasCountTimer = null;
+    useStore.getState().refreshAliasUnreadCounts();
+  }, 400);
+  aliasCountTimer.unref?.(); // never keeps a process (a test run) alive
+}
+
+// The state patch for a selected alias that no longer exists (a Gmail sync removed it, or the mode
+// was turned off elsewhere): the owner's Inbox, persisted like setAccounts does. `state` is the
+// state as it will be after the caller's own change. {} when nothing needs to change.
+function aliasSelectionFallback(state) {
+  if (!state.selectedAliasId) return {};
+  const kept = resolveSelectedAlias({
+    accounts: state.accounts, accountsReady: state.accountsReady,
+    selectedAccountId: state.selectedAccountId, selectedAliasId: state.selectedAliasId,
+    enabled: state.aliasesAsAccounts,
+  });
+  if (kept !== null) return {};
+  localStorage.setItem('mailexpert_selected_alias', '');
+  localStorage.setItem('mailexpert_selected_folder', 'INBOX');
+  return {
+    selectedAliasId: null, selectedFolder: 'INBOX',
+    selectedMessageId: null, messages: [], messagesOffset: 0, hasMoreMessages: true,
+    messagesRefreshToken: state.messagesRefreshToken + 1,
+  };
+}
+
 export const useStore = create((set, get) => ({
   // Auth
   user: null,
@@ -204,9 +243,11 @@ export const useStore = create((set, get) => ({
     // page load (nobody -> someone) keeps what this browser cached for that person's sake.
     const leaving = get().user != null && get().user.id !== user?.id;
     if (leaving) {
+      cancelAliasCountRefresh();
       localStorage.removeItem('mailexpert_locked_message');
       for (const key of [
         'mailexpert_pinned_accounts', 'mailexpert_sort_accounts_by_latest', 'mailexpert_aliases_as_accounts',
+        'mailexpert_selected_alias',
         'mailexpert_expanded_accounts',
         'mailexpert_favorite_folders', 'mailexpert_recent_folders', 'mailexpert_collapsed_folders',
         'mailexpert_default_sender', 'mailexpert_last_from_account',
@@ -218,6 +259,7 @@ export const useStore = create((set, get) => ({
       user,
       ...(leaving ? {
         pinnedAccounts: [], sortAccountsByLatest: true, aliasesAsAccounts: false, expandedAccounts: {},
+        selectedAliasId: null, aliasUnreadCounts: {},
         // Shared mailboxes still have personal shortcuts and sender choices.
         favoriteFolders: [], recentFolders: [], collapsedFolders: [], defaultSender: '',
         autoLockMinutes: 0, blockRemoteImages: false,
@@ -324,9 +366,11 @@ export const useStore = create((set, get) => ({
     set(state => ({
       accounts, accountsReady: true, selectedAccountId,
       ...(reselected ? { selectedFolder: 'INBOX' } : {}),
+      ...aliasSelectionFallback({ ...state, accounts, accountsReady: true, selectedAccountId }),
       folders: pruneFolders(state.folders, accounts),
       unreadCounts: displayCountSnapshot(state.serverUnreadCounts, state.pendingCounts, accounts),
     }));
+    scheduleAliasCountRefresh();
   },
   updateAccount: (id, updates) => set(state => {
     // WebSocket account events patch sync_error here; recompute a provisional health code
@@ -343,8 +387,11 @@ export const useStore = create((set, get) => ({
   selectedAccountId: localStorage.getItem('mailexpert_selected_account') || null, // '' stored as null
   selectedFolder: localStorage.getItem('mailexpert_selected_folder') || 'INBOX',
   messagesRefreshToken: 0, // incremented on every nav click so the effect always re-fires
-  setSelectedAccount: (accountId, folder = 'INBOX') => {
+  // The alias mailbox shown under accountId (its owner), or null: the plain mailbox views.
+  selectedAliasId: localStorage.getItem('mailexpert_selected_alias') || null, // '' stored as null
+  setSelectedAccount: (accountId, folder = 'INBOX', aliasId = null) => {
     localStorage.setItem('mailexpert_selected_account', accountId ?? '');
+    localStorage.setItem('mailexpert_selected_alias', aliasId ?? '');
     localStorage.setItem('mailexpert_selected_folder', folder);
     return set(state => {
       // #221: auto-close a folder-scoped search when navigating to a different
@@ -353,11 +400,13 @@ export const useStore = create((set, get) => ({
       // an all-folders search spans everything and is left intact. Clearing only
       // searchQuery lets the search effect tear down the rest of the search state,
       // exactly like the in-box clear (X) button does.
-      const navChanged = state.selectedAccountId !== accountId || state.selectedFolder !== folder;
+      const navChanged = state.selectedAccountId !== accountId || state.selectedFolder !== folder
+        || (state.selectedAliasId ?? null) !== (aliasId ?? null);
       const wasScopedSearch = !!state.selectedAccountId && !state.searchAllFolders && !!state.searchQuery.trim();
       return {
         selectedAccountId: accountId,
         selectedFolder: folder,
+        selectedAliasId: aliasId ?? null,
         selectedMessageId: null,
         messages: [],
         messagesOffset: 0,
@@ -490,7 +539,8 @@ export const useStore = create((set, get) => ({
   serverUnreadCounts: { total: 0, byAccount: {}, snapshots: {} },
   pendingCounts: {},
   unreadCounts: { total: 0, byAccount: {}, snapshots: {}, complete: false },
-  setUnreadCounts: (counts) => set(state => {
+  setUnreadCounts: (counts) => {
+    set(state => {
     if (state.isLocked) return {};
     const server = mergeCountSnapshots(state.serverUnreadCounts, counts);
     // Retire windows the server has now had a chance to observe, rather than waiting for the
@@ -500,7 +550,27 @@ export const useStore = create((set, get) => ({
     if (!Object.keys(pending).length) { clearTimeout(pendingCountTimer); pendingCountTimer = null; }
     return { serverUnreadCounts: server, pendingCounts: pending,
       unreadCounts: displayCountSnapshot(server, pending, state.accounts) };
-  }),
+    });
+    scheduleAliasCountRefresh();
+  },
+  // Unread letters per alias mailbox ({ [aliasId]: n }), read from the server (the global counts
+  // do not carry them). Empty while the mode is off.
+  aliasUnreadCounts: {},
+  refreshAliasUnreadCounts: () => {
+    const mine = ++aliasCountGeneration;
+    if (!get().aliasesAsAccounts) {
+      if (Object.keys(get().aliasUnreadCounts).length) set({ aliasUnreadCounts: {} });
+      return Promise.resolve();
+    }
+    return api.getAliasUnreadCounts()
+      .then((res) => {
+        // Only the newest read applies, and not after the mode went off meanwhile.
+        if (mine !== aliasCountGeneration || !get().aliasesAsAccounts) return;
+        const byAlias = res?.byAlias;
+        if (byAlias && typeof byAlias === 'object') set({ aliasUnreadCounts: byAlias });
+      })
+      .catch(() => {});
+  },
   adjustUnread: (accountId, delta) => {
     set(state => {
       if (state.isLocked) return {};
@@ -511,6 +581,7 @@ export const useStore = create((set, get) => ({
     });
     // Do not reset this timer on subsequent clicks: continuous activity cannot freeze counts.
     if (!pendingCountTimer) expirePendingCounts();
+    scheduleAliasCountRefresh();
   },
   decrementUnread: (accountId, count = 1) => get().adjustUnread(accountId, -count),
   incrementUnread: (accountId, count = 1) => get().adjustUnread(accountId, count),
@@ -1262,8 +1333,12 @@ export const useStore = create((set, get) => ({
   aliasesAsAccounts: localStorage.getItem('mailexpert_aliases_as_accounts') === 'true',
   setAliasesAsAccounts: (val) => {
     localStorage.setItem('mailexpert_aliases_as_accounts', String(val));
-    set({ aliasesAsAccounts: val });
+    set(state => ({
+      aliasesAsAccounts: val,
+      ...aliasSelectionFallback({ ...state, aliasesAsAccounts: val }),
+    }));
     schedulePrefSave({ aliasesAsAccounts: val });
+    scheduleAliasCountRefresh();
   },
   // A new_messages event for the inbox: that mailbox just received mail, which is newer than what
   // the last account list said. Only ever moves the date forward; nothing is saved or refetched.
@@ -1460,7 +1535,11 @@ export const useStore = create((set, get) => ({
         set({ sortAccountsByLatest: sortByLatest });
         const aliasesAsAccounts = prefs.aliasesAsAccounts === true;
         localStorage.setItem('mailexpert_aliases_as_accounts', String(aliasesAsAccounts));
-        set({ aliasesAsAccounts });
+        set(state => ({
+          aliasesAsAccounts,
+          ...aliasSelectionFallback({ ...state, aliasesAsAccounts }),
+        }));
+        scheduleAliasCountRefresh();
       }
       if (Array.isArray(prefs.collapsedFolders)) {
         localStorage.setItem('mailexpert_collapsed_folders', JSON.stringify(prefs.collapsedFolders));

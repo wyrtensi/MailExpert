@@ -94,14 +94,15 @@ describe('gmail-synced aliases', () => {
 
 describe('alias order', () => {
   it('listAliases and listAliasesByAccount order aliases inserted in one transaction by id', async () => {
-    // One transaction: now() is the same for every row, so created_at ties and id decides.
+    // One transaction: now() is the same for every row, so created_at ties and id decides. The ids
+    // are inserted out of their sorted order, so a missing id tie-break fails every run.
+    const ids = ['00000000-0000-4000-8000-000000000003', '00000000-0000-4000-8000-000000000001', '00000000-0000-4000-8000-000000000002'];
     await db.exec('BEGIN');
-    for (const email of ['c@example.com', 'a@example.com', 'b@example.com']) {
-      await db.query("INSERT INTO account_aliases (account_id, name, email, source) VALUES ($1, 'N', $2, 'gmail')", [SALES, email]);
+    for (const [i, id] of ids.entries()) {
+      await db.query("INSERT INTO account_aliases (id, account_id, name, email, source) VALUES ($1, $2, 'N', $3, 'gmail')", [id, SALES, `a${i}@example.com`]);
     }
     await db.exec('COMMIT');
-    const { rows } = await db.query('SELECT id FROM account_aliases WHERE account_id = $1', [SALES]);
-    const expected = rows.map((r) => r.id).sort();
+    const expected = [...ids].sort();
     expect((await listAliases(SALES)).map((a) => a.id)).toEqual(expected);
     const byAccount = await listAliasesByAccount([SALES, OPS]);
     expect(byAccount[SALES].map((a) => a.id)).toEqual(expected);

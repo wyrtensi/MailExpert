@@ -234,6 +234,7 @@ export function useGtdTriage() {
               openCompose,
               getMessageBody: api.getMessageBody,
               replyAll: action === 'replyAll',
+              view: useStore.getState(),
               ...safeQuoteOptions(t, useStore.getState().folders[message.account_id]),
             });
           }

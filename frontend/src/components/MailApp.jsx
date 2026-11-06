@@ -432,7 +432,7 @@ export default function MailApp() {
       // the HTML editor and can't inject markup.
       const bodyText = mt.searchParams.get('body') || '';
       openCompose({
-        accountId: useStore.getState().selectedAccountId || undefined,
+        ...composeDataForView(useStore.getState()),
         to: [...splitAddrs(mt.pathname, true), ...splitAddrs(mt.searchParams.get('to'), false)],
         cc: splitAddrs(mt.searchParams.get('cc'), false),
         bcc: splitAddrs(mt.searchParams.get('bcc'), false),

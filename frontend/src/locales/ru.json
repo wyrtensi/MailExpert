@@ -823,6 +823,11 @@
     "collapseAccount": "Свернуть {{name}}",
     "expandFolder": "Развернуть {{name}}",
     "collapseFolder": "Свернуть {{name}}",
+    "aliases": {
+      "toggle": "Алиасы как ящики",
+      "inbox": "Входящие",
+      "sent": "Отправленные"
+    },
     "accountFilter": {
       "label": "Фильтр почтовых ящиков по имени или адресу",
       "placeholder": "Найти ящик…",

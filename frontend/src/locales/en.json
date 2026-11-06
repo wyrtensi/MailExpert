@@ -789,6 +789,11 @@
     "collapseAccount": "Collapse {{name}}",
     "expandFolder": "Expand {{name}}",
     "collapseFolder": "Collapse {{name}}",
+    "aliases": {
+      "toggle": "Display aliases as accounts",
+      "inbox": "Inbox",
+      "sent": "Sent"
+    },
     "accountFilter": {
       "label": "Filter mailboxes by name or email",
       "placeholder": "Find a mailbox…",

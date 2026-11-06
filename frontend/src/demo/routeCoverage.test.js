@@ -100,6 +100,7 @@ const CONCRETE_PATH = {
   '/mail/resolve-message': '/mail/resolve-message?ref=demo-001',
   '/mail/thread/:param:param': '/mail/thread/demo-renewal?accountId=demo-sales',
   '/mail/unread-counts': '/mail/unread-counts',
+  '/mail/alias-unread-counts': '/mail/alias-unread-counts',
   '/mail/mailbox-usage': '/mail/mailbox-usage?accountId=demo-sales',
   '/mail/cleanup-preview': `/mail/cleanup-preview?accountId=demo-sales&fromEmail=${encodeURIComponent('newsletter@aster.example')}`,
   '/mail/messages/:param/headers': '/mail/messages/demo-001/headers',

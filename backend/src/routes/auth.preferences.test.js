@@ -198,7 +198,7 @@ describe('sync intervals are install-wide', () => {
     await patchPreferences({ session: { userId: 'user-1' }, body: { syncInterval: '15', folderSyncInterval: '0' } }, res);
     const [sql, params] = query.mock.calls[0];
     expect(sql).not.toMatch(/syncInterval|folderSyncInterval/);
-    expect(params).toHaveLength(45);
+    expect(params).toHaveLength(46);
     expect(res.json).toHaveBeenCalledWith({ ok: true });
   });
 
@@ -350,6 +350,37 @@ describe('PATCH /auth/preferences sortAccountsByLatest', () => {
   it('leaves the stored value untouched when the key is absent', async () => {
     await call({ theme: 'dark' });
     expect(query.mock.calls[0][1][42]).toBeNull();
+  });
+});
+
+describe('PATCH /auth/preferences aliasesAsAccounts', () => {
+  const call = async (body) => {
+    const req = { session: { userId: 'user-1' }, body };
+    const res = { status: vi.fn().mockReturnThis(), json: vi.fn() };
+    await patchPreferences(req, res);
+    return res;
+  };
+
+  it('merges the boolean as $46, true and false alike', async () => {
+    await call({ aliasesAsAccounts: false });
+    const [sql, params] = query.mock.calls[0];
+    expect(sql).toContain("jsonb_build_object('aliasesAsAccounts', $46::boolean)");
+    expect(params[45]).toBe(false);
+    query.mockClear();
+    await call({ aliasesAsAccounts: true });
+    expect(query.mock.calls[0][1][45]).toBe(true);
+  });
+
+  it('rejects a non-boolean without querying', async () => {
+    const res = await call({ aliasesAsAccounts: 'yes' });
+    expect(res.status).toHaveBeenCalledWith(400);
+    expect(res.json).toHaveBeenCalledWith({ error: 'aliasesAsAccounts must be a boolean' });
+    expect(query).not.toHaveBeenCalled();
+  });
+
+  it('leaves the stored value untouched when the key is absent', async () => {
+    await call({ theme: 'dark' });
+    expect(query.mock.calls[0][1][45]).toBeNull();
   });
 });
 

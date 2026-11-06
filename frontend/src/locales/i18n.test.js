@@ -198,6 +198,8 @@ const SAME_VALUE_ALLOWED = {
   'compose.ccPh': [['en', 'ru']],
   'compose.toPh': [['en', 'ru']],
   'contacts.websitePh': [['en', 'ru']],
+  // "{{name}}: {{folder}}" — only placeholders and punctuation, the words come from other keys
+  'messageList.aliasViewLabel': [['en', 'ru']],
 };
 
 // Locale-specific plural forms are allowed per locale. A locale may add forms

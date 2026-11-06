@@ -600,6 +600,7 @@ export const api = {
   bulkMove: (ids, folder) => request('POST', '/mail/messages/bulk-move', { ids, folder }),
   bulkArchive: (ids) => request('POST', '/mail/messages/bulk-archive', { ids }),
   getUnreadCounts: () => request('GET', '/mail/unread-counts'),
+  getAliasUnreadCounts: () => request('GET', '/mail/alias-unread-counts'),
 
   // Mailbox cleanup (read-only analysis; actual cleanup reuses bulkDelete above).
   mailboxUsage: (accountId) => request('GET', `/mail/mailbox-usage?accountId=${encodeURIComponent(accountId)}`),

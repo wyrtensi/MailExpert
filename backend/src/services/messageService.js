@@ -1,9 +1,50 @@
 import { query } from './db.js';
 import { resolveAccountScope } from './unifiedInbox.js';
 import { deliveryStateColumn } from './deliveryStatus.js';
-import { draftMessageSql } from '../utils/mailUtils.js';
+import { draftMessageSql, resolveAllSentPaths } from '../utils/mailUtils.js';
+import { aliasInboxCondition, aliasSentCondition, loadAliasMailboxes } from './aliasMailbox.js';
 
-export async function listMessages({ accountId, folder = 'INBOX', limit = 50, offset = 0, unreadOnly, threaded, category }) {
+// #407: a row the message list shows. Hides UID-only placeholder rows whose envelope has not been
+// fetched yet: during a rapid archive/reconcile overlap a UID can be listed before its envelope
+// arrives, rendering as an "Unknown / (no subject)" ghost row. A genuine message always carries at
+// least a Message-ID, a real subject, or a snippet, so this predicate only ever hides the hollow
+// placeholder, never a real message. The list and the alias unread counts share it, so a count
+// never names a letter the list does not show. Messages table alias `m`.
+export const LISTED_ROW_SQL = `NOT (m.message_id IS NULL AND (m.subject IS NULL OR m.subject = '(no subject)') AND COALESCE(m.snippet, '') = '')`;
+
+// Unread letters in every alias mailbox's Inbox, keyed by alias id: the same letters
+// listMessages({ accountId, folder: 'INBOX', aliasId, unreadOnly: true }) lists. Every alias of
+// loadAliasMailboxes() has a key (0 without unread letters). One query per mailbox: its unread
+// INBOX letters naming any of its aliases somewhere in their addresses (answered from the three
+// address indexes, see aliasInboxCondition), grouped by the alias the rule gives them.
+export async function aliasUnreadCounts() {
+  const mailboxes = await loadAliasMailboxes();
+  const counts = {};
+  await Promise.all(mailboxes.map(async (mailbox) => {
+    const aliasEmails = mailbox.aliases.map((a) => a.email);
+    const { rows } = await query(
+      `SELECT message_reply_alias(m.delivery_addresses, m.to_addresses, m.cc_addresses, m.from_email,
+                                  $2::text[], $3::text[]) AS email, COUNT(*)::int AS n
+       FROM messages m
+       WHERE m.account_id = $1 AND m.folder = 'INBOX' AND m.is_deleted = false AND m.is_read = false
+         AND ${LISTED_ROW_SQL}
+         AND (message_delivery_addresses(m.delivery_addresses) && $2::text[]
+              OR message_recipient_addresses(m.to_addresses, m.cc_addresses) && $2::text[]
+              OR lower(m.from_email) = ANY($2::text[]))
+       GROUP BY 1`,
+      [mailbox.accountId, aliasEmails, mailbox.ownAddresses],
+    );
+    const byEmail = new Map(rows.map((r) => [r.email, r.n]));
+    for (const alias of mailbox.aliases) counts[alias.id] = byEmail.get(alias.email) ?? 0;
+  }));
+  return counts;
+}
+
+// aliasId: list an alias of the mailbox accountId as its own mailbox (services/aliasMailbox.js):
+// only INBOX and the mailbox's Sent, letters of every category. Answers { error: 'alias_gone' }
+// when the alias is not a mailbox of accountId (any more), { error: 'alias_folder' } for another
+// folder.
+export async function listMessages({ accountId, folder = 'INBOX', limit = 50, offset = 0, unreadOnly, threaded, category, aliasId }) {
   const accountsResult = await query('SELECT id, include_in_unified_inbox FROM email_accounts WHERE enabled = true');
   const {
     accountIds: scopedAccountIds,
@@ -31,8 +72,27 @@ export async function listMessages({ accountId, folder = 'INBOX', limit = 50, of
   const isUnreadOnly = unreadOnly === 'true' || unreadOnly === true;
   if (isUnreadOnly) whereConditions.push('m.is_read = false');
 
-  // Category filter: 'primary' matches NULL and 'primary'; others match exactly.
-  const safeCategory = typeof category === 'string' && category.length > 0 ? category : null;
+  if (aliasId) {
+    if (!isSpecificAccount || resolvedAccountId !== accountId) return { error: 'alias_gone' };
+    const [mailbox] = await loadAliasMailboxes([resolvedAccountId]);
+    const alias = mailbox?.aliases.find(a => a.id === aliasId);
+    if (!alias) return { error: 'alias_gone' };
+    let condition;
+    if (folder === 'INBOX') {
+      condition = aliasInboxCondition(mailbox, alias.email, p);
+    } else if ((await resolveAllSentPaths(resolvedAccountId, mailbox.folderMappings)).has(folder)) {
+      condition = aliasSentCondition(alias.email, p);
+    } else {
+      return { error: 'alias_folder' };
+    }
+    whereConditions.push(condition.sql);
+    values.push(...condition.values);
+    p += condition.values.length;
+  }
+
+  // Category filter: 'primary' matches NULL and 'primary'; others match exactly. An alias's Inbox
+  // has no category tabs: it lists letters of every category.
+  const safeCategory = !aliasId && typeof category === 'string' && category.length > 0 ? category : null;
   if (safeCategory && safeCategory !== 'primary') {
     whereConditions.push(`m.category = $${p++}`);
     values.push(safeCategory);
@@ -40,13 +100,9 @@ export async function listMessages({ accountId, folder = 'INBOX', limit = 50, of
     whereConditions.push(`(m.category IS NULL OR m.category = 'primary')`);
   }
 
-  // #407: hide UID-only placeholder rows whose envelope has not been fetched yet. During a
-  // rapid archive/reconcile overlap a UID can be listed before its envelope arrives, rendering
-  // as an "Unknown / (no subject)" ghost row. A genuine message always carries at least a
-  // Message-ID, a real subject, or a snippet, so this predicate only ever hides the hollow
-  // placeholder, never a real message. Applies to both the flat and threaded queries (shared
-  // `where`), so pagination and the threaded count stay consistent.
-  whereConditions.push(`NOT (m.message_id IS NULL AND (m.subject IS NULL OR m.subject = '(no subject)') AND COALESCE(m.snippet, '') = '')`);
+  // #407 (LISTED_ROW_SQL). Applies to both the flat and threaded queries (shared `where`), so
+  // pagination and the threaded count stay consistent.
+  whereConditions.push(LISTED_ROW_SQL);
 
   const where = whereConditions.join(' AND ');
 
@@ -56,10 +112,11 @@ export async function listMessages({ accountId, folder = 'INBOX', limit = 50, of
   let total = 0;
   const isThreadedList = threaded === 'true' || threaded === true;
   try {
-    if (safeCategory && !isThreadedList) {
-      // A category tab lists only that category's mail; the folder's counts are of all its mail,
-      // so the list offered pages, or a "Load more", with nothing on them. Counted by row with the
-      // list's own conditions. The threaded list counts its threads further down.
+    if ((safeCategory || aliasId) && !isThreadedList) {
+      // A category tab (or an alias's mailbox) lists only part of the folder; the folder's counts
+      // are of all its mail, so the list offered pages, or a "Load more", with nothing on them.
+      // Counted by row with the list's own conditions. The threaded list counts its threads
+      // further down.
       const r = await query(`SELECT COUNT(*)::int AS n FROM messages m WHERE ${where}`, values);
       total = r.rows[0]?.n ?? 0;
     } else if (isSpecificAccount) {

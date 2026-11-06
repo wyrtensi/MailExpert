@@ -358,3 +358,63 @@ describe('quoted images and remote image blocking', () => {
     }
   });
 });
+
+describe('openReplyFromMessage from an alias view', () => {
+  const accounts = [{
+    id: 'acct', email_address: 'owner@example.com',
+    aliases: [
+      { id: 'al-ivan', email: 'ivan@example.com', name: 'Ivan' },
+      { id: 'al-anna', email: 'anna@example.com', name: 'Anna' },
+    ],
+  }];
+  // A letter from anna to ivan, as seen in anna's "Sent": pickReplyAlias alone would pick ivan.
+  const message = {
+    id: 'm1', account_id: 'acct', from_email: 'anna@example.com',
+    to_addresses: [{ email: 'ivan@example.com' }], cc_addresses: [],
+  };
+
+  it('a reply from an alias view goes out from that alias even when the letter\'s addresses pick another', async () => {
+    const h = harness();
+    await openReplyFromMessage(message, {
+      accounts, openCompose: h.openCompose, getMessageBody: h.getMessageBody,
+      view: { selectedAccountId: 'acct', selectedAliasId: 'al-anna' },
+    });
+    assert.equal(h.payload().aliasId, 'al-anna');
+  });
+
+  it('a reply from alias view X to a letter delivered to alias Y of the same mailbox goes from Y', async () => {
+    const h = harness();
+    await openReplyFromMessage({
+      id: 'm2', account_id: 'acct', from_email: 'client@client.test',
+      to_addresses: [{ email: 'ivan@example.com' }], cc_addresses: [], delivery_addresses: ['ivan@example.com'],
+    }, {
+      accounts, openCompose: h.openCompose, getMessageBody: h.getMessageBody,
+      view: { selectedAccountId: 'acct', selectedAliasId: 'al-anna', accounts },
+    });
+    assert.equal(h.payload().aliasId, 'al-ivan');
+  });
+
+  it('a reply from alias view X to an Inbox letter whose pill is X goes from X', async () => {
+    const h = harness();
+    await openReplyFromMessage({
+      id: 'm3', account_id: 'acct', from_email: 'client@client.test',
+      to_addresses: [{ email: 'owner@example.com' }, { email: 'anna@example.com' }], cc_addresses: [],
+    }, {
+      accounts, openCompose: h.openCompose, getMessageBody: h.getMessageBody,
+      view: { selectedAccountId: 'acct', selectedAliasId: 'al-anna', accounts },
+    });
+    assert.equal(h.payload().aliasId, 'al-anna');
+  });
+
+  it('a reply outside an alias view keeps pickReplyAlias', async () => {
+    const h = harness();
+    await openReplyFromMessage(message, {
+      accounts, openCompose: h.openCompose, getMessageBody: h.getMessageBody,
+      view: { selectedAccountId: 'acct', selectedAliasId: null },
+    });
+    assert.equal(h.payload().aliasId, 'al-ivan');
+    const h2 = harness();
+    await openReplyFromMessage(message, { accounts, openCompose: h2.openCompose, getMessageBody: h2.getMessageBody });
+    assert.equal(h2.payload().aliasId, 'al-ivan');
+  });
+});

@@ -16,7 +16,7 @@ import { pluginRegistry } from '../plugins/registry.js';
 import { recordAudit } from '../services/auditLog.js';
 import { uuidParam } from '../utils/uuid.js';
 import {
-  ALIAS_ERRORS, createAlias, deleteAlias, hasHeaderInjectionChars, listAliases, updateAlias,
+  ALIAS_ERRORS, createAlias, deleteAlias, hasHeaderInjectionChars, listAliases, listAliasesByAccount, updateAlias,
 } from '../services/accountAliases.js';
 import { THREAD_MODE_GMAIL, THREAD_MODE_RFC } from '../services/threading/threadId.js';
 import { previewRecompute } from '../services/threading/recompute.js';
@@ -70,18 +70,7 @@ router.get('/', async (req, res) => {
 
   // Attach aliases to each account in one query
   const accountIds = result.rows.map(a => a.id);
-  let aliasMap = {};
-  if (accountIds.length) {
-    const aliasResult = await query(
-      `SELECT id, account_id, name, email, reply_to, signature, source, created_at
-       FROM account_aliases WHERE account_id = ANY($1) ORDER BY created_at`,
-      [accountIds]
-    );
-    for (const alias of aliasResult.rows) {
-      if (!aliasMap[alias.account_id]) aliasMap[alias.account_id] = [];
-      aliasMap[alias.account_id].push(alias);
-    }
-  }
+  const aliasMap = accountIds.length ? await listAliasesByAccount(accountIds) : {};
 
   // Gmail id backfill state (threading/providerIdBackfill.js); absent for other providers.
   const providerIdStates = await imapManager.providerIdBackfillStates(result.rows);

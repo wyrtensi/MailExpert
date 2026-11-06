@@ -24,7 +24,7 @@ import { snippetFromBody, decodeMimeWords, parseRawHeaders, parseMailboxList, bu
 import { resolveTrashFolder, resolveAllTrashPaths, resolveAllDraftsPaths, resolveArchiveFolder, isAllMailFolder, resolveSpamFolder, resolveAllSpamPaths, getDeleteStrategy, adjustFolderCounts, fanOutReadToSiblings, fanOutStarToSiblings, fanOutBulkReadToSiblings } from '../utils/mailUtils.js';
 import { pluginRegistry } from '../plugins/registry.js';
 import { recordAudit } from '../services/auditLog.js';
-import { listMessages } from '../services/messageService.js';
+import { aliasUnreadCounts, listMessages } from '../services/messageService.js';
 import { recordSyncSignal } from '../services/diagnosticsRing.js';
 import { resolveAccountScope } from '../services/unifiedInbox.js';
 import { validateHost } from '../services/hostValidation.js';
@@ -132,16 +132,21 @@ function notifyMailMutation(rows) {
 
 // Get messages (unified or per-account/folder)
 router.get('/messages', async (req, res) => {
-  const { accountId, folder = 'INBOX', limit = 50, offset = 0, unreadOnly, threaded, category } = req.query;
+  const { accountId, folder = 'INBOX', limit = 50, offset = 0, unreadOnly, threaded, category, aliasId } = req.query;
 
   if (!isValidFolderName(folder)) return res.status(400).json({ error: 'Invalid folder name' });
+  // An alias shown as its own mailbox (services/aliasMailbox.js): an alias of the mailbox accountId.
+  if (aliasId !== undefined) {
+    if (typeof aliasId !== 'string' || !UUID_RE.test(aliasId)) return res.status(400).json({ error: 'Invalid alias id' });
+    if (!accountId) return res.status(400).json({ error: 'aliasId needs accountId' });
+  }
 
   // Validate category param — only allow known values to prevent SQL injection via the
   // WHERE clause in listMessages (even though it uses parameterised queries, belt-and-suspenders).
   const VALID_CATEGORIES = new Set(['primary', 'newsletter', 'promotion', 'automated', 'social']);
   const safeCategory = VALID_CATEGORIES.has(category) ? category : undefined;
 
-  const { messages, total, threaded: isThreaded, resolvedAccountId } = await listMessages({
+  const listed = await listMessages({
     accountId,
     folder,
     limit,
@@ -149,7 +154,15 @@ router.get('/messages', async (req, res) => {
     unreadOnly,
     threaded,
     category: safeCategory,
+    aliasId,
   });
+  if (listed.error === 'alias_gone') {
+    return res.status(404).json({ error: 'This alias is no longer a mailbox here', code: 'alias_gone' });
+  }
+  if (listed.error === 'alias_folder') {
+    return res.status(400).json({ error: 'An alias has only Inbox and Sent', code: 'alias_folder' });
+  }
+  const { messages, total, threaded: isThreaded, resolvedAccountId } = listed;
 
   if (resolvedAccountId && messages.length) {
     imapManager.prefetchFolderBodies(resolvedAccountId, messages.map(r => r.id))
@@ -360,6 +373,14 @@ router.get('/unread-counts', async (req, res) => {
   }
   res.set('Cache-Control', 'no-store');
   res.json({ total, byAccount, snapshots, complete });
+});
+
+// Unread letters in each alias mailbox's Inbox (services/aliasMailbox.js), counted from the
+// letters themselves with the alias Inbox's own rule, so they match what that Inbox lists.
+router.get('/alias-unread-counts', async (req, res) => {
+  const byAlias = await aliasUnreadCounts();
+  res.set('Cache-Control', 'no-store');
+  res.json({ byAlias });
 });
 
 // Hard cap on a live IMAP body fetch. Connection acquisition is already bounded at 30s

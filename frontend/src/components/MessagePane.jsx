@@ -15,6 +15,7 @@ import { getResults, removeResult } from '../aiResults.js';
 import { startRun, cancelRun, getAiState, subscribeRuns } from '../aiRuns.js';
 import { renderMarkdown } from '../utils/renderMarkdown.js';
 import { pickReplyAlias } from '../utils/replyAlias.js';
+import { viewReplyAliasId } from '../utils/aliasMailboxes.js';
 import { isCurrentAlias, isDraftFolder, mailboxBanner } from '../utils/mailboxBanner.js';
 import { emailFontFor } from '../utils/emailFont.js';
 import { buildQuote, identityName, quoteMetaFor, senderLanguage } from '../utils/quoteHeader.js';
@@ -1193,7 +1194,9 @@ export default function MessagePane({ windowMessageId = null, onWindowClose = nu
     const myAccount = accounts.find(a => a.id === message.account_id);
     const myEmail = myAccount?.email_address || '';
 
-    const replyAliasId = pickReplyAlias({
+    // A letter of the open alias view replies from that alias, whatever its addresses say
+    // (viewReplyAliasId); any other letter keeps the pick.
+    const replyAliasId = viewReplyAliasId(message, useStore.getState()) ?? pickReplyAlias({
       aliases: myAccount?.aliases || [],
       deliveryAddresses: message.delivery_addresses,
       toAddresses: message.to_addresses,

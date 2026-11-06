@@ -878,7 +878,7 @@ export async function patchPreferences(req, res) {
           markReadBehavior, markReadDelay, aiActions,
           autoLockMinutes, showMobileAvatars, gravatarAvatars,
           folderOrder, senderFavicons, showMessagePreviews, defaultSender, hoverActionSet,
-          themeFollowsSystem, pinnedAccounts, sortAccountsByLatest } = req.body;
+          themeFollowsSystem, pinnedAccounts, sortAccountsByLatest, aliasesAsAccounts } = req.body;
   // GTD content and generic right-sidebar layout preferences are independent flat
   // top-level keys with separate allow-lists. gtdEnabled is intentionally NOT a user
   // preference — it lives per-account in email_accounts.gtd_enabled.
@@ -948,6 +948,12 @@ export async function patchPreferences(req, res) {
     return res.status(400).json({ error: 'sortAccountsByLatest must be a boolean' });
   }
   const sortAccountsByLatestVal = hasSortAccountsByLatest ? sortAccountsByLatest : null;
+  // Sidebar: whether each mailbox alias is shown as its own mailbox. Same boolean-or-400 contract.
+  const hasAliasesAsAccounts = Object.prototype.hasOwnProperty.call(req.body, 'aliasesAsAccounts');
+  if (hasAliasesAsAccounts && typeof aliasesAsAccounts !== 'boolean') {
+    return res.status(400).json({ error: 'aliasesAsAccounts must be a boolean' });
+  }
+  const aliasesAsAccountsVal = hasAliasesAsAccounts ? aliasesAsAccounts : null;
   // Mailboxes the user pinned to the top of the sidebar, in pin order: ids only, deduplicated and
   // capped (utils/accountPrefs.js). Ids of mailboxes that no longer exist are dropped on read.
   // Three ways to write it, each answered with a 400 when malformed, like the switch above:
@@ -1033,6 +1039,7 @@ export async function patchPreferences(req, res) {
            COALESCE((SELECT jsonb_agg(e ORDER BY n) FROM jsonb_array_elements(COALESCE(preferences->'pinnedAccounts', '[]'::jsonb)) WITH ORDINALITY AS t(e, n)
                      WHERE e <> to_jsonb($45::text)), '[]'::jsonb))
            ELSE '{}'::jsonb END
+      || CASE WHEN $46::boolean IS NOT NULL THEN jsonb_build_object('aliasesAsAccounts', $46::boolean) ELSE '{}'::jsonb END
     WHERE id = $1
   `, [req.session.userId, theme ?? null, font ?? null, layout ?? null, notificationSound ?? null,
       pageSize ?? null, scrollMode ?? null,
@@ -1044,7 +1051,8 @@ export async function patchPreferences(req, res) {
       rightSidebarWidth, rightSidebarHidden, gtdCollapsedSectionsJson, gtdPetSlug, autoLockMinutesVal,
       showMobileAvatars ?? null, gravatarAvatars ?? null, folderOrderJson, senderFaviconsVal,
       showMessagePreviews ?? null, defaultSenderVal, hoverActionSetJson, themeFollowsSystemVal,
-      pinnedAccountsJson, sortAccountsByLatestVal, pinAccountVal, unpinAccountVal]);
+      pinnedAccountsJson, sortAccountsByLatestVal, pinAccountVal, unpinAccountVal,
+      aliasesAsAccountsVal]);
 
   res.json({ ok: true });
 }

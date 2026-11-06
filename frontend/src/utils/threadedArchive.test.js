@@ -87,6 +87,20 @@ describe('archiveViewKey', () => {
       );
     }
   });
+
+  it('archiveViewKey differs between an alias view and its owner\'s Inbox', () => {
+    const ownerInbox = { selectedAccountId: 'account-1', selectedFolder: 'INBOX', selectedAliasId: null };
+    const aliasInbox = { ...ownerInbox, selectedAliasId: 'alias-1' };
+    assert.notEqual(threadedArchive.archiveViewKey(aliasInbox), threadedArchive.archiveViewKey(ownerInbox));
+    assert.notEqual(
+      threadedArchive.archiveViewKey(aliasInbox),
+      threadedArchive.archiveViewKey({ ...ownerInbox, selectedAliasId: 'alias-2' }),
+    );
+    assert.equal(
+      threadedArchive.archiveViewKey({ ...ownerInbox, selectedAliasId: undefined }),
+      threadedArchive.archiveViewKey(ownerInbox),
+    );
+  });
 });
 
 describe('unreadCountsByAccount', () => {

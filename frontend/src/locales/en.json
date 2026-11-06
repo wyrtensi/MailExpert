@@ -751,6 +751,7 @@
     "countUnknown": "The mailbox count is not available yet",
     "countStale": "The last known mailbox count; waiting for the server to refresh it",
     "countServer": "Messages reported by the mail server",
+    "aliasViewLabel": "{{name}}: {{folder}}",
     "empty": {
       "inboxTitle": "Inbox is empty",
       "inboxBody": "You're all caught up",
@@ -789,6 +790,11 @@
     "collapseAccount": "Collapse {{name}}",
     "expandFolder": "Expand {{name}}",
     "collapseFolder": "Collapse {{name}}",
+    "aliases": {
+      "toggle": "Display aliases as accounts",
+      "inbox": "Inbox",
+      "sent": "Sent"
+    },
     "accountFilter": {
       "label": "Filter mailboxes by name or email",
       "placeholder": "Find a mailbox…",

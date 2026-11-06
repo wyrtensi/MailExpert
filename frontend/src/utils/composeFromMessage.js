@@ -1,4 +1,5 @@
 import { pickReplyAlias } from './replyAlias.js';
+import { viewReplyAliasId } from './aliasMailboxes.js';
 import { buildQuote, identityName, quoteMetaFor, senderLanguage } from './quoteHeader.js';
 import { safeQuoteSource, safeViewState, spamFolderPaths } from './safeView.js';
 
@@ -36,7 +37,7 @@ export function safeQuoteOptions(t, folders) {
   };
 }
 
-export async function openReplyFromMessage(message, { accounts, openCompose, getMessageBody, replyAll = false, folders = [], safeLabels }) {
+export async function openReplyFromMessage(message, { accounts, openCompose, getMessageBody, replyAll = false, folders = [], safeLabels, view = null }) {
   const replyToArr = Array.isArray(message.reply_to)
     ? message.reply_to
     : (() => { try { return JSON.parse(message.reply_to || '[]'); } catch { return []; } })();
@@ -54,7 +55,9 @@ export async function openReplyFromMessage(message, { accounts, openCompose, get
 
   // Delivered-To first, then the To/Cc/From scan: replying from the list or GTD triage picks
   // the same alias as replying from the reading pane.
-  const replyAliasId = pickReplyAlias({
+  // A letter of the open alias view replies from that alias, whatever its addresses say
+  // (viewReplyAliasId); any other letter keeps the pick.
+  const replyAliasId = (view && viewReplyAliasId(message, { accounts, ...view })) ?? pickReplyAlias({
     aliases: myAccount?.aliases || [],
     deliveryAddresses: message.delivery_addresses,
     toAddresses: message.to_addresses,

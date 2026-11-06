@@ -28,6 +28,8 @@ import ProfileModal from './ProfileModal.jsx';
 import { useUiScale, descale } from '../hooks/useUiScale.js';
 import { CheckIcon, CloseIcon, PinIcon } from './UiIcons.jsx';
 import { ReadOnlyLine, TenantPendingLine } from './MailboxDeletionNotice.jsx';
+import { AliasesAsAccountsSwitch, AliasMailboxRows } from './AliasMailboxRows.jsx';
+import { aliasMailboxRows, filterAliasRows, composeDataForView } from '../utils/aliasMailboxes.js';
 
 const ICONS = {
   inbox: (
@@ -357,6 +359,7 @@ export default function Sidebar() {
     showContacts, setShowContacts,
     accountFilter, setAccountFilter,
     pinnedAccounts, sortAccountsByLatest, pinAccount, unpinAccount, reorderPinnedAccounts,
+    aliasesAsAccounts, selectedAliasId,
   } = useStore();
 
   const isMobile = useMobile();
@@ -371,10 +374,13 @@ export default function Sidebar() {
   // never hide an account the user has no way to bring back.
   const showAccountFilter = accounts.length > 1 && !sidebarCollapsed;
 
-  // Close the mobile drawer whenever the user navigates to a different folder/account
+  // Close the mobile drawer whenever the user navigates to a different folder/account/alias
   useEffect(() => {
     if (isMobile) setMobileSidebarOpen(false);
-  }, [selectedAccountId, selectedFolder]); // eslint-disable-line react-hooks/exhaustive-deps
+  }, [selectedAccountId, selectedFolder, selectedAliasId]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  // While an alias mailbox is open its owner mailbox, the owner's folders and favorites are not.
+  const ownerSelectedId = selectedAliasId ? null : selectedAccountId;
 
   const [msgDragTarget, setMsgDragTarget] = useState(null);
   const [folderDrag, setFolderDrag] = useState(null);
@@ -580,6 +586,12 @@ export default function Sidebar() {
     [showAccountFilter, orderedAccounts, accountFilter],
   );
   const pinnedSet = useMemo(() => new Set(pinnedAccounts), [pinnedAccounts]);
+  // "Display aliases as accounts": alias rows after the mailboxes, narrowed by the same filter.
+  const aliasRows = useMemo(() => {
+    if (!aliasesAsAccounts) return [];
+    const rows = aliasMailboxRows(accounts);
+    return showAccountFilter ? filterAliasRows(rows, accountFilter) : rows;
+  }, [aliasesAsAccounts, accounts, showAccountFilter, accountFilter]);
   const roving = useRovingRows();
 
   // Per-account toggle to reveal hidden folders
@@ -1073,7 +1085,7 @@ export default function Sidebar() {
       {/* Compose button */}
       <div style={{ padding: '12px 10px' }}>
         <button
-          onClick={() => openCompose({ accountId: selectedAccountId || undefined })}
+          onClick={() => openCompose(composeDataForView(useStore.getState()))}
           title={t('sidebar.compose')}
           aria-label={t('sidebar.compose')}
           className="btn-press"
@@ -1105,6 +1117,7 @@ export default function Sidebar() {
           badgeStale={!unreadCounts.complete}
           onClick={() => setSelectedAccount(null, 'INBOX')}
         />
+        {!sidebarCollapsed && <AliasesAsAccountsSwitch />}
         <NavItem
           icon={ICONS.contacts}
           label={t('contacts.title')}
@@ -1157,7 +1170,7 @@ export default function Sidebar() {
                 if (!account) return null;
                 const accountFolders = folders[accountId] || [];
                 const folderObj = accountFolders.find(f => f.path === path);
-                const isActive = selectedAccountId === accountId && selectedFolder === path;
+                const isActive = ownerSelectedId === accountId && selectedFolder === path;
                 const favBadge = unreadBadge({ t, count: folderObj?.unread_count, known: folderObj?.counts_known !== false,
                   stale: folderObj?.counts_stale, observedAt: folderObj?.server_counts_at });
                 const isRenamingThis = renamingFav?.accountId === accountId && renamingFav?.path === path;
@@ -1406,7 +1419,7 @@ export default function Sidebar() {
         )}
 
         {/* Per-account */}
-        {showAccountFilter && visibleAccounts.length === 0 && (
+        {showAccountFilter && visibleAccounts.length === 0 && aliasRows.length === 0 && (
           <div role="status" style={{ fontSize: 12, color: 'var(--text-tertiary)', padding: '6px 10px' }}>
             {t('sidebar.accountFilter.noMatch')}
           </div>
@@ -1417,7 +1430,7 @@ export default function Sidebar() {
             known: Number.isFinite(unreadCounts.byAccount[account.id]) && countSnapshot?.known !== false,
             stale: countSnapshot?.stale, observedAt: countSnapshot?.observedAt, max: 999 });
           const expanded = expandedAccounts[account.id];
-          const isSelected = selectedAccountId === account.id;
+          const isSelected = ownerSelectedId === account.id;
           const accountFolders = folders[account.id] || [];
           const accountHiddenPaths = hiddenFolders[account.id] || [];
           const showingHidden = showHiddenFor.has(account.id);
@@ -1726,7 +1739,7 @@ export default function Sidebar() {
                   if (isHidden && !showingHidden) return null;
 
                   const isRenaming = renamingFolder?.accountId === account.id && renamingFolder?.path === folder.path;
-                  const isFolderSelected = selectedAccountId === account.id && selectedFolder === folder.path;
+                  const isFolderSelected = ownerSelectedId === account.id && selectedFolder === folder.path;
                   const visibleChildren = showingHidden ? children : children.filter(c => !accountHiddenPaths.includes(c.path));
                   const hasChildren = visibleChildren.length > 0;
                   const collapseKey = `${account.id}:${folder.path}`;
@@ -1957,6 +1970,7 @@ export default function Sidebar() {
             </div>
           );
         })}
+        <AliasMailboxRows rows={aliasRows} collapsed={sidebarCollapsed} />
       </nav>
 
       {/* Bottom — mobile: inline user section; desktop: user menu button */}

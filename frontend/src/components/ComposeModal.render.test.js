@@ -62,6 +62,7 @@ const { useStore } = await import('../store/index.js');
 const { api } = await import('../utils/api.js');
 const ComposeModal = (await import('./ComposeModal.jsx')).default;
 const { composeDataFromScheduled } = await import('../utils/scheduledSend.js');
+const { composeDataForView } = await import('../utils/aliasMailboxes.js');
 
 // A draft as Gmail saves it. TipTap loads this as <p> paragraphs, so its getHTML() never
 // matches the stored string even when nobody has touched it.
@@ -523,6 +524,18 @@ test('reopened alias draft keeps its From selection and autosave identity', asyn
     assert.equal(saved[0].aliasId, 'alias-1');
     assert.equal(saved[0].accountId, 'acct');
   } finally { await close(); useStore.setState({ accounts: prior }); }
+});
+
+test('compose opened from an alias view starts with From alias:<aliasId>:<accountId>', async () => {
+  const prior = useStore.getState().accounts;
+  useStore.setState({ accounts: [{ ...prior[0], aliases: [{ id: 'alias-1', account_id: 'acct', email: 'alias@example.com', name: 'Alias' }] }] });
+  useStore.getState().openCompose(composeDataForView({ selectedAccountId: 'acct', selectedAliasId: 'alias-1' }));
+  const root = createRoot(document.getElementById('root'));
+  await React.act(async () => { root.render(React.createElement(ComposeModal)); });
+  await React.act(async () => {});
+  try {
+    assert.equal(document.querySelector('select').value, 'alias:alias-1:acct');
+  } finally { await React.act(async () => root.unmount()); useStore.setState({ accounts: prior }); }
 });
 
 // MailApp mounts the composer as `composing && <ComposeModal />`, so closeCompose() after a send

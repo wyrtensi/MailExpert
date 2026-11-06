@@ -783,6 +783,7 @@
     "countUnknown": "Число писем в ящике пока неизвестно",
     "countStale": "Последнее известное число писем; ждём обновления от сервера",
     "countServer": "Писем на почтовом сервере",
+    "aliasViewLabel": "{{name}}: {{folder}}",
     "empty": {
       "inboxTitle": "Входящие пусты",
       "inboxBody": "Новых писем нет",
@@ -823,6 +824,11 @@
     "collapseAccount": "Свернуть {{name}}",
     "expandFolder": "Развернуть {{name}}",
     "collapseFolder": "Свернуть {{name}}",
+    "aliases": {
+      "toggle": "Алиасы как ящики",
+      "inbox": "Входящие",
+      "sent": "Отправленные"
+    },
     "accountFilter": {
       "label": "Фильтр почтовых ящиков по имени или адресу",
       "placeholder": "Найти ящик…",

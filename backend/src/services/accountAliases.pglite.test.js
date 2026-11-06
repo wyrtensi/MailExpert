@@ -7,7 +7,7 @@ const dbState = vi.hoisted(() => ({ db: null }));
 vi.mock('./db.js', () => ({ query: (sql, params) => dbState.db.query(sql, params) }));
 
 const { createRealSchemaDb } = await import('./testing/realSchema.js');
-const { ALIAS_ERRORS, createAlias, deleteAlias, listAliases, updateAlias } = await import('./accountAliases.js');
+const { ALIAS_ERRORS, createAlias, deleteAlias, listAliases, listAliasesByAccount, updateAlias } = await import('./accountAliases.js');
 
 const SALES = '70000000-0000-4000-8000-000000000001';
 const OPS = '70000000-0000-4000-8000-000000000002';
@@ -89,5 +89,23 @@ describe('gmail-synced aliases', () => {
     expect(result).toEqual({ error: 'alias_managed_by_gmail' });
     const { rows } = await db.query('SELECT email FROM account_aliases WHERE id = $1', [alias.id]);
     expect(rows[0].email).toBe('support@example.com');
+  });
+});
+
+describe('alias order', () => {
+  it('listAliases and listAliasesByAccount order aliases inserted in one transaction by id', async () => {
+    // One transaction: now() is the same for every row, so created_at ties and id decides. The ids
+    // are inserted out of their sorted order, so a missing id tie-break fails every run.
+    const ids = ['00000000-0000-4000-8000-000000000003', '00000000-0000-4000-8000-000000000001', '00000000-0000-4000-8000-000000000002'];
+    await db.exec('BEGIN');
+    for (const [i, id] of ids.entries()) {
+      await db.query("INSERT INTO account_aliases (id, account_id, name, email, source) VALUES ($1, $2, 'N', $3, 'gmail')", [id, SALES, `a${i}@example.com`]);
+    }
+    await db.exec('COMMIT');
+    const expected = [...ids].sort();
+    expect((await listAliases(SALES)).map((a) => a.id)).toEqual(expected);
+    const byAccount = await listAliasesByAccount([SALES, OPS]);
+    expect(byAccount[SALES].map((a) => a.id)).toEqual(expected);
+    expect(byAccount[OPS]).toBeUndefined();
   });
 });

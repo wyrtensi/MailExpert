@@ -1,0 +1,351 @@
+{
+  "accounts": {
+    "desk": {
+      "email_address": "desk@example.com",
+      "name": "Desk",
+      "folder_mappings": {
+        "sent": "Sent"
+      }
+    },
+    "other": {
+      "email_address": "science@example.com",
+      "name": "Science",
+      "folder_mappings": {}
+    }
+  },
+  "folders": [
+    {
+      "account": "desk",
+      "path": "INBOX",
+      "name": "INBOX",
+      "special_use": "\\Inbox"
+    },
+    {
+      "account": "desk",
+      "path": "Sent",
+      "name": "Sent",
+      "special_use": "\\Sent"
+    },
+    {
+      "account": "other",
+      "path": "INBOX",
+      "name": "INBOX",
+      "special_use": "\\Inbox"
+    }
+  ],
+  "aliases": [
+    {
+      "account": "desk",
+      "name": "Ivan Petrov",
+      "email": "ivan@example.com"
+    },
+    {
+      "account": "desk",
+      "name": "Anna Belova",
+      "email": "anna@example.com"
+    },
+    {
+      "account": "desk",
+      "name": "Desk Team",
+      "email": "desk@example.com"
+    }
+  ],
+  "cases": [
+    {
+      "name": "to-alias",
+      "account": "desk",
+      "folder": "INBOX",
+      "from_email": "client@corp.test",
+      "to": [
+        "ivan@example.com"
+      ],
+      "cc": [],
+      "delivery": [],
+      "category": "primary",
+      "is_read": false,
+      "inbox": "ivan@example.com",
+      "sent": null
+    },
+    {
+      "name": "cc-alias",
+      "account": "desk",
+      "folder": "INBOX",
+      "from_email": "client@corp.test",
+      "to": [
+        "client2@corp.test"
+      ],
+      "cc": [
+        "anna@example.com"
+      ],
+      "delivery": [],
+      "category": "primary",
+      "is_read": false,
+      "inbox": "anna@example.com",
+      "sent": null
+    },
+    {
+      "name": "delivered-only",
+      "account": "desk",
+      "folder": "INBOX",
+      "from_email": "client@corp.test",
+      "to": [
+        "desk@example.com"
+      ],
+      "cc": [],
+      "delivery": [
+        "anna@example.com"
+      ],
+      "category": "primary",
+      "is_read": false,
+      "inbox": "anna@example.com",
+      "sent": null
+    },
+    {
+      "name": "delivered-beats-to",
+      "account": "desk",
+      "folder": "INBOX",
+      "from_email": "client@corp.test",
+      "to": [
+        "ivan@example.com"
+      ],
+      "cc": [],
+      "delivery": [
+        "anna@example.com"
+      ],
+      "category": "primary",
+      "is_read": true,
+      "inbox": "anna@example.com",
+      "sent": null
+    },
+    {
+      "name": "two-aliases-in-to",
+      "account": "desk",
+      "folder": "INBOX",
+      "from_email": "client@corp.test",
+      "to": [
+        "anna@example.com",
+        "ivan@example.com"
+      ],
+      "cc": [],
+      "delivery": [],
+      "category": "primary",
+      "is_read": false,
+      "inbox": "ivan@example.com",
+      "sent": null
+    },
+    {
+      "name": "mixed-case",
+      "account": "desk",
+      "folder": "INBOX",
+      "from_email": "client@corp.test",
+      "to": [
+        "Ivan@Example.com"
+      ],
+      "cc": [],
+      "delivery": [],
+      "category": "primary",
+      "is_read": true,
+      "inbox": "ivan@example.com",
+      "sent": null
+    },
+    {
+      "name": "legacy-null-delivery",
+      "account": "desk",
+      "folder": "INBOX",
+      "from_email": "client@corp.test",
+      "to": [
+        "anna@example.com"
+      ],
+      "cc": [],
+      "delivery": null,
+      "category": "primary",
+      "is_read": true,
+      "inbox": "anna@example.com",
+      "sent": null
+    },
+    {
+      "name": "own-address-only",
+      "account": "desk",
+      "folder": "INBOX",
+      "from_email": "client@corp.test",
+      "to": [
+        "desk@example.com"
+      ],
+      "cc": [],
+      "delivery": [
+        "desk@example.com"
+      ],
+      "category": "primary",
+      "is_read": true,
+      "inbox": null,
+      "sent": null
+    },
+    {
+      "name": "removed-alias",
+      "account": "desk",
+      "folder": "INBOX",
+      "from_email": "client@corp.test",
+      "to": [
+        "olga@example.com"
+      ],
+      "cc": [],
+      "delivery": [],
+      "category": "primary",
+      "is_read": true,
+      "inbox": null,
+      "sent": null
+    },
+    {
+      "name": "neighbour-mailbox",
+      "account": "desk",
+      "folder": "INBOX",
+      "from_email": "client@corp.test",
+      "to": [
+        "science@example.com"
+      ],
+      "cc": [],
+      "delivery": [],
+      "category": "primary",
+      "is_read": true,
+      "inbox": null,
+      "sent": null
+    },
+    {
+      "name": "bcc-without-delivery",
+      "account": "desk",
+      "folder": "INBOX",
+      "from_email": "client@corp.test",
+      "to": [
+        "someone@corp.test"
+      ],
+      "cc": [],
+      "delivery": [],
+      "category": "primary",
+      "is_read": true,
+      "inbox": null,
+      "sent": null
+    },
+    {
+      "name": "newsletter",
+      "account": "desk",
+      "folder": "INBOX",
+      "from_email": "news@list.test",
+      "to": [
+        "ivan@example.com"
+      ],
+      "cc": [],
+      "delivery": [],
+      "category": "newsletter",
+      "is_read": false,
+      "inbox": "ivan@example.com",
+      "sent": null
+    },
+    {
+      "name": "outgoing-copy",
+      "account": "desk",
+      "folder": "INBOX",
+      "from_email": "ivan@example.com",
+      "to": [
+        "client@corp.test"
+      ],
+      "cc": [],
+      "delivery": [],
+      "category": "primary",
+      "is_read": true,
+      "inbox": null,
+      "sent": null
+    },
+    {
+      "name": "self-addressed-from-alias",
+      "account": "desk",
+      "folder": "INBOX",
+      "from_email": "ivan@example.com",
+      "to": [
+        "desk@example.com"
+      ],
+      "cc": [],
+      "delivery": [],
+      "category": "primary",
+      "is_read": false,
+      "inbox": "ivan@example.com",
+      "sent": null
+    },
+    {
+      "name": "alias-to-alias",
+      "account": "desk",
+      "folder": "INBOX",
+      "from_email": "ivan@example.com",
+      "to": [
+        "anna@example.com"
+      ],
+      "cc": [],
+      "delivery": [],
+      "category": "primary",
+      "is_read": true,
+      "inbox": "ivan@example.com",
+      "sent": null
+    },
+    {
+      "name": "other-mailbox",
+      "account": "other",
+      "folder": "INBOX",
+      "from_email": "client@corp.test",
+      "to": [
+        "ivan@example.com"
+      ],
+      "cc": [],
+      "delivery": [
+        "ivan@example.com"
+      ],
+      "category": "primary",
+      "is_read": true,
+      "inbox": null,
+      "sent": null
+    },
+    {
+      "name": "sent-from-alias",
+      "account": "desk",
+      "folder": "Sent",
+      "from_email": "ivan@example.com",
+      "to": [
+        "client@corp.test"
+      ],
+      "cc": [],
+      "delivery": null,
+      "category": "primary",
+      "is_read": true,
+      "inbox": null,
+      "sent": "ivan@example.com"
+    },
+    {
+      "name": "sent-mixed-case",
+      "account": "desk",
+      "folder": "Sent",
+      "from_email": "Ivan@Example.com",
+      "to": [
+        "client@corp.test"
+      ],
+      "cc": [],
+      "delivery": null,
+      "category": "primary",
+      "is_read": true,
+      "inbox": null,
+      "sent": "ivan@example.com"
+    },
+    {
+      "name": "sent-from-mailbox",
+      "account": "desk",
+      "folder": "Sent",
+      "from_email": "desk@example.com",
+      "to": [
+        "client@corp.test"
+      ],
+      "cc": [],
+      "delivery": null,
+      "category": "primary",
+      "is_read": true,
+      "inbox": null,
+      "sent": null
+    }
+  ]
+}

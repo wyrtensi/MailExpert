@@ -444,8 +444,9 @@ export default function MessageList() {
   // and only while that alias (and, for alias_folder, that folder) is still the one open:
   // - alias_gone: the alias no longer exists (a Gmail sync or an admin removed it); the view moves
   //   to the owner's Inbox and the mailbox list is read again. Turning the mode off on another
-  //   computer is not such an error: the server never sees a user's mode, and this page picks the
-  //   saved mode up only when it loads (loadPreferences), so the view stays until a page reload.
+  //   computer is not such an error: the message list route does not consult the mode, and this
+  //   page reads the saved mode only when it loads (loadPreferences), so the view stays until a
+  //   page reload.
   // - alias_folder: the folder is not the alias's Inbox or Sent any more (a stale Sent path, the
   //   Sent folder renamed); the view moves to the alias's Inbox.
   // True when the error was one of these.

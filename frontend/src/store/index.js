@@ -206,7 +206,8 @@ export const useStore = create((set, get) => ({
     if (leaving) {
       localStorage.removeItem('mailexpert_locked_message');
       for (const key of [
-        'mailexpert_pinned_accounts', 'mailexpert_sort_accounts_by_latest', 'mailexpert_expanded_accounts',
+        'mailexpert_pinned_accounts', 'mailexpert_sort_accounts_by_latest', 'mailexpert_aliases_as_accounts',
+        'mailexpert_expanded_accounts',
         'mailexpert_favorite_folders', 'mailexpert_recent_folders', 'mailexpert_collapsed_folders',
         'mailexpert_default_sender', 'mailexpert_last_from_account',
       ]) {
@@ -216,7 +217,7 @@ export const useStore = create((set, get) => ({
     set(state => ({
       user,
       ...(leaving ? {
-        pinnedAccounts: [], sortAccountsByLatest: true, expandedAccounts: {},
+        pinnedAccounts: [], sortAccountsByLatest: true, aliasesAsAccounts: false, expandedAccounts: {},
         // Shared mailboxes still have personal shortcuts and sender choices.
         favoriteFolders: [], recentFolders: [], collapsedFolders: [], defaultSender: '',
         autoLockMinutes: 0, blockRemoteImages: false,
@@ -1256,6 +1257,14 @@ export const useStore = create((set, get) => ({
     set({ sortAccountsByLatest: val });
     schedulePrefSave({ sortAccountsByLatest: val });
   },
+  // Show each mailbox alias as its own sidebar mailbox. The server is the source of truth; the
+  // localStorage mirror only serves the first paint.
+  aliasesAsAccounts: localStorage.getItem('mailexpert_aliases_as_accounts') === 'true',
+  setAliasesAsAccounts: (val) => {
+    localStorage.setItem('mailexpert_aliases_as_accounts', String(val));
+    set({ aliasesAsAccounts: val });
+    schedulePrefSave({ aliasesAsAccounts: val });
+  },
   // A new_messages event for the inbox: that mailbox just received mail, which is newer than what
   // the last account list said. Only ever moves the date forward; nothing is saved or refetched.
   noteAccountReceived: (accountId, receivedAt) => set(state => {
@@ -1449,6 +1458,9 @@ export const useStore = create((set, get) => ({
         const sortByLatest = typeof prefs.sortAccountsByLatest === 'boolean' ? prefs.sortAccountsByLatest : true;
         localStorage.setItem('mailexpert_sort_accounts_by_latest', String(sortByLatest));
         set({ sortAccountsByLatest: sortByLatest });
+        const aliasesAsAccounts = prefs.aliasesAsAccounts === true;
+        localStorage.setItem('mailexpert_aliases_as_accounts', String(aliasesAsAccounts));
+        set({ aliasesAsAccounts });
       }
       if (Array.isArray(prefs.collapsedFolders)) {
         localStorage.setItem('mailexpert_collapsed_folders', JSON.stringify(prefs.collapsedFolders));

@@ -829,3 +829,19 @@ test('the demo Proton connection: refusals, a human check, a replay and a cancel
   assert.equal((await demoRequest('GET', `/accounts/proton/connect/${challenge.id}`)).state, 'needs_second_password');
   await assert.rejects(() => demoRequest('POST', `/accounts/proton/connect/${challenge.id}/continue`, { challenge: '2fa', secret: 'x' }), err => err.code === 'invalid_challenge');
 });
+
+test('GET /auth/preferences has aliasesAsAccounts false by default', async () => {
+  assert.equal((await demoRequest('GET', '/auth/preferences')).aliasesAsAccounts, false);
+});
+
+test('PATCH keeps a boolean and refuses \'yes\' with invalid_preference', async () => {
+  await demoRequest('PATCH', '/auth/preferences', { aliasesAsAccounts: true });
+  assert.equal((await demoRequest('GET', '/auth/preferences')).aliasesAsAccounts, true);
+  await assert.rejects(
+    () => demoRequest('PATCH', '/auth/preferences', { aliasesAsAccounts: 'yes' }),
+    (err) => err.code === 'invalid_preference' && /aliasesAsAccounts must be a boolean/.test(err.message),
+  );
+  assert.equal((await demoRequest('GET', '/auth/preferences')).aliasesAsAccounts, true);
+  await demoRequest('PATCH', '/auth/preferences', { aliasesAsAccounts: false });
+  assert.equal((await demoRequest('GET', '/auth/preferences')).aliasesAsAccounts, false);
+});

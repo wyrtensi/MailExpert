@@ -462,6 +462,7 @@ const DEFAULT_PREFERENCES = {
   // latest received mail.
   pinnedAccounts: ['demo-fx-24', 'demo-fx-09'],
   sortAccountsByLatest: true,
+  aliasesAsAccounts: false,
 };
 
 // User admin list (GET /admin/users), same shape as publicUser() in backend/src/routes/admin.js —
@@ -2115,11 +2116,14 @@ export async function demoRequest(method, path, body = {}) {
     return clone({ ...preferences, pinnedAccounts: (preferences.pinnedAccounts || []).filter(id => accountFor(id)) });
   }
   if (verb === 'PATCH' && pathname === '/auth/preferences') {
-    const { pinnedAccounts, pinAccount, unpinAccount, sortAccountsByLatest, ...rest } = clone(body);
+    const { pinnedAccounts, pinAccount, unpinAccount, sortAccountsByLatest, aliasesAsAccounts, ...rest } = clone(body);
     // The same rules as the server (routes/auth.js): a list of ids, once each, or a 400; one id to
     // pin or unpin, applied to the stored list; a boolean or a 400.
     if ('sortAccountsByLatest' in body && typeof sortAccountsByLatest !== 'boolean') {
       throw demoError('sortAccountsByLatest must be a boolean', 'invalid_preference');
+    }
+    if ('aliasesAsAccounts' in body && typeof aliasesAsAccounts !== 'boolean') {
+      throw demoError('aliasesAsAccounts must be a boolean', 'invalid_preference');
     }
     if ('pinnedAccounts' in body && !Array.isArray(pinnedAccounts)) {
       throw demoError('pinnedAccounts must be an array of account ids', 'invalid_preference');
@@ -2138,6 +2142,7 @@ export async function demoRequest(method, path, body = {}) {
       ...rest,
       ...('pinnedAccounts' in body || 'pinAccount' in body || 'unpinAccount' in body ? { pinnedAccounts: pins } : {}),
       ...('sortAccountsByLatest' in body ? { sortAccountsByLatest } : {}),
+      ...('aliasesAsAccounts' in body ? { aliasesAsAccounts } : {}),
     };
     return { ok: true };
   }

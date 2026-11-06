@@ -55,8 +55,9 @@ export async function openReplyFromMessage(message, { accounts, openCompose, get
 
   // Delivered-To first, then the To/Cc/From scan: replying from the list or GTD triage picks
   // the same alias as replying from the reading pane.
-  // In an alias view the reply goes out from that alias, whatever the letter's addresses say.
-  const replyAliasId = (view && viewReplyAliasId(message, view)) ?? pickReplyAlias({
+  // A letter of the open alias view replies from that alias, whatever its addresses say
+  // (viewReplyAliasId); any other letter keeps the pick.
+  const replyAliasId = (view && viewReplyAliasId(message, { accounts, ...view })) ?? pickReplyAlias({
     aliases: myAccount?.aliases || [],
     deliveryAddresses: message.delivery_addresses,
     toAddresses: message.to_addresses,

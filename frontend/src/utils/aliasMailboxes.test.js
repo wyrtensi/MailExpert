@@ -72,10 +72,22 @@ test('composeDataForView carries aliasId only with an account', () => {
   assert.deepEqual(composeDataForView({ selectedAccountId: null, selectedAliasId: 'a1' }), {});
 });
 
-test("viewReplyAliasId answers only for a letter of the open alias's mailbox", () => {
-  const view = { selectedAccountId: 'a', selectedAliasId: 'a1' };
-  assert.equal(viewReplyAliasId({ account_id: 'a' }, view), 'a1');
-  assert.equal(viewReplyAliasId({ account_id: 'b' }, view), null);
-  assert.equal(viewReplyAliasId({ account_id: 'a' }, { selectedAccountId: 'a', selectedAliasId: null }), null);
+test("viewReplyAliasId answers only for a letter of the open alias's view", () => {
+  const owner = acc('a', { aliases: [alias('a1', 'anna@example.com'), alias('a2', 'ivan@example.com')] });
+  const accounts = [owner, acc('b')];
+  const view = { selectedAccountId: 'a', selectedAliasId: 'a1', accounts };
+  // Sent of the alias: From is the alias, whatever the recipients pick.
+  assert.equal(viewReplyAliasId({ account_id: 'a', from_email: 'Anna@Example.com', to_addresses: [{ email: 'ivan@example.com' }] }, view), 'a1');
+  // Inbox of the alias: the letter's pill (the reply's pick) names the alias.
+  assert.equal(viewReplyAliasId({ account_id: 'a', from_email: 'c@client.test', to_addresses: [{ email: 'anna@example.com' }] }, view), 'a1');
+  assert.equal(viewReplyAliasId({ account_id: 'a', from_email: 'c@client.test', delivery_addresses: ['anna@example.com'] }, view), 'a1');
+  // An owner letter outside the view (to another alias, or to the mailbox itself): no answer.
+  assert.equal(viewReplyAliasId({ account_id: 'a', from_email: 'c@client.test', to_addresses: [{ email: 'ivan@example.com' }] }, view), null);
+  assert.equal(viewReplyAliasId({ account_id: 'a', from_email: 'c@client.test', to_addresses: [{ email: 'a@example.com' }] }, view), null);
+  assert.equal(viewReplyAliasId({ account_id: 'b', from_email: 'anna@example.com' }, view), null);
+  assert.equal(viewReplyAliasId({ account_id: 'a', from_email: 'anna@example.com' }, { ...view, selectedAliasId: null }), null);
+  // The alias is unknown (no mailbox list, or the alias is gone): no answer.
+  assert.equal(viewReplyAliasId({ account_id: 'a', from_email: 'anna@example.com' }, { ...view, accounts: [] }), null);
+  assert.equal(viewReplyAliasId({ account_id: 'a', from_email: 'anna@example.com' }, { ...view, selectedAliasId: 'gone' }), null);
   assert.equal(viewReplyAliasId(null, view), null);
 });

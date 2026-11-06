@@ -382,6 +382,30 @@ describe('openReplyFromMessage from an alias view', () => {
     assert.equal(h.payload().aliasId, 'al-anna');
   });
 
+  it('a reply from alias view X to a letter delivered to alias Y of the same mailbox goes from Y', async () => {
+    const h = harness();
+    await openReplyFromMessage({
+      id: 'm2', account_id: 'acct', from_email: 'client@client.test',
+      to_addresses: [{ email: 'ivan@example.com' }], cc_addresses: [], delivery_addresses: ['ivan@example.com'],
+    }, {
+      accounts, openCompose: h.openCompose, getMessageBody: h.getMessageBody,
+      view: { selectedAccountId: 'acct', selectedAliasId: 'al-anna', accounts },
+    });
+    assert.equal(h.payload().aliasId, 'al-ivan');
+  });
+
+  it('a reply from alias view X to an Inbox letter whose pill is X goes from X', async () => {
+    const h = harness();
+    await openReplyFromMessage({
+      id: 'm3', account_id: 'acct', from_email: 'client@client.test',
+      to_addresses: [{ email: 'owner@example.com' }, { email: 'anna@example.com' }], cc_addresses: [],
+    }, {
+      accounts, openCompose: h.openCompose, getMessageBody: h.getMessageBody,
+      view: { selectedAccountId: 'acct', selectedAliasId: 'al-anna', accounts },
+    });
+    assert.equal(h.payload().aliasId, 'al-anna');
+  });
+
   it('a reply outside an alias view keeps pickReplyAlias', async () => {
     const h = harness();
     await openReplyFromMessage(message, {

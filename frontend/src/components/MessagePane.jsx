@@ -1194,7 +1194,8 @@ export default function MessagePane({ windowMessageId = null, onWindowClose = nu
     const myAccount = accounts.find(a => a.id === message.account_id);
     const myEmail = myAccount?.email_address || '';
 
-    // In an alias view the reply goes out from that alias, whatever the letter's addresses say.
+    // A letter of the open alias view replies from that alias, whatever its addresses say
+    // (viewReplyAliasId); any other letter keeps the pick.
     const replyAliasId = viewReplyAliasId(message, useStore.getState()) ?? pickReplyAlias({
       aliases: myAccount?.aliases || [],
       deliveryAddresses: message.delivery_addresses,

@@ -1,6 +1,7 @@
 // "Display aliases as accounts": each alias of a mailbox gets its own sidebar row with its own
 // Inbox and Sent. Pure helpers (no DOM, no store) so they run under `node --test`.
 import { sortAliasesByName } from './aliasSort.js';
+import { pickReplyAlias } from './replyAlias.js';
 
 const lower = (value) => String(value ?? '').trim().toLowerCase();
 
@@ -79,8 +80,26 @@ export function composeDataForView({ selectedAccountId, selectedAliasId }) {
   return selectedAliasId ? { accountId: selectedAccountId, aliasId: selectedAliasId } : { accountId: selectedAccountId };
 }
 
-// The alias a reply to `message` should send from: the open alias, but only for a letter of its
-// own mailbox.
-export function viewReplyAliasId(message, { selectedAccountId, selectedAliasId }) {
-  return selectedAliasId && message?.account_id === selectedAccountId ? selectedAliasId : null;
+// The alias a reply to `message` should send from when an alias view is open: the open alias, but
+// only for a letter of that view - a letter of its mailbox sent From the alias (its Sent), or one
+// whose reply pick (the recipient pill, pickReplyAlias) is the alias (its Inbox). Any other letter
+// (search results across the mailbox, a conversation letter to another alias, GTD triage) gets
+// null, so the caller's own pickReplyAlias decides and one client never sees another's address.
+// `accounts` (the store's mailbox list) gives the alias's address.
+export function viewReplyAliasId(message, { selectedAccountId, selectedAliasId, accounts } = {}) {
+  if (!selectedAliasId || !message || message.account_id !== selectedAccountId) return null;
+  const account = (Array.isArray(accounts) ? accounts : []).find((a) => a.id === selectedAccountId);
+  const alias = replyAliasesOf(account).find((a) => a.id === selectedAliasId);
+  if (!alias) return null;
+  if (lower(message.from_email) === lower(alias.email)) return selectedAliasId;
+  const picked = pickReplyAlias({
+    aliases: account.aliases || [],
+    deliveryAddresses: message.delivery_addresses,
+    toAddresses: message.to_addresses,
+    ccAddresses: message.cc_addresses,
+    fromEmail: message.from_email,
+    accountEmail: account.email_address || '',
+    mailNode: account.mail_node === true,
+  });
+  return picked === selectedAliasId ? selectedAliasId : null;
 }

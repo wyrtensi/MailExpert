@@ -38,7 +38,7 @@ import { folderMatchesQuery } from '../utils/folderDisplay.js';
 import { shortcutBus } from '../utils/shortcutBus.js';
 import { createLatestRequest } from '../utils/latestRequest.js';
 import { messageListParams } from '../utils/messageListParams.js';
-import { aliasMailboxRows } from '../utils/aliasMailboxes.js';
+import { aliasMailboxRows, viewReplyAliasId, composeDataForView } from '../utils/aliasMailboxes.js';
 import { isAliasGone } from '../utils/aliasGone.js';
 import { reconcileAccounts } from '../utils/accountsReconcile.js';
 import { draftComposeFields } from '../utils/draftSignature.js';
@@ -1400,7 +1400,8 @@ export default function MessageList() {
       ...(myAccount?.aliases || []).map(al => al.email.toLowerCase()),
     ]);
 
-    const replyAliasId = pickReplyAlias({
+    // In an alias view the reply goes out from that alias, whatever the letter's addresses say.
+    const replyAliasId = viewReplyAliasId(message, useStore.getState()) ?? pickReplyAlias({
       aliases: myAccount?.aliases || [],
       deliveryAddresses: message.delivery_addresses,
       toAddresses: message.to_addresses,
@@ -2344,6 +2345,7 @@ export default function MessageList() {
           openCompose,
           getMessageBody: api.getMessageBody,
           replyAll: action === 'replyAll',
+          view: useStore.getState(),
           ...safeQuoteOptions(t, useStore.getState().folders[message.account_id]),
         });
         break;
@@ -3742,7 +3744,7 @@ export default function MessageList() {
             onClearSearch={() => { setSearchQuery(''); }}
             onRetrySearch={() => setSearchReloadToken(token => token + 1)}
             onShowAll={() => setUnreadOnly(false)}
-            onCompose={() => openCompose({ accountId: selectedAccountId || undefined })}
+            onCompose={() => openCompose(composeDataForView(useStore.getState()))}
           />
         )}
 
@@ -4319,7 +4321,7 @@ export default function MessageList() {
             </button>
           )}
           <button
-            onClick={() => openCompose({ accountId: selectedAccountId || undefined })}
+            onClick={() => openCompose(composeDataForView(useStore.getState()))}
             aria-label={t('messageList.composeAriaLabel')}
             style={{
               pointerEvents: fabVisible ? 'auto' : 'none',

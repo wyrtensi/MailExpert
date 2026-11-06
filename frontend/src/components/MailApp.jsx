@@ -29,6 +29,7 @@ import { reconcileAccounts } from '../utils/accountsReconcile.js';
 import { appOAuthReturnWatch } from '../utils/appOAuthReturn.js';
 import { isAttemptId } from '../utils/addAccountFlow.js';
 import { isModalOpen } from '../utils/modalGate.js';
+import { composeDataForView } from '../utils/aliasMailboxes.js';
 
 const ContactsPage = lazy(() => import('./ContactsPage.jsx'));
 const WindowLayer  = lazy(() => import('./WindowLayer.jsx'));
@@ -685,7 +686,7 @@ export default function MailApp() {
 
   // Subscribe to global actions that MailApp owns
   useEffect(() => {
-    const onCompose   = () => openCompose({ accountId: useStore.getState().selectedAccountId || undefined });
+    const onCompose   = () => openCompose(composeDataForView(useStore.getState()));
     const onGoInbox   = () => setSelectedAccount(null, 'INBOX');
     const onShowHelp  = () => { if (!isMobile) setShowShortcutHelp(v => !v); };
 

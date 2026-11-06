@@ -29,7 +29,7 @@ import { useUiScale, descale } from '../hooks/useUiScale.js';
 import { CheckIcon, CloseIcon, PinIcon } from './UiIcons.jsx';
 import { ReadOnlyLine, TenantPendingLine } from './MailboxDeletionNotice.jsx';
 import { AliasesAsAccountsSwitch, AliasMailboxRows } from './AliasMailboxRows.jsx';
-import { aliasMailboxRows, filterAliasRows } from '../utils/aliasMailboxes.js';
+import { aliasMailboxRows, filterAliasRows, composeDataForView } from '../utils/aliasMailboxes.js';
 
 const ICONS = {
   inbox: (
@@ -1085,7 +1085,7 @@ export default function Sidebar() {
       {/* Compose button */}
       <div style={{ padding: '12px 10px' }}>
         <button
-          onClick={() => openCompose({ accountId: selectedAccountId || undefined })}
+          onClick={() => openCompose(composeDataForView(useStore.getState()))}
           title={t('sidebar.compose')}
           aria-label={t('sidebar.compose')}
           className="btn-press"

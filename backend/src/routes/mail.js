@@ -132,16 +132,21 @@ function notifyMailMutation(rows) {
 
 // Get messages (unified or per-account/folder)
 router.get('/messages', async (req, res) => {
-  const { accountId, folder = 'INBOX', limit = 50, offset = 0, unreadOnly, threaded, category } = req.query;
+  const { accountId, folder = 'INBOX', limit = 50, offset = 0, unreadOnly, threaded, category, aliasId } = req.query;
 
   if (!isValidFolderName(folder)) return res.status(400).json({ error: 'Invalid folder name' });
+  // An alias shown as its own mailbox (services/aliasMailbox.js): an alias of the mailbox accountId.
+  if (aliasId !== undefined) {
+    if (typeof aliasId !== 'string' || !UUID_RE.test(aliasId)) return res.status(400).json({ error: 'Invalid alias id' });
+    if (!accountId) return res.status(400).json({ error: 'aliasId needs accountId' });
+  }
 
   // Validate category param — only allow known values to prevent SQL injection via the
   // WHERE clause in listMessages (even though it uses parameterised queries, belt-and-suspenders).
   const VALID_CATEGORIES = new Set(['primary', 'newsletter', 'promotion', 'automated', 'social']);
   const safeCategory = VALID_CATEGORIES.has(category) ? category : undefined;
 
-  const { messages, total, threaded: isThreaded, resolvedAccountId } = await listMessages({
+  const listed = await listMessages({
     accountId,
     folder,
     limit,
@@ -149,7 +154,15 @@ router.get('/messages', async (req, res) => {
     unreadOnly,
     threaded,
     category: safeCategory,
+    aliasId,
   });
+  if (listed.error === 'alias_gone') {
+    return res.status(404).json({ error: 'This alias is no longer a mailbox here', code: 'alias_gone' });
+  }
+  if (listed.error === 'alias_folder') {
+    return res.status(400).json({ error: 'An alias has only Inbox and Sent', code: 'alias_folder' });
+  }
+  const { messages, total, threaded: isThreaded, resolvedAccountId } = listed;
 
   if (resolvedAccountId && messages.length) {
     imapManager.prefetchFolderBodies(resolvedAccountId, messages.map(r => r.id))

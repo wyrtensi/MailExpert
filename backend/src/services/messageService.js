@@ -1,9 +1,14 @@
 import { query } from './db.js';
 import { resolveAccountScope } from './unifiedInbox.js';
 import { deliveryStateColumn } from './deliveryStatus.js';
-import { draftMessageSql } from '../utils/mailUtils.js';
+import { draftMessageSql, resolveAllSentPaths } from '../utils/mailUtils.js';
+import { aliasInboxCondition, aliasSentCondition, loadAliasMailboxes } from './aliasMailbox.js';
 
-export async function listMessages({ accountId, folder = 'INBOX', limit = 50, offset = 0, unreadOnly, threaded, category }) {
+// aliasId: list an alias of the mailbox accountId as its own mailbox (services/aliasMailbox.js):
+// only INBOX and the mailbox's Sent, letters of every category. Answers { error: 'alias_gone' }
+// when the alias is not a mailbox of accountId (any more), { error: 'alias_folder' } for another
+// folder.
+export async function listMessages({ accountId, folder = 'INBOX', limit = 50, offset = 0, unreadOnly, threaded, category, aliasId }) {
   const accountsResult = await query('SELECT id, include_in_unified_inbox FROM email_accounts WHERE enabled = true');
   const {
     accountIds: scopedAccountIds,
@@ -31,8 +36,27 @@ export async function listMessages({ accountId, folder = 'INBOX', limit = 50, of
   const isUnreadOnly = unreadOnly === 'true' || unreadOnly === true;
   if (isUnreadOnly) whereConditions.push('m.is_read = false');
 
-  // Category filter: 'primary' matches NULL and 'primary'; others match exactly.
-  const safeCategory = typeof category === 'string' && category.length > 0 ? category : null;
+  if (aliasId) {
+    if (!isSpecificAccount || resolvedAccountId !== accountId) return { error: 'alias_gone' };
+    const [mailbox] = await loadAliasMailboxes([resolvedAccountId]);
+    const alias = mailbox?.aliases.find(a => a.id === aliasId);
+    if (!alias) return { error: 'alias_gone' };
+    let condition;
+    if (folder === 'INBOX') {
+      condition = aliasInboxCondition(mailbox, alias.email, p);
+    } else if ((await resolveAllSentPaths(resolvedAccountId, mailbox.folderMappings)).has(folder)) {
+      condition = aliasSentCondition(alias.email, p);
+    } else {
+      return { error: 'alias_folder' };
+    }
+    whereConditions.push(condition.sql);
+    values.push(...condition.values);
+    p += condition.values.length;
+  }
+
+  // Category filter: 'primary' matches NULL and 'primary'; others match exactly. An alias's Inbox
+  // has no category tabs: it lists letters of every category.
+  const safeCategory = !aliasId && typeof category === 'string' && category.length > 0 ? category : null;
   if (safeCategory && safeCategory !== 'primary') {
     whereConditions.push(`m.category = $${p++}`);
     values.push(safeCategory);
@@ -56,10 +80,11 @@ export async function listMessages({ accountId, folder = 'INBOX', limit = 50, of
   let total = 0;
   const isThreadedList = threaded === 'true' || threaded === true;
   try {
-    if (safeCategory && !isThreadedList) {
-      // A category tab lists only that category's mail; the folder's counts are of all its mail,
-      // so the list offered pages, or a "Load more", with nothing on them. Counted by row with the
-      // list's own conditions. The threaded list counts its threads further down.
+    if ((safeCategory || aliasId) && !isThreadedList) {
+      // A category tab (or an alias's mailbox) lists only part of the folder; the folder's counts
+      // are of all its mail, so the list offered pages, or a "Load more", with nothing on them.
+      // Counted by row with the list's own conditions. The threaded list counts its threads
+      // further down.
       const r = await query(`SELECT COUNT(*)::int AS n FROM messages m WHERE ${where}`, values);
       total = r.rows[0]?.n ?? 0;
     } else if (isSpecificAccount) {

@@ -20,7 +20,10 @@ registerHooks({
   load(url, context, nextLoad) {
     if (url.endsWith('react-i18next/dist/es/index.js') || url.endsWith('/react-i18next')) {
       return { format: 'module', shortCircuit: true, source: [
-        'export const useTranslation = () => ({ t: (k, d) => (typeof d === "string" ? d : k), i18n: { language: "en", changeLanguage: () => {} } });',
+        // t() still answers the key when given options; the options are kept per key, so a test can
+        // check what a label was asked to say (globalThis.__T_OPTIONS__).
+        'globalThis.__T_OPTIONS__ = {};',
+        'export const useTranslation = () => ({ t: (k, d) => { if (d && typeof d === "object") globalThis.__T_OPTIONS__[k] = d; return typeof d === "string" ? d : k; }, i18n: { language: "en", changeLanguage: () => {} } });',
         'export const initReactI18next = { type: "3rdParty", init: () => {} };',
         'export const Trans = ({ children }) => children ?? null;',
         'export const I18nextProvider = ({ children }) => children ?? null;',
@@ -1026,5 +1029,195 @@ describe('MessageList — recipient alias badge', () => {
     const threadToRemoved = { ...toRemoved, thread_id: 'thr-r', message_count: 2, unread_count: 1 };
     await mount({ rows: [threadToRemoved], threadedView: true, accounts: [ALIASED] });
     assert.equal(container.querySelector('[data-msgid="to-removed"] [data-alias-state]')?.dataset.aliasState, 'inactive');
+  });
+});
+
+// "Display aliases as accounts": an alias mailbox lists its owner's letters to (Inbox) or from
+// (Sent) that alias. The list asks the server with aliasId on every read, shows every category
+// with no tabs, and leaves the view for the owner's Inbox when the alias is gone.
+describe('MessageList — the list of an alias mailbox', () => {
+  const ALIASED = {
+    ...ACCOUNT, categorization_enabled: true, gtd_enabled: true,
+    aliases: [
+      { id: 'al-sales', email: 'sales@example.com', name: 'Sales' },
+      { id: 'al-help', email: 'help@example.com', name: 'Help' },
+    ],
+  };
+  const row = (id) => ({ ...MESSAGE, id, uid: id, message_id: `<${id}@example.com>` });
+  const aliasState = (aliasId, extra = {}) => ({
+    selectedAliasId: aliasId, aliasesAsAccounts: true, aliasUnreadCounts: {},
+    categorizationEnabled: true, enabledPlugins: ['gtd'], activeGtdTab: null, ...extra,
+  });
+  const buttonWithText = (text) => [...container.querySelectorAll('button')].find(b => b.textContent === text);
+  const settle = () => React.act(async () => { await new Promise(r => setTimeout(r, 0)); });
+  let originalGetMessages, originalGetAccounts, originalBulkRead, originalWidth;
+  let calls;
+  const spyMessages = (answer) => {
+    calls = [];
+    api.getMessages = async (params) => { calls.push(params); return answer(params); };
+  };
+  const saved = () => {
+    originalGetMessages = api.getMessages;
+    originalGetAccounts = api.getAccounts;
+    originalBulkRead = api.bulkRead;
+    originalWidth = dom.window.innerWidth;
+  };
+  const restore = async () => {
+    api.getMessages = originalGetMessages;
+    api.getAccounts = originalGetAccounts;
+    api.bulkRead = originalBulkRead;
+    dom.window.innerWidth = originalWidth;
+    await React.act(async () => {
+      useStore.setState({ selectedAliasId: null, aliasesAsAccounts: false, aliasUnreadCounts: {}, categorizationEnabled: false, enabledPlugins: [], activeGtdTab: null });
+    });
+  };
+
+  test('an alias Inbox asks for aliasId without category and shows no tabs even with categorization on', async () => {
+    saved();
+    spyMessages(() => ({ messages: [row('a-1')], total: 1 }));
+    try {
+      await mount({ rows: [], threadedView: false, accounts: [ALIASED], state: aliasState('al-sales') });
+      const first = calls.at(-1);
+      assert.equal(first.aliasId, 'al-sales');
+      assert.equal(first.accountId, 'acct-1');
+      assert.equal(first.folder, 'INBOX');
+      assert.equal('category' in first, false, 'an alias Inbox lists every category');
+      assert.equal(buttonWithText('messageList.categories.primary'), undefined, 'no category tabs');
+      assert.equal(buttonWithText('gtd.inbox'), undefined, 'no GTD tabs');
+
+      // The owner's own Inbox still has both.
+      await React.act(async () => useStore.getState().setSelectedAccount('acct-1', 'INBOX'));
+      assert.equal('aliasId' in calls.at(-1), false);
+      assert.equal(calls.at(-1).category, 'primary');
+      assert.ok(buttonWithText('messageList.categories.primary'), 'the owner Inbox keeps its category tabs');
+    } finally {
+      await restore();
+    }
+  });
+
+  test('an alias Inbox opened from the owner Inbox on a GTD tab lists the alias, not the GTD section', async () => {
+    saved();
+    spyMessages(() => ({ messages: [row('a-1')], total: 1 }));
+    try {
+      await mount({ rows: [], threadedView: false, accounts: [ALIASED], state: aliasState(null) });
+      await React.act(async () => buttonWithText('gtd.state.todo').click());
+      assert.equal(useStore.getState().activeGtdTab, 'todo', 'precondition: a GTD tab is open');
+      await React.act(async () => useStore.getState().setSelectedAccount('acct-1', 'INBOX', 'al-sales'));
+      assert.equal(useStore.getState().activeGtdTab, null);
+      assert.ok(container.querySelector('[data-msgid="a-1"]'), 'the alias letters are listed');
+    } finally {
+      await restore();
+    }
+  });
+
+  test('load more and a page change keep aliasId', async () => {
+    saved();
+    spyMessages((params) => ({ messages: [row(`p-${params.offset}-1`), row(`p-${params.offset}-2`)], total: 6 }));
+    const { pageSize, scrollMode } = useStore.getState();
+    try {
+      await mount({ rows: [], threadedView: false, accounts: [ALIASED], state: aliasState('al-sales', { pageSize: 2, scrollMode: 'infinite', messagesOffset: 0 }) });
+      await React.act(async () => buttonWithText('messageList.loadMore').click());
+      assert.equal(calls.at(-1).offset, 2);
+      assert.equal(calls.at(-1).aliasId, 'al-sales', 'the next page stays in the alias view');
+
+      // Another alias of the same mailbox, same folder: the list is read again for it, and its
+      // next page asks for it too (a callback built for the first alias would not).
+      await React.act(async () => useStore.getState().setSelectedAccount('acct-1', 'INBOX', 'al-help'));
+      assert.equal(calls.at(-1).aliasId, 'al-help', 'switching aliases of one mailbox reloads the list');
+      assert.equal(calls.at(-1).offset, 0);
+      await React.act(async () => buttonWithText('messageList.loadMore').click());
+      assert.equal(calls.at(-1).offset, 2);
+      assert.equal(calls.at(-1).aliasId, 'al-help');
+
+      // A background refresh keeps it as well.
+      await React.act(async () => { window.dispatchEvent(new dom.window.Event('mailexpert:refresh')); });
+      await settle();
+      assert.equal(calls.at(-1).aliasId, 'al-help', 'a refresh stays in the alias view');
+
+      // Paginated mode: the page jump keeps it.
+      await React.act(async () => useStore.setState({ scrollMode: 'paginated' }));
+      await settle();
+      const next = [...container.querySelectorAll('button')].find(b => b.textContent.includes('messageList.nextPage'));
+      assert.ok(next, 'the paginated footer is shown');
+      await React.act(async () => next.click());
+      assert.equal(calls.at(-1).offset, 2);
+      assert.equal(calls.at(-1).aliasId, 'al-help', 'a page change stays in the alias view');
+    } finally {
+      await restore();
+      await React.act(async () => { useStore.setState({ pageSize, scrollMode }); });
+    }
+  });
+
+  test('the header names the alias and shows its unread count', async () => {
+    saved();
+    spyMessages(() => ({ messages: [row('a-1'), row('a-2'), row('a-3')], total: 7 }));
+    try {
+      await mount({ rows: [], threadedView: false, accounts: [ALIASED], state: aliasState('al-sales', { aliasUnreadCounts: { 'al-sales': 4, 'al-help': 9 } }) });
+      const title = container.querySelector('h2');
+      assert.equal(title.textContent, 'messageList.aliasViewLabel', 'the alias label, not the inbox icon');
+      assert.deepEqual(globalThis.__T_OPTIONS__['messageList.aliasViewLabel'], { name: 'Sales', folder: 'sidebar.aliases.inbox' });
+      const count = title.nextElementSibling.querySelector('span[title]');
+      assert.equal(count.textContent, '7', 'the count is the total of the alias list');
+      assert.equal(count.getAttribute('title'), 'messageList.countFiltered');
+
+      // The phone header shows the unread badge: the alias's own count in its Inbox.
+      dom.window.innerWidth = 400;
+      await mount({ rows: [], threadedView: false, accounts: [ALIASED], state: aliasState('al-sales', { aliasUnreadCounts: { 'al-sales': 4, 'al-help': 9 } }) });
+      const mobileTitle = container.querySelector('[data-mobile-list-title]');
+      assert.equal(mobileTitle.querySelector('h2').textContent, 'messageList.aliasViewLabel');
+      assert.equal(mobileTitle.querySelector('span')?.textContent, '4');
+
+      // Its Sent: named so, and no unread badge.
+      await React.act(async () => useStore.getState().setSelectedAccount('acct-1', 'Sent', 'al-sales'));
+      assert.deepEqual(globalThis.__T_OPTIONS__['messageList.aliasViewLabel'], { name: 'Sales', folder: 'sidebar.aliases.sent' });
+      assert.equal(container.querySelector('[data-mobile-list-title] span'), null);
+    } finally {
+      await restore();
+    }
+  });
+
+  test('alias_gone from the list opens the owner\'s Inbox', async () => {
+    saved();
+    const gone = () => Object.assign(new Error('alias gone'), { code: 'alias_gone', status: 404 });
+    spyMessages((params) => {
+      if (params.aliasId) throw gone();
+      return { messages: [row('owner-1')], total: 1 };
+    });
+    let accountReads = 0;
+    api.getAccounts = async () => { accountReads += 1; return [ALIASED]; };
+    try {
+      await mount({ rows: [], threadedView: false, accounts: [ALIASED], state: aliasState('al-sales', { selectedFolder: 'Sent' }) });
+      await settle();
+      const state = useStore.getState();
+      assert.equal(state.selectedAliasId, null);
+      assert.equal(state.selectedAccountId, 'acct-1');
+      assert.equal(state.selectedFolder, 'INBOX');
+      assert.equal(accountReads, 1, 'the mailbox list is read again');
+      assert.equal('aliasId' in calls.at(-1), false, 'the owner Inbox is listed');
+      assert.equal(calls.at(-1).folder, 'INBOX');
+      assert.deepEqual(state.messages.map(m => m.id), ['owner-1']);
+      assert.equal(state.loadingMessages, false, 'the list is not stuck loading');
+    } finally {
+      await restore();
+    }
+  });
+
+  test('opening an unread letter in an alias view marks it read through the owner read path', async () => {
+    saved();
+    spyMessages(() => ({ messages: [row('a-1')], total: 1 }));
+    const reads = [];
+    api.bulkRead = async (ids, read) => { reads.push([ids, read]); return { ok: true }; };
+    const { markReadBehavior } = useStore.getState();
+    try {
+      await mount({ rows: [], threadedView: false, accounts: [ALIASED], state: aliasState('al-sales', { markReadBehavior: 'immediate' }) });
+      const target = container.querySelector('[data-msgid="a-1"] [draggable]');
+      await React.act(async () => target.dispatchEvent(new dom.window.MouseEvent('click', { bubbles: true, cancelable: true })));
+      await settle();
+      assert.deepEqual(reads, [[['a-1'], true]]);
+      assert.equal(useStore.getState().messages.find(m => m.id === 'a-1').is_read, true);
+    } finally {
+      await restore();
+      await React.act(async () => { useStore.setState({ markReadBehavior }); });
+    }
   });
 });

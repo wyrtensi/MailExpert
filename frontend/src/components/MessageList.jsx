@@ -37,6 +37,10 @@ import FolderPathLabel from './FolderPathLabel.jsx';
 import { folderMatchesQuery } from '../utils/folderDisplay.js';
 import { shortcutBus } from '../utils/shortcutBus.js';
 import { createLatestRequest } from '../utils/latestRequest.js';
+import { messageListParams } from '../utils/messageListParams.js';
+import { aliasMailboxRows } from '../utils/aliasMailboxes.js';
+import { isAliasGone } from '../utils/aliasGone.js';
+import { reconcileAccounts } from '../utils/accountsReconcile.js';
 import { draftComposeFields } from '../utils/draftSignature.js';
 import { isDraftMessage, pickThreadDraft } from '../utils/isDraftMessage.js';
 import { pendingMarkReadMap, completedMarkReadMap, setPending } from '../utils/pendingReads.js';
@@ -144,6 +148,7 @@ export default function MessageList() {
     hoverQuickActions, hoverActionSet, showMobileAvatars, showMessagePreviews,
     swipeActions,
     folders, favoriteFolders, addFavoriteFolder, removeFavoriteFolder, setSelectedAccount,
+    selectedAliasId, aliasUnreadCounts,
     categorizationEnabled, categoryCounts, setCategoryCounts, adjustCategoryCount,
     markReadBehavior, markReadDelay,
     searchAllFolders,
@@ -168,6 +173,8 @@ export default function MessageList() {
     () => Object.fromEntries(accounts.map(account => [account.id, account])),
     [accounts],
   );
+  // The alias mailbox rows, for the header of an alias view.
+  const aliasRows = useMemo(() => aliasMailboxRows(accounts), [accounts]);
   const unifiedInboxAccountKey = accounts
     .filter(isAccountInUnifiedInbox)
     .map(account => account.id)
@@ -260,7 +267,7 @@ export default function MessageList() {
   const layoutPickerRef = useRef(null);
 
   useEffect(() => { currentPageRef.current = currentPage; }, [currentPage]);
-  useEffect(() => { setActiveCategory('primary'); setActiveGtdTab(null); }, [selectedAccountId, selectedFolder, setActiveGtdTab]);
+  useEffect(() => { setActiveCategory('primary'); setActiveGtdTab(null); }, [selectedAccountId, selectedFolder, selectedAliasId, setActiveGtdTab]);
   useEffect(() => {
     const markOpening = () => {
       recentMessageOpenUntilRef.current = Date.now() + 1500;
@@ -289,7 +296,8 @@ export default function MessageList() {
   const gtdActive = gtdActiveForContext(accounts, selectedAccountId, gtdPluginActive);
   // While a GTD tab is selected the list body shows that section instead of the
   // folder listing. Same visibility envelope as the tab strip (INBOX, no search).
-  const showGtdTab = gtdActive && !!activeGtdTab && selectedFolder === 'INBOX' && !searchQuery.trim();
+  // An alias mailbox has no tabs: its Inbox lists every category and no GTD section.
+  const showGtdTab = !selectedAliasId && gtdActive && !!activeGtdTab && selectedFolder === 'INBOX' && !searchQuery.trim();
   // Unread badge per GTD tab, from the shared sections store (Waiting merged).
   const gtdTabUnread = (() => {
     const map = {};
@@ -299,7 +307,7 @@ export default function MessageList() {
 
   // Fetch unread counts per category for the tab bar badges.
   // Re-fetches whenever the account/folder changes or new mail arrives.
-  const categorizationActive = categorizationEnabled || (!isUnified && selectedAccount?.categorization_enabled);
+  const categorizationActive = !selectedAliasId && (categorizationEnabled || (!isUnified && selectedAccount?.categorization_enabled));
   archiveViewKeyRef.current = archiveViewKey({
     selectedAccountId,
     selectedFolder,
@@ -316,6 +324,7 @@ export default function MessageList() {
     accountCategorizationEnabled: selectedAccount?.categorization_enabled,
     unifiedInboxAccountKey,
     showGtdTab,
+    selectedAliasId,
   });
   useEffect(() => {
     if (!categorizationActive || selectedFolder !== 'INBOX') {
@@ -431,6 +440,20 @@ export default function MessageList() {
     setExpandedThreadId(null);
   }, [messagesRefreshToken]); // eslint-disable-line react-hooks/exhaustive-deps
 
+  // The open alias no longer exists (a Gmail sync removed it, or the mode went off on another
+  // computer): the server answers alias_gone, and the view moves to the owner's Inbox instead of
+  // staying on a list that can only fail. Only while that alias is still the one open. True when
+  // the error was alias_gone.
+  const leaveGoneAlias = useCallback((err, aliasId) => {
+    if (!isAliasGone(err)) return false;
+    const state = useStore.getState();
+    if (aliasId && state.selectedAliasId === aliasId) {
+      setSelectedAccount(state.selectedAccountId, 'INBOX');
+      reconcileAccounts();
+    }
+    return true;
+  }, [setSelectedAccount]);
+
   // Reset and load fresh when account/folder/filter changes
   useEffect(() => {
     let cancelled = false;
@@ -446,14 +469,11 @@ export default function MessageList() {
       setHasMoreMessages(true);
       setCurrentPage(1);
       try {
-        const params = { limit: pageSize, offset: 0 };
-        if (selectedAccountId) {
-          params.accountId = selectedAccountId;
-          params.folder = selectedFolder;
-        }
-        if (unreadOnly) params.unreadOnly = 'true';
-        if (threadedView) params.threaded = 'true';
-        if (selectedFolder === 'INBOX' && (categorizationEnabled || selectedAccount?.categorization_enabled)) params.category = activeCategory;
+        const params = messageListParams({
+          selectedAccountId, selectedFolder, selectedAliasId, unreadOnly, threaded: threadedView,
+          categoryActive: categorizationEnabled || selectedAccount?.categorization_enabled, activeCategory,
+          limit: pageSize, offset: 0,
+        });
         await refreshRequestRef.current.run(
           () => api.getMessages(params),
           (data) => {
@@ -488,7 +508,7 @@ export default function MessageList() {
           },
         );
       } catch (err) {
-        console.error('Failed to load messages:', err);
+        if (!leaveGoneAlias(err, selectedAliasId)) console.error('Failed to load messages:', err);
         setFolderSyncing(false);
       } finally {
         if (!cancelled) setLoadingMessages(false);
@@ -496,7 +516,7 @@ export default function MessageList() {
     };
     run();
     return () => { cancelled = true; };
-  }, [selectedAccountId, selectedFolder, unreadOnly, activeCategory, pageSize, scrollMode, accountsReady, unifiedInboxAccountKey, messagesRefreshToken, threadedView, categorizationEnabled, selectedAccount?.categorization_enabled, applyReadGuard, setHasMoreMessages, setLoadingMessages, setMessages, setMessagesOffset, setMessagesTotal]);
+  }, [selectedAccountId, selectedFolder, selectedAliasId, unreadOnly, activeCategory, pageSize, scrollMode, accountsReady, unifiedInboxAccountKey, messagesRefreshToken, threadedView, categorizationEnabled, selectedAccount?.categorization_enabled, applyReadGuard, leaveGoneAlias, setHasMoreMessages, setLoadingMessages, setMessages, setMessagesOffset, setMessagesTotal]);
 
   // Load next page (called by scroll or button)
   const loadMore = useCallback(async () => {
@@ -507,14 +527,11 @@ export default function MessageList() {
     try {
       // Read current offset directly from store to avoid stale closure
       const currentOffset = useStore.getState().messagesOffset;
-      const params = { limit: pageSize, offset: currentOffset };
-      if (selectedAccountId) {
-        params.accountId = selectedAccountId;
-        params.folder = selectedFolder;
-      }
-      if (unreadOnly) params.unreadOnly = 'true';
-      if (useStore.getState().threadedView) params.threaded = 'true';
-      if (selectedFolder === 'INBOX' && (categorizationEnabled || selectedAccount?.categorization_enabled)) params.category = activeCategory;
+      const params = messageListParams({
+        selectedAccountId, selectedFolder, selectedAliasId, unreadOnly, threaded: useStore.getState().threadedView,
+        categoryActive: categorizationEnabled || selectedAccount?.categorization_enabled, activeCategory,
+        limit: pageSize, offset: currentOffset,
+      });
       // A page that started before the list was reset (account, folder or filter changed) must
       // not be appended to the new list or overwrite its offset. It also goes through the
       // shared request guard, so an archive or delete meanwhile drops it, as it drops a refresh.
@@ -528,13 +545,13 @@ export default function MessageList() {
         },
       );
     } catch (err) {
-      if (sameList()) console.error('Failed to load more messages:', err);
+      if (sameList() && !leaveGoneAlias(err, selectedAliasId)) console.error('Failed to load more messages:', err);
     } finally {
       // After a reset the loading flag belongs to the first-page load that replaced this list.
       // Otherwise clear it even when the page was dropped: nothing else would.
       if (sameList()) setLoadingMessages(false);
     }
-  }, [selectedAccountId, selectedFolder, unreadOnly, activeCategory, pageSize, loadingMessages, hasMoreMessages, categorizationEnabled, selectedAccount?.categorization_enabled, applyReadGuard, appendMessages, setHasMoreMessages, setLoadingMessages, setMessagesOffset]);
+  }, [selectedAccountId, selectedFolder, selectedAliasId, unreadOnly, activeCategory, pageSize, loadingMessages, hasMoreMessages, categorizationEnabled, selectedAccount?.categorization_enabled, applyReadGuard, leaveGoneAlias, appendMessages, setHasMoreMessages, setLoadingMessages, setMessagesOffset]);
 
   // Listen for background refresh events from WebSocket. If a message was just
   // opened, give its body request a brief head start before reloading the full list.
@@ -544,19 +561,20 @@ export default function MessageList() {
         const state = useStore.getState();
         const ps = state.pageSize;
         const sm = state.scrollMode;
-        let params;
+        let page;
         if (sm === 'paginated') {
           const pg = currentPageRef.current;
-          params = { limit: ps, offset: (pg - 1) * ps };
+          page = { limit: ps, offset: (pg - 1) * ps };
         } else {
           const currentOffset = state.messagesOffset;
           // Backend caps limit at 500 — don't request more or the list silently shrinks
-          params = { limit: Math.min(currentOffset || ps, 500), offset: 0 };
+          page = { limit: Math.min(currentOffset || ps, 500), offset: 0 };
         }
-        if (selectedAccountId) { params.accountId = selectedAccountId; params.folder = selectedFolder; }
-        if (unreadOnly) params.unreadOnly = 'true';
-        if (state.threadedView) params.threaded = 'true';
-        if (selectedFolder === 'INBOX' && (categorizationEnabled || selectedAccount?.categorization_enabled)) params.category = activeCategory;
+        const params = messageListParams({
+          selectedAccountId, selectedFolder, selectedAliasId, unreadOnly, threaded: state.threadedView,
+          categoryActive: categorizationEnabled || selectedAccount?.categorization_enabled, activeCategory,
+          ...page,
+        });
         await refreshRequestRef.current.run(
           () => api.getMessages(params),
           (data) => {
@@ -578,7 +596,9 @@ export default function MessageList() {
             }
           },
         );
-      } catch { /* intentional */ }
+      } catch (err) {
+        leaveGoneAlias(err, selectedAliasId);
+      }
     };
 
     const handler = () => {
@@ -597,7 +617,7 @@ export default function MessageList() {
       window.removeEventListener('mailexpert:refresh', handler);
       clearTimeout(deferredRefreshTimerRef.current);
     };
-  }, [selectedAccountId, selectedFolder, unreadOnly, activeCategory, searchQuery, categorizationEnabled, selectedAccount?.categorization_enabled, applyReadGuard, setHasMoreMessages, setMessages, setMessagesOffset, setMessagesTotal]);
+  }, [selectedAccountId, selectedFolder, selectedAliasId, unreadOnly, activeCategory, searchQuery, categorizationEnabled, selectedAccount?.categorization_enabled, applyReadGuard, leaveGoneAlias, setHasMoreMessages, setMessages, setMessagesOffset, setMessagesTotal]);
 
   // Search
   useEffect(() => {
@@ -726,11 +746,11 @@ export default function MessageList() {
     setLoadingMessages(true);
     setCurrentPage(pageNum);
     try {
-      const params = { limit: pageSize, offset: (pageNum - 1) * pageSize };
-      if (selectedAccountId) { params.accountId = selectedAccountId; params.folder = selectedFolder; }
-      if (unreadOnly) params.unreadOnly = 'true';
-      if (threadedView) params.threaded = 'true';
-      if (selectedFolder === 'INBOX' && (categorizationEnabled || selectedAccount?.categorization_enabled)) params.category = activeCategory;
+      const params = messageListParams({
+        selectedAccountId, selectedFolder, selectedAliasId, unreadOnly, threaded: threadedView,
+        categoryActive: categorizationEnabled || selectedAccount?.categorization_enabled, activeCategory,
+        limit: pageSize, offset: (pageNum - 1) * pageSize,
+      });
       await refreshRequestRef.current.run(
         () => api.getMessages(params),
         (data) => {
@@ -743,11 +763,11 @@ export default function MessageList() {
         },
       );
     } catch (err) {
-      console.error('Failed to load page:', err);
+      if (!leaveGoneAlias(err, selectedAliasId)) console.error('Failed to load page:', err);
     } finally {
       setLoadingMessages(false);
     }
-  }, [selectedAccountId, selectedFolder, unreadOnly, activeCategory, pageSize, loadingMessages, threadedView, categorizationEnabled, selectedAccount?.categorization_enabled, applyReadGuard, setExpandedThreadId, setHasMoreMessages, setLoadingMessages, setMessages, setMessagesOffset, setMessagesTotal]);
+  }, [selectedAccountId, selectedFolder, selectedAliasId, unreadOnly, activeCategory, pageSize, loadingMessages, threadedView, categorizationEnabled, selectedAccount?.categorization_enabled, applyReadGuard, leaveGoneAlias, setExpandedThreadId, setHasMoreMessages, setLoadingMessages, setMessages, setMessagesOffset, setMessagesTotal]);
 
   const handleSync = async () => {
     if (syncing) return;
@@ -2785,16 +2805,25 @@ export default function MessageList() {
   };
 
   const accountColor = selectedAccount?.color || 'currentColor';
-  const showInboxIcon = !isUnified && selectedFolder === 'INBOX' && !searchQuery.trim();
+  const showInboxIcon = !isUnified && !selectedAliasId && selectedFolder === 'INBOX' && !searchQuery.trim();
+  const selectedAliasRow = selectedAliasId
+    ? aliasRows.find(row => row.accountId === selectedAccountId && row.aliasId === selectedAliasId)
+    : null;
 
   const label = searchQuery.trim()
     ? t('messageList.searchLabel', { query: searchQuery })
-    : isUnified ? t('sidebar.allInboxes') : selectedFolder;
+    : selectedAliasId ? t('messageList.aliasViewLabel', {
+      name: selectedAliasRow?.name ?? '',
+      folder: t(selectedFolder === 'INBOX' ? 'sidebar.aliases.inbox' : 'sidebar.aliases.sent'),
+    })
+      : isUnified ? t('sidebar.allInboxes') : selectedFolder;
 
   const selectedFolderCounts = folders[selectedAccountId]?.find(f => f.path === selectedFolder);
-  const headerUnread = isUnified ? unreadCounts.total
-    : selectedFolder === 'INBOX' ? unreadCounts.byAccount[selectedAccountId] ?? 0
-      : selectedFolderCounts?.unread_count ?? 0;
+  // An alias's unread count is its own (per letter, from the server); its Sent shows none.
+  const headerUnread = selectedAliasId ? (selectedFolder === 'INBOX' ? aliasUnreadCounts[selectedAliasId] ?? 0 : 0)
+    : isUnified ? unreadCounts.total
+      : selectedFolder === 'INBOX' ? unreadCounts.byAccount[selectedAccountId] ?? 0
+        : selectedFolderCounts?.unread_count ?? 0;
   // Paging totals count cached results (threads/categories can be subsets). The
   // unfiltered mailbox header instead shows independently observed server membership.
   const headerSamples = isUnified
@@ -2804,7 +2833,9 @@ export default function MessageList() {
   const headerCountKnown = headerSamples.length > 0 && headerSamples.every(s => s?.known && s.totalCount != null);
   const headerCountStale = headerSamples.some(s => !s?.known || s?.stale);
   const headerServerTotal = headerSamples.reduce((sum, s) => sum + (s?.totalCount || 0), 0);
-  const filteredCount = unreadOnly || (activeCategory && categorizationEnabled);
+  // An alias view is a subset of the owner's folders: its count is the list's own total, never the
+  // mailbox's IMAP snapshot.
+  const filteredCount = !!selectedAliasId || unreadOnly || (activeCategory && categorizationEnabled);
 
   // Derived bulk-selection values (computed fresh each render, no stale closure risk)
   const selectionMode = selectedIds.size > 0 || selectionModeActive;
@@ -3410,7 +3441,7 @@ export default function MessageList() {
       )}
 
       {/* Category + GTD tabs — shown in INBOX when categorization and/or GTD is active */}
-      {(categorizationActive || gtdActive) && selectedFolder === 'INBOX' && !searchQuery.trim() && (
+      {!selectedAliasId && (categorizationActive || gtdActive) && selectedFolder === 'INBOX' && !searchQuery.trim() && (
         <div style={{ position: 'relative', flexShrink: 0, borderBottom: '1px solid var(--border-subtle)' }}>
           {!isMobile && catScrollEdges.left && (
             <button

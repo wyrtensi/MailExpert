@@ -27,6 +27,7 @@ export function archiveViewKey({
   accountCategorizationEnabled,
   unifiedInboxAccountKey,
   showGtdTab,
+  selectedAliasId,
 }) {
   return JSON.stringify([
     selectedAccountId ?? null,
@@ -44,6 +45,7 @@ export function archiveViewKey({
     Boolean(accountCategorizationEnabled),
     unifiedInboxAccountKey ?? null,
     Boolean(showGtdTab),
+    selectedAliasId ?? null,
   ]);
 }
 

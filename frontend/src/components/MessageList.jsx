@@ -440,18 +440,32 @@ export default function MessageList() {
     setExpandedThreadId(null);
   }, [messagesRefreshToken]); // eslint-disable-line react-hooks/exhaustive-deps
 
-  // The open alias no longer exists (a Gmail sync removed it, or the mode went off on another
-  // computer): the server answers alias_gone, and the view moves to the owner's Inbox instead of
-  // staying on a list that can only fail. Only while that alias is still the one open. True when
-  // the error was alias_gone.
-  const leaveGoneAlias = useCallback((err, aliasId) => {
-    if (!isAliasGone(err)) return false;
+  // The open alias view can only fail, so leave it instead of staying on a list that keeps failing,
+  // and only while that alias (and, for alias_folder, that folder) is still the one open:
+  // - alias_gone: the alias no longer exists (a Gmail sync or an admin removed it); the view moves
+  //   to the owner's Inbox and the mailbox list is read again. Turning the mode off on another
+  //   computer is not such an error: the server never sees a user's mode, and this page picks the
+  //   saved mode up only when it loads (loadPreferences), so the view stays until a page reload.
+  // - alias_folder: the folder is not the alias's Inbox or Sent any more (a stale Sent path, the
+  //   Sent folder renamed); the view moves to the alias's Inbox.
+  // True when the error was one of these.
+  const leaveStaleAliasView = useCallback((err, aliasId, folder) => {
     const state = useStore.getState();
-    if (aliasId && state.selectedAliasId === aliasId) {
-      setSelectedAccount(state.selectedAccountId, 'INBOX');
-      reconcileAccounts();
+    const stillOpen = Boolean(aliasId) && state.selectedAliasId === aliasId;
+    if (isAliasGone(err)) {
+      if (stillOpen) {
+        setSelectedAccount(state.selectedAccountId, 'INBOX');
+        reconcileAccounts();
+      }
+      return true;
     }
-    return true;
+    if (err?.code === 'alias_folder') {
+      if (stillOpen && state.selectedFolder === folder && folder !== 'INBOX') {
+        setSelectedAccount(state.selectedAccountId, 'INBOX', aliasId);
+      }
+      return true;
+    }
+    return false;
   }, [setSelectedAccount]);
 
   // Reset and load fresh when account/folder/filter changes
@@ -508,7 +522,7 @@ export default function MessageList() {
           },
         );
       } catch (err) {
-        if (!leaveGoneAlias(err, selectedAliasId)) console.error('Failed to load messages:', err);
+        if (!leaveStaleAliasView(err, selectedAliasId, selectedFolder)) console.error('Failed to load messages:', err);
         setFolderSyncing(false);
       } finally {
         if (!cancelled) setLoadingMessages(false);
@@ -516,7 +530,7 @@ export default function MessageList() {
     };
     run();
     return () => { cancelled = true; };
-  }, [selectedAccountId, selectedFolder, selectedAliasId, unreadOnly, activeCategory, pageSize, scrollMode, accountsReady, unifiedInboxAccountKey, messagesRefreshToken, threadedView, categorizationEnabled, selectedAccount?.categorization_enabled, applyReadGuard, leaveGoneAlias, setHasMoreMessages, setLoadingMessages, setMessages, setMessagesOffset, setMessagesTotal]);
+  }, [selectedAccountId, selectedFolder, selectedAliasId, unreadOnly, activeCategory, pageSize, scrollMode, accountsReady, unifiedInboxAccountKey, messagesRefreshToken, threadedView, categorizationEnabled, selectedAccount?.categorization_enabled, applyReadGuard, leaveStaleAliasView, setHasMoreMessages, setLoadingMessages, setMessages, setMessagesOffset, setMessagesTotal]);
 
   // Load next page (called by scroll or button)
   const loadMore = useCallback(async () => {
@@ -545,13 +559,13 @@ export default function MessageList() {
         },
       );
     } catch (err) {
-      if (sameList() && !leaveGoneAlias(err, selectedAliasId)) console.error('Failed to load more messages:', err);
+      if (sameList() && !leaveStaleAliasView(err, selectedAliasId, selectedFolder)) console.error('Failed to load more messages:', err);
     } finally {
       // After a reset the loading flag belongs to the first-page load that replaced this list.
       // Otherwise clear it even when the page was dropped: nothing else would.
       if (sameList()) setLoadingMessages(false);
     }
-  }, [selectedAccountId, selectedFolder, selectedAliasId, unreadOnly, activeCategory, pageSize, loadingMessages, hasMoreMessages, categorizationEnabled, selectedAccount?.categorization_enabled, applyReadGuard, leaveGoneAlias, appendMessages, setHasMoreMessages, setLoadingMessages, setMessagesOffset]);
+  }, [selectedAccountId, selectedFolder, selectedAliasId, unreadOnly, activeCategory, pageSize, loadingMessages, hasMoreMessages, categorizationEnabled, selectedAccount?.categorization_enabled, applyReadGuard, leaveStaleAliasView, appendMessages, setHasMoreMessages, setLoadingMessages, setMessagesOffset]);
 
   // Listen for background refresh events from WebSocket. If a message was just
   // opened, give its body request a brief head start before reloading the full list.
@@ -597,7 +611,7 @@ export default function MessageList() {
           },
         );
       } catch (err) {
-        leaveGoneAlias(err, selectedAliasId);
+        leaveStaleAliasView(err, selectedAliasId, selectedFolder);
       }
     };
 
@@ -617,7 +631,7 @@ export default function MessageList() {
       window.removeEventListener('mailexpert:refresh', handler);
       clearTimeout(deferredRefreshTimerRef.current);
     };
-  }, [selectedAccountId, selectedFolder, selectedAliasId, unreadOnly, activeCategory, searchQuery, categorizationEnabled, selectedAccount?.categorization_enabled, applyReadGuard, leaveGoneAlias, setHasMoreMessages, setMessages, setMessagesOffset, setMessagesTotal]);
+  }, [selectedAccountId, selectedFolder, selectedAliasId, unreadOnly, activeCategory, searchQuery, categorizationEnabled, selectedAccount?.categorization_enabled, applyReadGuard, leaveStaleAliasView, setHasMoreMessages, setMessages, setMessagesOffset, setMessagesTotal]);
 
   // Search
   useEffect(() => {
@@ -763,11 +777,11 @@ export default function MessageList() {
         },
       );
     } catch (err) {
-      if (!leaveGoneAlias(err, selectedAliasId)) console.error('Failed to load page:', err);
+      if (!leaveStaleAliasView(err, selectedAliasId, selectedFolder)) console.error('Failed to load page:', err);
     } finally {
       setLoadingMessages(false);
     }
-  }, [selectedAccountId, selectedFolder, selectedAliasId, unreadOnly, activeCategory, pageSize, loadingMessages, threadedView, categorizationEnabled, selectedAccount?.categorization_enabled, applyReadGuard, leaveGoneAlias, setExpandedThreadId, setHasMoreMessages, setLoadingMessages, setMessages, setMessagesOffset, setMessagesTotal]);
+  }, [selectedAccountId, selectedFolder, selectedAliasId, unreadOnly, activeCategory, pageSize, loadingMessages, threadedView, categorizationEnabled, selectedAccount?.categorization_enabled, applyReadGuard, leaveStaleAliasView, setExpandedThreadId, setHasMoreMessages, setLoadingMessages, setMessages, setMessagesOffset, setMessagesTotal]);
 
   const handleSync = async () => {
     if (syncing) return;

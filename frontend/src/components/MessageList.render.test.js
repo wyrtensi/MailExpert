@@ -1202,6 +1202,37 @@ describe('MessageList — the list of an alias mailbox', () => {
     }
   });
 
+  test('alias_folder from the alias Sent opens the alias Inbox', async () => {
+    saved();
+    const stale = () => Object.assign(new Error('An alias has only Inbox and Sent'), { code: 'alias_folder', status: 400 });
+    spyMessages((params) => {
+      if (params.aliasId && params.folder !== 'INBOX') throw stale();
+      return { messages: [row('alias-1')], total: 1 };
+    });
+    let accountReads = 0;
+    api.getAccounts = async () => { accountReads += 1; return [ALIASED]; };
+    const errors = [];
+    const originalError = console.error;
+    console.error = (...args) => { errors.push(args); };
+    try {
+      await mount({ rows: [], threadedView: false, accounts: [ALIASED], state: aliasState('al-sales', { selectedFolder: 'Old Sent' }) });
+      await settle();
+      const state = useStore.getState();
+      assert.equal(state.selectedAliasId, 'al-sales', 'the alias stays open');
+      assert.equal(state.selectedAccountId, 'acct-1');
+      assert.equal(state.selectedFolder, 'INBOX');
+      assert.equal(calls.at(-1).aliasId, 'al-sales');
+      assert.equal(calls.at(-1).folder, 'INBOX');
+      assert.deepEqual(state.messages.map(m => m.id), ['alias-1']);
+      assert.equal(state.loadingMessages, false, 'the list is not stuck loading');
+      assert.equal(accountReads, 0, 'the alias exists, the mailbox list is not read again');
+      assert.deepEqual(errors, [], 'a handled refusal is not logged as a failure');
+    } finally {
+      console.error = originalError;
+      await restore();
+    }
+  });
+
   test('opening an unread letter in an alias view marks it read through the owner read path', async () => {
     saved();
     spyMessages(() => ({ messages: [row('a-1')], total: 1 }));

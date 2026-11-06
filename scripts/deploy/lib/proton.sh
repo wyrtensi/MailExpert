@@ -177,6 +177,9 @@ proton_refusal_text() {
 # A failed renewal is a warning and recorded in PROTON_RENEW_FAILED, which proton_snapshot_check
 # turns into a failed backup. The renewer closes the backup's lock descriptors: a backup killed
 # without its exit trap must not keep backup.lock, update.lock or install.lock held through it.
+# Its sleep gets no stderr: proton_snapshot_end kills the subshell, not the sleep, and a sleep
+# left holding the caller's stderr kept a $(...) or a pipe reading the backup open for up to a
+# whole interval after the backup ended.
 proton_start_renewer() {
   local id=$1 parent=$$ every=${PROTON_RENEW_SECONDS:-60} fd
   PROTON_RENEW_FAILED=$(mktemp)
@@ -184,7 +187,7 @@ proton_start_renewer() {
     for fd in ${BACKUP_FD:-} ${UPDATE_FD:-} ${INSTALL_FD:-} ${UPDATE_LOCK_FD:-}; do
       [[ $fd =~ ^[0-9]+$ ]] && eval "exec $fd>&-"
     done
-    while sleep "$every"; do
+    while sleep "$every" 2>/dev/null; do
       kill -0 "$parent" 2>/dev/null || exit 0
       if ! proton_renew "$id" >/dev/null 2>&1; then
         kill -0 "$parent" 2>/dev/null || exit 0

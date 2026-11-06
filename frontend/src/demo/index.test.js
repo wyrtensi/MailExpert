@@ -845,3 +845,21 @@ test('PATCH keeps a boolean and refuses \'yes\' with invalid_preference', async 
   await demoRequest('PATCH', '/auth/preferences', { aliasesAsAccounts: false });
   assert.equal((await demoRequest('GET', '/auth/preferences')).aliasesAsAccounts, false);
 });
+
+test('GET /mail/messages with aliasId lists only letters whose pill names the alias', async () => {
+  const aliasId = 'demo-ops-alias-vendors';
+  const inbox = await demoRequest('GET', `/mail/messages?accountId=demo-ops&folder=INBOX&aliasId=${aliasId}&category=social&limit=50`);
+  const ids = inbox.messages.map((m) => m.id);
+  assert.ok(ids.includes('demo-alias-901'));
+  assert.ok(!ids.includes('demo-alias-902'));
+  assert.equal(inbox.total, ids.length);
+  const sent = await demoRequest('GET', `/mail/messages?accountId=demo-ops&folder=Sent&aliasId=${aliasId}`);
+  assert.ok(sent.messages.every((m) => m.from_email.toLowerCase() === 'vendors@demo.mailexpert.local'));
+});
+
+test('GET /mail/alias-unread-counts answers byAlias for demo-ops-alias-vendors', async () => {
+  const { byAlias } = await demoRequest('GET', '/mail/alias-unread-counts');
+  assert.equal(typeof byAlias['demo-ops-alias-vendors'], 'number');
+  const inbox = await demoRequest('GET', '/mail/messages?accountId=demo-ops&folder=INBOX&aliasId=demo-ops-alias-vendors&unreadOnly=true');
+  assert.equal(byAlias['demo-ops-alias-vendors'], inbox.total);
+});

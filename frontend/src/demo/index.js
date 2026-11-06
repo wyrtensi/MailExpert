@@ -5,6 +5,8 @@ import { demoNodeAgentRequest, demoNodeUpdateState } from './nodeAgent.js';
 import { DEMO_TENANT_SETTINGS, demoTenantAlerts, demoTenantRequest } from './tenant.js';
 import { DEMO_MAIL_PROVIDERS, createProviderDemo } from './providers.js';
 import { demoRole } from '../utils/demoRole.js';
+import { aliasMailboxRows } from '../utils/aliasMailboxes.js';
+import { recipientAliasFor } from '../utils/mailboxBanner.js';
 import { googleCallbackFormError } from '../utils/googleApps.js';
 import {
   DOMAIN_STATES, MAILBOX_READY_STATES, MAX_DELETE_AFTER_DAYS, canMarkReady, canRestartOnboarding, deletionDate,
@@ -667,10 +669,27 @@ function foldersFor(accountId) {
   });
 }
 
+// Whether `item` belongs to the alias view of `address`: in the Inbox a letter whose pill names the
+// alias as an active one (the server's message_reply_alias rule), in Sent a letter from it.
+function inAliasView(item, account, address, folder) {
+  const wanted = String(address).toLocaleLowerCase();
+  if (folder === 'INBOX') {
+    const pill = recipientAliasFor(item, account, foldersFor(account.id));
+    return !!pill && pill.active && String(pill.address).toLocaleLowerCase() === wanted;
+  }
+  return String(item.from_email || '').toLocaleLowerCase() === wanted;
+}
+
+function aliasAddress(accountId, aliasId) {
+  const row = aliasMailboxRows(ACCOUNT_FIXTURES).find(r => r.accountId === accountId && r.aliasId === aliasId);
+  return row ? row.email : null;
+}
+
 function listMessages(url, forceSearch = false) {
   const accountId = url.searchParams.get('accountId');
   const folder = url.searchParams.get('folder') || (forceSearch ? null : 'INBOX');
-  const category = url.searchParams.get('category');
+  const aliasId = url.searchParams.get('aliasId');
+  const category = aliasId ? null : url.searchParams.get('category');
   const unreadOnly = url.searchParams.get('unreadOnly') === 'true';
   const query = (url.searchParams.get('q') || '').trim().toLocaleLowerCase();
   const limit = Math.max(0, Number.parseInt(url.searchParams.get('limit') || '50', 10));
@@ -680,6 +699,11 @@ function listMessages(url, forceSearch = false) {
   if (folder) result = result.filter(item => item.folder === folder);
   if (unreadOnly) result = result.filter(item => !item.is_read);
   if (category) result = result.filter(item => (item.category || 'primary') === category);
+  if (aliasId) {
+    const account = ACCOUNT_FIXTURES.find(a => a.id === accountId);
+    const address = account && aliasAddress(accountId, aliasId);
+    result = address ? result.filter(item => inAliasView(item, account, address, folder)) : [];
+  }
   // The one search operator the demo understands: from:<address>, as the sender history uses it.
   const fromOnly = query.match(/^from:"?([^"\s]+)"?$/);
   if (fromOnly) {
@@ -2405,6 +2429,16 @@ export async function demoRequest(method, path, body = {}) {
   }
 
   if (verb === 'GET' && pathname === '/mail/unread-counts') return clone(unreadCounts());
+  if (verb === 'GET' && pathname === '/mail/alias-unread-counts') {
+    const byAlias = {};
+    for (const row of aliasMailboxRows(ACCOUNT_FIXTURES)) {
+      const account = ACCOUNT_FIXTURES.find(a => a.id === row.accountId);
+      byAlias[row.aliasId] = visibleMessages()
+        .filter(item => item.account_id === row.accountId && item.folder === 'INBOX' && !item.is_read
+          && inAliasView(item, account, row.email, 'INBOX')).length;
+    }
+    return { byAlias };
+  }
   if (verb === 'GET' && pathname === '/mail/messages') return clone(listMessages(url));
   if (verb === 'GET' && (pathname === '/mail/search' || pathname === '/search')) {
     return clone({ ...listMessages(url, true), query: url.searchParams.get('q') || '' });

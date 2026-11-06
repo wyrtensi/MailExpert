@@ -6,15 +6,16 @@ import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
 import { readFileSync } from 'node:fs';
 import { createRealSchemaDb } from './testing/realSchema.js';
 
-const dbState = { db: null, last: null };
+const dbState = { db: null, last: null, calls: [] };
 vi.mock('./db.js', () => ({
   query: (sql, params) => {
     dbState.last = { sql, params };
+    dbState.calls.push({ sql, params });
     return dbState.db.query(sql, params);
   },
 }));
 
-const { listMessages } = await import('./messageService.js');
+const { aliasUnreadCounts, listMessages } = await import('./messageService.js');
 
 const fixture = JSON.parse(readFileSync(new URL('./aliasMailbox.fixtures.json', import.meta.url), 'utf8'));
 
@@ -32,6 +33,8 @@ const ALIAS_IDS = [
 ];
 const NODE_ALIAS = '83000000-0000-4000-8000-000000000004';
 const DISABLED_ALIAS = '83000000-0000-4000-8000-000000000005';
+// The other mailbox's alias on the same address as desk's ivan; its only letter is read.
+const OTHER_IVAN = '83000000-0000-4000-8000-000000000006';
 const UNKNOWN_ALIAS = '83000000-0000-4000-8000-0000000000ff';
 
 const aliasId = (email) => ALIAS_IDS[fixture.aliases.findIndex((a) => a.email === email)];
@@ -171,13 +174,43 @@ describe('listMessages with aliasId', () => {
   });
 });
 
+describe('aliasUnreadCounts', () => {
+  beforeAll(async () => {
+    await db.query(
+      "INSERT INTO account_aliases (id, account_id, name, email) VALUES ($1, $2, 'Ivan Science', 'ivan@example.com')",
+      [OTHER_IVAN, ACCOUNTS.other],
+    );
+  });
+
+  it("each alias's unread count equals its unreadOnly Inbox total", async () => {
+    const counts = await aliasUnreadCounts();
+    const aliases = [[ACCOUNTS.desk, IVAN], [ACCOUNTS.desk, ANNA], [ACCOUNTS.other, OTHER_IVAN]];
+    for (const [accountId, id] of aliases) {
+      const { total } = await listMessages({ accountId, folder: 'INBOX', aliasId: id, unreadOnly: true });
+      expect(counts[id]).toBe(total);
+    }
+    expect(counts[IVAN]).toBe(casesFor('inbox', 'ivan@example.com').filter((c) => !c.is_read).length);
+    expect(counts[ANNA]).toBe(casesFor('inbox', 'anna@example.com').filter((c) => !c.is_read).length);
+    expect(counts[IVAN]).toBeGreaterThan(0);
+    expect(counts[ANNA]).toBeGreaterThan(0);
+  });
+
+  it("has every current alias, 0 without unread letters, and nothing for the mailbox's own address, a mail node or a disabled mailbox", async () => {
+    const counts = await aliasUnreadCounts();
+    expect(Object.keys(counts).sort()).toEqual([IVAN, ANNA, OTHER_IVAN].sort());
+    expect(counts[OTHER_IVAN]).toBe(0);
+    for (const id of [DESK_OWN, NODE_ALIAS, DISABLED_ALIAS]) expect(counts).not.toHaveProperty(id);
+  });
+});
+
 describe('alias mailbox query plans', () => {
   beforeAll(async () => {
-    // A big old mailbox: letters to someone else in INBOX, the mailbox's own letters in Sent.
+    // A big old mailbox: letters to someone else in INBOX, half of them unread (so the unread
+    // counts cannot hide behind a short is_read list), the mailbox's own letters in Sent.
     await db.query(
       `INSERT INTO messages (account_id, uid, folder, message_id, subject, date, from_email, to_addresses, delivery_addresses, is_read)
        SELECT $1, 10000 + g, 'INBOX', '<bulk-in-' || g || '@example.com>', 'Bulk ' || g, now() - (g || ' minutes')::interval,
-              'client' || g || '@corp.test', '[{"name":"","email":"other@corp.test"}]'::jsonb, '["other@corp.test"]'::jsonb, true
+              'client' || g || '@corp.test', '[{"name":"","email":"other@corp.test"}]'::jsonb, '["other@corp.test"]'::jsonb, g % 2 = 0
        FROM generate_series(1, 3000) g`,
       [ACCOUNTS.desk],
     );
@@ -204,6 +237,19 @@ describe('alias mailbox query plans', () => {
     const plan = await planOf({ aliasId: IVAN });
     expect(plan).toContain('idx_messages_delivery_addresses');
     expect(plan).toContain('idx_messages_recipient_addresses');
+    expect(plan).not.toMatch(/Seq Scan on messages/);
+  });
+
+  it('counts without a scan of the mailbox', async () => {
+    dbState.calls = [];
+    await aliasUnreadCounts();
+    const counting = dbState.calls.filter((c) => c.sql.includes('GROUP BY') && c.params?.[0] === ACCOUNTS.desk);
+    expect(counting).toHaveLength(1);
+    const { rows } = await db.query(`EXPLAIN ${counting[0].sql}`, counting[0].params);
+    const plan = rows.map((r) => r['QUERY PLAN']).join('\n');
+    expect(plan).toContain('idx_messages_delivery_addresses');
+    expect(plan).toContain('idx_messages_recipient_addresses');
+    expect(plan).toContain('idx_messages_account_from_date');
     expect(plan).not.toMatch(/Seq Scan on messages/);
   });
 

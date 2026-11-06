@@ -8,26 +8,27 @@ vi.mock('../middleware/auth.js', () => ({
   },
 }));
 vi.mock('../index.js', () => ({ imapManager: {} }));
-vi.mock('../services/messageService.js', () => ({ listMessages: vi.fn() }));
+vi.mock('../services/messageService.js', () => ({ listMessages: vi.fn(), aliasUnreadCounts: vi.fn() }));
 
 import express from 'express';
 import mailRoutes from './mail.js';
-import { listMessages } from '../services/messageService.js';
+import { aliasUnreadCounts, listMessages } from '../services/messageService.js';
 
 const ACCOUNT = '84000000-0000-4000-8000-000000000001';
 const ALIAS = '85000000-0000-4000-8000-000000000001';
 
-describe('GET /api/mail/messages with aliasId', () => {
-  let server;
-  let base;
+let server;
+let base;
 
-  beforeAll(async () => {
-    const app = express();
-    app.use('/api/mail', mailRoutes);
-    await new Promise((resolve) => { server = app.listen(0, resolve); });
-    base = `http://127.0.0.1:${server.address().port}`;
-  });
-  afterAll(async () => { await new Promise((resolve) => server.close(resolve)); });
+beforeAll(async () => {
+  const app = express();
+  app.use('/api/mail', mailRoutes);
+  await new Promise((resolve) => { server = app.listen(0, resolve); });
+  base = `http://127.0.0.1:${server.address().port}`;
+});
+afterAll(async () => { await new Promise((resolve) => server.close(resolve)); });
+
+describe('GET /api/mail/messages with aliasId', () => {
   beforeEach(() => { listMessages.mockReset(); });
 
   const get = (qs) => fetch(`${base}/api/mail/messages?${qs}`);
@@ -73,5 +74,18 @@ describe('GET /api/mail/messages with aliasId', () => {
     const res = await get(`accountId=${ACCOUNT}`);
     expect(res.status).toBe(200);
     expect(listMessages.mock.calls[0][0].aliasId).toBeUndefined();
+  });
+});
+
+describe('GET /api/mail/alias-unread-counts', () => {
+  beforeEach(() => { aliasUnreadCounts.mockReset(); });
+
+  it('GET /alias-unread-counts answers byAlias with no-store', async () => {
+    aliasUnreadCounts.mockResolvedValueOnce({ [ALIAS]: 3 });
+    const res = await fetch(`${base}/api/mail/alias-unread-counts`);
+    expect(res.status).toBe(200);
+    expect(res.headers.get('cache-control')).toBe('no-store');
+    expect(await res.json()).toEqual({ byAlias: { [ALIAS]: 3 } });
+    expect(aliasUnreadCounts).toHaveBeenCalledTimes(1);
   });
 });

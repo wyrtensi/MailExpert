@@ -24,7 +24,7 @@ import { snippetFromBody, decodeMimeWords, parseRawHeaders, parseMailboxList, bu
 import { resolveTrashFolder, resolveAllTrashPaths, resolveAllDraftsPaths, resolveArchiveFolder, isAllMailFolder, resolveSpamFolder, resolveAllSpamPaths, getDeleteStrategy, adjustFolderCounts, fanOutReadToSiblings, fanOutStarToSiblings, fanOutBulkReadToSiblings } from '../utils/mailUtils.js';
 import { pluginRegistry } from '../plugins/registry.js';
 import { recordAudit } from '../services/auditLog.js';
-import { listMessages } from '../services/messageService.js';
+import { aliasUnreadCounts, listMessages } from '../services/messageService.js';
 import { recordSyncSignal } from '../services/diagnosticsRing.js';
 import { resolveAccountScope } from '../services/unifiedInbox.js';
 import { validateHost } from '../services/hostValidation.js';
@@ -373,6 +373,14 @@ router.get('/unread-counts', async (req, res) => {
   }
   res.set('Cache-Control', 'no-store');
   res.json({ total, byAccount, snapshots, complete });
+});
+
+// Unread letters in each alias mailbox's Inbox (services/aliasMailbox.js), counted from the
+// letters themselves with the alias Inbox's own rule, so they match what that Inbox lists.
+router.get('/alias-unread-counts', async (req, res) => {
+  const byAlias = await aliasUnreadCounts();
+  res.set('Cache-Control', 'no-store');
+  res.json({ byAlias });
 });
 
 // Hard cap on a live IMAP body fetch. Connection acquisition is already bounded at 30s

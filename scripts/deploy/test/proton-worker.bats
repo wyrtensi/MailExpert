@@ -467,6 +467,17 @@ STUB_EOF
   exec {BACKUP_FD}>&-
 }
 
+@test "once the gate ends, nothing of the renewer holds the caller's output" {
+  # A caller that reads the backup's output ($(...), a pipe: the e2e, a backup piped to a log)
+  # waits for every holder of that pipe; a renewer's sleep left running held it for a whole
+  # renewal interval after the backup ended.
+  export PROTON_RENEW_SECONDS=30
+  local start=$SECONDS out
+  out=$(proton_snapshot_begin snap-1 2>&1; proton_snapshot_end 2>&1)
+  [[ $out == *"snapshot gate open"* ]]
+  [ $((SECONDS - start)) -lt 10 ]
+}
+
 @test "Minor B: a stuck sender is cleared by stopping backend and worker, then install.sh" {
   PROTON_REFUSAL=snapshot_busy OPT_PREFIX=/opt/x run proton_refusal_text
   [[ $output == *"docker compose -p me-test stop backend proton-worker, then install.sh --prefix /opt/x"* ]]

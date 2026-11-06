@@ -2,6 +2,9 @@
 -- the list pill (frontend/src/utils/mailboxBanner.js recipientAliasFor with replyAlias.js
 -- matchReplyAlias); backend/src/services/aliasMailbox.fixtures.json is run by both, so change the
 -- rule in both places at once and add a case there.
+-- message_delivery_addresses backs the index idx_messages_delivery_addresses (0102): changing its
+-- body needs a new migration that also rebuilds that index (REINDEX, or drop and create);
+-- message_reply_alias is not indexed.
 
 -- delivery_addresses (jsonb array of address strings) as a lowercased text[]; '{}' for NULL and
 -- for anything that is not an array. IMMUTABLE so a GIN index can be built over it (0102).

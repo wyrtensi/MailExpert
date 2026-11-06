@@ -36,15 +36,36 @@ function fieldsRefusal({ name, email, reply_to: replyTo }) {
   return null;
 }
 
+const ALIAS_COLUMNS = 'id, account_id, name, email, reply_to, signature, source, created_at';
+
+const withSafeSignature = (alias) => ({
+  ...alias,
+  signature: alias.signature ? sanitizeSignature(alias.signature) : alias.signature,
+});
+
+// created_at, id: aliases of one Gmail sync are inserted in one transaction and share created_at,
+// so id breaks the tie. The list pill (frontend) and the server's alias Inbox must see the same
+// order (message_reply_alias takes the first match).
 export async function listAliases(accountId, db = { query }) {
   const result = await db.query(
-    'SELECT id, account_id, name, email, reply_to, signature, source, created_at FROM account_aliases WHERE account_id = $1 ORDER BY created_at',
+    `SELECT ${ALIAS_COLUMNS} FROM account_aliases WHERE account_id = $1 ORDER BY created_at, id`,
     [accountId],
   );
-  return result.rows.map((alias) => ({
-    ...alias,
-    signature: alias.signature ? sanitizeSignature(alias.signature) : alias.signature,
-  }));
+  return result.rows.map(withSafeSignature);
+}
+
+// { [accountId]: AliasRow[] } for the accounts that have aliases, one query. Rows as stored: the
+// caller sanitizes the signature where it sends the alias out (routes/accounts.js).
+export async function listAliasesByAccount(accountIds, db = { query }) {
+  const result = await db.query(
+    `SELECT ${ALIAS_COLUMNS} FROM account_aliases WHERE account_id = ANY($1) ORDER BY created_at, id`,
+    [accountIds],
+  );
+  const byAccount = {};
+  for (const alias of result.rows) {
+    (byAccount[alias.account_id] ||= []).push(alias);
+  }
+  return byAccount;
 }
 
 // { alias } or { error }.

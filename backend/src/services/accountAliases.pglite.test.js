@@ -7,7 +7,7 @@ const dbState = vi.hoisted(() => ({ db: null }));
 vi.mock('./db.js', () => ({ query: (sql, params) => dbState.db.query(sql, params) }));
 
 const { createRealSchemaDb } = await import('./testing/realSchema.js');
-const { ALIAS_ERRORS, createAlias, deleteAlias, listAliases, updateAlias } = await import('./accountAliases.js');
+const { ALIAS_ERRORS, createAlias, deleteAlias, listAliases, listAliasesByAccount, updateAlias } = await import('./accountAliases.js');
 
 const SALES = '70000000-0000-4000-8000-000000000001';
 const OPS = '70000000-0000-4000-8000-000000000002';
@@ -89,5 +89,22 @@ describe('gmail-synced aliases', () => {
     expect(result).toEqual({ error: 'alias_managed_by_gmail' });
     const { rows } = await db.query('SELECT email FROM account_aliases WHERE id = $1', [alias.id]);
     expect(rows[0].email).toBe('support@example.com');
+  });
+});
+
+describe('alias order', () => {
+  it('listAliases and listAliasesByAccount order aliases inserted in one transaction by id', async () => {
+    // One transaction: now() is the same for every row, so created_at ties and id decides.
+    await db.exec('BEGIN');
+    for (const email of ['c@example.com', 'a@example.com', 'b@example.com']) {
+      await db.query("INSERT INTO account_aliases (account_id, name, email, source) VALUES ($1, 'N', $2, 'gmail')", [SALES, email]);
+    }
+    await db.exec('COMMIT');
+    const { rows } = await db.query('SELECT id FROM account_aliases WHERE account_id = $1', [SALES]);
+    const expected = rows.map((r) => r.id).sort();
+    expect((await listAliases(SALES)).map((a) => a.id)).toEqual(expected);
+    const byAccount = await listAliasesByAccount([SALES, OPS]);
+    expect(byAccount[SALES].map((a) => a.id)).toEqual(expected);
+    expect(byAccount[OPS]).toBeUndefined();
   });
 });

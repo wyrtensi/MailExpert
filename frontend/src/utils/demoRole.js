@@ -32,3 +32,22 @@ export function switchDemoRole(current, { storage = globalThis.localStorage, loc
   }
   return next;
 }
+
+// Demo mode only: whether the demo plays a panel with deleting letters turned off
+// (MAIL_DELETE_ENABLED=false). `?demoDelete=off` or `?demoDelete=on` sets it, remembered in this
+// browser; on by default.
+export const DEMO_DELETE_KEY = 'mailexpert_demo_delete';
+const DELETE_SWITCH = new Set(['on', 'off']);
+
+export function demoDeleteEnabled({ search = globalThis.location?.search ?? '', storage = globalThis.localStorage } = {}) {
+  let fromUrl = null;
+  try { fromUrl = new URLSearchParams(search).get('demoDelete'); } catch { /* no URL */ }
+  if (DELETE_SWITCH.has(fromUrl)) {
+    try { storage?.setItem(DEMO_DELETE_KEY, fromUrl); } catch { /* storage unavailable */ }
+    return fromUrl === 'on';
+  }
+  try {
+    if (storage?.getItem(DEMO_DELETE_KEY) === 'off') return false;
+  } catch { /* storage unavailable */ }
+  return true;
+}

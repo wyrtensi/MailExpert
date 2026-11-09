@@ -266,6 +266,11 @@ export default function ElectronNotificationBridge() {
         if (action === 'delete-message') {
           const messageId = payload?.messageId;
           if (!messageId) return;
+          // The native notification keeps its Delete button; with deleting letters off it only says so.
+          if (!useStore.getState().deleteEnabled) {
+            addNotification({ title: i18n.t('common.mailDeleteDisabled') });
+            return;
+          }
 
           try {
             await api.deleteMessage(messageId);

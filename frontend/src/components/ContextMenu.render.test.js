@@ -138,3 +138,53 @@ describe('ContextMenu snooze matches the server rule', () => {
     assert.equal(await hasSnooze('Folders/Snoozed'), false);
   });
 });
+
+// MAIL_DELETE_ENABLED=false (GET /api/auth/config deleteEnabled): no delete item, and no Trash
+// among the move destinations.
+describe('ContextMenu while deleting letters is off', () => {
+  let originalGetFolders, host, root;
+  before(() => {
+    useStore.getState().setUser({ id: 'u1' });
+    useStore.getState().setAccounts([{ id: 'acct', enabled: true, email_address: 'x@y.z', color: '#fff' }]);
+    originalGetFolders = api.getFolders;
+    api.getFolders = async () => ([
+      { path: 'Work', name: 'Work', special_use: null },
+      { path: '[Gmail]/Bin', name: 'Bin', special_use: '\\Trash' },
+    ]);
+    useStore.setState({ favoriteFolders: [], recentFolders: [] });
+    host = dom.window.document.createElement('div');
+    dom.window.document.body.appendChild(host);
+    root = createRoot(host);
+  });
+  after(async () => {
+    await React.act(async () => root.unmount());
+    host.remove();
+    api.getFolders = originalGetFolders;
+    useStore.getState().setDeleteEnabled(true);
+  });
+  const render = async (props = {}) => {
+    await React.act(async () => {
+      root.render(React.createElement(ContextMenu, { x: 10, y: 10, message: MESSAGE, onClose: () => {}, onAction: () => {}, ...props }));
+    });
+    await React.act(async () => { await new Promise(r => setTimeout(r, 0)); });
+  };
+
+  test('the menu has a delete item while deleting is on', async () => {
+    useStore.getState().setDeleteEnabled(true);
+    await render();
+    assert.ok(host.textContent.includes('contextMenu.delete'));
+  });
+
+  test('the menu has no delete item while deleting is off', async () => {
+    useStore.getState().setDeleteEnabled(false);
+    await render();
+    assert.ok(!host.textContent.includes('contextMenu.delete'));
+  });
+
+  test('the move picker offers no Trash while deleting is off', async () => {
+    useStore.getState().setDeleteEnabled(false);
+    await render({ key: 'move-view', defaultMoveView: true });
+    assert.ok(host.textContent.includes('Work'));
+    assert.ok(!host.textContent.includes('Bin'));
+  });
+});

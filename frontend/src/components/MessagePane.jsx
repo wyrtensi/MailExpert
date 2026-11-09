@@ -54,6 +54,7 @@ import { senderColor } from '../themes.js';
 import MessageHeaderModal from './MessageHeaderModal.jsx';
 import FolderIcon from './FolderIcon.jsx';
 import { fewerLabels, initialLabelCount, showsLabel } from '../utils/paneToolbar.js';
+import { movableFolders } from '../utils/deletePolicy.js';
 import { useUiScale } from '../hooks/useUiScale.js';
 import TodoistTaskModal from './TodoistTaskModal.jsx';
 import SenderAvatarImage from './SenderAvatarImage.jsx';
@@ -123,7 +124,7 @@ export default function MessagePane({ windowMessageId = null, onWindowClose = nu
     imageWhitelist, addToImageWhitelist, blockRemoteImages, threadMessages, folders,
     replyDefault, shortcuts, recentFolders, favoriteFolders, todoistConnected,
     categorizationEnabled, setCategoryCounts, adjustCategoryCount,
-    aiActions, setShowAdmin, setAdminTab,
+    aiActions, setShowAdmin, setAdminTab, deleteEnabled,
   } = useStore();
 
   // Detached-window mode (#219): when a message id is passed in, this pane renders that
@@ -1540,7 +1541,9 @@ ${bodyContent}
     setMovePickerLoading(true);
     try {
       const data = await api.getFolders(message.account_id);
-      setMovePickerFolders(Array.isArray(data) ? data : (data.folders || []));
+      // No Trash among the destinations while deleting letters is off.
+      const mappings = accounts.find(a => a.id === message.account_id)?.folder_mappings;
+      setMovePickerFolders(movableFolders(Array.isArray(data) ? data : (data.folders || []), deleteEnabled, mappings));
     } catch (err) {
       console.error('Failed to load folders:', err);
       setMovePickerFolders([]);
@@ -2046,7 +2049,8 @@ ${bodyContent}
       if (result.type === 'url' && result.url) window.open(result.url, '_blank', 'noopener,noreferrer');
       else if (result.type === 'mailto' && result.mailto) window.open(result.mailto, '_blank', 'noopener,noreferrer');
       setUnsubscribeStatus('done');
-      addNotification({
+      // The toast offers to move the letter to Trash, unless deleting letters is off.
+      addNotification(!useStore.getState().deleteEnabled ? { title: t('message.unsubscribe.done') } : {
         title: t('message.unsubscribe.done'),
         actionLabel: t('message.unsubscribe.moveToTrash'),
         onAction: () => {
@@ -2680,12 +2684,14 @@ ${bodyContent}
           </svg>
         </PaneBtn>
 
-        <PaneBtn onClick={handleDelete} kind="delete" label={t('message.toolbar.delete')} title={t('message.delete')} danger>
-          <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.75">
-            <polyline points="3 6 5 6 21 6"/>
-            <path d="M19 6v14a2 2 0 01-2 2H7a2 2 0 01-2-2V6m3 0V4a1 1 0 011-1h4a1 1 0 011 1v2"/>
-          </svg>
-        </PaneBtn>
+        {deleteEnabled && (
+          <PaneBtn onClick={handleDelete} kind="delete" label={t('message.toolbar.delete')} title={t('message.delete')} danger>
+            <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.75">
+              <polyline points="3 6 5 6 21 6"/>
+              <path d="M19 6v14a2 2 0 01-2 2H7a2 2 0 01-2-2V6m3 0V4a1 1 0 011-1h4a1 1 0 011 1v2"/>
+            </svg>
+          </PaneBtn>
+        )}
       </div>
       </PaneLabelsContext.Provider>
 

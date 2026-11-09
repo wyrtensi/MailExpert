@@ -163,6 +163,7 @@ export function useGtdTriage() {
   // Delete this row's copy (the label-folder message). Optimistically drop the row from
   // its section(s); the refetch reconciles (and, on failure, restores it) — no undo timer.
   const deleteRow = (thread, states) => {
+    if (!useStore.getState().deleteEnabled) return;
     cancelAutoMarkReadFor(thread);
     removeGtdThread(thread.message_id || thread.id, states);
     api.deleteMessage(thread.id)

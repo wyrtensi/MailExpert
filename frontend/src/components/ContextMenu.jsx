@@ -6,6 +6,7 @@ import { useStore, selectAccountFolders } from '../store/index.js';
 import { api } from '../utils/api.js';
 import { mailboxBusyOr } from '../utils/mailboxBusy.js';
 import { getContextMenuPolicy, resolveContextMenuMessage } from '../utils/contextMenuPolicy.js';
+import { movableFolders } from '../utils/deletePolicy.js';
 import { usePluginCollected } from '../plugins/PluginSlot.jsx';
 import MessageHeaderModal from './MessageHeaderModal.jsx';
 import FolderPathLabel from './FolderPathLabel.jsx';
@@ -27,7 +28,11 @@ export default function ContextMenu({ x, y, message, onClose, onAction, defaultM
   const isMobile = useMobile();
   // Variants share one menu; the policy removes actions that depend on the center
   // list or conflict with GTD's Done contract while preserving ordinary mail actions.
-  const menuPolicy = getContextMenuPolicy(variant);
+  const deleteEnabled = useStore(s => s.deleteEnabled);
+  const folderMappings = useStore(s => s.accounts.find(a => a.id === message?.account_id)?.folder_mappings);
+  const menuPolicy = getContextMenuPolicy(variant, { deleteEnabled });
+  // Move destinations: no Trash while deleting letters is off.
+  const moveTargets = (data) => movableFolders(Array.isArray(data) ? data : (data.folders || []), deleteEnabled, folderMappings);
   const recentFolders = useStore(s => s.recentFolders);
   const favoriteFolders = useStore(s => s.favoriteFolders);
   // Pull the current account so we can render the spam/ham visibility based on
@@ -91,7 +96,7 @@ export default function ContextMenu({ x, y, message, onClose, onAction, defaultM
   useEffect(() => {
     if (!defaultMoveView) return;
     api.getFolders(message.account_id)
-      .then(data => setMoveFolders(Array.isArray(data) ? data : (data.folders || [])))
+      .then(data => setMoveFolders(moveTargets(data)))
       .catch(() => setMoveFolders([]))
       .finally(() => setMoveFoldersLoading(false));
   }, []); // eslint-disable-line react-hooks/exhaustive-deps
@@ -102,7 +107,7 @@ export default function ContextMenu({ x, y, message, onClose, onAction, defaultM
     setMoveFoldersLoading(true);
     try {
       const data = await api.getFolders(message.account_id);
-      setMoveFolders(Array.isArray(data) ? data : (data.folders || []));
+      setMoveFolders(moveTargets(data));
     } catch {
       setMoveFolders([]);
     } finally {
@@ -321,7 +326,7 @@ export default function ContextMenu({ x, y, message, onClose, onAction, defaultM
         },
       ]
     }]),
-    {
+    ...(!menuPolicy.delete ? [] : [{
       group: 'Danger',
       actions: [
         {
@@ -331,7 +336,7 @@ export default function ContextMenu({ x, y, message, onClose, onAction, defaultM
           danger: true,
         },
       ]
-    },
+    }]),
   ];
 
   return (

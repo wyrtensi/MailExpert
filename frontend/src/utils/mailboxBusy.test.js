@@ -52,4 +52,15 @@ describe('mailbox busy errors', () => {
     assert.equal(mailboxBusyText(pending, t), 't:common.movePending');
     assert.equal(mailboxBusyOr({ ok: true, deleted: ['a'], code: 'move_pending' }, t, 'fallback'), 't:common.movePending');
   });
+
+  // MAIL_DELETE_ENABLED=false on the server: a delete that got through anyway (an old tab, a
+  // native notification) is refused with 403 mail_delete_disabled, and the toast says why.
+  it('says deleting letters is turned off', () => {
+    const t = key => `t:${key}`;
+    const refused = Object.assign(new Error('x'), { code: 'mail_delete_disabled' });
+    assert.equal(isMailboxBusy(refused), false);
+    assert.equal(mailboxBusyOr(refused, t, 'fallback'), 't:common.mailDeleteDisabled');
+    assert.equal(locale('en').common.mailDeleteDisabled, 'Deleting letters is turned off on this panel.');
+    assert.equal(locale('ru').common.mailDeleteDisabled, 'Удаление писем отключено на этой панели.');
+  });
 });

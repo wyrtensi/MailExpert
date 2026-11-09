@@ -14,6 +14,7 @@ test('GTD sidebar keeps message actions but drops list-only and archive actions'
     spam: false,
     copy: true,
     viewHeaders: true,
+    delete: true,
   });
 });
 
@@ -29,6 +30,7 @@ test('inbox retains its existing action capabilities', () => {
     spam: true,
     copy: true,
     viewHeaders: true,
+    delete: true,
   });
 });
 
@@ -65,4 +67,10 @@ test('inbox actions keep their current row without resolving', async () => {
   });
 
   assert.equal(result, message);
+});
+
+test('the delete action goes while deleting letters is off', () => {
+  assert.equal(getContextMenuPolicy('inbox', { deleteEnabled: false }).delete, false);
+  assert.equal(getContextMenuPolicy('gtdSidebar', { deleteEnabled: false }).delete, false);
+  assert.equal(getContextMenuPolicy('messagePane', { deleteEnabled: true }).delete, true);
 });

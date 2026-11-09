@@ -25,6 +25,7 @@ import RecipientAliasBadge from './RecipientAliasBadge.jsx';
 import { mailboxBanner, isDraftFolder, recipientAliasFor } from '../utils/mailboxBanner.js';
 import MailNodeOutageNotice from './MailNodeOutageNotice.jsx';
 import { isTrashOrJunkFolder } from '../utils/specialFolders.js';
+import { allowedSwipeAction, movableFolders } from '../utils/deletePolicy.js';
 import { useUiScale, descale } from '../hooks/useUiScale.js';
 import {
   gtdActiveForContext, buildGtdDisplaySections, GTD_COLORS, GTD_CHIP_BG, sectionBadge, isSelectedRow,
@@ -146,7 +147,7 @@ export default function MessageList() {
     threadedView, expandedThreadId, setExpandedThreadId,
     threadMessages, setThreadMessages, clearThreadMessages, loadingThread, setLoadingThread,
     hoverQuickActions, hoverActionSet, showMobileAvatars, showMessagePreviews,
-    swipeActions,
+    swipeActions, deleteEnabled,
     folders, favoriteFolders, addFavoriteFolder, removeFavoriteFolder, setSelectedAccount,
     selectedAliasId, aliasUnreadCounts,
     categorizationEnabled, categoryCounts, setCategoryCounts, adjustCategoryCount,
@@ -2189,6 +2190,7 @@ export default function MessageList() {
     };
 
     const onDelete = () => {
+      if (!getState().deleteEnabled) return;
       const { messages, searchResults, searchQuery, selectedMessageId } = getState();
       const pool = searchQuery.trim() ? searchResults : messages;
       const ids = [...scRef.current.selectedIds];
@@ -2314,7 +2316,10 @@ export default function MessageList() {
     setPickerLoading(true);
     try {
       const data = await api.getFolders(accountIds[0]);
-      setPickerFolders(Array.isArray(data) ? data : (data.folders || []));
+      // No Trash among the destinations while deleting letters is off.
+      const { deleteEnabled: canDelete, accounts: knownAccounts } = useStore.getState();
+      const mappings = knownAccounts.find(a => a.id === accountIds[0])?.folder_mappings;
+      setPickerFolders(movableFolders(Array.isArray(data) ? data : (data.folders || []), canDelete, mappings));
     } catch (err) {
       console.error('Failed to load folders:', err);
       setShowFolderPicker(false);
@@ -3829,17 +3834,19 @@ export default function MessageList() {
               </svg>
             </BulkBtn>
 
-            {/* Delete button */}
-            <BulkBtn
-              title={t('messageList.deleteSelected')}
-              onClick={() => handleBulkDelete([...selectedIds], selectedMsgs)}
-              danger
-            >
-              <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
-                <polyline points="3 6 5 6 21 6"/>
-                <path d="M19 6v14a2 2 0 01-2 2H7a2 2 0 01-2-2V6m3 0V4a1 1 0 011-1h4a1 1 0 011 1v2"/>
-              </svg>
-            </BulkBtn>
+            {/* Delete button (none while deleting letters is off) */}
+            {deleteEnabled && (
+              <BulkBtn
+                title={t('messageList.deleteSelected')}
+                onClick={() => handleBulkDelete([...selectedIds], selectedMsgs)}
+                danger
+              >
+                <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+                  <polyline points="3 6 5 6 21 6"/>
+                  <path d="M19 6v14a2 2 0 01-2 2H7a2 2 0 01-2-2V6m3 0V4a1 1 0 011-1h4a1 1 0 011 1v2"/>
+                </svg>
+              </BulkBtn>
+            )}
 
             {/* Move button + folder picker */}
             <div style={{ position: 'relative' }} ref={folderPickerRef}>
@@ -4044,8 +4051,8 @@ export default function MessageList() {
         {threadedView && !searchQuery.trim() ? (
           displayMessages.map(message => {
             const cacheKey = threadCacheKey(message);
-            const swipeLeftAction = swipeActions?.left || 'archive';
-            const swipeRightAction = swipeActions?.right || 'markRead';
+            const swipeLeftAction = allowedSwipeAction(swipeActions?.left || 'archive', deleteEnabled);
+            const swipeRightAction = allowedSwipeAction(swipeActions?.right || 'markRead', deleteEnabled);
             return (
               <ThreadRow
                 key={cacheKey}
@@ -4069,7 +4076,7 @@ export default function MessageList() {
                 onOpenWindow={!isMobile ? handleOpenInWindow : undefined}
                 onMarkRead={handleThreadMarkRead}
                 onStar={handleStar}
-                onDelete={handleDelete}
+                onDelete={deleteEnabled ? handleDelete : undefined}
                 hoverQuickActions={hoverQuickActions}
                 hoverActionSet={hoverActionSet}
                 onArchive={handleHoverArchive}
@@ -4096,8 +4103,8 @@ export default function MessageList() {
           })
         ) : (
           displayMessages.map(message => {
-            const swipeLeftAction = swipeActions?.left || 'archive';
-            const swipeRightAction = swipeActions?.right || 'markRead';
+            const swipeLeftAction = allowedSwipeAction(swipeActions?.left || 'archive', deleteEnabled);
+            const swipeRightAction = allowedSwipeAction(swipeActions?.right || 'markRead', deleteEnabled);
             return (
               <MessageRow
                 key={message.id}
@@ -4120,7 +4127,7 @@ export default function MessageList() {
                 showMessagePreviews={showMessagePreviews}
                 onMarkRead={handleMarkRead}
                 onStar={handleStar}
-                onDelete={handleDelete}
+                onDelete={deleteEnabled ? handleDelete : undefined}
                 hoverQuickActions={hoverQuickActions}
                 hoverActionSet={hoverActionSet}
                 onArchive={handleHoverArchive}

@@ -61,6 +61,7 @@ import { openOAuthWindow } from '../utils/oauthWindow.js';
 import { HEALTH_COLORS, HEALTH_LABEL_KEYS, MICROSOFT_OAUTH_PATH, reconnectUrlFor } from '../utils/accountHealth.js';
 import { isGoogleReconnectRequired } from '../utils/googleOAuth.js';
 import { microsoftOAuthErrorKey } from '../utils/microsoftOAuth.js';
+import { withoutDeleteChoices } from '../utils/deletePolicy.js';
 import { getEffectiveShortcuts, getGroupedActions, ACTION_DEFS, SPECIAL_KEY_LABELS, parseModKey, modLabel } from '../utils/defaultShortcuts.js';
 import { isValidForwardAddress, ruleForwardTarget } from '../utils/ruleActions.js';
 import { folderParentLabel } from '../utils/folderDisplay.js';
@@ -1964,7 +1965,7 @@ function SwipeActionIcon({ action, size = 17 }) {
 export function LayoutsTab() {
   const { t } = useTranslation();
   const isMobile = useMobile();
-  const { layout, setLayout, pageSize, setPageSize, scrollMode, setScrollMode, swipeActions, setSwipeAction, threadedView, setThreadedView, plaintextEmail, setPlaintextEmail, hoverQuickActions, setHoverQuickActions, hoverActionSet, setHoverActionSet, showMobileAvatars, setShowMobileAvatars, gravatarAvatars, setGravatarAvatars, replyDefault, setReplyDefault, markReadBehavior, setMarkReadBehavior, markReadDelay, setMarkReadDelay, senderFavicons, senderFaviconsSaving, setSenderFavicons, showMessagePreviews, setShowMessagePreviews, accounts, defaultSender, setDefaultSender, sortAccountsByLatest, setSortAccountsByLatest } = useStore();
+  const { layout, setLayout, pageSize, setPageSize, scrollMode, setScrollMode, swipeActions, setSwipeAction, threadedView, setThreadedView, plaintextEmail, setPlaintextEmail, hoverQuickActions, setHoverQuickActions, hoverActionSet, setHoverActionSet, showMobileAvatars, setShowMobileAvatars, gravatarAvatars, setGravatarAvatars, replyDefault, setReplyDefault, markReadBehavior, setMarkReadBehavior, markReadDelay, setMarkReadDelay, senderFavicons, senderFaviconsSaving, setSenderFavicons, showMessagePreviews, setShowMessagePreviews, accounts, defaultSender, setDefaultSender, sortAccountsByLatest, setSortAccountsByLatest, deleteEnabled } = useStore();
   const [senderFaviconsError, setSenderFaviconsError] = useState('');
 
   // "Set MailExpert as your default email app": registerProtocolHandler is the
@@ -1987,7 +1988,7 @@ export function LayoutsTab() {
     applyLayout(key);
   };
 
-  const swipeOptions = [
+  const swipeOptions = withoutDeleteChoices([
     { id: 'star', label: t('admin.messageList.swipeStar'), desc: t('admin.messageList.swipeStarDesc') },
     { id: 'archive', label: t('admin.messageList.swipeArchive'), desc: t('admin.messageList.swipeArchiveDesc') },
     { id: 'delete', label: t('admin.messageList.swipeDelete'), desc: t('admin.messageList.swipeDeleteDesc') },
@@ -1995,7 +1996,7 @@ export function LayoutsTab() {
     { id: 'reply', label: t('admin.messageList.swipeReply'), desc: t('admin.messageList.swipeReplyDesc') },
     { id: 'replyAll', label: t('admin.messageList.swipeReplyAll'), desc: t('admin.messageList.swipeReplyAllDesc') },
     { id: 'disabled', label: t('admin.messageList.swipeDisabled'), desc: t('admin.messageList.swipeDisabledDesc') },
-  ];
+  ], deleteEnabled);
 
   const renderSwipePicker = (direction, title) => (
     <div>
@@ -2207,14 +2208,14 @@ export function LayoutsTab() {
           {/* #440: which actions the cluster shows. Membership only — order stays canonical. */}
           {hoverQuickActions && (
             <div style={{ display: 'flex', flexWrap: 'wrap', gap: 6, marginTop: 10 }}>
-              {[
+              {withoutDeleteChoices([
                 { id: 'markRead', label: t('admin.messageList.swipeMarkRead') },
                 { id: 'star', label: t('admin.messageList.swipeStar') },
                 { id: 'archive', label: t('admin.messageList.swipeArchive') },
                 { id: 'snooze', label: t('contextMenu.snooze.label') },
                 { id: 'delete', label: t('admin.messageList.swipeDelete') },
                 { id: 'move', label: t('contextMenu.moveToFolder') },
-              ].map(({ id, label }) => {
+              ], deleteEnabled).map(({ id, label }) => {
                 const active = hoverActionSet.includes(id);
                 return (
                   <button
@@ -6073,7 +6074,7 @@ function AboutTab() {
 // ─── Rules Tab ────────────────────────────────────────────────────────────────
 function RulesTab() {
   const { t } = useTranslation();
-  const { accounts, folders: storeFolders, setFolders, rulesPreFill, setRulesPreFill } = useStore();
+  const { accounts, folders: storeFolders, setFolders, rulesPreFill, setRulesPreFill, deleteEnabled } = useStore();
   const [rules, setRules] = useState([]);
   const [loading, setLoading] = useState(true);
   const [formMode, setFormMode] = useState(null); // null | 'add' | 'edit'
@@ -6533,7 +6534,8 @@ function RulesTab() {
         </Field>
 
         <Field label={t('admin.rules.actionsLabel')} required>
-          {ACTION_TYPES.map(({ type, label }) => {
+          {/* No delete action while deleting letters is off; a rule that has one shows it so it can be unticked. */}
+          {ACTION_TYPES.filter(a => a.type !== 'delete' || deleteEnabled || fd.actions.some(x => x.type === 'delete')).map(({ type, label }) => {
             const checked = fd.actions.some(a => a.type === type);
             const moveVal = fd.actions.find(a => a.type === 'move')?.value || '';
             return (
@@ -6788,7 +6790,7 @@ function RulesTab() {
 // ─── Block List Tab ────────────────────────────────────────────────────────────
 function BlockListTab() {
   const { t } = useTranslation();
-  const { accounts } = useStore();
+  const { accounts, deleteEnabled } = useStore();
   const [entries, setEntries] = useState([]);
   const [loading, setLoading] = useState(true);
   const [newEmail, setNewEmail] = useState('');
@@ -6835,7 +6837,7 @@ function BlockListTab() {
   return (
     <div>
       <p style={{ fontSize: 13, color: 'var(--text-secondary)', marginTop: 0, marginBottom: 16 }}>
-        {t('admin.blockList.description')}
+        {deleteEnabled ? t('admin.blockList.description') : t('admin.blockList.descriptionDeleteDisabled')}
       </p>
       <form onSubmit={handleAdd} style={{ display: 'flex', gap: 8, marginBottom: 20, flexWrap: 'wrap' }}>
         <select
@@ -6900,7 +6902,7 @@ function RulesAndBlockListTab({ initialSubTab }) {
 // sender), and the operation is idempotent: re-running a cleared sender finds nothing.
 function MailboxCleanupTab() {
   const { t } = useTranslation();
-  const { accounts } = useStore();
+  const { accounts, deleteEnabled } = useStore();
   const [accountId, setAccountId] = useState(accounts[0]?.id || '');
   const [data, setData] = useState(null);
   const [loading, setLoading] = useState(false);
@@ -6914,7 +6916,7 @@ function MailboxCleanupTab() {
   const archiveAvailable = data ? data.archiveAvailable !== false : true;
   // If the selected account has no archive folder, Archive isn't a usable action —
   // fall back to Trash so the row button never runs an action the server can't honor.
-  useEffect(() => { if (data && data.archiveAvailable === false) setAction('trash'); }, [data]);
+  useEffect(() => { if (data && data.archiveAvailable === false && deleteEnabled) setAction('trash'); }, [data, deleteEnabled]);
 
   // Re-fetch the summary/sender data without touching the error banner or the loading
   // spinner, so a caller that just wants fresh counts (after a cleanup, including a partial
@@ -6991,7 +6993,7 @@ function MailboxCleanupTab() {
               {[
                 { key: 'archive', label: t('admin.cleanup.actionArchive'), disabled: !archiveAvailable },
                 { key: 'trash', label: t('admin.cleanup.moveToTrash'), disabled: false },
-              ].map(opt => {
+              ].filter(opt => deleteEnabled || opt.key !== 'trash').map(opt => {
                 const selected = action === opt.key;
                 return (
                   <button
@@ -7187,7 +7189,7 @@ function ShortcutsTab() {
   const [pendingConflict, setPendingConflict] = useState(null); // { action: conflictingAction, key }
 
   const effective = getEffectiveShortcuts(shortcuts);
-  const groups = getGroupedActions();
+  const groups = getGroupedActions({ deleteEnabled: useStore(s => s.deleteEnabled) });
 
   // Listen for key presses while recording
   useEffect(() => {

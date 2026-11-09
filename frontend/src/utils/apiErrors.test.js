@@ -46,6 +46,7 @@ describe('apiErrorText', () => {
       ['todoist_token_invalid', /Todoist did not accept the API token/, /Todoist не принял API-токен/],
       ['account_not_found', /mailbox no longer exists/, /ящика больше нет/],
       ['move_folder_not_found', /destination folder does not exist/, /папки в этом ящике нет/],
+      ['mail_delete_disabled', 'Deleting letters is turned off on this panel.', 'Удаление писем отключено на этой панели.'],
       ['internal_error', /went wrong on the server/, /На сервере что-то пошло не так/],
     ];
     for (const [code, english, russian] of cases) {

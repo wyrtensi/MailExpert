@@ -1014,7 +1014,7 @@ export default function MailApp() {
 function ShortcutHelpOverlay({ shortcuts, onClose }) {
   const { t } = useTranslation();
   const effective = getEffectiveShortcuts(shortcuts);
-  const groups    = getGroupedActions();
+  const groups    = getGroupedActions({ deleteEnabled: useStore(s => s.deleteEnabled) });
 
   const keyBadge = (key) => {
     if (!key) return <span style={{ color: 'var(--text-tertiary)', fontSize: 11 }}>—</span>;

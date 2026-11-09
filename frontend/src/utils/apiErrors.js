@@ -22,6 +22,7 @@ const ERROR_KEYS = {
   invalid_action: 'admin.rules.errorInvalidAction',
   move_folder_not_found: 'admin.rules.errorMoveFolderNotFound',
   already_running: 'admin.rules.errorAlreadyRunning',
+  mail_delete_disabled: 'common.mailDeleteDisabled',
   // Contacts (routes/contacts.js).
   contact_not_found: 'contacts.errorNotFound',
   contact_exists: 'contacts.errorExists',

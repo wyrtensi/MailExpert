@@ -1,7 +1,7 @@
 // Run with: node --test src/utils/defaultShortcuts.test.js
 import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
-import { buildKeyMap, buildModKeyMap } from './defaultShortcuts.js';
+import { buildKeyMap, buildModKeyMap, getGroupedActions } from './defaultShortcuts.js';
 
 describe('buildKeyMap', () => {
   it('does not warn when no overrides are given (defaults have no collisions)', (t) => {
@@ -64,4 +64,11 @@ describe('buildModKeyMap', () => {
     assert.equal(keyMap['/'], 'focusSearch', 'bare / stays the search key (separate map)');
     assert.equal(warn.mock.callCount(), 0);
   });
+});
+
+it('the delete shortcut is not listed while deleting letters is off', () => {
+  const listed = groups => Object.values(groups).flat().map(a => a.action);
+  assert.ok(listed(getGroupedActions()).includes('delete'));
+  assert.ok(!listed(getGroupedActions({ deleteEnabled: false })).includes('delete'));
+  assert.ok(listed(getGroupedActions({ deleteEnabled: false })).includes('archive'));
 });

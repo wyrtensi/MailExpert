@@ -118,3 +118,12 @@ describe('flow seeded for a Proton reconnect', () => {
     assert.deepEqual(initialAddAccountFlow(null), { screen: 'picker', provider: null, email: '' });
   });
 });
+
+describe('the Gmail seed (Try again after Google refused)', () => {
+  test('opens the Gmail form with the address, or empty without one', async () => {
+    const { initialAddAccountFlow } = await import('./addAccountFlow.js');
+    assert.deepEqual(initialAddAccountFlow({ provider: 'gmail', email_address: 'me@example.com' }), { screen: 'form', provider: 'gmail', email: 'me@example.com' });
+    assert.deepEqual(initialAddAccountFlow({ provider: 'gmail' }), { screen: 'form', provider: 'gmail', email: '' });
+    assert.deepEqual(initialAddAccountFlow({ provider: 'yahoo', email_address: 'x@example.com' }), { screen: 'picker', provider: null, email: '' });
+  });
+});

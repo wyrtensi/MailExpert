@@ -7,6 +7,8 @@ import { ADD_ACCOUNT_KINDS } from './addAccount.js';
 // A seed (the mailbox a Proton reconnect came from) opens the Proton form with its address.
 export function initialAddAccountFlow(seed = null) {
   if (seed?.id && typeof seed.email_address === 'string') return { screen: 'form', provider: 'proton', email: seed.email_address };
+  // "Try again" after Google refused a Gmail connection: the Gmail form, with the address when known.
+  if (seed?.provider === 'gmail') return { screen: 'form', provider: 'gmail', email: typeof seed.email_address === 'string' ? seed.email_address : '' };
   return { screen: 'picker', provider: null, email: '' };
 }
 

@@ -1306,6 +1306,13 @@
         "demoConsentTitle": "Allow MailExpert to use {{email}}?",
         "demoConsentBody": "In a real install a Google tab opens here: the owner of the address signs in and lets MailExpert read and send its mail. MailExpert never sees the password. The demo connects the address right away.",
         "demoConsentAllow": "Allow",
+        "demoConsentNoGmail": "Continue without the Gmail box",
+        "gmailHint": {
+          "title": "What Google will ask",
+          "unverified": "Google may say it hasn't verified this app. Click “Advanced”, then “Go to …” with the app's name.",
+          "tick": "Tick the box that gives access to Gmail. Without it the mailbox won't connect: MailExpert needs this access to receive and send your mail.",
+          "noDelete": "Google's wording mentions deleting mail, but this panel can't delete letters: deleting is turned off here."
+        },
         "senderNameLabel": "Sender name",
         "senderNamePh": "e.g. Ivan Petrov",
         "senderNameHint": "Recipients see it in From. You can change it later in the mailbox settings.",
@@ -2271,6 +2278,7 @@
         "errorEmailNotVerified": "Google did not confirm that this email address is verified. The mailbox was not connected.",
         "errorMissingRefreshToken": "Google did not grant offline access. Remove MailExpert from your Google account permissions and connect again.",
         "errorScopeMissing": "Full Gmail access was not granted. Connect again and allow access to Gmail.",
+        "retry": "Try again",
         "errorAuthenticationFailed": "Google authorization failed. Please try again.",
         "errorAlreadyConnected": "This Gmail address is already connected.",
         "errorAccountMismatch": "You signed in to Google with a different account than the one you asked to connect. Try again and choose the right account.",

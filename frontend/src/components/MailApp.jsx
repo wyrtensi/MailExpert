@@ -8,7 +8,7 @@ import { LAYOUTS } from '../layouts.js';
 import { updateFaviconBadge } from '../themes.js';
 import { installResumeRefresh } from '../utils/resumeRefresh.js';
 import { shortcutBus } from '../utils/shortcutBus.js';
-import { oauthMessageToSearchParams, parseOAuthResult } from '../utils/googleOAuth.js';
+import { googleResultNotifications, oauthMessageToSearchParams, parseOAuthResult } from '../utils/googleOAuth.js';
 import { microsoftDeviceReconnectTarget } from '../utils/microsoftOAuth.js';
 import { setPending, pendingMarkReadMap, completedMarkReadMap } from '../utils/pendingReads.js';
 import { readDeepLink } from '../utils/deepLink.js';
@@ -729,6 +729,14 @@ export default function MailApp() {
     return () => document.removeEventListener('keydown', handler);
   }, []);
 
+  // "Try again" on a Google refusal opens the Gmail form, with the address of the last Gmail start
+  // in this tab (the callback never carries it). While the dialog is open its Gmail form offers
+  // its own retry, so the toast offers none.
+  const googleRetry = () => (useStore.getState().showAddAccountDialog ? undefined : () => {
+    const state = useStore.getState();
+    state.openGmailAdd(state.lastGmailStartEmail);
+  });
+
   // Handle same-tab OAuth callback redirects (e.g. /?oauth_success=microsoft).
   // The popup case (window.opener present) is handled earlier in App.jsx before
   // auth is checked, so MailApp never mounts in that context.
@@ -740,16 +748,7 @@ export default function MailApp() {
     const oidcError = params.get('oidc_error');
     // Google results get a localized toast; the raw query values are never rendered.
     const oauthResult = parseOAuthResult(params);
-    if (oauthResult?.provider === 'google') {
-      addNotification({
-        type: oauthResult.status === 'error' ? 'error' : 'info',
-        title: t('admin.integrations.google.title'),
-        body: t(oauthResult.messageKey),
-      });
-      if (oauthResult.noticeKey) {
-        addNotification({ type: 'info', title: t('admin.integrations.google.title'), body: t(oauthResult.noticeKey) });
-      }
-    }
+    for (const toast of googleResultNotifications(oauthResult, { t, onRetry: googleRetry() })) addNotification(toast);
 
     if (oauthError) {
       window.history.replaceState({}, '', '/');
@@ -795,14 +794,7 @@ export default function MailApp() {
       if (result?.provider !== 'google') return;
       // The attempt has its answer: an external-return wait for it (a dialog closed meanwhile) ends.
       if (isAttemptId(e.data?.attempt)) appOAuthReturnWatch().forget(e.data.attempt);
-      addNotification({
-        type: result.status === 'error' ? 'error' : 'info',
-        title: t('admin.integrations.google.title'),
-        body: t(result.messageKey),
-      });
-      if (result.noticeKey) {
-        addNotification({ type: 'info', title: t('admin.integrations.google.title'), body: t(result.noticeKey) });
-      }
+      for (const toast of googleResultNotifications(result, { t, onRetry: googleRetry() })) addNotification(toast);
       if (result.status === 'success') {
         reconcileAccounts();
       }

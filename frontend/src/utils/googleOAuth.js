@@ -39,6 +39,10 @@ const GOOGLE_ERROR_KEYS = {
 };
 const GOOGLE_ERROR_FALLBACK_KEY = 'admin.integrations.google.errorGeneric';
 
+// Errors a second try fixes: the user cancelled on Google's screen or left the Gmail box unticked.
+// The toast and the Gmail form offer "Try again" for them.
+const GOOGLE_RETRYABLE_ERRORS = new Set(['access_denied', 'scope_missing']);
+
 const GENERIC_SUCCESS_KEY = 'admin.integrations.oauthGenericSuccess';
 const GENERIC_ERROR_KEY = 'admin.integrations.oauthGenericError';
 
@@ -68,7 +72,8 @@ export function isGoogleReconnectRequired(account) {
 
 // Maps OAuth callback query parameters to { provider, status, messageKey }, or
 // null when the query carries no OAuth result. `provider` is 'google' or 'other'. A Google
-// success with a known notice also has `noticeKey`.
+// success with a known notice also has `noticeKey`; a Google error a second try fixes has
+// `retryable: true`.
 // An error wins over a success if both are present.
 export function parseOAuthResult(searchParams) {
   if (searchParams == null) return null;
@@ -78,7 +83,8 @@ export function parseOAuthResult(searchParams) {
   const error = query.get('oauth_error');
   if (error) {
     if (query.get('oauth_provider') === 'google') {
-      return { provider: 'google', status: 'error', messageKey: lookup(GOOGLE_ERROR_KEYS, error, GOOGLE_ERROR_FALLBACK_KEY) };
+      const result = { provider: 'google', status: 'error', messageKey: lookup(GOOGLE_ERROR_KEYS, error, GOOGLE_ERROR_FALLBACK_KEY) };
+      return GOOGLE_RETRYABLE_ERRORS.has(error) ? { ...result, retryable: true } : result;
     }
     return { provider: 'other', status: 'error', messageKey: GENERIC_ERROR_KEY };
   }
@@ -110,5 +116,21 @@ export function oauthMessageToSearchParams(data) {
     out.set('oauth_error', data.error);
     if (str(data.provider)) out.set('oauth_provider', data.provider);
   }
+  return out;
+}
+
+// The toasts for a Google result (parseOAuthResult): the result, then its notice when there is one.
+// `t` translates; `onRetry`, when given, puts "Try again" on an error a second try fixes.
+export function googleResultNotifications(result, { t, onRetry } = {}) {
+  if (result?.provider !== 'google') return [];
+  const title = t('admin.integrations.google.title');
+  const main = { type: result.status === 'error' ? 'error' : 'info', title, body: t(result.messageKey) };
+  if (result.retryable && typeof onRetry === 'function') {
+    main.actionLabel = t('admin.integrations.google.retry');
+    main.onAction = onRetry;
+    main.allowWrap = true; // the reason is a sentence: let it wrap beside the button
+  }
+  const out = [main];
+  if (result.noticeKey) out.push({ type: 'info', title, body: t(result.noticeKey) });
   return out;
 }

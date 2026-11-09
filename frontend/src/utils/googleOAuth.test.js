@@ -89,8 +89,10 @@ describe('parseOAuthResult', () => {
   };
   for (const [code, key] of Object.entries(errorCases)) {
     it(`maps the Google error code ${code}`, () => {
+      // A missing tick or a cancel on Google's screen is fixed by trying again; the toast offers it.
+      const retry = code === 'access_denied' || code === 'scope_missing' ? { retryable: true } : {};
       assert.deepEqual(parseOAuthResult(params(`oauth_error=${code}&oauth_provider=google`)), {
-        provider: 'google', status: 'error', messageKey: key,
+        provider: 'google', status: 'error', messageKey: key, ...retry,
       });
     });
   }
@@ -183,7 +185,7 @@ describe('oauthMessageToSearchParams', () => {
   it('converts a popup error message', () => {
     const p = oauthMessageToSearchParams({ type: 'oauth_error', provider: 'google', error: 'scope_missing' });
     assert.deepEqual(parseOAuthResult(p), {
-      provider: 'google', status: 'error', messageKey: 'admin.integrations.google.errorScopeMissing',
+      provider: 'google', status: 'error', messageKey: 'admin.integrations.google.errorScopeMissing', retryable: true,
     });
   });
 
@@ -196,5 +198,37 @@ describe('oauthMessageToSearchParams', () => {
     for (const data of [null, undefined, 'oauth_success', {}, { type: 'other', provider: 'google' }, { type: 'oauth_success', provider: { a: 1 } }]) {
       assert.equal(parseOAuthResult(oauthMessageToSearchParams(data)), null, JSON.stringify(data));
     }
+  });
+});
+
+describe('googleResultNotifications', () => {
+  const t = (key) => `t:${key}`;
+  it('offers Try again on a retryable error when a retry is given', async () => {
+    const { googleResultNotifications } = await import('./googleOAuth.js');
+    let retried = 0;
+    const [toast, ...rest] = googleResultNotifications(parseOAuthResult('?oauth_error=scope_missing&oauth_provider=google'), { t, onRetry: () => { retried += 1; } });
+    assert.equal(rest.length, 0);
+    assert.equal(toast.type, 'error');
+    assert.equal(toast.body, 't:admin.integrations.google.errorScopeMissing');
+    assert.equal(toast.actionLabel, 't:admin.integrations.google.retry');
+    toast.onAction();
+    assert.equal(retried, 1);
+  });
+
+  it('offers nothing without a retry, or for an error a retry does not fix', async () => {
+    const { googleResultNotifications } = await import('./googleOAuth.js');
+    const [plain] = googleResultNotifications(parseOAuthResult('?oauth_error=access_denied&oauth_provider=google'), { t });
+    assert.equal(plain.actionLabel, undefined);
+    const [fixed] = googleResultNotifications(parseOAuthResult('?oauth_error=invalid_state&oauth_provider=google'), { t, onRetry: () => {} });
+    assert.equal(fixed.actionLabel, undefined);
+  });
+
+  it('keeps a success and its notice as two info toasts', async () => {
+    const { googleResultNotifications } = await import('./googleOAuth.js');
+    const toasts = googleResultNotifications(parseOAuthResult('?oauth_success=google&oauth_result=created&oauth_notice=sender_name_duplicate'), { t, onRetry: () => {} });
+    assert.deepEqual(toasts.map(n => [n.type, n.body, n.actionLabel]), [
+      ['info', 't:admin.integrations.google.resultCreated', undefined],
+      ['info', 't:admin.integrations.google.noticeSenderNameDuplicate', undefined],
+    ]);
   });
 });

@@ -23,6 +23,8 @@ import { senderNamesPayload } from '../utils/mailNode.js';
 import { isAttemptId, newAttemptId } from '../utils/addAccountFlow.js';
 import { appOAuthReturnWatch } from '../utils/appOAuthReturn.js';
 import AdvancedConnectionFields from './addAccount/AdvancedConnectionFields.jsx';
+import { useStore } from '../store/index.js';
+import { oauthMessageToSearchParams, parseOAuthResult } from '../utils/googleOAuth.js';
 
 const LIST_ID = 'gmail-add-suggestions';
 
@@ -58,6 +60,9 @@ export default function GmailAddForm({
   const [highlight, setHighlight] = useState(-1);
   const [busy, setBusy] = useState(false);
   const [errorKey, setErrorKey] = useState(null);
+  // A refusal of this form's attempt a second try fixes (unticked Gmail box, cancel): "Try again".
+  const [retryable, setRetryable] = useState(false);
+  const deleteEnabled = useStore((st) => st.deleteEnabled);
   const [launchPath, setLaunchPath] = useState(null);
   const [demoConsent, setDemoConsent] = useState(null);
   // Optional here: without them the mailbox sends under the Google profile name.
@@ -95,7 +100,14 @@ export default function GmailAddForm({
         setLaunchPath(null);
         onConnected?.({ kind: 'oauth', attemptId: attemptRef.current });
       } else if (e.data?.type === 'oauth_error') {
-        if (mine) { appOAuthReturnWatch().forget(attemptRef.current); awaitingRef.current = null; setLaunchPath(null); }
+        if (!mine) return;
+        appOAuthReturnWatch().forget(attemptRef.current);
+        awaitingRef.current = null;
+        setLaunchPath(null);
+        // Why Google refused, here where the user can try again (MailApp shows the toast too).
+        const result = parseOAuthResult(oauthMessageToSearchParams(e.data));
+        setErrorKey(result?.messageKey ?? null);
+        setRetryable(!!result?.retryable);
       }
     };
     window.addEventListener('message', handleMessage);
@@ -152,6 +164,9 @@ export default function GmailAddForm({
       awaitingRef.current = null;
     }
     const attemptId = attemptRef.current;
+    setRetryable(false);
+    // Kept for "Try again" on the toast, which opens this form again with the address.
+    useStore.getState().setLastGmailStartEmail(email.trim());
     if (demo) {
       setErrorKey(null);
       setDemoConsent(email.trim());
@@ -203,6 +218,17 @@ export default function GmailAddForm({
     }
   };
 
+  // Demo only: Google's screen with the Gmail box left unticked. The same message the callback posts.
+  const refuseDemoGmailBox = () => {
+    attemptSentRef.current = true;
+    setDemoConsent(null);
+    const result = parseOAuthResult(oauthMessageToSearchParams({ type: 'oauth_error', provider: 'google', error: 'scope_missing' }));
+    setErrorKey(result.messageKey);
+    setRetryable(true);
+    // MailApp shows its toast for it, as for a real callback.
+    window.postMessage({ type: 'oauth_error', provider: 'google', error: 'scope_missing', attempt: attemptRef.current }, window.location.origin);
+  };
+
   if (demoConsent) {
     return (
       <div className="add-account-help" style={{ padding: '16px 18px' }}>
@@ -218,6 +244,9 @@ export default function GmailAddForm({
         <div className="add-account-actions" style={{ marginTop: 14 }}>
           <button type="button" className="add-account-button" onClick={allowDemoConsent} disabled={busy}>
             {t('admin.accounts.add.demoConsentAllow')}
+          </button>
+          <button type="button" className="add-account-link-button" onClick={refuseDemoGmailBox} disabled={busy}>
+            {t('admin.accounts.add.demoConsentNoGmail')}
           </button>
           <button type="button" className="add-account-link-button" onClick={() => setDemoConsent(null)} disabled={busy}>
             {t('common.cancel')}
@@ -360,9 +389,20 @@ export default function GmailAddForm({
         </div>
       </AdvancedConnectionFields>
 
+      {/* What Google asks on its two screens; without the Gmail box the connection fails. */}
+      <div className="add-account-help" data-gmail-consent-hint style={{ padding: '12px 14px', fontSize: 12, lineHeight: 1.55, color: 'var(--text-secondary)' }}>
+        <div style={{ fontWeight: 600, color: 'var(--text-primary)', marginBottom: 4 }}>{t('admin.accounts.add.gmailHint.title')}</div>
+        <ol style={{ margin: 0, paddingLeft: 18, listStyle: 'decimal' }}>
+          <li>{t('admin.accounts.add.gmailHint.unverified')}</li>
+          <li>{t('admin.accounts.add.gmailHint.tick')}</li>
+        </ol>
+        {!deleteEnabled && <p style={{ margin: '6px 0 0' }}>{t('admin.accounts.add.gmailHint.noDelete')}</p>}
+      </div>
+
       <div className="add-account-actions">
         <button type="button" className="add-account-button" onClick={start} disabled={!canStart}>
-          {busy ? t('admin.accounts.add.starting') : t('admin.accounts.add.continue')}
+          {/* After a refusal a second try fixes, the same button says so, under the hint. */}
+          {busy ? t('admin.accounts.add.starting') : t(errorKey && retryable ? 'admin.integrations.google.retry' : 'admin.accounts.add.continue')}
         </button>
       </div>
 

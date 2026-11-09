@@ -780,6 +780,15 @@ export const useStore = create((set, get) => ({
     showAddAccountDialog: true,
     addAccountSeed: account?.id ? { id: account.id, email_address: account.email_address } : null,
   }),
+  // "Try again" on a Google refusal (scope_missing, access_denied): the dialog opens on the Gmail
+  // form, with the address of the last Gmail start in this tab when there was one.
+  openGmailAdd: (email) => set({
+    showAddAccountDialog: true,
+    addAccountSeed: { provider: 'gmail', email_address: typeof email === 'string' ? email : '' },
+  }),
+  // The address of the last Gmail start in this tab (GmailAddForm), for "Try again".
+  lastGmailStartEmail: '',
+  setLastGmailStartEmail: (email) => set({ lastGmailStartEmail: typeof email === 'string' ? email : '' }),
   closeAddAccount: () => set({ showAddAccountDialog: false, addAccountSeed: null }),
   // Set by the sidebar's "Account settings" item with the account's id: the accounts tab opens
   // that account's own settings view (the edit form) and clears it. Same hand-off as above, so

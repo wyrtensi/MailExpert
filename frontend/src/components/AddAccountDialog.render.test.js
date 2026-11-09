@@ -416,6 +416,50 @@ describe('AddAccountDialog Gmail attempts', () => {
     await settle();
   };
 
+  // Before Google: what its two screens ask. The line about deleting shows only on a panel where
+  // deleting letters is off (GET /api/auth/config deleteEnabled), where it is true.
+  test('gmail_consent_hint: the two Google screens are explained; "cannot delete" only while deleting is off', async () => {
+    const hint = () => dialog().querySelector('[data-gmail-consent-hint]');
+    assert.ok(hint(), 'the hint is on the form');
+    const text = hint().textContent;
+    assert.ok(text.includes('admin.accounts.add.gmailHint.title'));
+    assert.ok(text.includes('admin.accounts.add.gmailHint.unverified'));
+    assert.ok(text.includes('admin.accounts.add.gmailHint.tick'));
+    assert.ok(!text.includes('admin.accounts.add.gmailHint.noDelete'));
+    await React.act(async () => { useStore.getState().setDeleteEnabled(false); });
+    try {
+      assert.ok(hint().textContent.includes('admin.accounts.add.gmailHint.noDelete'));
+    } finally {
+      await React.act(async () => { useStore.getState().setDeleteEnabled(true); });
+    }
+  });
+
+  test('gmail_retry: a refused grant for this attempt shows why and Try again starts a new attempt', async () => {
+    failFirst = false;
+    await cont();
+    assert.equal(useStore.getState().lastGmailStartEmail, 'me@example.com', 'the address is kept for the toast retry');
+    const retry = () => [...dialog().querySelectorAll('button')].find((b) => b.textContent === 'admin.integrations.google.retry');
+    await message({ type: 'oauth_error', provider: 'google', error: 'scope_missing', attempt: 'not-this-attempt' });
+    assert.equal(retry(), undefined, 'an error of another attempt shows nothing here');
+    await message({ type: 'oauth_error', provider: 'google', error: 'scope_missing', attempt: starts[0].attemptId });
+    assert.equal(dialog().querySelector('[role="alert"]')?.textContent, 'admin.integrations.google.errorScopeMissing');
+    assert.ok(retry(), 'Try again is offered');
+    await click(retry());
+    await settle();
+    assert.equal(starts.length, 2, 'Try again starts Google again');
+    assert.equal(starts[1].email, 'me@example.com');
+    assert.notEqual(starts[1].attemptId, starts[0].attemptId, 'as a new attempt');
+    assert.equal(retry(), undefined, 'the error is gone');
+  });
+
+  test('gmail_no_retry_for_unfixable: an error a retry does not fix shows no Try again', async () => {
+    failFirst = false;
+    await cont();
+    await message({ type: 'oauth_error', provider: 'google', error: 'invalid_state', attempt: starts[0].attemptId });
+    assert.equal(dialog().querySelector('[role="alert"]')?.textContent, 'admin.integrations.google.errorInvalidState');
+    assert.equal([...dialog().querySelectorAll('button')].find((b) => b.textContent === 'admin.integrations.google.retry'), undefined);
+  });
+
   test('late_oauth_a_cannot_close_b: only the callback of the newest attempt closes the form', async () => {
     failFirst = false;
     await cont();
@@ -552,5 +596,34 @@ describe('AddAccountDialog Gmail attempts', () => {
     await message(success(a));
     assert.equal(closed, 0);
     assert.ok(dialog().querySelector('[data-provider-picker]'), 'the picker stays, the form is not reopened');
+  });
+});
+
+// The demo has no Google: its consent card can also refuse the Gmail box, so the error and
+// "Try again" can be seen without a server.
+describe('Gmail form in the demo', () => {
+  let host, root;
+  const button = (text) => [...host.querySelectorAll('button')].find((b) => b.textContent === text);
+  before(async () => {
+    host = document.createElement('div');
+    document.body.appendChild(host);
+    root = createRoot(host);
+    api.knownGoogleEmails = () => Promise.resolve({ emails: [] });
+    const { default: GmailAddForm } = await import('./GmailAddForm.jsx');
+    await React.act(async () => root.render(React.createElement(GmailAddForm, { accounts: [], initialEmail: 'demo@example.com', demo: true })));
+  });
+  after(async () => {
+    await React.act(async () => root.unmount());
+    host.remove();
+  });
+
+  test('demo_refuses_gmail_box: the consent card can skip the box; the form then offers Try again', async () => {
+    await React.act(async () => { button('admin.accounts.add.continue').click(); });
+    assert.ok(button('admin.accounts.add.demoConsentNoGmail'), 'the demo card can refuse the box');
+    await React.act(async () => { button('admin.accounts.add.demoConsentNoGmail').click(); });
+    await settle();
+    assert.equal(host.querySelector('[role="alert"]')?.textContent, 'admin.integrations.google.errorScopeMissing');
+    await React.act(async () => { button('admin.integrations.google.retry').click(); });
+    assert.ok(button('admin.accounts.add.demoConsentAllow'), 'Try again shows the consent card again');
   });
 });

@@ -3,6 +3,7 @@ import { applyInboxRules, isDangerousRegex } from '../inboxRules.js';
 import { recordAudit } from '../auditLog.js';
 import { auditOf } from '../actor.js';
 import { MAILBOX_REF_ERRORS, findMailboxId } from '../../utils/requireMailbox.js';
+import { mailDeleteEnabled } from '../mailDeletePolicy.js';
 
 // Inbox rules, shared by the rules API (routes/rules.js, /api/rules) and the panel CLI
 // (cli/commands/rule.js): the same checks, the same journal (rule.created, rule.updated,
@@ -23,6 +24,7 @@ export const RULE_ERRORS = Object.freeze({
   move_folder_not_found: [400, 'Move destination folder not found for this account'],
   not_found: [404, 'Rule not found'],
   already_running: [409, 'Rules are already running'],
+  mail_delete_disabled: [403, 'Deleting letters is turned off on this panel'],
 });
 
 // The API's answer to a refusal: [status, body]. A catalogued refusal carries its key as the code.
@@ -153,6 +155,10 @@ async function checkRuleBody(body) {
   const normalizedActions = normalizeActions(actions);
   const actionError = validateActions(normalizedActions);
   if (actionError) return { error: 'invalid_action', message: actionError };
+  // With deleting turned off a rule may keep its delete action only while it is off.
+  if (!mailDeleteEnabled() && body.enabled !== false && normalizedActions.some(a => a.type === 'delete')) {
+    return { error: 'mail_delete_disabled' };
+  }
   const mailbox = await findMailboxId(accountId);
   if (mailbox.error) return mailbox;
   const mailboxId = mailbox.id;

@@ -281,6 +281,12 @@ export const useStore = create((set, get) => ({
   },
   updateUser: (updates) => set(state => ({ user: state.user ? { ...state.user, ...updates } : state.user })),
 
+  // Whether letters may be deleted on this panel (GET /api/auth/config deleteEnabled, set by the
+  // server's MAIL_DELETE_ENABLED). Off: every delete, move-to-Trash and empty-folder control is
+  // hidden (utils/deletePolicy.js); the server refuses them anyway.
+  deleteEnabled: true,
+  setDeleteEnabled: (deleteEnabled) => set({ deleteEnabled: deleteEnabled !== false }),
+
   // Plugins an administrator switched on for the whole panel (GET /api/plugins, backed by
   // system_settings.enabled_plugins). Loaded with the preferences after sign-in; only an
   // administrator changes it, via setPluginEnabled (the Plugins settings tab). Independent of a

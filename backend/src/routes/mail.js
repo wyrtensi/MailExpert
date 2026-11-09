@@ -31,6 +31,7 @@ import { validateHost } from '../services/hostValidation.js';
 import { safeFetch } from '../services/safeFetch.js';
 import { deliveryStateColumn } from '../services/deliveryStatus.js';
 import { safeFilename, attachmentDisposition, truncateFilename } from '../utils/contentDisposition.js';
+import { mailDeleteEnabled, sendMailDeleteDisabled } from '../services/mailDeletePolicy.js';
 
 const router = Router();
 router.use(requireAuth);
@@ -1351,6 +1352,7 @@ router.post('/folders', async (req, res) => {
 
 // Delete folder
 router.post('/folders/delete', async (req, res) => {
+  if (!mailDeleteEnabled()) return sendMailDeleteDisabled(res);
   const { accountId, path } = req.body;
   if (!accountId || !path) return res.status(400).json({ error: 'accountId and path required' });
   if (!isValidFolderName(path)) return res.status(400).json({ error: 'Invalid folder path' });
@@ -1525,6 +1527,7 @@ const emptyInFlight = new Set();
 // immediately and the outcome is reported over WebSocket (folder_emptied). This keeps the UI from
 // hanging on big folders. On failure the DB rows are left in place so the next sync reconciles.
 router.post('/folders/empty', async (req, res) => {
+  if (!mailDeleteEnabled()) return sendMailDeleteDisabled(res);
   const { accountId, path } = req.body;
   if (!accountId || !path) return res.status(400).json({ error: 'accountId and path required' });
   if (!isValidFolderName(path)) return res.status(400).json({ error: 'Invalid folder path' });
@@ -1906,6 +1909,7 @@ router.post('/messages/bulk-star', async (req, res) => {
 // backfill would bring back as new mail. Only that part can still be busy. A letter already in
 // Trash that the client saw elsewhere is left alone and reported deleted (deleteIntent).
 router.post('/messages/bulk-delete', async (req, res) => {
+  if (!mailDeleteEnabled()) return sendMailDeleteDisabled(res);
   const bySeen = seenByFolder(req.body);
   if (req.body?.seen !== undefined && !bySeen) {
     return res.status(400).json({ error: 'seen must map folders to arrays of ids' });
@@ -2179,6 +2183,11 @@ router.post('/messages/bulk-move', async (req, res) => {
       (byAccount[msg.account_id] = byAccount[msg.account_id] || []).push(msg);
     }
 
+    // With deleting turned off, a move into Trash is a delete too (drag-and-drop, the move picker).
+    if (!mailDeleteEnabled() && await isTrashForAny(Object.keys(byAccount), folder)) {
+      return sendMailDeleteDisabled(res);
+    }
+
     const movedIds = [];
     for (const [accountId, msgs] of Object.entries(byAccount)) {
       // Verify the destination folder exists for this account
@@ -2205,6 +2214,15 @@ router.post('/messages/bulk-move', async (req, res) => {
     res.status(500).json({ error: 'Failed to move messages' });
   }
 });
+
+// Whether `folder` is a Trash folder of any of these accounts.
+async function isTrashForAny(accountIds, folder) {
+  const { rows } = await query('SELECT id, folder_mappings FROM email_accounts WHERE id = ANY($1::uuid[])', [accountIds]);
+  for (const account of rows) {
+    if ((await resolveAllTrashPaths(account.id, account.folder_mappings)).has(folder)) return true;
+  }
+  return false;
+}
 
 // Bulk archive — moves messages to the archive folder for each account. DB-first, as bulk-move.
 router.post('/messages/bulk-archive', async (req, res) => {
@@ -2477,6 +2495,7 @@ router.post('/messages/:id/snooze', async (req, res) => {
 
 // Delete (move to trash; drafts are permanently deleted)
 router.delete('/messages/:id', async (req, res) => {
+  if (!mailDeleteEnabled()) return sendMailDeleteDisabled(res);
   const { id } = req.params;
   if (!UUID_RE.test(id)) return res.status(400).json({ error: 'Invalid message id' });
 

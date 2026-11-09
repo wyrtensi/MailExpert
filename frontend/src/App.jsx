@@ -11,7 +11,7 @@ import AccessDeniedPage from './components/AccessDeniedPage.jsx';
 import { accessRefusalCode, isCloudflareOnlyMode, isGoogleAuthMode } from './utils/authMode.js';
 import { signOut } from './utils/signOut.js';
 import { isDemoMode } from './demo/mode.js';
-import { demoRole } from './utils/demoRole.js';
+import { demoDeleteEnabled, demoRole } from './utils/demoRole.js';
 import { needsLanguageChoice } from './utils/language.js';
 import { readDeepLink } from './utils/deepLink.js';
 import MailApp from './components/MailApp.jsx';
@@ -116,6 +116,7 @@ export default function App() {
       // choices, kept in localStorage, are what applies. One exception is below.
       if (needsLanguageChoice({ stored: localStorage.getItem('mailexpert_language') })) useStore.getState().setLanguagePickerOpen(true);
       setUser(demoUser());
+      useStore.getState().setDeleteEnabled(demoDeleteEnabled());
       setLocked(false);
       // Theme, font, and layout were applied above from localStorage. The exception: which
       // mailboxes are pinned is read once from the demo adapter's preferences, the first time this
@@ -156,7 +157,10 @@ export default function App() {
 
     // The sign-in screen depends on the server's mode; an unreachable config means local.
     const configLoaded = api.authConfig()
-      .then(setAuthConfig)
+      .then((config) => {
+        setAuthConfig(config);
+        useStore.getState().setDeleteEnabled(config?.deleteEnabled);
+      })
       .catch(() => setAuthConfig({ mode: 'local' }));
     const userLoaded = api.me()
       .then(async (data) => {

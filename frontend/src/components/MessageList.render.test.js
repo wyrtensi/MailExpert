@@ -1252,3 +1252,44 @@ describe('MessageList — the list of an alias mailbox', () => {
     }
   });
 });
+
+// MAIL_DELETE_ENABLED=false (GET /api/auth/config deleteEnabled): the multi-select bar has no
+// delete button and the delete shortcut does nothing.
+describe('MessageList — delete controls follow deleteEnabled', () => {
+  const M_ONE = { ...MESSAGE, id: 'msg-del-1', uid: 31, message_id: '<del1@example.com>' };
+  const M_TWO = { ...MESSAGE, id: 'msg-del-2', uid: 32, message_id: '<del2@example.com>' };
+  const select = async () => {
+    await mount({ rows: [M_ONE, M_TWO], threadedView: false });
+    await React.act(async () => { useStore.getState().setSelectedMessage(M_ONE.id); });
+    const row = container.querySelector(`[data-msgid="${M_TWO.id}"]`);
+    const target = row.querySelector('[draggable]') || row;
+    await React.act(async () => {
+      target.dispatchEvent(new dom.window.MouseEvent('click', { bubbles: true, cancelable: true, ctrlKey: true }));
+    });
+  };
+  const bulkDeleteButton = () => [...container.querySelectorAll('button')].find(b => b.getAttribute('title') === 'messageList.deleteSelected');
+
+  test('the multi-select bar has a delete button while deleting is on', async () => {
+    useStore.getState().setDeleteEnabled(true);
+    await select();
+    assert.ok(bulkDeleteButton());
+  });
+
+  test('the multi-select bar has no delete button and the shortcut deletes nothing while deleting is off', async () => {
+    useStore.getState().setDeleteEnabled(false);
+    const calls = [];
+    const originalBulkDelete = api.bulkDelete;
+    api.bulkDelete = async (ids) => { calls.push(ids); return { ok: true, deleted: ids }; };
+    try {
+      await select();
+      assert.equal(bulkDeleteButton(), undefined);
+      await React.act(async () => { shortcutBus.emit('delete'); });
+      await React.act(async () => { await new Promise(r => setTimeout(r, 0)); });
+      assert.equal(useStore.getState().messages.length, 2, 'no row left the list');
+      assert.deepEqual(calls, []);
+    } finally {
+      api.bulkDelete = originalBulkDelete;
+      useStore.getState().setDeleteEnabled(true);
+    }
+  });
+});

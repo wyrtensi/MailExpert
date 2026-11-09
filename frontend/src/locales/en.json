@@ -27,6 +27,7 @@
     "mailboxBusy": "The mailbox is busy, try again in a few seconds",
     "mailboxAuthRejected": "The mail server does not accept the sign-in to this mailbox. Ask an administrator to check the mailbox.",
     "movePending": "The letter is still being moved, try again in a few seconds",
+    "mailDeleteDisabled": "Deleting letters is turned off on this panel.",
     "close": "Close",
     "actionFailed": {
       "body": "The request to the server failed. Check the connection and try again.",
@@ -1198,6 +1199,7 @@
     },
     "blockList": {
       "description": "Emails from blocked senders are automatically moved to trash.",
+      "descriptionDeleteDisabled": "Deleting letters is turned off on this panel: blocked senders' letters stay where they arrive.",
       "empty": "No blocked senders",
       "emailPlaceholder": "sender@example.com",
       "addButton": "Block",

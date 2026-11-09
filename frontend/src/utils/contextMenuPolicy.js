@@ -1,4 +1,5 @@
-export function getContextMenuPolicy(variant = 'inbox') {
+// deleteEnabled: false while the panel has deleting letters turned off (utils/deletePolicy.js).
+export function getContextMenuPolicy(variant = 'inbox', { deleteEnabled = true } = {}) {
   const gtdSidebar = variant === 'gtdSidebar';
   return {
     select: !gtdSidebar,
@@ -11,6 +12,7 @@ export function getContextMenuPolicy(variant = 'inbox') {
     spam: !gtdSidebar,
     copy: true,
     viewHeaders: true,
+    delete: deleteEnabled !== false,
   };
 }
 

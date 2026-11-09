@@ -693,3 +693,38 @@ describe('The via line above an open letter colors a current alias like the list
     assert.doesNotMatch(inactive.getAttribute('style'), /--amber/);
   });
 });
+
+// MAIL_DELETE_ENABLED=false (GET /api/auth/config deleteEnabled): the toolbar has no delete button.
+describe('The toolbar delete button follows deleteEnabled', () => {
+  let originalInnerWidth, host, paneRoot;
+  before(() => {
+    originalInnerWidth = dom.window.innerWidth;
+    dom.window.innerWidth = 1280;
+    useStore.getState().setMessages?.([MSG_A, MSG_B]);
+    host = dom.window.document.createElement('div');
+    dom.window.document.body.appendChild(host);
+    paneRoot = createRoot(host);
+  });
+  after(async () => {
+    await React.act(async () => paneRoot.unmount());
+    host.remove();
+    dom.window.innerWidth = originalInnerWidth;
+    useStore.getState().setDeleteEnabled(true);
+  });
+  const deleteButton = () => [...host.querySelectorAll('button')].find(b => b.getAttribute('title') === 'message.delete');
+
+  test('shows while deleting is on', async () => {
+    useStore.getState().setDeleteEnabled(true);
+    await React.act(async () => {
+      useStore.getState().setSelectedMessage('a1');
+      paneRoot.render(React.createElement(MessagePane));
+    });
+    await React.act(async () => { await new Promise(r => setTimeout(r, 0)); });
+    assert.ok(deleteButton(), 'expected the delete button');
+  });
+
+  test('is gone while deleting is off', async () => {
+    await React.act(async () => { useStore.getState().setDeleteEnabled(false); });
+    assert.equal(deleteButton(), undefined);
+  });
+});

@@ -31,6 +31,8 @@ export function mailboxBusyText(err, t) {
 
 // The busy text when `err` is a busy mailbox, else `fallback` (the message the caller showed
 // before).
+// 'mail_delete_disabled' (403): deleting letters is turned off on this panel (MAIL_DELETE_ENABLED).
 export function mailboxBusyOr(err, t, fallback) {
+  if (err?.code === 'mail_delete_disabled') return t('common.mailDeleteDisabled');
   return isMailboxBusy(err) ? mailboxBusyText(err, t) : fallback;
 }

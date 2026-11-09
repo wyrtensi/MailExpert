@@ -38,3 +38,15 @@ describe('switchDemoRole', () => {
     assert.equal(switchDemoRole('user', { storage, location: null }), 'admin');
   });
 });
+
+it('the demo deletes letters unless ?demoDelete=off was given, and remembers the choice', async () => {
+  const { demoDeleteEnabled, DEMO_DELETE_KEY } = await import('./demoRole.js');
+  const store = new Map();
+  const storage = { getItem: k => store.get(k) ?? null, setItem: (k, v) => store.set(k, v) };
+  assert.equal(demoDeleteEnabled({ search: '', storage }), true);
+  assert.equal(demoDeleteEnabled({ search: '?demoDelete=off', storage }), false);
+  assert.equal(store.get(DEMO_DELETE_KEY), 'off');
+  assert.equal(demoDeleteEnabled({ search: '', storage }), false);
+  assert.equal(demoDeleteEnabled({ search: '?demoDelete=on', storage }), true);
+  assert.equal(demoDeleteEnabled({ search: '', storage: { getItem() { throw new Error('blocked'); } } }), true);
+});

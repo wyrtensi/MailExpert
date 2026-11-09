@@ -2,6 +2,7 @@ import vm from 'node:vm';
 import { query } from './db.js';
 import { parseHeadersInput } from './messageParser.js';
 import { htmlToText } from '../utils/htmlToText.js';
+import { mailDeleteEnabled } from './mailDeletePolicy.js';
 import { resolveArchiveFolder, isAllMailFolder, resolveTrashFolder, resolveAllTrashPaths, getDeleteStrategy, adjustFolderCounts } from '../utils/mailUtils.js';
 
 async function getRulesForAccount(accountId) {
@@ -397,6 +398,8 @@ export async function applyInboxRules(messages, account, imapManager) {
 // Moves messages from blocked senders to trash before inbox rules run.
 export async function applyBlockList(messages, account, imapManager) {
   if (!messages.length) return messages;
+  // MAIL_DELETE_ENABLED=false: blocking a sender no longer sends their letters to Trash.
+  if (!mailDeleteEnabled()) return messages;
 
   let blockedRows;
   try {
@@ -642,6 +645,8 @@ async function applyAction(action, msg, account, imapManager, ruleId, resolverCa
     }
 
     case 'delete': {
+      // MAIL_DELETE_ENABLED=false: a rule saved before the switch leaves the letter where it is.
+      if (!mailDeleteEnabled()) return false;
       if (!resolverCache._trashResolved) {
         resolverCache._trashResolved = true;
         [resolverCache.trashFolder, resolverCache.allTrashPaths] = await Promise.all([

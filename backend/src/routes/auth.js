@@ -25,6 +25,7 @@ import { getAuthSettings } from '../services/auth/authSettings.js';
 import { CF_ACCESS_HEADER } from '../services/auth/cloudflareAccess.js';
 import { closeUserSockets } from '../services/websocket.js';
 import { imapManager } from '../index.js';
+import { mailDeleteEnabled } from '../services/mailDeletePolicy.js';
 
 const router = Router();
 
@@ -144,7 +145,13 @@ const loginLimiter = createLoginLimit(authLimiterConfig, {
 // Public: which sign-in screen to show. Only switches, never the configured values.
 router.get('/config', (req, res) => {
   const settings = getAuthSettings();
-  res.json({ mode: settings.mode, cloudflare: !!settings.cloudflare, googleSignIn: !!settings.googleSignIn });
+  res.json({
+    mode: settings.mode,
+    cloudflare: !!settings.cloudflare,
+    googleSignIn: !!settings.googleSignIn,
+    // MAIL_DELETE_ENABLED: the client hides every way to delete letters when it is false.
+    deleteEnabled: mailDeleteEnabled(),
+  });
 });
 
 router.post('/register', registerLimiter, async (req, res) => {

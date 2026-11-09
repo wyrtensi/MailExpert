@@ -4,7 +4,7 @@ import { demoOutageRequest, demoOutageWaiting } from './outages.js';
 import { demoNodeAgentRequest, demoNodeUpdateState } from './nodeAgent.js';
 import { DEMO_TENANT_SETTINGS, demoTenantAlerts, demoTenantRequest } from './tenant.js';
 import { DEMO_MAIL_PROVIDERS, createProviderDemo } from './providers.js';
-import { demoRole } from '../utils/demoRole.js';
+import { demoDeleteEnabled, demoRole } from '../utils/demoRole.js';
 import { aliasMailboxRows } from '../utils/aliasMailboxes.js';
 import { recipientAliasFor } from '../utils/mailboxBanner.js';
 import { googleCallbackFormError } from '../utils/googleApps.js';
@@ -1676,6 +1676,18 @@ function demoQuarantineRequest(verb, pathname, body) {
   return undefined;
 }
 
+// The requests that delete letters, which the server refuses with MAIL_DELETE_ENABLED=false
+// (backend/src/services/mailDeletePolicy.js).
+function demoDeletes(verb, pathname, body) {
+  if (verb === 'DELETE' && /^\/mail\/messages\/[^/]+$/.test(pathname)) return true;
+  if (verb === 'POST' && ['/mail/messages/bulk-delete', '/mail/folders/empty', '/mail/folders/delete'].includes(pathname)) return true;
+  if (verb === 'POST' && pathname === '/mail/messages/bulk-move') return body?.folder === 'Trash';
+  if ((verb === 'POST' && pathname === '/rules') || (verb === 'PUT' && /^\/rules\/[^/]+$/.test(pathname))) {
+    return body?.enabled !== false && Array.isArray(body?.actions) && body.actions.some(a => a?.type === 'delete');
+  }
+  return false;
+}
+
 function demoError(message, code) {
   return Object.assign(new Error(message), { code });
 }
@@ -2130,7 +2142,14 @@ export async function demoRequest(method, path, body = {}) {
     throw Object.assign(demoError('Admin access required'), { status: 403 });
   }
 
-  if (verb === 'GET' && pathname === '/auth/config') return { mode: 'local', cloudflare: false, googleSignIn: false };
+  // ?demoDelete=off plays MAIL_DELETE_ENABLED=false: the delete routes answer 403 as on a server.
+  if (!demoDeleteEnabled() && demoDeletes(verb, pathname, body)) {
+    throw Object.assign(demoError('Deleting letters is turned off on this panel', 'mail_delete_disabled'), { status: 403 });
+  }
+
+  if (verb === 'GET' && pathname === '/auth/config') {
+    return { mode: 'local', cloudflare: false, googleSignIn: false, deleteEnabled: demoDeleteEnabled() };
+  }
   if (verb === 'GET' && pathname === '/auth/me') {
     const base = demoRole() === 'user' ? DEMO_PLAIN_USER : DEMO_USER;
     return { user: { ...clone(base), totpEnabled: demoTotpEnabled, ...clone(profileOverrides) } };

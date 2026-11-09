@@ -123,9 +123,11 @@ export function buildModKeyMap(userOverrides = {}) {
 }
 
 // Returns actions grouped for display in the help overlay / settings tab.
-export function getGroupedActions() {
+// deleteEnabled: false leaves out the delete shortcut (deleting letters is off on this panel).
+export function getGroupedActions({ deleteEnabled = true } = {}) {
   const groups = {};
   for (const [action, def] of Object.entries(ACTION_DEFS)) {
+    if (!deleteEnabled && action === 'delete') continue;
     if (!groups[def.groupKey]) groups[def.groupKey] = [];
     groups[def.groupKey].push({ action, ...def });
   }

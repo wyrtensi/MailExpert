@@ -59,7 +59,7 @@ const cloudflareEnv = () => {
 describe('GET /api/auth/config', () => {
   it('describes local mode', async () => {
     expect(await (await fetch(`${base}/api/auth/config`)).json())
-      .toEqual({ mode: 'local', cloudflare: false, googleSignIn: false });
+      .toEqual({ mode: 'local', cloudflare: false, googleSignIn: false, deleteEnabled: true });
   });
 
   it('describes google mode without exposing its settings', async () => {
@@ -67,7 +67,14 @@ describe('GET /api/auth/config', () => {
     vi.stubEnv('AUTH_GOOGLE_CLIENT_ID', 'client-id');
     vi.stubEnv('AUTH_GOOGLE_CLIENT_SECRET', 'client-secret');
     expect(await (await fetch(`${base}/api/auth/config`)).json())
-      .toEqual({ mode: 'google', cloudflare: true, googleSignIn: true });
+      .toEqual({ mode: 'google', cloudflare: true, googleSignIn: true, deleteEnabled: true });
+  });
+});
+
+describe('GET /api/auth/config deleteEnabled', () => {
+  it('is false when MAIL_DELETE_ENABLED=false', async () => {
+    vi.stubEnv('MAIL_DELETE_ENABLED', 'false');
+    expect(await (await fetch(`${base}/api/auth/config`)).json()).toMatchObject({ deleteEnabled: false });
   });
 });
 

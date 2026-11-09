@@ -361,13 +361,6 @@ export default function GmailAddForm({
       )}
       </div>
       {errorKey && <p className="add-account-error" role="alert">{t(errorKey)}</p>}
-      {errorKey && retryable && (
-        <div className="add-account-actions" style={{ marginTop: 0 }}>
-          <button type="button" className="add-account-button" onClick={start} disabled={!canStart}>
-            {t('admin.integrations.google.retry')}
-          </button>
-        </div>
-      )}
 
       <AdvancedConnectionFields managed="gmail">
         <div className="add-account-field">
@@ -399,7 +392,7 @@ export default function GmailAddForm({
       {/* What Google asks on its two screens; without the Gmail box the connection fails. */}
       <div className="add-account-help" data-gmail-consent-hint style={{ padding: '12px 14px', fontSize: 12, lineHeight: 1.55, color: 'var(--text-secondary)' }}>
         <div style={{ fontWeight: 600, color: 'var(--text-primary)', marginBottom: 4 }}>{t('admin.accounts.add.gmailHint.title')}</div>
-        <ol style={{ margin: 0, paddingLeft: 18 }}>
+        <ol style={{ margin: 0, paddingLeft: 18, listStyle: 'decimal' }}>
           <li>{t('admin.accounts.add.gmailHint.unverified')}</li>
           <li>{t('admin.accounts.add.gmailHint.tick')}</li>
         </ol>
@@ -408,7 +401,8 @@ export default function GmailAddForm({
 
       <div className="add-account-actions">
         <button type="button" className="add-account-button" onClick={start} disabled={!canStart}>
-          {busy ? t('admin.accounts.add.starting') : t('admin.accounts.add.continue')}
+          {/* After a refusal a second try fixes, the same button says so, under the hint. */}
+          {busy ? t('admin.accounts.add.starting') : t(errorKey && retryable ? 'admin.integrations.google.retry' : 'admin.accounts.add.continue')}
         </button>
       </div>
 

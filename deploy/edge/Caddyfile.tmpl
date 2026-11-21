@@ -4,6 +4,18 @@
 {
 	admin off
 	@GLOBAL_EMAIL@
+	# Runtime error logs can include the callback URL when the upstream is unavailable.
+	log {
+		format filter {
+			wrap json
+			fields {
+				request>uri query {
+					delete code
+					delete state
+				}
+			}
+		}
+	}
 }
 
 @SITE@ {

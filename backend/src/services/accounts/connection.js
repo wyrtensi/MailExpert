@@ -48,6 +48,11 @@ export function changedConnectionFields(stored, updates) {
   });
 }
 
+export function hasManagedConnection(account) {
+  return account.connection_mode === 'managed'
+    && (account.mail_provider === 'proton' || account.oauth_provider === 'mailru' || account.oauth_provider === 'yandex');
+}
+
 // The servers of a new mailbox against the policy: the error text the API answers, or null. A
 // port is checked only with its host.
 export async function newServersError({ imap_host, imap_port, smtp_host, smtp_port }, policy) {

@@ -138,7 +138,8 @@ export default function App() {
     const params = new URLSearchParams(window.location.search);
     const oauthSuccess = params.get('oauth_success');
     const oauthError = params.get('oauth_error');
-    if ((oauthSuccess || oauthError) && window.opener) {
+    const oauthProvider = params.get('oauth_provider');
+    if ((oauthSuccess || oauthError) && oauthSuccess !== 'mailru' && oauthProvider !== 'mailru' && window.opener) {
       if (oauthSuccess) {
         window.opener.postMessage({
           type: 'oauth_success', provider: oauthSuccess,
@@ -149,7 +150,7 @@ export default function App() {
         }, window.location.origin);
       } else {
         // oauth_account: the Microsoft mailbox to reconnect by device code instead (redirect_not_configured).
-        window.opener.postMessage({ type: 'oauth_error', error: oauthError, provider: params.get('oauth_provider') || undefined, account: params.get('oauth_account') || undefined, attempt: params.get('oauth_attempt') || undefined }, window.location.origin);
+        window.opener.postMessage({ type: 'oauth_error', error: oauthError, provider: oauthProvider || undefined, account: params.get('oauth_account') || undefined, attempt: params.get('oauth_attempt') || undefined }, window.location.origin);
       }
       window.close();
       return;

@@ -776,6 +776,10 @@ export const useStore = create((set, get) => ({
   // form with the address filled in. Any other open, and closing, drop it.
   addAccountSeed: null,
   openAddAccount: () => set({ showAddAccountDialog: true, addAccountSeed: null }),
+  openYandexReconnect: (account) => set({
+    showAddAccountDialog: true,
+    addAccountSeed: { provider: 'yandex', id: account.id, email_address: account.email_address },
+  }),
   openProtonReconnect: (account) => set({
     showAddAccountDialog: true,
     addAccountSeed: account?.id ? { id: account.id, email_address: account.email_address } : null,

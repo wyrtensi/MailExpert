@@ -47,6 +47,15 @@ describe('managed mailboxes', () => {
   it('a mail node mailbox is metadata-only as well', () => {
     assert.equal('imap_host' in accountUpdateFromForm(FORM, { isAdmin: true, account: { mail_node: true } }), false);
   });
+  it('locks Mail.ru OAuth connection settings and keeps the app-password account editable', () => {
+    assert.equal('imap_host' in accountUpdateFromForm(FORM, { isAdmin: true, account: { oauth_provider: 'mailru' } }), false);
+    assert.equal('imap_host' in accountUpdateFromForm(FORM, { isAdmin: true, account: { mail_provider: 'mailru' } }), true);
+  });
+
+  it('locks Yandex OAuth connection settings and keeps the app-password account editable', () => {
+    assert.equal('imap_host' in accountUpdateFromForm(FORM, { isAdmin: true, account: { oauth_provider: 'yandex' } }), false);
+    assert.equal('imap_host' in accountUpdateFromForm(FORM, { isAdmin: true, account: { mail_provider: 'yandex' } }), true);
+  });
   it('an ordinary mailbox is unchanged for an administrator', () => {
     const updates = accountUpdateFromForm(FORM, { isAdmin: true, account: { mail_provider: 'yandex', connection_mode: 'preset' } });
     assert.equal(updates.imap_host, 'imap.example.com');

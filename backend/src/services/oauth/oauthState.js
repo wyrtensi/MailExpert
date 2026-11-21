@@ -33,7 +33,7 @@ function stateKey(provider, state) {
 // redirect so a late result of an older attempt cannot be taken for the newest one.
 export async function createOAuthState({
   provider, userId = null, loginHint = null, appId = null, mode = null, email = null, accountId = null,
-  senderName = null, senderNameAlt = null, reservation = null, attemptId = null,
+  senderName = null, senderNameAlt = null, reservation = null, attemptId = null, sessionBinding = null,
 }) {
   const state = randomBytes(32).toString('base64url');
   const codeVerifier = randomBytes(32).toString('base64url');
@@ -53,6 +53,7 @@ export async function createOAuthState({
       senderNameAlt: senderNameAlt || null,
       reservation: reservation || null,
       attemptId: parseAttemptId(attemptId),
+      ...(sessionBinding ? { sessionBinding } : {}),
     }),
     { NX: true, EX: OAUTH_STATE_TTL_SECONDS },
   );
@@ -83,6 +84,7 @@ export async function consumeOAuthState({ provider, state, anonymous = false }) 
       senderNameAlt: typeof data.senderNameAlt === 'string' ? data.senderNameAlt : null,
       reservation: typeof data.reservation === 'string' ? data.reservation : null,
       attemptId: parseAttemptId(data.attemptId),
+      ...(typeof data.sessionBinding === 'string' ? { sessionBinding: data.sessionBinding } : {}),
     };
   } catch {
     return null;

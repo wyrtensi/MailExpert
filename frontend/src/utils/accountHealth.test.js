@@ -134,6 +134,17 @@ describe('accountEventPatch', () => {
 });
 
 describe('reconnectMenuAction', () => {
+  it('starts Mail.ru OAuth with the account ID when consent must be renewed', () => {
+    const mailbox = { id: 'acc-mailru', oauth_provider: 'mailru', health: 'oauth_reconnect_required' };
+    assert.deepEqual(reconnectMenuAction(mailbox), { kind: 'mailru', accountId: mailbox.id });
+    assert.deepEqual(reconnectMenuAction({ ...mailbox, health: 'failed' }), { kind: 'imap' });
+  });
+
+  it('opens device authorization for a Yandex mailbox when consent must be renewed', () => {
+    const mailbox = { id: 'acc-yandex', oauth_provider: 'yandex', health: 'oauth_reconnect_required' };
+    assert.deepEqual(reconnectMenuAction(mailbox), { kind: 'yandex' });
+  });
+
   it('offers the OAuth consent flow for a reconnect-required OAuth account', () => {
     const google = { id: 'acc-1', oauth_provider: 'google', email_address: 'a@gmail.com', health: 'oauth_reconnect_required' };
     assert.deepEqual(reconnectMenuAction(google), { kind: 'oauth', url: reconnectUrlFor(google) });

@@ -45,6 +45,8 @@ import { importLegacyGoogleConfig } from '../services/oauth/googleApps.js';
 const CLIENT_ID = '123456789012-abc123def456.apps.googleusercontent.com';
 const REDIRECT_URI = 'https://mail.example.com/oauth/google/callback';
 const NEW_PARTS = {
+  mailru: { configured: false },
+  yandex: { configured: false },
   mailProviders: expect.any(Array),
   proton: { configured: true, available: true, code: null },
   manual: { allowPrivateHosts: false, allowNonstandardPorts: false },

@@ -801,6 +801,28 @@ test('the demo status lists the four fixed providers, a ready Proton worker and 
   assert.deepEqual(status.manual, { allowPrivateHosts: false, allowNonstandardPorts: false });
 });
 
+test('the demo supports Mail.ru OAuth configuration and connection', async () => {
+  assert.deepEqual((await demoRequest('GET', '/integrations/status')).mailru, { configured: false });
+  await assert.rejects(() => demoRequest('POST', '/oauth/mailru/start', { email: 'demo@mail.ru' }), { code: 'not_configured' });
+  await demoRequest('POST', '/integrations/mailru', {
+    clientId: 'client', clientSecret: 'secret-sentinel', redirectUri: 'https://example.com/oauth/mailru/callback',
+  });
+  assert.equal((await demoRequest('GET', '/integrations')).mailru.clientSecret, '•'.repeat(8));
+  await assert.rejects(() => demoRequest('POST', '/integrations/mailru', {
+    clientId: 'different-client', clientSecret: '', redirectUri: 'https://example.com/oauth/mailru/callback',
+  }), { code: 'client_secret_required' });
+  await demoRequest('POST', '/integrations/mailru', {
+    clientId: 'client', clientSecret: '', redirectUri: 'https://example.com/oauth/mailru/callback',
+  });
+  assert.equal((await demoRequest('GET', '/integrations')).mailru.clientSecret, '•'.repeat(8));
+  assert.deepEqual((await demoRequest('GET', '/integrations/status')).mailru, { configured: true });
+  const result = await demoRequest('POST', '/oauth/mailru/start', { email: 'demo@mail.ru' });
+  assert.deepEqual(result, { demo: true, result: 'created' });
+  const account = (await demoRequest('GET', '/accounts')).find((row) => row.email_address === 'demo@mail.ru');
+  assert.equal(account.oauth_provider, 'mailru');
+  assert.deepEqual(await demoRequest('POST', '/oauth/mailru/start', { accountId: account.id }), { demo: true, result: 'updated' });
+});
+
 test('the demo refuses a provider mailbox twice and a malformed request, and never keeps the password', async () => {
   const body = { provider: 'icloud', email: 'Pat@iCloud.com', appPassword: 'secret-sentinel' };
   const created = await demoRequest('POST', '/accounts/provider', body);

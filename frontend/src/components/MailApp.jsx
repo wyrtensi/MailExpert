@@ -10,6 +10,7 @@ import { installResumeRefresh } from '../utils/resumeRefresh.js';
 import { shortcutBus } from '../utils/shortcutBus.js';
 import { googleResultNotifications, oauthMessageToSearchParams, parseOAuthResult } from '../utils/googleOAuth.js';
 import { microsoftDeviceReconnectTarget } from '../utils/microsoftOAuth.js';
+import { mailruOAuthNotification } from '../utils/mailruOAuth.js';
 import { setPending, pendingMarkReadMap, completedMarkReadMap } from '../utils/pendingReads.js';
 import { readDeepLink } from '../utils/deepLink.js';
 import { buildKeyMap, buildModKeyMap, getEffectiveShortcuts, getGroupedActions, parseModKey, modLabel, SPECIAL_KEYS, SPECIAL_KEY_LABELS } from '../utils/defaultShortcuts.js';
@@ -749,6 +750,8 @@ export default function MailApp() {
     // Google results get a localized toast; the raw query values are never rendered.
     const oauthResult = parseOAuthResult(params);
     for (const toast of googleResultNotifications(oauthResult, { t, onRetry: googleRetry() })) addNotification(toast);
+    const mailruToast = mailruOAuthNotification(params, t);
+    if (mailruToast) addNotification(mailruToast);
 
     if (oauthError) {
       window.history.replaceState({}, '', '/');
@@ -762,7 +765,7 @@ export default function MailApp() {
       reconcileAccounts();
       // A Google mailbox is added from the dialog over the current mail view, which is kept; the
       // other providers still land on the accounts settings.
-      if (provider !== 'google') {
+      if (provider !== 'google' && provider !== 'mailru') {
         setAdminTab('accounts');
         setShowAdmin(true);
       }

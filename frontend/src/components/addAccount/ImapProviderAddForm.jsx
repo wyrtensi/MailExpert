@@ -4,6 +4,7 @@ import RequiredMark from './RequiredMark.jsx';
 import { api } from '../../utils/api.js';
 import { GMAIL_EMAIL_PATTERN, ADD_ACCOUNT_TITLE_KEYS } from '../../utils/addAccount.js';
 import { newAttemptId, submitWithReplay } from '../../utils/addAccountFlow.js';
+import { beginMailruOAuth, mailruOAuthErrorKey } from '../../utils/mailruOAuth.js';
 import {
   advancedFromDefaults,
   connectionErrorKey,
@@ -19,6 +20,9 @@ import AdvancedConnectionFields from './AdvancedConnectionFields.jsx';
 import AppPasswordHelp from './AppPasswordHelp.jsx';
 import PasswordField from './PasswordField.jsx';
 import useSlowFlag from './useSlowFlag.js';
+import useYandexOAuth from './useYandexOAuth.js';
+import { useStore } from '../../store/index.js';
+import { isDemoMode } from '../../demo/mode.js';
 
 const NO_POLICY = Object.freeze({ allowPrivateHosts: false, allowNonstandardPorts: false });
 // The check may take up to 35 s (15 s per protocol); after this long the form says it is still on.
@@ -43,6 +47,8 @@ export default function ImapProviderAddForm({
   provider,
   catalog = null,
   manualPolicy = NO_POLICY,
+  oauthConfigured = false,
+  yandexReconnectId = null,
   email = '',
   onEmailChange,
   signal,
@@ -61,8 +67,10 @@ export default function ImapProviderAddForm({
   const [advancedOpen, setAdvancedOpen] = useState(false);
   const [metadata, setMetadata] = useState({ name: '', senderName: '', signature: '', color: '' });
   const [busy, setBusy] = useState(false);
+  const [oauthPending, setOauthPending] = useState(false);
   const [errorKey, setErrorKey] = useState(null);
   const [nextStepKey, setNextStepKey] = useState(null);
+  const yandex = useYandexOAuth(signal);
   const slow = useSlowFlag(busy, slowAfterMs);
   const liveRef = useRef(true);
   useEffect(() => {
@@ -89,9 +97,13 @@ export default function ImapProviderAddForm({
   const missing = serverRequired ? missingServerFields(advanced) : [];
   const portIssues = portProblems(advanced, manualPolicy);
   const serverIncomplete = serverRequired && (missing.length > 0 || portIssues.length > 0);
-  const emailInvalid = emailTouched && address.length > 0 && !GMAIL_EMAIL_PATTERN.test(address);
-  const valid = GMAIL_EMAIL_PATTERN.test(address) && password.length > 0 && !serverIncomplete;
-  const canSubmit = valid && !busy;
+  const emailValid = GMAIL_EMAIL_PATTERN.test(address);
+  const emailInvalid = emailTouched && address.length > 0 && !emailValid;
+  const yandexPending = Boolean(yandex.starting || yandex.flow);
+  const blocked = busy || oauthPending || yandexPending;
+  const canSubmit = emailValid && password.length > 0 && !serverIncomplete && !blocked;
+  const showMailruOAuth = provider === 'mailru' && oauthConfigured;
+  const showYandexOAuth = provider === 'yandex' && (oauthConfigured || yandexReconnectId);
   const otherTile = isOther ? null : otherProviderForEmail(address, provider, catalog);
 
   const submit = async (event) => {
@@ -126,8 +138,33 @@ export default function ImapProviderAddForm({
 
   const openServers = () => setAdvancedOpen(true);
 
+  const startOAuth = async () => {
+    if (!emailValid || blocked) return;
+    clearError();
+    if (showYandexOAuth) {
+      onAttemptStart?.();
+      await yandex.start(yandexReconnectId ? { accountId: yandexReconnectId } : { email: address }, (result) => {
+        useStore.getState().addNotification({
+          type: 'info',
+          title: t('admin.integrations.yandex.title'),
+          body: t(result === 'updated' ? 'admin.integrations.yandex.updated' : 'admin.integrations.yandex.connected'),
+        });
+        onConnected?.({ kind: 'oauth' });
+      });
+      return;
+    }
+    setOauthPending(true);
+    try {
+      if (await beginMailruOAuth({ email: address }, t, signal)) onConnected?.({ kind: 'oauth' });
+    } catch (err) {
+      if (signal?.aborted || err?.name === 'AbortError' || !liveRef.current) return;
+      setErrorKey(mailruOAuthErrorKey(err?.code));
+      setOauthPending(false);
+    }
+  };
+
   return (
-    <form className="add-account-form" onSubmit={submit} noValidate data-provider-form={provider} aria-busy={busy}>
+    <form className="add-account-form" onSubmit={submit} noValidate data-provider-form={provider} aria-busy={busy || oauthPending || yandex.starting}>
       <div className="add-account-field">
         <label className="add-account-label" htmlFor="imap-add-email">{t('admin.accounts.add.addressLabel')}<RequiredMark /></label>
         <input
@@ -141,7 +178,7 @@ export default function ImapProviderAddForm({
           autoCorrect="off"
           spellCheck={false}
           value={email}
-          readOnly={busy}
+          readOnly={blocked || Boolean(yandexReconnectId)}
           aria-invalid={emailInvalid ? 'true' : undefined}
           aria-describedby={emailInvalid ? 'imap-add-email-error' : undefined}
           placeholder={t('admin.accounts.add.addressPh')}
@@ -156,83 +193,122 @@ export default function ImapProviderAddForm({
         )}
       </div>
 
-      <div className="add-account-field">
-        <label className="add-account-label" htmlFor="imap-add-password">
-          {t(isOther ? 'admin.accounts.add.passwordLabel' : 'admin.accounts.add.appPasswordLabel')}
-          <RequiredMark />
-        </label>
-        <PasswordField
-          id="imap-add-password"
-          required
-          value={password}
-          readOnly={busy}
-          onChange={(e) => { setPassword(e.target.value); clearError(); }}
-        />
-      </div>
-
-      {!isOther && <AppPasswordHelp provider={provider} url={defaults?.appPasswordUrl} />}
-
-      {loginOffered && (
-        <div className="add-account-field" data-login-offered>
-          <label className="add-account-label" htmlFor="imap-add-login">{t('admin.accounts.add.loginLabel')}</label>
-          <input
-            id="imap-add-login"
-            className="add-account-input"
-            autoComplete="off"
-            autoCapitalize="none"
-            autoCorrect="off"
-            spellCheck={false}
-            value={login}
-            readOnly={busy}
-            aria-describedby="imap-add-login-hint"
-            onChange={(e) => { setLogin(e.target.value); clearError(); }}
-          />
-          <p className="add-account-note" id="imap-add-login-hint">{t('admin.accounts.add.loginAfterRefusalHint')}</p>
+      {showMailruOAuth && (
+        <div>
+          <button type="button" className="add-account-button" disabled={!emailValid || blocked} onClick={startOAuth}>
+            {t(oauthPending ? 'admin.integrations.mailru.redirecting' : 'admin.integrations.mailru.connect')}
+          </button>
         </div>
       )}
 
-      <AdvancedConnectionFields
-        open={advancedOpen}
-        onOpenChange={setAdvancedOpen}
-        server={isOther || defaults ? {
-          values: advanced,
-          onChange: patchAdvanced,
-          defaults,
-          required: serverRequired,
-          showLogins: isOther,
-          login,
-          onLoginChange: setLogin,
-          manualPolicy,
-        } : undefined}
-        metadata={metadata}
-        onMetadataChange={(patch) => setMetadata((current) => ({ ...current, ...patch }))}
-      >
-        {!isOther && !defaults && <p className="add-account-note">{t('admin.accounts.add.serversUnknownNote')}</p>}
-      </AdvancedConnectionFields>
-
-      <div role="status" aria-live="polite">
-        {busy && <p className="add-account-success">{t('admin.accounts.add.checking')}</p>}
-        {busy && slow && <p className="add-account-note" data-checking-slow>{t('admin.accounts.add.checkingSlow')}</p>}
-      </div>
-      {errorKey && <p className="add-account-error" role="alert">{t(errorKey)}</p>}
-      {errorKey && nextStepKey && <p className="add-account-note" role="status" data-next-step>{t(nextStepKey)}</p>}
-
-      {serverIncomplete && (
-        <div className="add-account-note" data-servers-missing>
-          {t('admin.accounts.add.serversMissingHint')}{' '}
-          {!advancedOpen && (
-            <button type="button" className="add-account-link-button" onClick={openServers}>
-              {t('admin.accounts.add.serversShow')}
+      {showYandexOAuth && (
+        <div className="add-account-field">
+          {yandex.flow ? (
+            <>
+              {isDemoMode ? <p className="add-account-note">{t('admin.integrations.yandex.deviceDemo')}</p> : (
+                <>
+                  <p className="add-account-note">{t('admin.integrations.yandex.deviceInstructions')}</p>
+                  <a href={yandex.flow.verificationUri} target="_blank" rel="noreferrer">
+                    {t('admin.integrations.yandex.deviceOpen')}
+                  </a>
+                  <code style={{ fontSize: 20, letterSpacing: 2 }}>{yandex.flow.userCode}</code>
+                  <p className="add-account-note">{t('admin.integrations.yandex.deviceSafety')}</p>
+                </>
+              )}
+              <p role="status">{t('admin.integrations.yandex.deviceWaiting')}</p>
+              <button type="button" className="add-account-link-button" onClick={yandex.cancel}>{t('common.cancel')}</button>
+            </>
+          ) : (
+            <button type="button" className="add-account-button" disabled={!emailValid || blocked} onClick={startOAuth}>
+              {t(yandex.starting ? 'admin.integrations.yandex.starting' : 'admin.integrations.yandex.connect')}
             </button>
           )}
+          {yandex.errorKey && <p className="add-account-error" role="alert">{t(yandex.errorKey)}</p>}
         </div>
       )}
 
-      <div className="add-account-actions">
-        <button type="submit" className="add-account-button" disabled={!canSubmit}>
-          {busy ? t('admin.accounts.add.connecting') : t('admin.accounts.add.connect')}
-        </button>
-      </div>
+      {!yandexReconnectId && !yandexPending && (
+        <>
+          <div className="add-account-field">
+            <label className="add-account-label" htmlFor="imap-add-password">
+              {t(isOther ? 'admin.accounts.add.passwordLabel' : 'admin.accounts.add.appPasswordLabel')}
+              <RequiredMark />
+            </label>
+            <PasswordField
+              id="imap-add-password"
+              required
+              value={password}
+              readOnly={blocked}
+              onChange={(e) => { setPassword(e.target.value); clearError(); }}
+            />
+          </div>
+
+          {!isOther && <AppPasswordHelp provider={provider} url={defaults?.appPasswordUrl} />}
+
+          {loginOffered && (
+            <div className="add-account-field" data-login-offered>
+              <label className="add-account-label" htmlFor="imap-add-login">{t('admin.accounts.add.loginLabel')}</label>
+              <input
+                id="imap-add-login"
+                className="add-account-input"
+                autoComplete="off"
+                autoCapitalize="none"
+                autoCorrect="off"
+                spellCheck={false}
+                value={login}
+                readOnly={busy}
+                aria-describedby="imap-add-login-hint"
+                onChange={(e) => { setLogin(e.target.value); clearError(); }}
+              />
+              <p className="add-account-note" id="imap-add-login-hint">{t('admin.accounts.add.loginAfterRefusalHint')}</p>
+            </div>
+          )}
+
+          <AdvancedConnectionFields
+            open={advancedOpen}
+            onOpenChange={setAdvancedOpen}
+            server={isOther || defaults ? {
+              values: advanced,
+              onChange: patchAdvanced,
+              defaults,
+              required: serverRequired,
+              showLogins: isOther,
+              login,
+              onLoginChange: setLogin,
+              manualPolicy,
+            } : undefined}
+            metadata={metadata}
+            onMetadataChange={(patch) => setMetadata((current) => ({ ...current, ...patch }))}
+          >
+            {!isOther && !defaults && <p className="add-account-note">{t('admin.accounts.add.serversUnknownNote')}</p>}
+          </AdvancedConnectionFields>
+
+          <div role="status" aria-live="polite">
+            {busy && <p className="add-account-success">{t('admin.accounts.add.checking')}</p>}
+            {busy && slow && <p className="add-account-note" data-checking-slow>{t('admin.accounts.add.checkingSlow')}</p>}
+          </div>
+          {errorKey && <p className="add-account-error" role="alert">{t(errorKey)}</p>}
+          {errorKey && nextStepKey && <p className="add-account-note" role="status" data-next-step>{t(nextStepKey)}</p>}
+
+          {serverIncomplete && (
+            <div className="add-account-note" data-servers-missing>
+              {t('admin.accounts.add.serversMissingHint')}{' '}
+              {!advancedOpen && (
+                <button type="button" className="add-account-link-button" onClick={openServers}>
+                  {t('admin.accounts.add.serversShow')}
+                </button>
+              )}
+            </div>
+          )}
+
+          <div className="add-account-actions">
+            <button type="submit" className="add-account-button" disabled={!canSubmit}>
+              {busy ? t('admin.accounts.add.connecting')
+                : t(showMailruOAuth || showYandexOAuth ? 'admin.accounts.add.connectAppPassword' : 'admin.accounts.add.connect')}
+            </button>
+          </div>
+        </>
+      )}
     </form>
   );
 }

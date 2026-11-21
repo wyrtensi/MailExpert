@@ -107,6 +107,14 @@ export function canReconnectOAuth(account, { isAdmin = false } = {}) {
   return true;
 }
 
+export function isMailruReconnectRequired(account) {
+  return account?.oauth_provider === 'mailru' && account.health === 'oauth_reconnect_required';
+}
+
+export function isYandexReconnectRequired(account) {
+  return account?.oauth_provider === 'yandex' && account.health === 'oauth_reconnect_required';
+}
+
 // What the account context menu's "Reconnect" item does ('proton': a new Proton sign-in, see
 // below). An IMAP reconnect cannot
 // fix a revoked grant, so reconnect-required OAuth accounts re-run consent instead —
@@ -118,6 +126,12 @@ export function reconnectMenuAction(account, { isAdmin = false } = {}) {
   // The sign-in dialog is seeded with this mailbox and its address.
   if (account?.health === 'proton_reconnect_required' && account.can_reconnect_proton === true) {
     return { kind: 'proton', accountId: account.id, email: account.email_address };
+  }
+  if (isMailruReconnectRequired(account)) {
+    return { kind: 'mailru', accountId: account.id };
+  }
+  if (isYandexReconnectRequired(account)) {
+    return { kind: 'yandex' };
   }
   const url = account?.health === 'oauth_reconnect_required' ? reconnectUrlFor(account) : null;
   if (!url) return { kind: 'imap' };

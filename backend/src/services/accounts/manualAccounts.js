@@ -8,7 +8,7 @@ import { computeAccountHealth } from '../accountHealth.js';
 import { hasHeaderInjectionChars } from '../accountAliases.js';
 import {
   CONNECTION_FIELDS, RECONNECT_FIELDS, applyImapTlsMode, changedConnectionFields, changedServersError, impliedImapTls, newServersError,
-  storedColumnValue, withAccountAddressLock,
+  hasManagedConnection, storedColumnValue, withAccountAddressLock,
 } from './connection.js';
 
 // An administrator's actions on mailboxes set up by hand (IMAP/SMTP) and on OAuth ones, shared by
@@ -166,7 +166,7 @@ export async function updateAccountConnection(id, updates, actor) {
   if (!Object.keys(given).length) return { error: 'no_fields' };
   const { rows: [stored] } = await query('SELECT * FROM email_accounts WHERE id = $1', [id]);
   if (!stored) return { error: 'account_not_found' };
-  if (stored.mail_provider === 'proton' && stored.connection_mode === 'managed' && changedConnectionFields(stored, given).length) return { error: 'managed_connection_locked' };
+  if (hasManagedConnection(stored) && changedConnectionFields(stored, given).length) return { error: 'managed_connection_locked' };
   if (stored.mail_node && changedConnectionFields(stored, given).length) return { error: 'mail_node_connection_locked' };
 
   const policy = await getConnectionPolicy();

@@ -32,7 +32,7 @@ import { mailNodeFailure, onOtherMailHost, refuse as refuseMailNode } from './ma
 import { deleteAccount } from '../services/accounts/deleteAccount.js';
 import {
   CONNECTION_FIELDS, applyImapTlsMode, changedConnectionFields, changedServersError,
-  reconnectAccount, reconnectQueue, storedColumnValue,
+  hasManagedConnection, reconnectAccount, reconnectQueue, storedColumnValue,
 } from '../services/accounts/connection.js';
 import {
   resetOAuthSubject, safeAccount,
@@ -154,7 +154,7 @@ router.put('/:id', async (req, res) => {
   // The server and the password of a mail node mailbox belong to the node settings: pointing it at
   // another host would hand the generated password to that host. The form resends unchanged
   // values, so only a real change is refused.
-  if (stored.mail_provider === 'proton' && stored.connection_mode === 'managed' && changedConnectionFields(stored, updates).length) {
+  if (hasManagedConnection(stored) && changedConnectionFields(stored, updates).length) {
     return res.status(400).json({ error: 'Managed mailbox connection settings cannot be changed', code: 'managed_connection_locked' });
   }
   if (stored.mail_node && changedConnectionFields(stored, updates).length) {

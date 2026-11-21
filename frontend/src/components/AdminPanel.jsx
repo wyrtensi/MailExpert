@@ -58,8 +58,9 @@ import {
 } from '../utils/mailNode.js';
 import MailboxDeletionNotice, { MailboxDeactivatedNotice, TenantPendingLine } from './MailboxDeletionNotice.jsx';
 import { openOAuthWindow } from '../utils/oauthWindow.js';
-import { HEALTH_COLORS, HEALTH_LABEL_KEYS, MICROSOFT_OAUTH_PATH, reconnectUrlFor } from '../utils/accountHealth.js';
+import { HEALTH_COLORS, HEALTH_LABEL_KEYS, MICROSOFT_OAUTH_PATH, isMailruReconnectRequired, isYandexReconnectRequired, reconnectUrlFor } from '../utils/accountHealth.js';
 import { isGoogleReconnectRequired } from '../utils/googleOAuth.js';
+import { reconnectMailruOAuth } from '../utils/mailruOAuth.js';
 import { microsoftOAuthErrorKey } from '../utils/microsoftOAuth.js';
 import { withoutDeleteChoices } from '../utils/deletePolicy.js';
 import { getEffectiveShortcuts, getGroupedActions, ACTION_DEFS, SPECIAL_KEY_LABELS, parseModKey, modLabel } from '../utils/defaultShortcuts.js';
@@ -509,7 +510,7 @@ function threadingBlockedMessage(err, t) {
 // Exported (like ThemesTab below) only so AccountsTab.render.test.js can mount it.
 export function AccountsTab() {
   const { t } = useTranslation();
-  const { accounts, setAccounts, updateAccount, setUnreadCounts, addNotification, backfillProgress, user, openAddAccount, openProtonReconnect, accountSettingsRequested, clearAccountSettingsRequest, accountsReady } = useStore();
+  const { accounts, setAccounts, updateAccount, setUnreadCounts, addNotification, backfillProgress, user, openAddAccount, openProtonReconnect, openYandexReconnect, accountSettingsRequested, clearAccountSettingsRequest, accountsReady } = useStore();
   const isAdmin = !!user?.isAdmin;
   const [subview, setSubview] = useState('list'); // 'list' | 'edit' | 'folders' | 'aliases'
   const [editTarget, setEditTarget] = useState(null);
@@ -1323,7 +1324,7 @@ export function AccountsTab() {
               <div style={{ fontSize: 11, marginTop: 3, display: 'flex', alignItems: 'center', gap: 6, flexWrap: 'wrap' }}>
                 {account.health === 'proton_reconnect_required' || account.health === 'proton_unavailable' ? (
                   <span style={{ color: HEALTH_COLORS[account.health], display: 'inline-flex', alignItems: 'center', gap: 4 }}><WarningIcon size={12} /> {t(HEALTH_LABEL_KEYS[account.health])}</span>
-                ) : isGoogleReconnectRequired(account) ? (
+                ) : (isGoogleReconnectRequired(account) || isMailruReconnectRequired(account) || isYandexReconnectRequired(account)) ? (
                   <span style={{ color: 'var(--red)', display: 'inline-flex', alignItems: 'center', gap: 4 }}><WarningIcon size={12} /> {t('admin.accounts.oauthReconnectRequired')}</span>
                 ) : account.sync_error ? (
                   <span style={{
@@ -1341,12 +1342,16 @@ export function AccountsTab() {
               </div>
             </div>
             <div style={{ display: 'flex', gap: 6, flexShrink: 0, marginLeft: 'auto' }}>
-              {isGoogleReconnectRequired(account) && (
-                <button onClick={() => openOAuthWindow(reconnectUrlFor(account))} style={{
+              {(isGoogleReconnectRequired(account) || isMailruReconnectRequired(account) || isYandexReconnectRequired(account)) && (
+                <button type="button" onClick={() => {
+                  if (isMailruReconnectRequired(account)) reconnectMailruOAuth(account.id, t);
+                  else if (isYandexReconnectRequired(account)) openYandexReconnect(account);
+                  else openOAuthWindow(reconnectUrlFor(account));
+                }} style={{
                   padding: '5px 10px', background: 'var(--accent)', border: 'none', borderRadius: 6,
                   color: 'var(--accent-text)', cursor: 'pointer', fontSize: 12, fontWeight: 500,
                 }}>
-                  {t('admin.accounts.reconnectGmail')}
+                  {t(isGoogleReconnectRequired(account) ? 'admin.accounts.reconnectGmail' : 'sidebar.accountMenu.reconnect')}
                 </button>
               )}
               {account.can_reconnect_proton === true && (
@@ -1363,7 +1368,10 @@ export function AccountsTab() {
                   {t('admin.accounts.protonReconnect')}
                 </button>
               )}
-              {account.sync_error && !isGoogleReconnectRequired(account) && account.can_reconnect_proton !== true && (
+              {account.sync_error && !isGoogleReconnectRequired(account)
+                && !isMailruReconnectRequired(account)
+                && !isYandexReconnectRequired(account)
+                && account.can_reconnect_proton !== true && (
                 <IconBtn onClick={() => handleReconnect(account.id)} title={t('sidebar.accountMenu.reconnect')}>
                   <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
                     <polyline points="23 4 23 10 17 10"/>
@@ -2645,6 +2653,96 @@ function MailNodeTab() {
   );
 }
 
+const OAUTH_SETTINGS_KEYS = {
+  mailru: {
+    title: 'admin.integrations.mailru.title',
+    keepSecret: 'admin.integrations.mailru.keepSecret',
+    saved: 'admin.integrations.mailru.saved',
+    errorSave: 'admin.integrations.mailru.errorSave',
+    errorClientId: 'admin.integrations.mailru.errorClientId',
+    errorClientSecret: 'admin.integrations.mailru.errorClientSecret',
+  },
+  yandex: {
+    title: 'admin.integrations.yandex.title',
+    keepSecret: 'admin.integrations.yandex.keepSecret',
+    saved: 'admin.integrations.yandex.saved',
+    errorSave: 'admin.integrations.yandex.errorSave',
+    errorClientId: 'admin.integrations.yandex.errorClientId',
+    errorClientSecret: 'admin.integrations.yandex.errorClientSecret',
+  },
+};
+
+function MailboxOAuthSettings({ provider, config, onSaved }) {
+  const { t } = useTranslation();
+  const keys = OAUTH_SETTINGS_KEYS[provider];
+  const usesRedirect = provider === 'mailru';
+  const [clientId, setClientId] = useState(config?.clientId ?? '');
+  const [clientSecret, setClientSecret] = useState('');
+  const [redirectUri, setRedirectUri] = useState(config?.redirectUri ?? (usesRedirect ? `${window.location.origin}/oauth/mailru/callback` : ''));
+  const [saving, setSaving] = useState(false);
+  const [message, setMessage] = useState(null);
+  const keepSecret = Boolean(config?.clientId) && clientId.trim() === config.clientId;
+  const canSave = !saving && clientId.trim() && (!usesRedirect || redirectUri.trim()) && (clientSecret.trim() || keepSecret);
+
+  const save = async (event) => {
+    event.preventDefault();
+    if (!canSave) return;
+    setSaving(true);
+    setMessage(null);
+    const savedConfig = { clientId: clientId.trim(), ...(usesRedirect ? { redirectUri: redirectUri.trim() } : {}) };
+    try {
+      await api.saveIntegration(provider, { ...savedConfig, clientSecret: clientSecret.trim() });
+      setClientSecret('');
+      onSaved(savedConfig);
+      setMessage({ type: 'success', text: t(keys.saved) });
+    } catch (err) {
+      const key = apiErrorKey(err?.code, {
+        redirect_uri_invalid: 'admin.integrations.mailru.errorRedirectUri',
+        client_id_invalid: keys.errorClientId,
+        client_secret_required: keys.errorClientSecret,
+        client_secret_redacted: keys.errorClientSecret,
+      });
+      setMessage({ type: 'error', text: t(key ?? keys.errorSave) });
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  return (
+    <details style={{ border: '1px solid var(--border-subtle)', borderRadius: 12, marginBottom: 12 }}>
+      <summary style={{ padding: '14px 16px', cursor: 'pointer', fontWeight: 600 }}>
+        {t(keys.title)}
+      </summary>
+      <form onSubmit={save} style={{ padding: '0 16px 16px' }} aria-busy={saving}>
+        {!usesRedirect && <p className="add-account-note">{t('admin.integrations.yandex.setupNote')}</p>}
+        <Field label={t('admin.integrations.microsoft.clientId')} htmlFor={`${provider}-client-id`} required>
+          <input id={`${provider}-client-id`} style={inputStyle} value={clientId} disabled={saving} required onChange={e => setClientId(e.target.value)} />
+        </Field>
+        <Field label={t('admin.integrations.microsoft.clientSecret')} htmlFor={`${provider}-client-secret`} required={!keepSecret}>
+          <input id={`${provider}-client-secret`} style={inputStyle} type="password" autoComplete="new-password"
+            placeholder={keepSecret ? t(keys.keepSecret) : undefined}
+            value={clientSecret} disabled={saving} required={!keepSecret} onChange={e => setClientSecret(e.target.value)} />
+        </Field>
+        {usesRedirect && <Field label={t('admin.integrations.microsoft.redirectUri')} htmlFor="mailru-redirect-uri" required>
+          <input id="mailru-redirect-uri" style={inputStyle} type="url" value={redirectUri} disabled={saving} required
+            aria-describedby="mailru-redirect-note" onChange={e => setRedirectUri(e.target.value)} />
+          <div id="mailru-redirect-note" style={{ color: 'var(--text-tertiary)', fontSize: 12, marginTop: 5 }}>
+            {t('admin.integrations.mailru.redirectNote')}
+          </div>
+        </Field>}
+        <button type="submit" className="add-account-button" disabled={!canSave}>
+          {saving ? t('common.saving') : t('common.save')}
+        </button>
+        {message && (
+          <p role={message.type === 'error' ? 'alert' : 'status'} style={{ color: message.type === 'error' ? 'var(--red)' : 'var(--green)' }}>
+            {message.text}
+          </p>
+        )}
+      </form>
+    </details>
+  );
+}
+
 // ─── Integrations Tab ────────────────────────────────────────────────────────
 function IntegrationsTab() {
   const { t } = useTranslation();
@@ -3216,7 +3314,15 @@ function IntegrationsTab() {
             )}
           </div>
 
-          {isAdmin && <GoogleAppsSection />}
+          {isAdmin && (
+            <>
+              <GoogleAppsSection />
+              {Object.keys(OAUTH_SETTINGS_KEYS).map((provider) => (
+                <MailboxOAuthSettings key={provider} provider={provider} config={configs[provider]}
+                  onSaved={(config) => setConfigs(prev => ({ ...prev, [provider]: config }))} />
+              ))}
+            </>
+          )}
         </div>
       )}
         </div>

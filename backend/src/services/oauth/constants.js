@@ -2,7 +2,7 @@
 // Keep this module free of imports: tests mock the token manager and the provider modules, and
 // a constant read through a mocked module would silently become undefined.
 
-export const OAUTH_PROVIDERS = new Set(['microsoft', 'google']);
+export const OAUTH_PROVIDERS = new Set(['microsoft', 'google', 'mailru', 'yandex']);
 
 export const isOAuthAccount = (account) => OAUTH_PROVIDERS.has(account?.oauth_provider);
 
@@ -27,10 +27,10 @@ export const OAUTH_SEND_FAILURES = Object.freeze({
 // /oauth/google): the stored callback URL must name it exactly.
 export const GOOGLE_CALLBACK_PATH = '/oauth/google/callback';
 
-// Timeout of a single provider token-endpoint call (fetch AbortSignal) in googleOAuth.js and
-// microsoftOAuth.js.
+// Timeout of a single OAuth provider request (fetch AbortSignal), including discovery in
+// mailruOAuth.js.
 export const PROVIDER_FETCH_TIMEOUT_MS = 10000;
 
-// Worst-case token-endpoint calls in one refresh. Microsoft's AADSTS90023 public-client self-heal
-// repeats the call without the client secret; Google always makes one call.
-export const OAUTH_REFRESH_MAX_TOKEN_CALLS = Object.freeze({ google: 1, microsoft: 2 });
+// Worst-case network calls in one refresh. Microsoft's AADSTS90023 public-client self-heal
+// repeats the call without the client secret; Mail.ru may need a discovery lookup first.
+export const OAUTH_REFRESH_MAX_TOKEN_CALLS = Object.freeze({ google: 1, microsoft: 2, mailru: 2, yandex: 1 });

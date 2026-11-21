@@ -583,6 +583,7 @@ let demoGoogleApps = [];
 let demoOidcProviders = [];
 let systemEmailConfig = null;
 let integrationsConfig = {};
+const yandexDeviceFlows = new Map();
 let aiConfig = null;
 let demoRules = [];
 let demoBlockList = [];
@@ -2193,6 +2194,51 @@ export async function demoRequest(method, path, body = {}) {
   // "Mailbox on our domain": the demo adds it to the account list for this page session.
   if (verb === 'POST' && pathname === '/accounts' && body?.kind === 'domain') return clone(createDomainMailbox(body));
   if (verb === 'POST' && pathname === '/oauth/google/start') return connectGmail(body);
+  const mailboxOAuth = pathname === '/oauth/mailru/start' ? 'mailru'
+    : pathname === '/oauth/yandex/device' ? 'yandex' : null;
+  if (verb === 'POST' && mailboxOAuth) {
+    if (!integrationsConfig[mailboxOAuth]) throw demoError('Mailbox OAuth is not configured', 'not_configured');
+    const account = body?.accountId ? accountFor(body.accountId) : null;
+    const email = normalizeEmail(body?.email);
+    if (body?.accountId) {
+      if (account?.oauth_provider !== mailboxOAuth) throw demoError('Invalid OAuth account', 'invalid_state');
+    } else if (!/^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(email)) {
+      throw demoError('Invalid email', 'email_invalid');
+    }
+    if (mailboxOAuth === 'yandex') {
+      const now = Date.now();
+      for (const [id, flow] of yandexDeviceFlows) {
+        if (flow.expiresAt <= now) yandexDeviceFlows.delete(id);
+      }
+      const flowId = globalThis.crypto.randomUUID();
+      const expiresIn = 60;
+      yandexDeviceFlows.set(flowId, { accountId: account?.id, email, expiresAt: now + expiresIn * 1000 });
+      return { flowId, userCode: 'DEMO-CODE', verificationUri: 'https://ya.ru/device', interval: 1, expiresIn };
+    }
+    if (account) {
+      Object.assign(account, { health: 'healthy', oauth_reconnect_required: false, sync_error: null });
+      return { demo: true, result: 'updated' };
+    }
+    providerDemo.createProviderMailbox({ provider: 'mailru', email }, { oauthProvider: 'mailru' });
+    return { demo: true, result: 'created' };
+  }
+  if (verb === 'POST' && pathname === '/oauth/yandex/device/poll') {
+    const flow = yandexDeviceFlows.get(body?.flowId);
+    yandexDeviceFlows.delete(body?.flowId);
+    if (!flow || flow.expiresAt <= Date.now()) return { status: 'expired' };
+    if (flow.accountId) {
+      const account = accountFor(flow.accountId);
+      if (account?.oauth_provider !== 'yandex') throw demoError('Invalid OAuth account', 'invalid_state');
+      Object.assign(account, { health: 'healthy', oauth_reconnect_required: false, sync_error: null });
+      return { status: 'success', result: 'updated' };
+    }
+    providerDemo.createProviderMailbox({ provider: 'yandex', email: flow.email }, { oauthProvider: 'yandex' });
+    return { status: 'success', result: 'created' };
+  }
+  if (verb === 'POST' && pathname === '/oauth/yandex/device/cancel') {
+    yandexDeviceFlows.delete(body?.flowId);
+    return { ok: true };
+  }
   if (verb === 'GET' && pathname === '/oauth/google/known-emails') {
     const q = normalizeEmail(url.searchParams.get('q'));
     return { emails: KNOWN_GOOGLE_EMAILS.filter(email => email.includes(q) && !mailboxWithEmail(email)) };
@@ -2713,6 +2759,8 @@ export async function demoRequest(method, path, body = {}) {
   if (verb === 'GET' && pathname === '/integrations/status') {
     return {
       google: { configured: true, available: true }, microsoft: { configured: false }, domainMail: { configured: true },
+      mailru: { configured: Boolean(integrationsConfig.mailru) },
+      yandex: { configured: Boolean(integrationsConfig.yandex) },
       mailProviders: clone(DEMO_MAIL_PROVIDERS),
       proton: { configured: true, available: true, code: null },
       manual: { allowPrivateHosts: false, allowNonstandardPorts: false },
@@ -2725,6 +2773,16 @@ export async function demoRequest(method, path, body = {}) {
       const redirectUri = String(body?.redirectUri ?? '').trim();
       if (redirectUri && googleCallbackFormError(redirectUri)) throw demoError('redirect_uri must be the full callback URL', 'redirect_uri_invalid');
       integrationsConfig = { ...integrationsConfig, google: { ...(redirectUri ? { redirectUri } : {}), updated_at: new Date().toISOString() } };
+    } else if (provider === 'mailru' || provider === 'yandex') {
+      const clientId = String(body?.clientId ?? '').trim();
+      const secret = String(body?.clientSecret ?? '').trim();
+      const redirect = provider === 'mailru' ? { redirectUri: String(body?.redirectUri ?? '').trim() } : {};
+      if (!clientId) throw demoError('Client ID required', 'client_id_invalid');
+      if (!secret && clientId !== integrationsConfig[provider]?.clientId) throw demoError('Client secret required', 'client_secret_required');
+      integrationsConfig = {
+        ...integrationsConfig,
+        [provider]: { clientId, ...redirect, clientSecret: '•'.repeat(8), updated_at: new Date().toISOString() },
+      };
     } else {
       const cfg = { ...clone(body || {}) };
       if (cfg.clientSecret) cfg.clientSecret = '•'.repeat(8);

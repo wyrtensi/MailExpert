@@ -63,10 +63,20 @@ const { default: AddAccountDialog } = await import('./AddAccountDialog.jsx');
 const { ADD_ACCOUNT_KINDS } = await import('../utils/addAccount.js');
 const { isAttemptId } = await import('../utils/addAccountFlow.js');
 const { appOAuthReturnWatch } = await import('../utils/appOAuthReturn.js');
+const { mailruOAuthNotification } = await import('../utils/mailruOAuth.js');
 
 const settle = () => React.act(async () => { await new Promise(r => setTimeout(r, 0)); });
 const key = (target, k, init = {}) => target.dispatchEvent(new dom.window.KeyboardEvent('keydown', { key: k, bubbles: true, cancelable: true, ...init }));
 const visibleRect = () => ({ left: 0, top: 0, right: 100, bottom: 44, width: 100, height: 44 });
+
+test('Mail.ru OAuth results use localized messages and never expose raw callback data', () => {
+  const toast = (query) => mailruOAuthNotification(new URLSearchParams(query), (key) => key);
+  assert.equal(toast('oauth_success=mailru&oauth_result=created').body, 'admin.integrations.mailru.connected');
+  assert.equal(toast('oauth_success=mailru&oauth_result=updated').body, 'admin.integrations.mailru.updated');
+  assert.equal(toast('oauth_error=account_mismatch&oauth_provider=mailru').body, 'admin.integrations.mailru.errorAccountMismatch');
+  assert.equal(toast('oauth_error=secret-sentinel&oauth_provider=mailru').body, 'admin.integrations.mailru.errorAuthenticationFailed');
+  assert.equal(toast('oauth_error=access_denied&oauth_provider=microsoft'), null);
+});
 
 // A form that exposes what the dialog hands to it, so the tests can drive it.
 let lastProps = null;
@@ -111,7 +121,7 @@ describe('AddAccountDialog', () => {
     lastProps = null;
     serverAccounts = [];
     document.body.style.overflow = 'auto';
-    useStore.setState({ accounts: [{ id: 'a1', email_address: 'one@example.invalid' }], showAddAccountDialog: true, notifications: [], fontSize: 100 });
+    useStore.setState({ accounts: [{ id: 'a1', email_address: 'one@example.invalid' }], showAddAccountDialog: true, addAccountSeed: null, notifications: [], fontSize: 100 });
   });
 
   test('provider_intro_under_title: each form opens with one line on what the service needs', async () => {
@@ -122,6 +132,127 @@ describe('AddAccountDialog', () => {
     await click(dialog().querySelector('.add-account-back'));
     await click(tile('other'));
     assert.equal(dialog().querySelector('[data-provider-intro]')?.textContent, 'admin.accounts.add.intro.other');
+  });
+
+  test('Mail.ru displays OAuth only when configured and can start with just the email address', async (context) => {
+    const configured = context.mock.method(api, 'getIntegrationsStatus', async () => ({ mailru: { configured: false } }));
+    const start = context.mock.method(api, 'startMailruOAuth', async () => {
+      throw Object.assign(new Error('private details'), { code: 'not_configured' });
+    });
+    // The dialog's real form is needed so the button and request run together.
+    const openReal = async () => {
+      await React.act(async () => root.render(React.createElement(AddAccountDialog, { onClose: () => root.render(null) })));
+      await settle();
+      await click(tile('mailru'));
+    };
+    const button = (text) => [...dialog().querySelectorAll('button')].find((el) => el.textContent === text);
+    await openReal();
+    assert.equal(button('admin.integrations.mailru.connect'), undefined);
+    assert.ok(button('admin.accounts.add.connect'));
+    await React.act(async () => root.render(null));
+
+    configured.mock.mockImplementation(async () => ({ mailru: { configured: true } }));
+    await openReal();
+    assert.ok(button('admin.integrations.mailru.connect').disabled);
+    const input = dialog().querySelector('input[type="email"]');
+    await React.act(async () => {
+      const setter = Object.getOwnPropertyDescriptor(dom.window.HTMLInputElement.prototype, 'value').set;
+      setter.call(input, 'me@mail.ru');
+      input.dispatchEvent(new dom.window.Event('input', { bubbles: true }));
+    });
+    assert.ok(button('admin.accounts.add.connectAppPassword').disabled, 'the password flow still requires a password');
+    await click(button('admin.integrations.mailru.connect'));
+    assert.deepEqual(start.mock.calls[0].arguments[0], { email: 'me@mail.ru' });
+    const signal = start.mock.calls[0].arguments[1];
+    assert.equal(signal.aborted, false);
+    assert.equal(dialog().querySelector('[role="alert"]').textContent, 'admin.integrations.mailru.errorNotConfigured');
+    await click(dialog().querySelector('.add-account-back'));
+    assert.equal(signal.aborted, true);
+  });
+
+  test('Yandex OAuth starts with only the address and cancels its device flow on Back', async (context) => {
+    context.mock.method(api, 'getIntegrationsStatus', async () => ({ yandex: { configured: true } }));
+    context.mock.method(globalThis, 'fetch', async (url, options) => {
+      requests.push([url, JSON.parse(options.body)]);
+      const body = url.endsWith('/cancel') ? {} : {
+        flowId: 'flow-id', userCode: 'ABCD-EFGH', verificationUri: 'https://ya.ru/device', interval: 5, expiresIn: 60,
+      };
+      return { ok: true, status: 200, json: async () => body };
+    });
+    const requests = [];
+    await React.act(async () => root.render(React.createElement(AddAccountDialog, { onClose: () => root.render(null) })));
+    await settle();
+    await click(tile('yandex'));
+    const input = dialog().querySelector('input[type="email"]');
+    await React.act(async () => {
+      const setter = Object.getOwnPropertyDescriptor(dom.window.HTMLInputElement.prototype, 'value').set;
+      setter.call(input, 'me@yandex.ru');
+      input.dispatchEvent(new dom.window.Event('input', { bubbles: true }));
+    });
+    const start = [...dialog().querySelectorAll('button')].find((el) => el.textContent === 'admin.integrations.yandex.connect');
+    assert.ok(start, 'configured Yandex shows OAuth sign-in');
+    await click(start);
+    assert.deepEqual(requests[0], ['/api/oauth/yandex/device', { email: 'me@yandex.ru' }]);
+    assert.equal(dialog().querySelector('code').textContent, 'ABCD-EFGH');
+    assert.equal(dialog().querySelector('a[href="https://ya.ru/device"]').rel, 'noreferrer');
+    await click(dialog().querySelector('.add-account-back'));
+    assert.deepEqual(requests[1], ['/api/oauth/yandex/device/cancel', { flowId: 'flow-id' }]);
+  });
+
+  test('Yandex reconnect retries a dropped response and honors the server polling interval', async (context) => {
+    const calls = [];
+    context.mock.method(api, 'getIntegrationsStatus', async () => ({ yandex: { configured: true } }));
+    context.mock.method(api, 'startYandexOAuth', async (body) => {
+      calls.push(body);
+      return { flowId: 'flow-id', userCode: 'ABCD-EFGH', verificationUri: 'https://ya.ru/device', interval: 5, expiresIn: 60 };
+    });
+    let polls = 0;
+    let finishPoll;
+    const cancel = context.mock.method(api, 'cancelYandexOAuth', async () => ({ ok: true }));
+    context.mock.method(api, 'pollYandexOAuth', async (id) => {
+      calls.push(id);
+      polls += 1;
+      if (polls === 1) throw new TypeError('Network request failed');
+      return polls === 2 ? { status: 'pending', interval: 8 }
+        : new Promise((resolve) => { finishPoll = resolve; });
+    });
+    useStore.getState().openYandexReconnect({ id: 'y1', email_address: 'me@yandex.ru' });
+    await React.act(async () => root.render(React.createElement(AddAccountDialog, { onClose: () => root.render(null) })));
+    await settle();
+    const address = dialog().querySelector('input[type="email"]');
+    assert.equal(address.value, 'me@yandex.ru');
+    assert.equal(address.readOnly, true);
+    assert.equal(dialog().querySelector('#imap-add-password'), null);
+    context.mock.timers.enable({ apis: ['setTimeout'] });
+    await click([...dialog().querySelectorAll('button')].find((el) => el.textContent === 'admin.integrations.yandex.connect'));
+    assert.deepEqual(calls, [{ accountId: 'y1' }]);
+    await React.act(async () => context.mock.timers.tick(5000));
+    assert.equal(polls, 1);
+    assert.equal(cancel.mock.callCount(), 0);
+    await React.act(async () => context.mock.timers.tick(5000));
+    assert.equal(polls, 2);
+    await React.act(async () => context.mock.timers.tick(7999));
+    assert.equal(polls, 2);
+    await React.act(async () => context.mock.timers.tick(1));
+    assert.deepEqual(calls, [{ accountId: 'y1' }, 'flow-id', 'flow-id', 'flow-id']);
+    await React.act(async () => context.mock.timers.tick(42000));
+    assert.ok(dialog().querySelector('code'), 'an active authorization can complete after the device code expires');
+    await React.act(async () => finishPoll({ status: 'success', result: 'updated' }));
+    assert.equal(dialog(), null);
+    assert.ok(useStore.getState().notifications.some((n) => n.body === 'admin.integrations.yandex.updated'));
+  });
+
+  test('closing while a Yandex device code is requested cancels the late flow', async (context) => {
+    let answer;
+    context.mock.method(api, 'startYandexOAuth', () => new Promise((resolve) => { answer = resolve; }));
+    const cancel = context.mock.method(api, 'cancelYandexOAuth', async () => ({ ok: true }));
+    useStore.getState().openYandexReconnect({ id: 'y1', email_address: 'me@yandex.ru' });
+    await React.act(async () => root.render(React.createElement(AddAccountDialog, { onClose: () => root.render(null) })));
+    await click([...dialog().querySelectorAll('button')].find((el) => el.textContent === 'admin.integrations.yandex.connect'));
+    await click(dialog().querySelector('[aria-label="common.close"]'));
+    await React.act(async () => answer({ flowId: 'late-flow-id' }));
+    assert.deepEqual(cancel.mock.calls[0].arguments, ['late-flow-id']);
+    assert.equal(dialog(), null);
   });
 
   test('proton_tile_shows_unavailable: a stopped Proton service is visible on its tile, which stays selectable', async () => {

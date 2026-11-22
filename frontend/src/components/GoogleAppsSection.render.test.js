@@ -95,27 +95,30 @@ async function mount(apps) {
 const WARNING_KEY = 'admin.integrations.googleApps.gmailApiDisabledWarning';
 
 describe('GoogleAppsSection — Gmail API disabled warning', () => {
-  test('can collapse and reopen the settings from the provider header', async () => {
+  test('starts collapsed and can open and close from the provider header', async () => {
     const host = await mount([CLEAN_APP]);
     const header = host.querySelector('button[aria-expanded][aria-controls]');
     assert.ok(header, 'expected a keyboard-accessible integration header');
     assert.equal(header.querySelector('img')?.getAttribute('src'), '/provider-icons/gmail.svg');
     const panel = dom.window.document.getElementById(header.getAttribute('aria-controls'));
     assert.ok(panel);
-    assert.equal(header.getAttribute('aria-expanded'), 'true');
-
-    await React.act(async () => { header.click(); });
     assert.equal(header.getAttribute('aria-expanded'), 'false');
     assert.equal(panel.hidden, true);
+    assert.equal(panel.textContent, '');
 
     await React.act(async () => { header.click(); });
     assert.equal(header.getAttribute('aria-expanded'), 'true');
     assert.equal(panel.hidden, false);
     assert.ok(panel.textContent.includes(CLEAN_APP.label));
+
+    await React.act(async () => { header.click(); });
+    assert.equal(header.getAttribute('aria-expanded'), 'false');
+    assert.equal(panel.hidden, true);
   });
 
   test('shows the warning under an app whose Gmail API turned out to be disabled', async () => {
     const host = await mount([CLEAN_APP, FLAGGED_APP]);
+    await React.act(async () => { host.querySelector('button[aria-expanded]').click(); });
     assert.equal(host.textContent.includes(WARNING_KEY), true);
     // The row exists once, and it is the flagged app's row, not the clean one's.
     const rows = [...host.querySelectorAll('tr')];
@@ -125,6 +128,7 @@ describe('GoogleAppsSection — Gmail API disabled warning', () => {
 
   test('renders no warning when no app has the flag set', async () => {
     const host = await mount([CLEAN_APP]);
+    await React.act(async () => { host.querySelector('button[aria-expanded]').click(); });
     assert.equal(host.textContent.includes(WARNING_KEY), false);
   });
 });

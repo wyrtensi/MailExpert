@@ -47,7 +47,7 @@ const headCellStyle = { ...cellStyle, fontSize: 11, fontWeight: 600, color: 'var
 // with its own 100-user cap; MailExpert picks the app per mailbox. Secrets are only ever sent.
 export default function GoogleAppsSection() {
   const { t } = useTranslation();
-  const [expanded, setExpanded] = useState(true);
+  const [expanded, setExpanded] = useState(false);
   const [apps, setApps] = useState(null);
   const [loadError, setLoadError] = useState('');
   const [callback, setCallback] = useState('');

@@ -1,20 +1,11 @@
 import { useEffect, useRef, useState } from 'react';
 import { api } from '../../utils/api.js';
+import { mailboxBrowserOAuthErrorKey } from '../../utils/mailboxBrowserOAuth.js';
 
 const VERIFICATION_URIS = new Set(['https://ya.ru/device', 'https://oauth.yandex.ru/device']);
-const ERROR_KEYS = {
-  not_configured: 'admin.integrations.yandex.errorNotConfigured',
-  already_connected: 'admin.integrations.yandex.errorAlreadyConnected',
-  invalid_state: 'admin.integrations.yandex.errorExpired',
-  email_invalid: 'admin.accounts.add.error.emailInvalid',
-  rate_limited: 'admin.accounts.add.error.rateLimited',
-  scope_missing: 'admin.integrations.yandex.errorScopeMissing',
-  missing_refresh_token: 'admin.integrations.yandex.errorMissingRefreshToken',
-  account_mismatch: 'admin.integrations.yandex.errorAccountMismatch',
-  imap_auth_failed: 'admin.integrations.yandex.errorImapAuth',
-  smtp_auth_failed: 'admin.integrations.yandex.errorSmtpAuth',
-};
 const DEFAULT_ERROR = 'admin.integrations.yandex.errorAuthenticationFailed';
+const deviceErrorKey = (code) => code === 'invalid_state'
+  ? 'admin.integrations.yandex.errorExpired' : mailboxBrowserOAuthErrorKey('yandex', code);
 const MAX_POLL_RETRIES = 2;
 const retryablePollError = (error) => error instanceof TypeError || error instanceof SyntaxError
   || (!error?.code && [502, 503, 504].includes(error?.status));
@@ -84,7 +75,7 @@ export default function useYandexOAuth(signal) {
             return;
           }
           // The server may have committed already. Preserve its cached result on network failure.
-          fail(Object.hasOwn(ERROR_KEYS, error?.code) ? ERROR_KEYS[error.code] : DEFAULT_ERROR, { cancel: !retryable });
+          fail(deviceErrorKey(error?.code), { cancel: !retryable });
         }
       }, interval * 1000);
     }
@@ -110,7 +101,7 @@ export default function useYandexOAuth(signal) {
       // still be verifying the mailbox when the advertised lifetime ends.
       schedulePoll(flow.interval);
     } catch (error) {
-      fail(Object.hasOwn(ERROR_KEYS, error?.code) ? ERROR_KEYS[error.code] : DEFAULT_ERROR);
+      fail(deviceErrorKey(error?.code));
     }
   };
 

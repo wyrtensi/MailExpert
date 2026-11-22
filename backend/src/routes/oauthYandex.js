@@ -7,10 +7,13 @@ import {
 import { probeConnection } from '../services/accounts/connectionProbe.js';
 import { getMailboxOAuthConfig } from '../services/integrations/mailboxOAuth.js';
 import { acquireOAuthLease, releaseOAuthLease } from '../services/oauth/oauthLease.js';
-import { exchangeYandexDeviceCode, fetchYandexIdentity, requestYandexDeviceCode } from '../services/oauth/yandexOAuth.js';
+import {
+  buildYandexAuthorizationUrl, exchangeYandexCode, exchangeYandexDeviceCode, fetchYandexIdentity, requestYandexDeviceCode,
+} from '../services/oauth/yandexOAuth.js';
 import { consume } from '../services/rateLimiter.js';
 import { redisClient } from '../services/redis.js';
 import { isUuid } from '../utils/uuid.js';
+import { createMailboxOAuthRedirectRoutes } from './mailboxOAuthRedirect.js';
 
 const router = Router();
 const PROVIDER = 'yandex';
@@ -31,6 +34,24 @@ const errors = {
 const errorResult = (code) => ({ http: errors[code], body: { error: code, code } });
 const replyError = (res, code) => res.status(errors[code]).json({ error: code, code });
 
+async function proveIdentity(tokens, config, email) {
+  const identity = await fetchYandexIdentity(tokens.accessToken, { clientId: config.clientId });
+  // This OAuth app may have no login:email permission. Prove the intended mailbox by signing
+  // in over both protocols before saving the grant. This SMTP probe does not send a message.
+  await probeConnection(oauthMailboxConnection(PROVIDER, email), { oauthAccessToken: tokens.accessToken });
+  return identity;
+}
+
+const { apiRoutes, callbackRoutes: yandexCallbackRoutes } = createMailboxOAuthRedirectRoutes({
+  provider: PROVIDER,
+  buildAuthorizationUrl: buildYandexAuthorizationUrl,
+  exchangeCode: exchangeYandexCode,
+  proveIdentity,
+  providerErrors: new Set(['imap_auth_failed', 'smtp_auth_failed', 'scope_missing', 'missing_refresh_token']),
+});
+export { yandexCallbackRoutes };
+
+router.use(apiRoutes);
 router.use(requireAuth, (_req, res, next) => { res.set('Cache-Control', 'no-store'); next(); });
 
 function flowKey(req, flowId) {
@@ -64,10 +85,7 @@ router.post('/device', async (req, res) => {
 
 async function finishDeviceFlow(req, key, flow, config) {
   const tokens = await exchangeYandexDeviceCode({ ...config, deviceCode: flow.deviceCode });
-  const identity = await fetchYandexIdentity(tokens.accessToken, { clientId: config.clientId });
-  // This OAuth app may have no login:email permission. Prove the intended mailbox by signing
-  // in over both protocols before saving the grant. This SMTP probe does not send a message.
-  await probeConnection(oauthMailboxConnection(PROVIDER, flow.email), { oauthAccessToken: tokens.accessToken });
+  const identity = await proveIdentity(tokens, config, flow.email);
   const saved = await saveMailboxOAuthAccount({
     provider: PROVIDER, pending: flow, identity, tokens, config,
     // Check again after waiting for the mailbox address lock, just before persistence.

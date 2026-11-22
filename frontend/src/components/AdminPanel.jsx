@@ -41,6 +41,8 @@ import AuditLogTab from './AuditLogTab.jsx';
 import { isGoogleAuthMode } from '../utils/authMode.js';
 import { adminUserErrorText } from '../utils/adminUsers.js';
 import GoogleAppsSection from './GoogleAppsSection.jsx';
+import IntegrationCard from './IntegrationCard.jsx';
+import ProviderIcon from './addAccount/ProviderIcon.jsx';
 import MailNodeSection from './MailNodeSection.jsx';
 import EopSection from './EopSection.jsx';
 import MailNodeOpsSection from './MailNodeOpsSection.jsx';
@@ -60,7 +62,7 @@ import MailboxDeletionNotice, { MailboxDeactivatedNotice, TenantPendingLine } fr
 import { openOAuthWindow } from '../utils/oauthWindow.js';
 import { HEALTH_COLORS, HEALTH_LABEL_KEYS, MICROSOFT_OAUTH_PATH, isMailruReconnectRequired, isYandexReconnectRequired, reconnectUrlFor } from '../utils/accountHealth.js';
 import { isGoogleReconnectRequired } from '../utils/googleOAuth.js';
-import { reconnectMailruOAuth } from '../utils/mailruOAuth.js';
+import { reconnectMailruOAuth } from '../utils/mailboxBrowserOAuth.js';
 import { microsoftOAuthErrorKey } from '../utils/microsoftOAuth.js';
 import { withoutDeleteChoices } from '../utils/deletePolicy.js';
 import { getEffectiveShortcuts, getGroupedActions, ACTION_DEFS, SPECIAL_KEY_LABELS, parseModKey, modLabel } from '../utils/defaultShortcuts.js';
@@ -2656,6 +2658,9 @@ function MailNodeTab() {
 const OAUTH_SETTINGS_KEYS = {
   mailru: {
     title: 'admin.integrations.mailru.title',
+    description: 'admin.integrations.mailru.description',
+    redirectNote: 'admin.integrations.mailru.redirectNote',
+    errorRedirectUri: 'admin.integrations.mailru.errorRedirectUri',
     keepSecret: 'admin.integrations.mailru.keepSecret',
     saved: 'admin.integrations.mailru.saved',
     errorSave: 'admin.integrations.mailru.errorSave',
@@ -2664,6 +2669,9 @@ const OAUTH_SETTINGS_KEYS = {
   },
   yandex: {
     title: 'admin.integrations.yandex.title',
+    description: 'admin.integrations.yandex.description',
+    redirectNote: 'admin.integrations.yandex.redirectNote',
+    errorRedirectUri: 'admin.integrations.yandex.errorRedirectUri',
     keepSecret: 'admin.integrations.yandex.keepSecret',
     saved: 'admin.integrations.yandex.saved',
     errorSave: 'admin.integrations.yandex.errorSave',
@@ -2675,21 +2683,24 @@ const OAUTH_SETTINGS_KEYS = {
 function MailboxOAuthSettings({ provider, config, onSaved }) {
   const { t } = useTranslation();
   const keys = OAUTH_SETTINGS_KEYS[provider];
-  const usesRedirect = provider === 'mailru';
+  const redirectRequired = provider === 'mailru';
+  const suggestedRedirectUri = `${window.location.origin}/oauth/${provider}/callback`;
+  const [expanded, setExpanded] = useState(false);
   const [clientId, setClientId] = useState(config?.clientId ?? '');
   const [clientSecret, setClientSecret] = useState('');
-  const [redirectUri, setRedirectUri] = useState(config?.redirectUri ?? (usesRedirect ? `${window.location.origin}/oauth/mailru/callback` : ''));
+  const [redirectUri, setRedirectUri] = useState(config?.redirectUri ?? (redirectRequired ? suggestedRedirectUri : ''));
   const [saving, setSaving] = useState(false);
   const [message, setMessage] = useState(null);
-  const keepSecret = Boolean(config?.clientId) && clientId.trim() === config.clientId;
-  const canSave = !saving && clientId.trim() && (!usesRedirect || redirectUri.trim()) && (clientSecret.trim() || keepSecret);
+  const configured = Boolean(config?.clientId);
+  const keepSecret = configured && clientId.trim() === config.clientId;
+  const canSave = !saving && clientId.trim() && (!redirectRequired || redirectUri.trim()) && (clientSecret.trim() || keepSecret);
 
   const save = async (event) => {
     event.preventDefault();
     if (!canSave) return;
     setSaving(true);
     setMessage(null);
-    const savedConfig = { clientId: clientId.trim(), ...(usesRedirect ? { redirectUri: redirectUri.trim() } : {}) };
+    const savedConfig = { clientId: clientId.trim(), redirectUri: redirectUri.trim() };
     try {
       await api.saveIntegration(provider, { ...savedConfig, clientSecret: clientSecret.trim() });
       setClientSecret('');
@@ -2697,7 +2708,7 @@ function MailboxOAuthSettings({ provider, config, onSaved }) {
       setMessage({ type: 'success', text: t(keys.saved) });
     } catch (err) {
       const key = apiErrorKey(err?.code, {
-        redirect_uri_invalid: 'admin.integrations.mailru.errorRedirectUri',
+        redirect_uri_invalid: keys.errorRedirectUri,
         client_id_invalid: keys.errorClientId,
         client_secret_required: keys.errorClientSecret,
         client_secret_redacted: keys.errorClientSecret,
@@ -2709,12 +2720,17 @@ function MailboxOAuthSettings({ provider, config, onSaved }) {
   };
 
   return (
-    <details style={{ border: '1px solid var(--border-subtle)', borderRadius: 12, marginBottom: 12 }}>
-      <summary style={{ padding: '14px 16px', cursor: 'pointer', fontWeight: 600 }}>
-        {t(keys.title)}
-      </summary>
-      <form onSubmit={save} style={{ padding: '0 16px 16px' }} aria-busy={saving}>
-        {!usesRedirect && <p className="add-account-note">{t('admin.integrations.yandex.setupNote')}</p>}
+    <IntegrationCard
+      icon={<ProviderIcon kind={provider} size={20} />}
+      title={t(keys.title)}
+      description={t(keys.description)}
+      status={t(configured ? 'admin.integrations.microsoft.configured' : 'admin.integrations.microsoft.notConfigured')}
+      active={configured}
+      expanded={expanded}
+      onToggle={() => setExpanded((open) => !open)}
+    >
+      <form onSubmit={save} aria-busy={saving}>
+        {!redirectRequired && <p className="add-account-note">{t('admin.integrations.yandex.setupNote')}</p>}
         <Field label={t('admin.integrations.microsoft.clientId')} htmlFor={`${provider}-client-id`} required>
           <input id={`${provider}-client-id`} style={inputStyle} value={clientId} disabled={saving} required onChange={e => setClientId(e.target.value)} />
         </Field>
@@ -2723,14 +2739,15 @@ function MailboxOAuthSettings({ provider, config, onSaved }) {
             placeholder={keepSecret ? t(keys.keepSecret) : undefined}
             value={clientSecret} disabled={saving} required={!keepSecret} onChange={e => setClientSecret(e.target.value)} />
         </Field>
-        {usesRedirect && <Field label={t('admin.integrations.microsoft.redirectUri')} htmlFor="mailru-redirect-uri" required>
-          <input id="mailru-redirect-uri" style={inputStyle} type="url" value={redirectUri} disabled={saving} required
-            aria-describedby="mailru-redirect-note" onChange={e => setRedirectUri(e.target.value)} />
-          <div id="mailru-redirect-note" style={{ color: 'var(--text-tertiary)', fontSize: 12, marginTop: 5 }}>
-            {t('admin.integrations.mailru.redirectNote')}
+        <Field label={t('admin.integrations.microsoft.redirectUri')} htmlFor={`${provider}-redirect-uri`} required={redirectRequired}>
+          <input id={`${provider}-redirect-uri`} style={inputStyle} type="url" value={redirectUri}
+            disabled={saving} required={redirectRequired} placeholder={suggestedRedirectUri}
+            aria-describedby={`${provider}-redirect-note`} onChange={e => setRedirectUri(e.target.value)} />
+          <div id={`${provider}-redirect-note`} style={{ color: 'var(--text-tertiary)', fontSize: 12, marginTop: 5 }}>
+            {t(keys.redirectNote, { uri: suggestedRedirectUri })}
           </div>
-        </Field>}
-        <button type="submit" className="add-account-button" disabled={!canSave}>
+        </Field>
+        <button type="submit" className="admin-integration-save" disabled={!canSave}>
           {saving ? t('common.saving') : t('common.save')}
         </button>
         {message && (
@@ -2739,7 +2756,7 @@ function MailboxOAuthSettings({ provider, config, onSaved }) {
           </p>
         )}
       </form>
-    </details>
+    </IntegrationCard>
   );
 }
 
@@ -2999,67 +3016,22 @@ function IntegrationsTab() {
           {!loading && (
             <div>
               {/* Microsoft 365 */}
-          <div style={{
-            border: '1px solid var(--border-subtle)', borderRadius: 12,
-            overflow: 'hidden', marginBottom: 12,
-          }}>
-            {/* Header */}
-            <div
-              onClick={() => setMsExpanded(!msExpanded)}
-              style={{
-                padding: '14px 16px', display: 'flex', alignItems: 'center',
-                gap: 12, cursor: 'pointer', background: 'var(--bg-tertiary)',
-                transition: 'background 0.1s',
-              }}
-              onMouseEnter={e => e.currentTarget.style.background = 'var(--bg-hover)'}
-              onMouseLeave={e => e.currentTarget.style.background = 'var(--bg-tertiary)'}
-            >
-              {/* Microsoft icon */}
-              <svg width="20" height="20" viewBox="0 0 21 21" fill="none">
+          <IntegrationCard
+            icon={
+              <svg width="20" height="20" viewBox="0 0 21 21" fill="none" aria-hidden="true">
                 <rect x="1" y="1" width="9" height="9" fill="#f25022"/>
                 <rect x="11" y="1" width="9" height="9" fill="#7fba00"/>
                 <rect x="1" y="11" width="9" height="9" fill="#00a4ef"/>
                 <rect x="11" y="11" width="9" height="9" fill="#ffb900"/>
               </svg>
-
-              <div style={{ flex: 1 }}>
-                <div style={{ fontSize: 14, fontWeight: 500, color: 'var(--text-primary)' }}>
-                  {t('admin.integrations.microsoft.title')}
-                </div>
-                <div style={{ fontSize: 12, color: 'var(--text-tertiary)', marginTop: 1 }}>
-                  {t('admin.integrations.microsoft.description')}
-                </div>
-              </div>
-
-              <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
-                {msConfigured ? (
-                  <span style={{
-                    fontSize: 11, padding: '3px 8px', borderRadius: 20,
-                    background: 'rgba(74,222,128,0.1)', color: 'var(--green)',
-                    border: '1px solid rgba(74,222,128,0.2)', fontWeight: 500,
-                  }}>
-                    {t('admin.integrations.microsoft.configured')}
-                  </span>
-                ) : (
-                  <span style={{
-                    fontSize: 11, padding: '3px 8px', borderRadius: 20,
-                    background: 'var(--bg-elevated)', color: 'var(--text-tertiary)',
-                    border: '1px solid var(--border)',
-                  }}>
-                    {t('admin.integrations.microsoft.notConfigured')}
-                  </span>
-                )}
-                <svg width="14" height="14" viewBox="0 0 24 24" fill="none"
-                  stroke="var(--text-tertiary)" strokeWidth="2"
-                  style={{ transform: msExpanded ? 'rotate(180deg)' : 'none', transition: 'transform 0.15s' }}>
-                  <polyline points="6 9 12 15 18 9"/>
-                </svg>
-              </div>
-            </div>
-
-            {/* Expanded form */}
-            {msExpanded && (
-              <div style={{ padding: '16px', borderTop: '1px solid var(--border-subtle)' }}>
+            }
+            title={t('admin.integrations.microsoft.title')}
+            description={t('admin.integrations.microsoft.description')}
+            status={t(msConfigured ? 'admin.integrations.microsoft.configured' : 'admin.integrations.microsoft.notConfigured')}
+            active={msConfigured}
+            expanded={msExpanded}
+            onToggle={() => setMsExpanded((open) => !open)}
+          >
                 {/* Admin-only: setup instructions + credential form. Non-admins can't
                     read or write the global config, so they see only the note + connect
                     buttons below. (#315) */}
@@ -3154,12 +3126,7 @@ function IntegrationsTab() {
 
                 <div style={{ display: 'flex', gap: 8 }}>
                   {isAdmin && (
-                  <button onClick={handleSaveMs} disabled={saving} style={{
-                    padding: '9px 16px', background: 'var(--bg-elevated)',
-                    border: '1px solid var(--border)', borderRadius: 8,
-                    color: 'var(--text-primary)', cursor: saving ? 'not-allowed' : 'pointer',
-                    fontSize: 13, fontWeight: 500, opacity: saving ? 0.7 : 1,
-                  }}>
+                  <button onClick={handleSaveMs} disabled={saving} className="admin-integration-save">
                     {saving ? t('common.saving') : t('admin.integrations.microsoft.save')}
                   </button>
                   )}
@@ -3310,9 +3277,7 @@ function IntegrationsTab() {
                     </div>
                   )}
                 </div>
-              </div>
-            )}
-          </div>
+          </IntegrationCard>
 
           {isAdmin && (
             <>
@@ -3331,51 +3296,21 @@ function IntegrationsTab() {
       {subTab === 'apps' && (
         <div>
           {/* Todoist */}
-          <div style={{
-            border: '1px solid var(--border-subtle)', borderRadius: 12,
-            overflow: 'hidden', marginBottom: 12,
-          }}>
-            {/* Header */}
-            <div
-              onClick={() => setTdExpanded(!tdExpanded)}
-              style={{
-                padding: '14px 16px', display: 'flex', alignItems: 'center',
-                gap: 12, cursor: 'pointer', background: 'var(--bg-tertiary)',
-                transition: 'background 0.1s',
-              }}
-              onMouseEnter={e => e.currentTarget.style.background = 'var(--bg-hover)'}
-              onMouseLeave={e => e.currentTarget.style.background = 'var(--bg-tertiary)'}
-            >
-              <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="var(--accent)" strokeWidth="2">
+          <IntegrationCard
+            icon={
+              <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="var(--accent)" strokeWidth="2" aria-hidden="true">
                 <circle cx="12" cy="12" r="9"/>
                 <polyline points="9 12 11 14 15 10"/>
               </svg>
-              <div style={{ flex: 1 }}>
-                <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
-                  <span style={{ fontSize: 14, fontWeight: 600, color: 'var(--text-primary)' }}>
-                    {t('admin.integrations.todoist.title')}
-                  </span>
-                  <span style={{
-                    fontSize: 11, padding: '2px 8px', borderRadius: 10,
-                    background: (!tdLoading && tdConnected) ? 'rgba(34,197,94,0.1)' : 'var(--bg-primary)',
-                    color: (!tdLoading && tdConnected) ? '#22c55e' : 'var(--text-tertiary)',
-                    border: `1px solid ${(!tdLoading && tdConnected) ? '#22c55e' : 'var(--border)'}`,
-                  }}>
-                    {tdLoading ? '...' : (tdConnected ? t('admin.integrations.todoist.connected') : t('admin.integrations.todoist.notConnected'))}
-                  </span>
-                </div>
-                <div style={{ fontSize: 12, color: 'var(--text-tertiary)', marginTop: 2 }}>
-                  {t('admin.integrations.todoist.description')}
-                </div>
-              </div>
-              <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="var(--text-tertiary)" strokeWidth="2.5"
-                style={{ transform: tdExpanded ? 'rotate(180deg)' : 'none', transition: 'transform 0.2s', flexShrink: 0 }}>
-                <polyline points="6 9 12 15 18 9"/>
-              </svg>
-            </div>
-
-            {tdExpanded && (
-              <div style={{ padding: '16px 18px', borderTop: '1px solid var(--border-subtle)', display: 'flex', flexDirection: 'column', gap: 12 }}>
+            }
+            title={t('admin.integrations.todoist.title')}
+            description={t('admin.integrations.todoist.description')}
+            status={tdLoading ? null : t(tdConnected ? 'admin.integrations.todoist.connected' : 'admin.integrations.todoist.notConnected')}
+            active={!tdLoading && tdConnected}
+            expanded={tdExpanded}
+            onToggle={() => setTdExpanded((open) => !open)}
+          >
+              <div style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
                 {tdLoading ? (
                   <div style={{ color: 'var(--text-tertiary)', fontSize: 13 }}>{t('admin.integrations.loading')}</div>
                 ) : tdConnected ? (
@@ -3448,8 +3383,7 @@ function IntegrationsTab() {
                   </>
                 )}
               </div>
-            )}
-          </div>
+          </IntegrationCard>
         </div>
       )}
     </div>

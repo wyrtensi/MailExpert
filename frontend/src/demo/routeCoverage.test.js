@@ -637,6 +637,11 @@ test('already-handled writes from part 1 of the demo-settings fix still answer',
   const reconnect = await demoRequest('POST', '/oauth/yandex/device', { email: 'cancel@yandex.ru' });
   assert.deepEqual(await answer('/oauth/yandex/device/cancel', 'POST', '/oauth/yandex/device/cancel', { flowId: reconnect.flowId }), { ok: true });
   assert.deepEqual(await demoRequest('POST', '/oauth/yandex/device/poll', { flowId: reconnect.flowId }), { status: 'expired' });
+  await demoRequest('POST', '/integrations/yandex', {
+    clientId: 'demo-client', clientSecret: '', redirectUri: 'https://example.com/oauth/yandex/callback',
+  });
+  assert.equal((await demoRequest('GET', '/integrations/status')).yandex.redirectConfigured, true);
+  assert.deepEqual(await answer('/oauth/yandex/start', 'POST', '/oauth/yandex/start', { email: 'browser@yandex.ru' }), { demo: true, result: 'created' });
 });
 
 test('the node operations answer: queue actions, alerts, budget', async () => {

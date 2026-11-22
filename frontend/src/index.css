@@ -901,6 +901,64 @@ body, #root {
 .add-account-label { display: block; margin-bottom: 5px; font-size: 12px; color: var(--text-secondary); }
 .add-account-required { margin-inline-start: 4px; color: var(--red); font-weight: 700; }
 .add-account-provider-image { display: block; object-fit: contain; flex-shrink: 0; border-radius: 6px; }
+/* The Integrations settings use the same collapsible card for each provider. */
+.admin-integration-card {
+  overflow: hidden;
+  margin-bottom: 12px;
+  border: 1px solid var(--border-subtle);
+  border-radius: 12px;
+}
+.admin-integration-header {
+  width: 100%;
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 14px 16px;
+  border: 0;
+  background: var(--bg-tertiary);
+  text-align: start;
+  cursor: pointer;
+}
+.admin-integration-header:hover { background: var(--bg-hover); }
+.admin-integration-header:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
+.admin-integration-header > svg { flex-shrink: 0; }
+.admin-integration-label { flex: 1; min-width: 0; }
+.admin-integration-title {
+  display: block;
+  color: var(--text-primary);
+  font-size: 14px;
+  font-weight: 500;
+}
+.admin-integration-description { display: block; margin-top: 1px; color: var(--text-tertiary); font-size: 12px; }
+.admin-integration-status {
+  flex-shrink: 0;
+  padding: 3px 8px;
+  border: 1px solid var(--border);
+  border-radius: 20px;
+  background: var(--bg-elevated);
+  color: var(--text-tertiary);
+  font-size: 11px;
+}
+.admin-integration-status[data-active="true"] {
+  border-color: rgba(74, 222, 128, 0.2);
+  background: rgba(74, 222, 128, 0.1);
+  color: var(--green);
+  font-weight: 500;
+}
+.admin-integration-chevron { color: var(--text-tertiary); }
+.admin-integration-header[aria-expanded="true"] .admin-integration-chevron { transform: rotate(180deg); }
+.admin-integration-panel { padding: 16px; border-top: 1px solid var(--border-subtle); }
+.admin-integration-save {
+  padding: 9px 16px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--bg-elevated);
+  color: var(--text-primary);
+  font-size: 13px;
+  font-weight: 500;
+  cursor: pointer;
+}
+.admin-integration-save:disabled { opacity: 0.7; cursor: not-allowed; }
 .add-account-input {
   width: 100%;
   min-width: 0;
@@ -957,8 +1015,33 @@ textarea.add-account-input { min-height: 88px; resize: vertical; }
   cursor: pointer;
   box-sizing: border-box;
 }
-.add-account-button { border: none; font-weight: 500; background: var(--accent); color: var(--accent-text); }
-.add-account-button:disabled { background: var(--bg-elevated); color: var(--text-secondary); cursor: not-allowed; }
+.add-account-button {
+  --add-account-button-background: color-mix(in srgb, var(--accent) 18%, var(--bg-elevated));
+  --add-account-button-foreground: var(--text-primary);
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border: 1px solid var(--accent);
+  font-weight: 600;
+  background: var(--add-account-button-background);
+  color: var(--add-account-button-foreground);
+  text-align: center;
+}
+@supports (color: contrast-color(#777)) {
+  .add-account-button {
+    --add-account-button-background: var(--accent);
+    --add-account-button-foreground: contrast-color(var(--accent));
+  }
+}
+.add-account-button:not(:disabled):hover {
+  box-shadow: 0 0 0 2px var(--accent-dim);
+}
+.add-account-button:disabled {
+  border-color: color-mix(in srgb, var(--accent) 42%, var(--border));
+  background: color-mix(in srgb, var(--accent) 13%, var(--bg-elevated));
+  color: var(--text-secondary);
+  cursor: not-allowed;
+}
 .add-account-link-button { border: 1px solid var(--border); background: none; color: var(--text-secondary); }
 .add-account-link-button:hover { background: var(--bg-hover); color: var(--text-primary); }
 .add-account-link-button:disabled { cursor: not-allowed; opacity: 0.7; }
@@ -1005,6 +1088,7 @@ textarea.add-account-input { min-height: 88px; resize: vertical; }
 .add-account-help a.add-account-link-anchor:hover { color: var(--text-primary); }
 .add-account-help-link { display: inline-flex; align-items: center; min-height: 44px; min-width: 44px; }
 .add-account-form a { color: var(--accent); overflow-wrap: anywhere; }
+.add-account-form a.add-account-button { color: var(--add-account-button-foreground); text-decoration: none; }
 .add-account-form a:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
 .add-account-help ol { margin: 6px 0 8px; padding-left: 20px; }
 .add-account-help li { margin-bottom: 3px; }

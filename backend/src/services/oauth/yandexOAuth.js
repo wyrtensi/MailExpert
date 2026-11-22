@@ -1,6 +1,7 @@
 import { PROVIDER_FETCH_TIMEOUT_MS } from './constants.js';
 import { refreshMailboxToken } from './mailboxRefresh.js';
 
+const AUTHORIZATION_ENDPOINT = 'https://oauth.yandex.ru/authorize';
 const DEVICE_ENDPOINT = 'https://oauth.yandex.ru/device/code';
 const TOKEN_ENDPOINT = 'https://oauth.yandex.ru/token';
 const USERINFO_ENDPOINT = 'https://login.yandex.ru/info';
@@ -32,6 +33,21 @@ async function requestJson(url, init, failureCode) {
     // Provider responses and transport errors can contain credentials.
   }
   throw error(failureCode);
+}
+
+export function buildYandexAuthorizationUrl({ clientId, redirectUri, loginHint, state, codeChallenge }) {
+  const url = new URL(AUTHORIZATION_ENDPOINT);
+  url.search = new URLSearchParams({
+    client_id: clientId,
+    response_type: 'code',
+    redirect_uri: redirectUri,
+    login_hint: loginHint,
+    state,
+    code_challenge: codeChallenge,
+    code_challenge_method: 'S256',
+    scope: SCOPES.join(' '),
+  }).toString();
+  return url.href;
 }
 
 export async function requestYandexDeviceCode({ clientId }) {
@@ -84,10 +100,18 @@ async function requestToken({ clientId, clientSecret }, params) {
   return { accessToken, refreshToken: refreshToken ?? null, expiresAt, scope };
 }
 
-export async function exchangeYandexDeviceCode({ clientId, clientSecret, deviceCode }) {
-  const tokens = await requestToken({ clientId, clientSecret }, { grant_type: 'device_code', code: deviceCode });
+async function exchangeYandexGrant(config, params) {
+  const tokens = await requestToken(config, params);
   if (!tokens.refreshToken) throw error('missing_refresh_token');
   return tokens;
+}
+
+export function exchangeYandexDeviceCode({ clientId, clientSecret, deviceCode }) {
+  return exchangeYandexGrant({ clientId, clientSecret }, { grant_type: 'device_code', code: deviceCode });
+}
+
+export function exchangeYandexCode({ clientId, clientSecret, code, codeVerifier }) {
+  return exchangeYandexGrant({ clientId, clientSecret }, { grant_type: 'authorization_code', code, code_verifier: codeVerifier });
 }
 
 export async function fetchYandexIdentity(accessToken, { clientId }) {

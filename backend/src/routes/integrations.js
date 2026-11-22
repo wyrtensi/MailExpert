@@ -12,7 +12,10 @@ import { GOOGLE_CALLBACK_PATH } from '../services/oauth/constants.js';
 import { publicProviderCatalog } from '../services/accounts/providerCatalog.js';
 import { getConnectionPolicy } from '../services/connectionPolicy.js';
 import { getProtonStatus } from '../services/proton/workerStatus.js';
-import { hasMailboxOAuthConfig, MAILBOX_OAUTH_CONFIG_ERRORS, saveMailboxOAuthConfig } from '../services/integrations/mailboxOAuth.js';
+import {
+  getMailboxOAuthConfig, hasMailboxOAuthConfig, MAILBOX_OAUTH_CONFIG_ERRORS,
+  mailboxOAuthRedirectConfigured, saveMailboxOAuthConfig,
+} from '../services/integrations/mailboxOAuth.js';
 import { allowedRequestOrigin } from '../utils/publicOrigins.js';
 
 const router = Router();
@@ -124,6 +127,8 @@ async function protonCapabilities() {
 
 router.get('/status', async (req, res) => {
   const configured = !!(await resolveGoogleConfig());
+  const origin = allowedRequestOrigin(req);
+  const yandexConfig = await getMailboxOAuthConfig('yandex');
   res.json({
     microsoft: {
       configured: !!process.env.MS_CLIENT_ID,
@@ -144,8 +149,10 @@ router.get('/status', async (req, res) => {
     mailProviders: publicProviderCatalog(),
     proton: await protonCapabilities(),
     manual: await manualCapabilities(),
-    mailru: { configured: await hasMailboxOAuthConfig('mailru', allowedRequestOrigin(req)) },
-    yandex: { configured: await hasMailboxOAuthConfig('yandex') },
+    mailru: { configured: await hasMailboxOAuthConfig('mailru', origin) },
+    yandex: {
+      configured: !!yandexConfig, redirectConfigured: mailboxOAuthRedirectConfigured('yandex', yandexConfig, origin),
+    },
   });
 });
 

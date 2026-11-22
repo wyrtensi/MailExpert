@@ -225,6 +225,8 @@ export default function AdvancedConnectionFields({
   hideSenderName = false,
   open,
   onOpenChange,
+  disabled = false,
+  beforeFields,
   children,
 }) {
   const { t } = useTranslation();
@@ -239,12 +241,13 @@ export default function AdvancedConnectionFields({
   const bodyId = `${baseId}-body`;
   return (
     <section className="add-account-advanced" data-advanced-connection>
-      <button type="button" className="add-account-advanced-toggle" aria-expanded={isOpen} aria-controls={bodyId} onClick={toggle}>
+      <button type="button" className="add-account-advanced-toggle" aria-expanded={isOpen} aria-controls={bodyId} disabled={disabled} onClick={toggle}>
         <Chevron />
         <span>{t('admin.accounts.add.advanced')}</span>
       </button>
       {isOpen && (
         <div id={bodyId} className="add-account-advanced-body">
+          {beforeFields}
           {managed && <ManagedDetails kind={managed} />}
           {server && <ServerFields idBase={baseId} server={server} />}
           {metadata && <MetadataFields idBase={baseId} metadata={metadata} onChange={onMetadataChange} hideSenderName={hideSenderName} />}

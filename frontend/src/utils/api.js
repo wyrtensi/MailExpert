@@ -636,6 +636,7 @@ export const api = {
   // `attemptId` is opaque: the callback hands it back so the dialog can tell its own flow from an older one.
   startGoogleOAuth: (email, names = {}, attemptId, signal) => request('POST', '/oauth/google/start', { email, ...names, ...(attemptId ? { attemptId } : {}) }, undefined, signal),
   startMailruOAuth: (target, signal) => request('POST', '/oauth/mailru/start', target, undefined, signal),
+  startYandexBrowserOAuth: (target, signal) => request('POST', '/oauth/yandex/start', target, undefined, signal),
   startYandexOAuth: (target) => request('POST', '/oauth/yandex/device', target),
   pollYandexOAuth: (flowId, signal) => request('POST', '/oauth/yandex/device/poll', { flowId }, undefined, signal),
   cancelYandexOAuth: (flowId) => request('POST', '/oauth/yandex/device/cancel', { flowId }),

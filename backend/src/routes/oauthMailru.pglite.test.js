@@ -2,8 +2,8 @@ import { afterAll, beforeAll, beforeEach, expect, it, vi } from 'vitest';
 import express from 'express';
 import { createRealSchemaDb } from '../services/testing/realSchema.js';
 import { decrypt, encrypt } from '../services/encryption.js';
-import yandexOAuthRoutes from './oauthYandex.js';
-import { exchangeYandexDeviceCode, fetchYandexIdentity, requestYandexDeviceCode } from '../services/oauth/yandexOAuth.js';
+import yandexOAuthRoutes, { yandexCallbackRoutes } from './oauthYandex.js';
+import { buildYandexAuthorizationUrl, exchangeYandexCode, exchangeYandexDeviceCode, fetchYandexIdentity, requestYandexDeviceCode } from '../services/oauth/yandexOAuth.js';
 import { probeConnection } from '../services/accounts/connectionProbe.js';
 
 const fixtures = vi.hoisted(() => ({ db: null, redis: new Map() }));
@@ -32,6 +32,8 @@ vi.mock('../services/redis.js', () => ({
 }));
 vi.mock('../services/auditLog.js', () => ({ recordAudit: vi.fn() }));
 vi.mock('../services/oauth/yandexOAuth.js', () => ({
+  buildYandexAuthorizationUrl: vi.fn(({ state }) => `https://oauth.yandex.ru/authorize?state=${state}`),
+  exchangeYandexCode: vi.fn(),
   requestYandexDeviceCode: vi.fn(),
   exchangeYandexDeviceCode: vi.fn(),
   fetchYandexIdentity: vi.fn(),
@@ -51,6 +53,7 @@ const USER = '40000000-0000-4000-8000-000000000001';
 const EMAIL = 'team@example.com';
 const ORIGIN = 'https://localhost';
 const CALLBACK = `${ORIGIN}/oauth/mailru/callback`;
+const YANDEX_CALLBACK = `${ORIGIN}/oauth/yandex/callback`;
 const CONFIG = { clientId: 'fixture-client', clientSecret: 'fixture-secret', redirectUri: CALLBACK };
 let server;
 let base;
@@ -72,6 +75,7 @@ beforeAll(async () => {
   app.use('/api/oauth/mailru', mailruApiRoutes);
   app.use('/oauth/mailru', mailruCallbackRoutes);
   app.use('/api/oauth/yandex', yandexOAuthRoutes);
+  app.use('/oauth/yandex', yandexCallbackRoutes);
   await new Promise(resolve => { server = app.listen(0, resolve); });
   base = `http://127.0.0.1:${server.address().port}`;
 });
@@ -94,9 +98,11 @@ beforeEach(async () => {
   requestYandexDeviceCode.mockResolvedValue({
     deviceCode: 'server-private-code', userCode: 'usercode', verificationUri: 'https://ya.ru/device', interval: 5, expiresIn: 300,
   });
-  exchangeYandexDeviceCode.mockResolvedValue({
+  const yandexTokens = {
     accessToken: 'yandex-access', refreshToken: 'yandex-refresh', expiresAt: new Date(Date.now() + 3600000),
-  });
+  };
+  exchangeYandexDeviceCode.mockResolvedValue(yandexTokens);
+  exchangeYandexCode.mockResolvedValue(yandexTokens);
   fetchYandexIdentity.mockResolvedValue({ sub: 'yandex-user-id' });
   probeConnection.mockResolvedValue({ imapLogin: EMAIL, smtpLogin: EMAIL });
 });
@@ -143,7 +149,9 @@ it('saves only known fields and encrypts the write-only client secret', async ()
 
 it('connects by authorization code and stores only encrypted credentials for the fixed IMAP and SMTP servers', async () => {
   const state = await startState({ email: EMAIL.toUpperCase() });
-  expect(buildMailruAuthorizationUrl).toHaveBeenCalledWith({ clientId: CONFIG.clientId, state, codeChallenge: expect.any(String), redirectUri: CALLBACK });
+  expect(buildMailruAuthorizationUrl).toHaveBeenCalledWith({
+    clientId: CONFIG.clientId, state, codeChallenge: expect.any(String), redirectUri: CALLBACK, loginHint: EMAIL,
+  });
   const res = await callback(state);
   expect(res.headers.get('location')).toBe('/?oauth_success=mailru&oauth_result=created');
   expect(res.headers.get('referrer-policy')).toBe('no-referrer');
@@ -201,6 +209,84 @@ function device(path, body, session = 'browser-1') {
     headers: { 'content-type': 'application/json', 'x-test-host': 'localhost', 'x-forwarded-proto': 'https', 'x-test-session': session },
   });
 }
+
+function yandexStart(body = { email: EMAIL }, host = 'localhost', session = 'browser-1') {
+  return fetch(`${base}/api/oauth/yandex/start`, {
+    method: 'POST', body: JSON.stringify(body),
+    headers: { 'content-type': 'application/json', 'x-test-host': host, 'x-forwarded-proto': 'https', 'x-test-session': session },
+  });
+}
+
+async function yandexStartState(body) {
+  const response = await yandexStart(body);
+  expect(response.status).toBe(200);
+  expect(response.headers.get('cache-control')).toBe('no-store');
+  return new URL((await response.json()).authorizationUrl).searchParams.get('state');
+}
+
+function yandexCallback(state, session = 'browser-1') {
+  return fetch(`${base}/oauth/yandex/callback?code=browser-code&state=${state}`, {
+    redirect: 'manual', headers: { 'x-test-host': 'localhost', 'x-forwarded-proto': 'https', 'x-test-session': session },
+  });
+}
+
+async function configureYandexCallback() {
+  await expect(saveMailboxOAuthConfig('yandex', { clientId: CONFIG.clientId, redirectUri: YANDEX_CALLBACK }))
+    .resolves.toEqual({ ok: true });
+}
+
+it('stores, preserves and clears the optional Yandex callback with the saved secret', async () => {
+  expect((await yandexStart()).status).toBe(409);
+  await expect(saveMailboxOAuthConfig('yandex', { clientId: CONFIG.clientId, redirectUri: CALLBACK }))
+    .resolves.toEqual({ error: 'redirect_uri_invalid' });
+  await configureYandexCallback();
+  await expect(saveMailboxOAuthConfig('yandex', { clientId: CONFIG.clientId, clientSecret: 'rotated' }))
+    .resolves.toEqual({ ok: true });
+  expect((await yandexStart()).status).toBe(200);
+  await expect(saveMailboxOAuthConfig('yandex', { clientId: CONFIG.clientId, redirectUri: ' ' }))
+    .resolves.toEqual({ ok: true });
+  const { rows: [{ config }] } = await fixtures.db.query("SELECT config FROM integration_config WHERE provider = 'yandex'");
+  expect(config).not.toHaveProperty('redirectUri');
+  expect(decrypt(config.clientSecret)).toBe('rotated');
+  expect((await yandexStart()).status).toBe(409);
+  await deviceStart();
+});
+
+it('prefills the Yandex browser login and verifies mailbox access before saving a single-use grant', async () => {
+  await configureYandexCallback();
+  const state = await yandexStartState({ email: EMAIL.toUpperCase() });
+  expect(buildYandexAuthorizationUrl).toHaveBeenCalledWith({
+    clientId: CONFIG.clientId, redirectUri: YANDEX_CALLBACK, loginHint: EMAIL, state, codeChallenge: expect.any(String),
+  });
+  probeConnection.mockImplementationOnce(async () => {
+    expect(await accounts()).toHaveLength(0);
+    return { imapLogin: EMAIL, smtpLogin: EMAIL };
+  });
+  const response = await yandexCallback(state);
+  expect(response.headers.get('location')).toBe('/?oauth_success=yandex&oauth_result=created');
+  expect(response.headers.get('referrer-policy')).toBe('no-referrer');
+  expect(exchangeYandexCode).toHaveBeenCalledWith(expect.objectContaining({
+    clientId: CONFIG.clientId, code: 'browser-code', codeVerifier: expect.any(String),
+  }));
+  expect(probeConnection).toHaveBeenCalledWith(expect.objectContaining({
+    email_address: EMAIL, imap_host: 'imap.yandex.com', smtp_host: 'smtp.yandex.com',
+  }), { oauthAccessToken: 'yandex-access' });
+  expect(await accounts()).toEqual([expect.objectContaining({ email_address: EMAIL, oauth_subject: 'yandex-user-id' })]);
+  expect((await yandexCallback(state)).headers.get('location')).toBe('/?oauth_error=invalid_state&oauth_provider=yandex');
+  expect(exchangeYandexCode).toHaveBeenCalledOnce();
+});
+
+it('refuses Yandex browser flow on a different origin or session or without mailbox access', async () => {
+  await configureYandexCallback();
+  expect((await yandexStart(undefined, 'unlisted.example.com')).status).toBe(409);
+  expect((await yandexStart(undefined, 'localhost', 'anonymous')).status).toBe(401);
+  const state = await yandexStartState();
+  expect((await yandexCallback(state, 'another-browser')).headers.get('location')).toBe('/?oauth_error=invalid_state&oauth_provider=yandex');
+  expect(exchangeYandexCode).not.toHaveBeenCalled();
+  probeConnection.mockRejectedValueOnce(Object.assign(new Error('provider response'), { code: 'smtp_auth_failed' }));
+  expect((await yandexCallback(await yandexStartState())).headers.get('location')).toBe('/?oauth_error=smtp_auth_failed&oauth_provider=yandex');
+  expect(await accounts()).toHaveLength(0);
+});
 
 async function deviceStart(body = { email: EMAIL }) {
   const response = await device('', body);

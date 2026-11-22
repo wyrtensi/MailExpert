@@ -9,7 +9,7 @@ import { useRovingRows } from '../hooks/useRovingRows.js';
 import { manualMoveNeighbour, movePinnedId, prunePinnedIds } from '../utils/accountOrder.js';
 import { HEALTH_COLORS, HEALTH_LABEL_KEYS, canReconnectOAuth, computeAccountHealth, isMailruReconnectRequired, isYandexReconnectRequired, reconnectMenuAction, reconnectUrlFor } from '../utils/accountHealth.js';
 import { openOAuthWindow } from '../utils/oauthWindow.js';
-import { reconnectMailruOAuth } from '../utils/mailruOAuth.js';
+import { reconnectMailruOAuth } from '../utils/mailboxBrowserOAuth.js';
 import { api } from '../utils/api.js';
 import { noticeVersion } from '../utils/panelUpdate.js';
 import { mailboxBusyOr } from '../utils/mailboxBusy.js';

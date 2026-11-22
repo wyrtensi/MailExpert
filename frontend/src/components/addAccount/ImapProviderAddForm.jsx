@@ -4,7 +4,7 @@ import RequiredMark from './RequiredMark.jsx';
 import { api } from '../../utils/api.js';
 import { GMAIL_EMAIL_PATTERN, ADD_ACCOUNT_TITLE_KEYS } from '../../utils/addAccount.js';
 import { newAttemptId, submitWithReplay } from '../../utils/addAccountFlow.js';
-import { beginMailruOAuth, mailruOAuthErrorKey } from '../../utils/mailruOAuth.js';
+import { beginMailboxBrowserOAuth, mailboxBrowserOAuthErrorKey } from '../../utils/mailboxBrowserOAuth.js';
 import {
   advancedFromDefaults,
   connectionErrorKey,
@@ -27,13 +27,15 @@ import { isDemoMode } from '../../demo/mode.js';
 const NO_POLICY = Object.freeze({ allowPrivateHosts: false, allowNonstandardPorts: false });
 // The check may take up to 35 s (15 s per protocol); after this long the form says it is still on.
 const SLOW_CHECK_MS = 8000;
+const focusPassword = (input) => { input?.focus(); };
 
 // One address, one app password, "Connect": the form of Yahoo, Yandex, Mail.ru and iCloud, and
 // (with `provider="other"`) the manual IMAP/SMTP form, which shares everything but the help text
 // and the required server values (see ManualAccountAddForm).
 //
-// The password lives in this component's state only: it is cleared on success and goes away with
-// the component on Back, Close and a tile change. It is never put in the flow state, the store, a
+// The password lives in this component's state only: it is cleared on success or closing the
+// alternative sign-in, and goes away with the component on Back, Close and a tile change. It is
+// never put in the flow state, the store, a
 // URL or storage. Each press of "Connect" mints a new attempt id (the Idempotency-Key); a lost
 // answer is replayed once with the same id. A fixed provider uses the provider route while the
 // advanced values equal the catalog's; a changed server value moves the request to the manual
@@ -48,6 +50,7 @@ export default function ImapProviderAddForm({
   catalog = null,
   manualPolicy = NO_POLICY,
   oauthConfigured = false,
+  yandexBrowserOAuth = false,
   yandexReconnectId = null,
   email = '',
   onEmailChange,
@@ -65,6 +68,7 @@ export default function ImapProviderAddForm({
   const [loginOffered, setLoginOffered] = useState(false);
   const [advanced, setAdvanced] = useState(() => (isOther ? emptyAdvanced() : advancedFromDefaults(defaults)));
   const [advancedOpen, setAdvancedOpen] = useState(false);
+  const [passwordSelected, setPasswordSelected] = useState(false);
   const [metadata, setMetadata] = useState({ name: '', senderName: '', signature: '', color: '' });
   const [busy, setBusy] = useState(false);
   const [oauthPending, setOauthPending] = useState(false);
@@ -101,9 +105,12 @@ export default function ImapProviderAddForm({
   const emailInvalid = emailTouched && address.length > 0 && !emailValid;
   const yandexPending = Boolean(yandex.starting || yandex.flow);
   const blocked = busy || oauthPending || yandexPending;
-  const canSubmit = emailValid && password.length > 0 && !serverIncomplete && !blocked;
-  const showMailruOAuth = provider === 'mailru' && oauthConfigured;
-  const showYandexOAuth = provider === 'yandex' && (oauthConfigured || yandexReconnectId);
+  const passwordIsAlternative = provider === 'mailru' || provider === 'yandex';
+  const showAdvanced = !yandexReconnectId && !yandexPending;
+  const showPasswordForm = showAdvanced && (!passwordIsAlternative || (advancedOpen && passwordSelected));
+  const canSubmit = showPasswordForm && emailValid && password.length > 0 && !serverIncomplete && !blocked;
+  const showMailruOAuth = provider === 'mailru' && oauthConfigured && !passwordSelected;
+  const showYandexOAuth = provider === 'yandex' && (oauthConfigured || yandexReconnectId) && !passwordSelected;
   const otherTile = isOther ? null : otherProviderForEmail(address, provider, catalog);
 
   const submit = async (event) => {
@@ -138,12 +145,28 @@ export default function ImapProviderAddForm({
 
   const openServers = () => setAdvancedOpen(true);
 
+  const toggleAdvanced = (open) => {
+    setAdvancedOpen(open);
+    if (open || !passwordIsAlternative || !passwordSelected) return;
+    setPasswordSelected(false);
+    setPassword('');
+    setLogin('');
+    setLoginOffered(false);
+    clearError();
+  };
+
+  const selectPassword = () => {
+    setPasswordSelected(true);
+    clearError();
+  };
+
   const startOAuth = async () => {
     if (!emailValid || blocked) return;
     clearError();
-    if (showYandexOAuth) {
+    const target = yandexReconnectId ? { accountId: yandexReconnectId } : { email: address };
+    if (showYandexOAuth && !yandexBrowserOAuth) {
       onAttemptStart?.();
-      await yandex.start(yandexReconnectId ? { accountId: yandexReconnectId } : { email: address }, (result) => {
+      await yandex.start(target, (result) => {
         useStore.getState().addNotification({
           type: 'info',
           title: t('admin.integrations.yandex.title'),
@@ -155,13 +178,63 @@ export default function ImapProviderAddForm({
     }
     setOauthPending(true);
     try {
-      if (await beginMailruOAuth({ email: address }, t, signal)) onConnected?.({ kind: 'oauth' });
+      if (await beginMailboxBrowserOAuth(provider, target, t, signal)) onConnected?.({ kind: 'oauth' });
     } catch (err) {
       if (signal?.aborted || err?.name === 'AbortError' || !liveRef.current) return;
-      setErrorKey(mailruOAuthErrorKey(err?.code));
+      setErrorKey(mailboxBrowserOAuthErrorKey(provider, err?.code));
       setOauthPending(false);
     }
   };
+
+  const passwordFields = showPasswordForm && (
+    <>
+      <div className="add-account-field">
+        <label className="add-account-label" htmlFor="imap-add-password">
+          {t(isOther ? 'admin.accounts.add.passwordLabel' : 'admin.accounts.add.appPasswordLabel')}
+          <RequiredMark />
+        </label>
+        <PasswordField
+          id="imap-add-password"
+          ref={passwordIsAlternative ? focusPassword : undefined}
+          required
+          value={password}
+          readOnly={blocked}
+          onChange={(e) => { setPassword(e.target.value); clearError(); }}
+        />
+      </div>
+
+      {!isOther && <AppPasswordHelp provider={provider} url={defaults?.appPasswordUrl} />}
+
+      {loginOffered && (
+        <div className="add-account-field" data-login-offered>
+          <label className="add-account-label" htmlFor="imap-add-login">{t('admin.accounts.add.loginLabel')}</label>
+          <input
+            id="imap-add-login"
+            className="add-account-input"
+            autoComplete="off"
+            autoCapitalize="none"
+            autoCorrect="off"
+            spellCheck={false}
+            value={login}
+            readOnly={busy}
+            aria-describedby="imap-add-login-hint"
+            onChange={(e) => { setLogin(e.target.value); clearError(); }}
+          />
+          <p className="add-account-note" id="imap-add-login-hint">{t('admin.accounts.add.loginAfterRefusalHint')}</p>
+        </div>
+      )}
+    </>
+  );
+
+  const passwordOption = passwordIsAlternative && (
+    passwordSelected ? passwordFields : (
+      <div className="add-account-actions">
+        <button type="button" className="add-account-link-button" disabled={blocked} onClick={selectPassword}>
+          {t('admin.accounts.add.appPasswordOption')}
+        </button>
+      </div>
+    )
+  );
 
   return (
     <form className="add-account-form" onSubmit={submit} noValidate data-provider-form={provider} aria-busy={busy || oauthPending || yandex.starting}>
@@ -208,7 +281,7 @@ export default function ImapProviderAddForm({
               {isDemoMode ? <p className="add-account-note">{t('admin.integrations.yandex.deviceDemo')}</p> : (
                 <>
                   <p className="add-account-note">{t('admin.integrations.yandex.deviceInstructions')}</p>
-                  <a href={yandex.flow.verificationUri} target="_blank" rel="noreferrer">
+                  <a className="add-account-button" href={yandex.flow.verificationUri} target="_blank" rel="noreferrer">
                     {t('admin.integrations.yandex.deviceOpen')}
                   </a>
                   <code style={{ fontSize: 20, letterSpacing: 2 }}>{yandex.flow.userCode}</code>
@@ -220,69 +293,47 @@ export default function ImapProviderAddForm({
             </>
           ) : (
             <button type="button" className="add-account-button" disabled={!emailValid || blocked} onClick={startOAuth}>
-              {t(yandex.starting ? 'admin.integrations.yandex.starting' : 'admin.integrations.yandex.connect')}
+              {t(oauthPending ? 'admin.integrations.yandex.redirecting'
+                : yandex.starting ? 'admin.integrations.yandex.starting' : 'admin.integrations.yandex.connect')}
             </button>
           )}
           {yandex.errorKey && <p className="add-account-error" role="alert">{t(yandex.errorKey)}</p>}
         </div>
       )}
 
-      {!yandexReconnectId && !yandexPending && (
+      {passwordIsAlternative && showAdvanced && !oauthConfigured && !passwordSelected && (
+        <p className="add-account-note">{t('admin.accounts.add.appPasswordWhenOAuthUnavailable')}</p>
+      )}
+
+      {!passwordIsAlternative && passwordFields}
+
+      {showAdvanced && (
+        <AdvancedConnectionFields
+          open={advancedOpen}
+          onOpenChange={toggleAdvanced}
+          disabled={passwordIsAlternative && blocked}
+          beforeFields={passwordOption}
+          server={showPasswordForm && (isOther || defaults) ? {
+            values: advanced,
+            onChange: patchAdvanced,
+            defaults,
+            required: serverRequired,
+            showLogins: isOther,
+            login,
+            onLoginChange: setLogin,
+            manualPolicy,
+          } : undefined}
+          metadata={showPasswordForm ? metadata : undefined}
+          onMetadataChange={(patch) => setMetadata((current) => ({ ...current, ...patch }))}
+        >
+          {showPasswordForm && !isOther && !defaults && <p className="add-account-note">{t('admin.accounts.add.serversUnknownNote')}</p>}
+        </AdvancedConnectionFields>
+      )}
+
+      {errorKey && !showPasswordForm && <p className="add-account-error" role="alert">{t(errorKey)}</p>}
+
+      {showPasswordForm && (
         <>
-          <div className="add-account-field">
-            <label className="add-account-label" htmlFor="imap-add-password">
-              {t(isOther ? 'admin.accounts.add.passwordLabel' : 'admin.accounts.add.appPasswordLabel')}
-              <RequiredMark />
-            </label>
-            <PasswordField
-              id="imap-add-password"
-              required
-              value={password}
-              readOnly={blocked}
-              onChange={(e) => { setPassword(e.target.value); clearError(); }}
-            />
-          </div>
-
-          {!isOther && <AppPasswordHelp provider={provider} url={defaults?.appPasswordUrl} />}
-
-          {loginOffered && (
-            <div className="add-account-field" data-login-offered>
-              <label className="add-account-label" htmlFor="imap-add-login">{t('admin.accounts.add.loginLabel')}</label>
-              <input
-                id="imap-add-login"
-                className="add-account-input"
-                autoComplete="off"
-                autoCapitalize="none"
-                autoCorrect="off"
-                spellCheck={false}
-                value={login}
-                readOnly={busy}
-                aria-describedby="imap-add-login-hint"
-                onChange={(e) => { setLogin(e.target.value); clearError(); }}
-              />
-              <p className="add-account-note" id="imap-add-login-hint">{t('admin.accounts.add.loginAfterRefusalHint')}</p>
-            </div>
-          )}
-
-          <AdvancedConnectionFields
-            open={advancedOpen}
-            onOpenChange={setAdvancedOpen}
-            server={isOther || defaults ? {
-              values: advanced,
-              onChange: patchAdvanced,
-              defaults,
-              required: serverRequired,
-              showLogins: isOther,
-              login,
-              onLoginChange: setLogin,
-              manualPolicy,
-            } : undefined}
-            metadata={metadata}
-            onMetadataChange={(patch) => setMetadata((current) => ({ ...current, ...patch }))}
-          >
-            {!isOther && !defaults && <p className="add-account-note">{t('admin.accounts.add.serversUnknownNote')}</p>}
-          </AdvancedConnectionFields>
-
           <div role="status" aria-live="polite">
             {busy && <p className="add-account-success">{t('admin.accounts.add.checking')}</p>}
             {busy && slow && <p className="add-account-note" data-checking-slow>{t('admin.accounts.add.checkingSlow')}</p>}
@@ -304,7 +355,7 @@ export default function ImapProviderAddForm({
           <div className="add-account-actions">
             <button type="submit" className="add-account-button" disabled={!canSubmit}>
               {busy ? t('admin.accounts.add.connecting')
-                : t(showMailruOAuth || showYandexOAuth ? 'admin.accounts.add.connectAppPassword' : 'admin.accounts.add.connect')}
+                : t(passwordIsAlternative ? 'admin.accounts.add.connectAppPassword' : 'admin.accounts.add.connect')}
             </button>
           </div>
         </>

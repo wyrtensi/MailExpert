@@ -2194,10 +2194,14 @@ export async function demoRequest(method, path, body = {}) {
   // "Mailbox on our domain": the demo adds it to the account list for this page session.
   if (verb === 'POST' && pathname === '/accounts' && body?.kind === 'domain') return clone(createDomainMailbox(body));
   if (verb === 'POST' && pathname === '/oauth/google/start') return connectGmail(body);
+  const yandexDeviceFlow = pathname === '/oauth/yandex/device';
   const mailboxOAuth = pathname === '/oauth/mailru/start' ? 'mailru'
-    : pathname === '/oauth/yandex/device' ? 'yandex' : null;
+    : pathname === '/oauth/yandex/start' || yandexDeviceFlow ? 'yandex' : null;
   if (verb === 'POST' && mailboxOAuth) {
-    if (!integrationsConfig[mailboxOAuth]) throw demoError('Mailbox OAuth is not configured', 'not_configured');
+    const config = integrationsConfig[mailboxOAuth];
+    if (!config || (mailboxOAuth === 'yandex' && !yandexDeviceFlow && !config.redirectUri)) {
+      throw demoError('Mailbox OAuth is not configured', 'not_configured');
+    }
     const account = body?.accountId ? accountFor(body.accountId) : null;
     const email = normalizeEmail(body?.email);
     if (body?.accountId) {
@@ -2205,7 +2209,7 @@ export async function demoRequest(method, path, body = {}) {
     } else if (!/^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(email)) {
       throw demoError('Invalid email', 'email_invalid');
     }
-    if (mailboxOAuth === 'yandex') {
+    if (yandexDeviceFlow) {
       const now = Date.now();
       for (const [id, flow] of yandexDeviceFlows) {
         if (flow.expiresAt <= now) yandexDeviceFlows.delete(id);
@@ -2219,7 +2223,7 @@ export async function demoRequest(method, path, body = {}) {
       Object.assign(account, { health: 'healthy', oauth_reconnect_required: false, sync_error: null });
       return { demo: true, result: 'updated' };
     }
-    providerDemo.createProviderMailbox({ provider: 'mailru', email }, { oauthProvider: 'mailru' });
+    providerDemo.createProviderMailbox({ provider: mailboxOAuth, email }, { oauthProvider: mailboxOAuth });
     return { demo: true, result: 'created' };
   }
   if (verb === 'POST' && pathname === '/oauth/yandex/device/poll') {
@@ -2760,7 +2764,7 @@ export async function demoRequest(method, path, body = {}) {
     return {
       google: { configured: true, available: true }, microsoft: { configured: false }, domainMail: { configured: true },
       mailru: { configured: Boolean(integrationsConfig.mailru) },
-      yandex: { configured: Boolean(integrationsConfig.yandex) },
+      yandex: { configured: Boolean(integrationsConfig.yandex), redirectConfigured: Boolean(integrationsConfig.yandex?.redirectUri) },
       mailProviders: clone(DEMO_MAIL_PROVIDERS),
       proton: { configured: true, available: true, code: null },
       manual: { allowPrivateHosts: false, allowNonstandardPorts: false },
@@ -2776,12 +2780,14 @@ export async function demoRequest(method, path, body = {}) {
     } else if (provider === 'mailru' || provider === 'yandex') {
       const clientId = String(body?.clientId ?? '').trim();
       const secret = String(body?.clientSecret ?? '').trim();
-      const redirect = provider === 'mailru' ? { redirectUri: String(body?.redirectUri ?? '').trim() } : {};
+      const redirectUri = String(body?.redirectUri ?? integrationsConfig[provider]?.redirectUri ?? '').trim();
       if (!clientId) throw demoError('Client ID required', 'client_id_invalid');
       if (!secret && clientId !== integrationsConfig[provider]?.clientId) throw demoError('Client secret required', 'client_secret_required');
       integrationsConfig = {
         ...integrationsConfig,
-        [provider]: { clientId, ...redirect, clientSecret: '•'.repeat(8), updated_at: new Date().toISOString() },
+        [provider]: {
+          clientId, ...(redirectUri ? { redirectUri } : {}), clientSecret: '•'.repeat(8), updated_at: new Date().toISOString(),
+        },
       };
     } else {
       const cfg = { ...clone(body || {}) };

@@ -63,18 +63,21 @@ const { default: AddAccountDialog } = await import('./AddAccountDialog.jsx');
 const { ADD_ACCOUNT_KINDS } = await import('../utils/addAccount.js');
 const { isAttemptId } = await import('../utils/addAccountFlow.js');
 const { appOAuthReturnWatch } = await import('../utils/appOAuthReturn.js');
-const { mailruOAuthNotification } = await import('../utils/mailruOAuth.js');
+const { mailboxBrowserOAuthNotification } = await import('../utils/mailboxBrowserOAuth.js');
 
 const settle = () => React.act(async () => { await new Promise(r => setTimeout(r, 0)); });
 const key = (target, k, init = {}) => target.dispatchEvent(new dom.window.KeyboardEvent('keydown', { key: k, bubbles: true, cancelable: true, ...init }));
 const visibleRect = () => ({ left: 0, top: 0, right: 100, bottom: 44, width: 100, height: 44 });
 
-test('Mail.ru OAuth results use localized messages and never expose raw callback data', () => {
-  const toast = (query) => mailruOAuthNotification(new URLSearchParams(query), (key) => key);
+test('Mailbox browser OAuth results use localized messages and never expose raw callback data', () => {
+  const toast = (query) => mailboxBrowserOAuthNotification(new URLSearchParams(query), (key) => key);
   assert.equal(toast('oauth_success=mailru&oauth_result=created').body, 'admin.integrations.mailru.connected');
   assert.equal(toast('oauth_success=mailru&oauth_result=updated').body, 'admin.integrations.mailru.updated');
   assert.equal(toast('oauth_error=account_mismatch&oauth_provider=mailru').body, 'admin.integrations.mailru.errorAccountMismatch');
   assert.equal(toast('oauth_error=secret-sentinel&oauth_provider=mailru').body, 'admin.integrations.mailru.errorAuthenticationFailed');
+  assert.equal(toast('oauth_success=yandex&oauth_result=updated').body, 'admin.integrations.yandex.updated');
+  assert.equal(toast('oauth_error=imap_auth_failed&oauth_provider=yandex').body, 'admin.integrations.yandex.errorImapAuth');
+  assert.equal(toast('oauth_error=secret-sentinel&oauth_provider=yandex').body, 'admin.integrations.yandex.errorAuthenticationFailed');
   assert.equal(toast('oauth_error=access_denied&oauth_provider=microsoft'), null);
 });
 
@@ -148,7 +151,10 @@ describe('AddAccountDialog', () => {
     const button = (text) => [...dialog().querySelectorAll('button')].find((el) => el.textContent === text);
     await openReal();
     assert.equal(button('admin.integrations.mailru.connect'), undefined);
-    assert.ok(button('admin.accounts.add.connect'));
+    assert.equal(dialog().querySelector('#imap-add-password'), null);
+    await click(button('admin.accounts.add.advanced'));
+    await click(button('admin.accounts.add.appPasswordOption'));
+    assert.ok(button('admin.accounts.add.connectAppPassword').disabled, 'the alternative requires the address and password');
     await React.act(async () => root.render(null));
 
     configured.mock.mockImplementation(async () => ({ mailru: { configured: true } }));
@@ -160,7 +166,7 @@ describe('AddAccountDialog', () => {
       setter.call(input, 'me@mail.ru');
       input.dispatchEvent(new dom.window.Event('input', { bubbles: true }));
     });
-    assert.ok(button('admin.accounts.add.connectAppPassword').disabled, 'the password flow still requires a password');
+    assert.equal(button('admin.accounts.add.connectAppPassword'), undefined, 'OAuth is the only initial action');
     await click(button('admin.integrations.mailru.connect'));
     assert.deepEqual(start.mock.calls[0].arguments[0], { email: 'me@mail.ru' });
     const signal = start.mock.calls[0].arguments[1];
@@ -197,6 +203,38 @@ describe('AddAccountDialog', () => {
     assert.equal(dialog().querySelector('a[href="https://ya.ru/device"]').rel, 'noreferrer');
     await click(dialog().querySelector('.add-account-back'));
     assert.deepEqual(requests[1], ['/api/oauth/yandex/device/cancel', { flowId: 'flow-id' }]);
+  });
+
+  for (const [client, native, endpoint] of [
+    ['web', null, 'start'],
+    ['desktop', { mailexpertNative: { platform: 'win32' } }, 'device'],
+    ['Android', { Capacitor: { isNativePlatform: () => true } }, 'device'],
+  ]) test(`Yandex OAuth uses the ${endpoint} endpoint on ${client} with a callback configured`, async (context) => {
+    if (native) {
+      Object.assign(window, native);
+      context.after(() => { for (const key of Object.keys(native)) delete window[key]; });
+    }
+    context.mock.method(api, 'getIntegrationsStatus', async () => ({
+      yandex: { configured: true, redirectConfigured: true },
+    }));
+    const requests = [];
+    context.mock.method(globalThis, 'fetch', async (url, options) => {
+      requests.push([url, JSON.parse(options.body)]);
+      return { ok: false, status: 409, json: async () => ({ code: 'not_configured' }) };
+    });
+    await React.act(async () => root.render(React.createElement(AddAccountDialog, { onClose: () => root.render(null) })));
+    await settle();
+    await click(tile('yandex'));
+    const input = dialog().querySelector('input[type="email"]');
+    await React.act(async () => {
+      const setter = Object.getOwnPropertyDescriptor(dom.window.HTMLInputElement.prototype, 'value').set;
+      setter.call(input, 'me@yandex.ru');
+      input.dispatchEvent(new dom.window.Event('input', { bubbles: true }));
+    });
+    const start = [...dialog().querySelectorAll('button')].find((el) => el.textContent === 'admin.integrations.yandex.connect');
+    await click(start);
+    assert.deepEqual(requests, [[`/api/oauth/yandex/${endpoint}`, { email: 'me@yandex.ru' }]]);
+    assert.equal(dialog().querySelector('[role="alert"]').textContent, 'admin.integrations.yandex.errorNotConfigured');
   });
 
   test('Yandex reconnect retries a dropped response and honors the server polling interval', async (context) => {

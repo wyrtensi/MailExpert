@@ -1,5 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { exchangeYandexDeviceCode, fetchYandexIdentity, requestYandexDeviceCode, refreshYandexToken } from './yandexOAuth.js';
+import {
+  buildYandexAuthorizationUrl, exchangeYandexCode, exchangeYandexDeviceCode, fetchYandexIdentity, requestYandexDeviceCode, refreshYandexToken,
+} from './yandexOAuth.js';
 
 vi.mock('../db.js', () => ({ query: vi.fn() }));
 vi.mock('../integrations/mailboxOAuth.js', () => ({ getMailboxOAuthConfig: vi.fn() }));
@@ -29,6 +31,40 @@ beforeEach(() => {
 afterEach(() => {
   vi.unstubAllEnvs();
   vi.unstubAllGlobals();
+});
+
+describe('Yandex browser authorization', () => {
+  it('prefills the mailbox and asks only for the required mail scopes with PKCE', () => {
+    const redirectUri = 'https://panel.example.com/oauth/yandex/callback';
+    const url = new URL(buildYandexAuthorizationUrl({
+      ...config, redirectUri, loginHint: 'team+inbox@example.com', state: 'flow-state', codeChallenge: 'challenge',
+    }));
+    expect(url.origin + url.pathname).toBe('https://oauth.yandex.ru/authorize');
+    expect(Object.fromEntries(url.searchParams)).toEqual({
+      client_id: config.clientId, response_type: 'code', redirect_uri: redirectUri, login_hint: 'team+inbox@example.com',
+      state: 'flow-state', code_challenge: 'challenge', code_challenge_method: 'S256', scope: 'mail:imap_full mail:smtp',
+    });
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  it('exchanges the browser code with the verifier and server-side client credentials', async () => {
+    reply(tokenResponse);
+    await expect(exchangeYandexCode({ ...config, code: 'browser-code', codeVerifier: 'verifier' })).resolves.toMatchObject({
+      accessToken: 'access', refreshToken: 'refresh', scope: 'mail:imap_full mail:smtp',
+    });
+    const [[url, init]] = fetchMock.mock.calls;
+    expect(url).toBe('https://oauth.yandex.ru/token');
+    expect(init.headers.Authorization).toBe('Basic ' + Buffer.from('client:secret+%').toString('base64'));
+    expect(Object.fromEntries(init.body)).toEqual({
+      grant_type: 'authorization_code', code: 'browser-code', code_verifier: 'verifier',
+    });
+  });
+
+  it('requires a refresh token for the browser grant as well', async () => {
+    reply({ ...tokenResponse, refresh_token: undefined });
+    await expect(exchangeYandexCode({ ...config, code: 'browser-code', codeVerifier: 'verifier' }))
+      .rejects.toMatchObject({ code: 'missing_refresh_token' });
+  });
 });
 
 describe('Yandex device authorization', () => {

@@ -104,6 +104,10 @@ export default function AddAccountDialog({ onClose, forms = FORMS }) {
   );
   const selected = flow.provider ? options.find((option) => option.kind === flow.provider) ?? null : null;
   const yandexReconnectId = flow.provider === 'yandex' && !session && seed?.provider === 'yandex' ? seed.id : null;
+  // A redirect to an external browser cannot return to the native client's session.
+  const hasNativeBridge = Boolean(window.mailexpertNative || window.Capacitor?.isNativePlatform?.());
+  const yandexBrowserOAuth = flow.provider === 'yandex' && formStatus.yandexBrowserOAuth === true && !hasNativeBridge;
+  const oauthIntro = Object.hasOwn(OAUTH_INTRO_KEYS, flow.provider);
 
   // Which integrations are configured: decides the state shown on the Gmail and mail-node forms.
   useEffect(() => {
@@ -117,6 +121,7 @@ export default function AddAccountDialog({ onClose, forms = FORMS }) {
           catalog: Array.isArray(data?.mailProviders) ? data.mailProviders : null,
           manualPolicy: { ...NO_MANUAL_POLICY, ...(data?.manual || {}) },
           proton: data?.proton || null,
+          yandexBrowserOAuth: data?.yandex?.redirectConfigured === true,
           oauth: {
             mailru: data?.mailru?.configured === true,
             yandex: data?.yandex?.configured === true,
@@ -353,9 +358,10 @@ export default function AddAccountDialog({ onClose, forms = FORMS }) {
           )}
           {Form && inForm && (
             <>
-              {selected.enabled && selected.introKey && (
+              {selected.enabled && selected.introKey && (!oauthIntro || formStatus.oauth[flow.provider] || yandexReconnectId) && (
                 <p className="add-account-hint" data-provider-intro>
-                  {t(yandexReconnectId ? 'admin.integrations.yandex.reconnectHint'
+                  {t(yandexBrowserOAuth ? 'admin.integrations.yandex.browserHint'
+                    : yandexReconnectId ? 'admin.integrations.yandex.reconnectHint'
                     : formStatus.oauth[flow.provider] ? OAUTH_INTRO_KEYS[flow.provider]
                     : selected.introKey, { service: t(selected.titleKey) })}
                 </p>
@@ -374,6 +380,7 @@ export default function AddAccountDialog({ onClose, forms = FORMS }) {
                     manualPolicy={formStatus.manualPolicy}
                     proton={formStatus.proton}
                     oauthConfigured={formStatus.oauth[flow.provider]}
+                    yandexBrowserOAuth={yandexBrowserOAuth}
                     yandexReconnectId={yandexReconnectId}
                     onAttemptStart={() => { attemptedRef.current = true; }}
                     onConnected={handleConnected}

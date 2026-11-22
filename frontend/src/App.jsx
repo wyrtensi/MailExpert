@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useState } from 'react';
 import { Routes, Route, Navigate } from 'react-router';
 import { useStore } from './store/index.js';
+import { isMailboxBrowserOAuthProvider } from './utils/mailboxBrowserOAuth.js';
 import { api } from './utils/api.js';
 import { applyTheme, getInitialTheme, resolveSystemTheme, readThemeFollowsSystem } from './themes.js';
 import { applyFontSet, effectiveFontSet } from './fonts.js'; // still used for the instant localStorage apply on mount
@@ -139,7 +140,7 @@ export default function App() {
     const oauthSuccess = params.get('oauth_success');
     const oauthError = params.get('oauth_error');
     const oauthProvider = params.get('oauth_provider');
-    if ((oauthSuccess || oauthError) && oauthSuccess !== 'mailru' && oauthProvider !== 'mailru' && window.opener) {
+    if ((oauthSuccess || oauthError) && !isMailboxBrowserOAuthProvider(oauthSuccess || oauthProvider) && window.opener) {
       if (oauthSuccess) {
         window.opener.postMessage({
           type: 'oauth_success', provider: oauthSuccess,

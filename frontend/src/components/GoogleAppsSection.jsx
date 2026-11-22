@@ -21,6 +21,8 @@ import {
   shortClientId,
 } from '../utils/googleApps.js';
 import ConfirmOverlay from './ConfirmOverlay.jsx';
+import IntegrationCard from './IntegrationCard.jsx';
+import ProviderIcon from './addAccount/ProviderIcon.jsx';
 
 const fieldStyle = {
   width: '100%', padding: '9px 12px', background: 'var(--bg-tertiary)', border: '1px solid var(--border)',
@@ -45,6 +47,7 @@ const headCellStyle = { ...cellStyle, fontSize: 11, fontWeight: 600, color: 'var
 // with its own 100-user cap; MailExpert picks the app per mailbox. Secrets are only ever sent.
 export default function GoogleAppsSection() {
   const { t } = useTranslation();
+  const [expanded, setExpanded] = useState(true);
   const [apps, setApps] = useState(null);
   const [loadError, setLoadError] = useState('');
   const [callback, setCallback] = useState('');
@@ -213,16 +216,18 @@ export default function GoogleAppsSection() {
   });
 
   const altCallback = googleCallbackAltUri(storedCallback, window.location.origin);
+  const configured = Boolean(apps?.length);
 
   return (
-    <div style={{ border: '1px solid var(--border-subtle)', borderRadius: 12, padding: 16, marginBottom: 12 }}>
-      <div style={{ fontSize: 14, fontWeight: 600, color: 'var(--text-primary)' }}>
-        {t('admin.integrations.googleApps.title')}
-      </div>
-      <div style={{ fontSize: 12, color: 'var(--text-tertiary)', marginTop: 2, marginBottom: 16 }}>
-        {t('admin.integrations.googleApps.description')}
-      </div>
-
+    <IntegrationCard
+      icon={<ProviderIcon kind="gmail" size={20} />}
+      title={t('admin.integrations.googleApps.title')}
+      description={t('admin.integrations.googleApps.description')}
+      status={apps && t(configured ? 'admin.integrations.microsoft.configured' : 'admin.integrations.microsoft.notConfigured')}
+      active={configured}
+      expanded={expanded}
+      onToggle={() => setExpanded((open) => !open)}
+    >
       <ConfirmOverlay dialog={confirmDialog} onClose={() => setConfirmDialog(null)} />
 
       <label style={{ display: 'block', marginBottom: 16 }}>
@@ -407,6 +412,6 @@ export default function GoogleAppsSection() {
           </div>
         );
       })}
-    </div>
+    </IntegrationCard>
   );
 }

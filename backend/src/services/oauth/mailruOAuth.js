@@ -58,7 +58,7 @@ function discover() {
   return pendingDiscovery;
 }
 
-export async function buildMailruAuthorizationUrl({ clientId, state, codeChallenge, redirectUri }) {
+export async function buildMailruAuthorizationUrl({ clientId, state, codeChallenge, redirectUri, loginHint }) {
   const { authorization } = await discover();
   const url = new URL(authorization);
   const params = {
@@ -72,6 +72,7 @@ export async function buildMailruAuthorizationUrl({ clientId, state, codeChallen
     prompt: 'consent',
   };
   for (const [key, value] of Object.entries(params)) url.searchParams.set(key, value);
+  if (loginHint) url.searchParams.set('login_hint', loginHint);
   return url.href;
 }
 

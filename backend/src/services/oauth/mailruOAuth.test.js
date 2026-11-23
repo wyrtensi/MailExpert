@@ -40,8 +40,8 @@ afterEach(() => {
 });
 
 describe('Mail.ru OAuth protocol', () => {
-  it('reuses discovery for simultaneous requests and requests PKCE and offline consent', async () => {
-    const input = { ...config, state: 'state', codeChallenge: 'challenge' };
+  it('reuses discovery and requests PKCE, offline consent and a mailbox login hint', async () => {
+    const input = { ...config, state: 'state', codeChallenge: 'challenge', loginHint: 'team+alerts@mail.ru' };
     const urls = await Promise.all([oauth.buildMailruAuthorizationUrl(input), oauth.buildMailruAuthorizationUrl(input)]);
     expect(fakeFetch).toHaveBeenCalledExactlyOnceWith(issuer + '/.well-known/openid-configuration',
       expect.objectContaining({ redirect: 'error', signal: expect.any(AbortSignal) }));
@@ -51,7 +51,7 @@ describe('Mail.ru OAuth protocol', () => {
       expect(Object.fromEntries(url.searchParams)).toEqual({
         client_id: config.clientId, response_type: 'code', redirect_uri: config.redirectUri,
         state: 'state', code_challenge: 'challenge', code_challenge_method: 'S256',
-        scope: 'openid email mail.imap offline_access', prompt: 'consent',
+        scope: 'openid email mail.imap offline_access', prompt: 'consent', login_hint: 'team+alerts@mail.ru',
       });
     }
   });

@@ -171,6 +171,36 @@ it('connects by authorization code and stores only encrypted credentials for the
   expect(await accounts()).toHaveLength(1);
 });
 
+it('adds the verified mailbox chosen on the Mail.ru consent screen without a login hint', async () => {
+  const state = await startState({ discoverEmail: true });
+  expect(buildMailruAuthorizationUrl).toHaveBeenCalledWith({
+    clientId: CONFIG.clientId, state, codeChallenge: expect.any(String), redirectUri: CALLBACK, loginHint: undefined,
+  });
+  const res = await callback(state);
+  expect(res.headers.get('location')).toBe('/?oauth_success=mailru&oauth_result=created');
+  expect(await accounts()).toEqual([expect.objectContaining({
+    email_address: EMAIL, auth_user: EMAIL, smtp_auth_user: EMAIL, oauth_subject: 'mail-user-id',
+  })]);
+});
+
+it('refuses to replace an existing mailbox when Mail.ru supplies an already connected address', async () => {
+  await callback(await startState());
+  const [original] = await accounts();
+  exchangeMailruCode.mockResolvedValueOnce({
+    accessToken: 'new-access', refreshToken: 'new-refresh', expiresAt: new Date(),
+  });
+  const res = await callback(await startState({ discoverEmail: true }));
+  expect(res.headers.get('location')).toContain('oauth_error=already_connected');
+  expect(await accounts()).toEqual([original]);
+});
+
+it('refuses to combine Mail.ru discovery with a supplied address or reconnect target', async () => {
+  expect((await start({ discoverEmail: true, email: EMAIL })).status).toBe(400);
+  await callback(await startState());
+  const [account] = await accounts();
+  expect((await start({ discoverEmail: true, accountId: account.id })).status).toBe(400);
+});
+
 it('refuses anonymous starts, foreign origins and another browser for the same user', async () => {
   expect((await start(undefined, 'localhost', 'anonymous')).status).toBe(401);
   expect((await start(undefined, 'unlisted.example.com')).status).toBe(409);

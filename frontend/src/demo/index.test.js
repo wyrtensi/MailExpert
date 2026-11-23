@@ -823,6 +823,18 @@ test('the demo supports Mail.ru OAuth configuration and connection', async () =>
   assert.deepEqual(await demoRequest('POST', '/oauth/mailru/start', { accountId: account.id }), { demo: true, result: 'updated' });
 });
 
+test('the demo uses a fixed Mail.ru identity when the OAuth request has no address', async () => {
+  await demoRequest('POST', '/integrations/mailru', {
+    clientId: 'client', clientSecret: 'secret-sentinel', redirectUri: 'https://example.com/oauth/mailru/callback',
+  });
+  const body = { discoverEmail: true };
+  assert.deepEqual(await demoRequest('POST', '/oauth/mailru/start', body), { demo: true, result: 'created' });
+  const account = (await demoRequest('GET', '/accounts')).find((row) => row.email_address === 'mailru-demo@mail.ru');
+  assert.equal(account?.oauth_provider, 'mailru');
+  await assert.rejects(() => demoRequest('POST', '/oauth/mailru/start', body), { code: 'already_connected' });
+  await demoRequest('DELETE', `/accounts/${account.id}`);
+});
+
 test('the demo refuses a provider mailbox twice and a malformed request, and never keeps the password', async () => {
   const body = { provider: 'icloud', email: 'Pat@iCloud.com', appPassword: 'secret-sentinel' };
   const created = await demoRequest('POST', '/accounts/provider', body);

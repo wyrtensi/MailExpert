@@ -8,7 +8,7 @@ export const { apiRoutes: mailruApiRoutes, callbackRoutes: mailruCallbackRoutes 
   exchangeCode: exchangeMailruCode,
   async proveIdentity(tokens, _config, email) {
     const identity = await fetchMailruIdentity(tokens.accessToken);
-    return normalizeEmail(identity.email) === email ? identity : null;
+    return email === null || normalizeEmail(identity.email) === email ? identity : null;
   },
   providerErrors: new Set(['email_not_verified', 'missing_refresh_token', 'scope_missing']),
 });

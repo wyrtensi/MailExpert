@@ -137,7 +137,7 @@ describe('AddAccountDialog', () => {
     assert.equal(dialog().querySelector('[data-provider-intro]')?.textContent, 'admin.accounts.add.intro.other');
   });
 
-  test('Mail.ru displays OAuth only when configured and can start with just the email address', async (context) => {
+  test('Mail.ru displays OAuth only when configured and binds without asking for an address', async (context) => {
     const configured = context.mock.method(api, 'getIntegrationsStatus', async () => ({ mailru: { configured: false } }));
     const start = context.mock.method(api, 'startMailruOAuth', async () => {
       throw Object.assign(new Error('private details'), { code: 'not_configured' });
@@ -149,8 +149,10 @@ describe('AddAccountDialog', () => {
       await click(tile('mailru'));
     };
     const button = (text) => [...dialog().querySelectorAll('button')].find((el) => el.textContent === text);
+    const settingsLink = () => dialog().querySelector('a[href="https://account.mail.ru/oauth/applications"]');
     await openReal();
     assert.equal(button('admin.integrations.mailru.connect'), undefined);
+    assert.equal(settingsLink(), null);
     assert.equal(dialog().querySelector('#imap-add-password'), null);
     await click(button('admin.accounts.add.advanced'));
     await click(button('admin.accounts.add.appPasswordOption'));
@@ -159,16 +161,14 @@ describe('AddAccountDialog', () => {
 
     configured.mock.mockImplementation(async () => ({ mailru: { configured: true } }));
     await openReal();
-    assert.ok(button('admin.integrations.mailru.connect').disabled);
-    const input = dialog().querySelector('input[type="email"]');
-    await React.act(async () => {
-      const setter = Object.getOwnPropertyDescriptor(dom.window.HTMLInputElement.prototype, 'value').set;
-      setter.call(input, 'me@mail.ru');
-      input.dispatchEvent(new dom.window.Event('input', { bubbles: true }));
-    });
-    assert.equal(button('admin.accounts.add.connectAppPassword'), undefined, 'OAuth is the only initial action');
+    assert.equal(Boolean(dialog().querySelector('input[type="email"]')), false);
+    assert.equal(settingsLink()?.target, '_blank');
+    assert.ok(settingsLink().relList.contains('noreferrer'));
+    assert.ok(settingsLink().compareDocumentPosition(button('admin.integrations.mailru.connect')) & Node.DOCUMENT_POSITION_FOLLOWING);
+    assert.equal(button('admin.integrations.mailru.connect').disabled, false);
+    assert.equal(button('admin.accounts.add.connectAppPassword'), undefined);
     await click(button('admin.integrations.mailru.connect'));
-    assert.deepEqual(start.mock.calls[0].arguments[0], { email: 'me@mail.ru' });
+    assert.deepEqual(start.mock.calls[0].arguments[0], { discoverEmail: true });
     const signal = start.mock.calls[0].arguments[1];
     assert.equal(signal.aborted, false);
     assert.equal(dialog().querySelector('[role="alert"]').textContent, 'admin.integrations.mailru.errorNotConfigured');

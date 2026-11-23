@@ -37,6 +37,12 @@ async function findOAuthReconnectTarget(provider, id, db = { query }) {
 
 export async function resolveMailboxOAuthTarget(provider, body) {
   const accountId = body?.accountId;
+  if (body?.discoverEmail !== undefined) {
+    if (provider !== 'mailru' || body.discoverEmail !== true || accountId !== undefined || body.email !== undefined) {
+      return { error: 'invalid_state' };
+    }
+    return { mode: 'discover' };
+  }
   if (accountId !== undefined) {
     if (!isUuid(accountId) || body?.email !== undefined) return { error: 'invalid_state' };
     const target = await findOAuthReconnectTarget(provider, accountId);

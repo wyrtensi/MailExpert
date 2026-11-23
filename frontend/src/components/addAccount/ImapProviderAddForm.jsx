@@ -27,7 +27,7 @@ import { isDemoMode } from '../../demo/mode.js';
 const NO_POLICY = Object.freeze({ allowPrivateHosts: false, allowNonstandardPorts: false });
 // The check may take up to 35 s (15 s per protocol); after this long the form says it is still on.
 const SLOW_CHECK_MS = 8000;
-const focusPassword = (input) => { input?.focus(); };
+const focusInput = (input) => { input?.focus(); };
 
 // One address, one app password, "Connect": the form of Yahoo, Yandex, Mail.ru and iCloud, and
 // (with `provider="other"`) the manual IMAP/SMTP form, which shares everything but the help text
@@ -110,6 +110,7 @@ export default function ImapProviderAddForm({
   const showPasswordForm = showAdvanced && (!passwordIsAlternative || (advancedOpen && passwordSelected));
   const canSubmit = showPasswordForm && emailValid && password.length > 0 && !serverIncomplete && !blocked;
   const showMailruOAuth = provider === 'mailru' && oauthConfigured && !passwordSelected;
+  const focusMailruAddress = provider === 'mailru' && showPasswordForm;
   const showYandexOAuth = provider === 'yandex' && (oauthConfigured || yandexReconnectId) && !passwordSelected;
   const otherTile = isOther ? null : otherProviderForEmail(address, provider, catalog);
 
@@ -161,9 +162,10 @@ export default function ImapProviderAddForm({
   };
 
   const startOAuth = async () => {
-    if (!emailValid || blocked) return;
+    if (blocked || (!showMailruOAuth && !emailValid)) return;
     clearError();
-    const target = yandexReconnectId ? { accountId: yandexReconnectId } : { email: address };
+    const target = showMailruOAuth ? { discoverEmail: true }
+      : yandexReconnectId ? { accountId: yandexReconnectId } : { email: address };
     if (showYandexOAuth && !yandexBrowserOAuth) {
       onAttemptStart?.();
       await yandex.start(target, (result) => {
@@ -195,7 +197,7 @@ export default function ImapProviderAddForm({
         </label>
         <PasswordField
           id="imap-add-password"
-          ref={passwordIsAlternative ? focusPassword : undefined}
+          ref={passwordIsAlternative && !focusMailruAddress ? focusInput : undefined}
           required
           value={password}
           readOnly={blocked}
@@ -238,40 +240,58 @@ export default function ImapProviderAddForm({
 
   return (
     <form className="add-account-form" onSubmit={submit} noValidate data-provider-form={provider} aria-busy={busy || oauthPending || yandex.starting}>
-      <div className="add-account-field">
-        <label className="add-account-label" htmlFor="imap-add-email">{t('admin.accounts.add.addressLabel')}<RequiredMark /></label>
-        <input
-          id="imap-add-email"
-          type="email"
-          required
-          inputMode="email"
-          className="add-account-input"
-          autoComplete="email"
-          autoCapitalize="none"
-          autoCorrect="off"
-          spellCheck={false}
-          value={email}
-          readOnly={blocked || Boolean(yandexReconnectId)}
-          aria-invalid={emailInvalid ? 'true' : undefined}
-          aria-describedby={emailInvalid ? 'imap-add-email-error' : undefined}
-          placeholder={t('admin.accounts.add.addressPh')}
-          onBlur={() => setEmailTouched(true)}
-          onChange={(e) => { onEmailChange?.(e.target.value); clearError(); }}
-        />
-        {emailInvalid && <p id="imap-add-email-error" className="add-account-error" role="alert" data-email-error>{t('admin.accounts.add.error.emailInvalid')}</p>}
-        {otherTile && (
-          <p className="add-account-note" role="status" data-other-tile={otherTile}>
-            {t('admin.accounts.add.otherTileHint', { service: t(ADD_ACCOUNT_TITLE_KEYS[otherTile]) })}
-          </p>
-        )}
-      </div>
+      {!showMailruOAuth && (
+        <div className="add-account-field">
+          <label className="add-account-label" htmlFor="imap-add-email">{t('admin.accounts.add.addressLabel')}<RequiredMark /></label>
+          <input
+            id="imap-add-email"
+            ref={focusMailruAddress ? focusInput : undefined}
+            type="email"
+            required
+            inputMode="email"
+            className="add-account-input"
+            autoComplete="email"
+            autoCapitalize="none"
+            autoCorrect="off"
+            spellCheck={false}
+            value={email}
+            readOnly={blocked || Boolean(yandexReconnectId)}
+            aria-invalid={emailInvalid ? 'true' : undefined}
+            aria-describedby={emailInvalid ? 'imap-add-email-error' : undefined}
+            placeholder={t('admin.accounts.add.addressPh')}
+            onBlur={() => setEmailTouched(true)}
+            onChange={(e) => { onEmailChange?.(e.target.value); clearError(); }}
+          />
+          {emailInvalid && <p id="imap-add-email-error" className="add-account-error" role="alert" data-email-error>{t('admin.accounts.add.error.emailInvalid')}</p>}
+          {otherTile && (
+            <p className="add-account-note" role="status" data-other-tile={otherTile}>
+              {t('admin.accounts.add.otherTileHint', { service: t(ADD_ACCOUNT_TITLE_KEYS[otherTile]) })}
+            </p>
+          )}
+        </div>
+      )}
 
       {showMailruOAuth && (
-        <div>
-          <button type="button" className="add-account-button" disabled={!emailValid || blocked} onClick={startOAuth}>
-            {t(oauthPending ? 'admin.integrations.mailru.redirecting' : 'admin.integrations.mailru.connect')}
-          </button>
-        </div>
+        <>
+          <div className="add-account-field">
+            <a
+              className="add-account-link-button add-account-link-anchor"
+              href="https://account.mail.ru/oauth/applications"
+              target="_blank"
+              rel="noreferrer"
+              aria-describedby="mailru-prepare-note"
+            >
+              {t('admin.integrations.mailru.prepare')}
+            </a>
+            <p className="add-account-note" id="mailru-prepare-note">{t('admin.integrations.mailru.prepareNote')}</p>
+          </div>
+          <div className="add-account-field">
+            <button type="button" className="add-account-button" disabled={blocked} onClick={startOAuth} aria-describedby="mailru-consent-note">
+              {t(oauthPending ? 'admin.integrations.mailru.redirecting' : 'admin.integrations.mailru.connect')}
+            </button>
+            <p className="add-account-note" id="mailru-consent-note">{t('admin.integrations.mailru.consentNote')}</p>
+          </div>
+        </>
       )}
 
       {showYandexOAuth && (

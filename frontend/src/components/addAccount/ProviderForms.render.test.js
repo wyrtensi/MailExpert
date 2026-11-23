@@ -169,6 +169,23 @@ async function selectAppPassword(host) {
 }
 
 describe('Yandex and Mail.ru app password option', () => {
+  test('a late Mail.ru OAuth status does not move focus while entering an app password', async () => {
+    let setConfigured;
+    function FormWithPendingStatus() {
+      const [configured, setStatus] = React.useState(false);
+      setConfigured = setStatus;
+      return React.createElement(Harness, {
+        Form: ImapProviderAddForm, provider: 'mailru', catalog: CATALOG, oauthConfigured: configured,
+      });
+    }
+    const { host } = await mount(React.createElement(FormWithPendingStatus));
+    await selectAppPassword(host);
+    const password = host.querySelector('#imap-add-password');
+    password.focus();
+    await React.act(async () => setConfigured(true));
+    assert.ok(win.document.activeElement === password, 'the password input keeps focus');
+  });
+
   for (const provider of ['yandex', 'mailru']) {
     for (const oauthConfigured of [true, false]) {
       test(`${provider} requires choosing an app password even when OAuth is ${oauthConfigured ? 'configured' : 'unavailable'}`, async () => {
@@ -178,8 +195,10 @@ describe('Yandex and Mail.ru app password option', () => {
         }));
         const oauthButton = () => byText(host, 'button', `admin.integrations.${provider}.connect`);
         const passwordField = () => host.querySelector('#imap-add-password');
+        const addressField = () => host.querySelector('#imap-add-email');
         const form = host.querySelector('form');
         assert.equal(Boolean(oauthButton()), oauthConfigured);
+        assert.equal(Boolean(addressField()), provider !== 'mailru' || !oauthConfigured);
         assert.equal(host.textContent.includes('admin.accounts.add.appPasswordWhenOAuthUnavailable'), !oauthConfigured);
         assert.equal(advancedToggle(host).getAttribute('aria-expanded'), 'false');
         gone(passwordField());
@@ -192,6 +211,7 @@ describe('Yandex and Mail.ru app password option', () => {
 
         await selectAppPassword(host);
         gone(oauthButton(), 'the form shows the selected sign-in method');
+        assert.equal(addressField().value, email);
         assert.ok(passwordField()?.closest('[data-advanced-connection]'));
         await type(passwordField(), SENTINEL);
         await click(advancedToggle(host));

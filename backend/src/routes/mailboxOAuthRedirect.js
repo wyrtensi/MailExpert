@@ -2,6 +2,7 @@ import { createHash } from 'node:crypto';
 import { Router } from 'express';
 import { requireAuth } from '../middleware/auth.js';
 import { notifyMailboxOAuthConnected, resolveMailboxOAuthTarget, saveMailboxOAuthAccount } from '../services/accounts/mailboxOAuthAccount.js';
+import { normalizeEmail } from '../services/auth/userIdentity.js';
 import { getMailboxOAuthConfig, mailboxOAuthRedirectConfigured } from '../services/integrations/mailboxOAuth.js';
 import { consumeOAuthState, createOAuthState } from '../services/oauth/oauthState.js';
 import { allowedRequestOrigin } from '../utils/publicOrigins.js';
@@ -52,8 +53,11 @@ export function createMailboxOAuthRedirectRoutes({ provider, buildAuthorizationU
     res.set({ 'Cache-Control': 'no-store', 'Referrer-Policy': 'no-referrer' });
     try {
       const pending = await consumeOAuthState({ provider, state: req.query.state });
-      if (!req.sessionID || pending?.userId !== req.session.userId || !pending.email ||
-          !['add', 'reconnect'].includes(pending.mode)) return errorRedirect(res, 'invalid_state');
+      if (!req.sessionID || !pending || pending.userId !== req.session.userId) return errorRedirect(res, 'invalid_state');
+      const discoverEmail = provider === 'mailru' && pending.mode === 'discover' && !pending.email && !pending.accountId;
+      if (!discoverEmail && (!pending.email || !['add', 'reconnect'].includes(pending.mode))) {
+        return errorRedirect(res, 'invalid_state');
+      }
       const config = await configForRequest(req);
       if (!config) return errorRedirect(res, 'not_configured');
       if (pending.sessionBinding !== bindSession(req, config)) return errorRedirect(res, 'invalid_state');
@@ -64,7 +68,10 @@ export function createMailboxOAuthRedirectRoutes({ provider, buildAuthorizationU
       const tokens = await exchangeCode({ ...config, code: req.query.code, codeVerifier: pending.codeVerifier });
       const identity = await proveIdentity(tokens, config, pending.email);
       if (!identity) return errorRedirect(res, 'account_mismatch');
-      const saved = await saveMailboxOAuthAccount({ provider, pending, identity, tokens, config });
+      const email = discoverEmail ? normalizeEmail(identity.email) : pending.email;
+      if (!email) return errorRedirect(res, 'email_not_verified');
+      const target = discoverEmail ? { ...pending, mode: 'add', email } : pending;
+      const saved = await saveMailboxOAuthAccount({ provider, pending: target, identity, tokens, config });
       if (saved.error) return errorRedirect(res, saved.error);
       notifyMailboxOAuthConnected(req.app.get('imapManager'), { provider, saved, userId: pending.userId });
       return res.redirect(`/?oauth_success=${provider}&oauth_result=${saved.result}`);

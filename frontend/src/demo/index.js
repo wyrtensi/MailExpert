@@ -2202,8 +2202,13 @@ export async function demoRequest(method, path, body = {}) {
     if (!config || (mailboxOAuth === 'yandex' && !yandexDeviceFlow && !config.redirectUri)) {
       throw demoError('Mailbox OAuth is not configured', 'not_configured');
     }
+    const discoverEmail = body?.discoverEmail === true;
+    if (body?.discoverEmail !== undefined &&
+        (!discoverEmail || mailboxOAuth !== 'mailru' || body.accountId !== undefined || body.email !== undefined)) {
+      throw demoError('Invalid OAuth target', 'invalid_state');
+    }
     const account = body?.accountId ? accountFor(body.accountId) : null;
-    const email = normalizeEmail(body?.email);
+    const email = discoverEmail ? 'mailru-demo@mail.ru' : normalizeEmail(body?.email);
     if (body?.accountId) {
       if (account?.oauth_provider !== mailboxOAuth) throw demoError('Invalid OAuth account', 'invalid_state');
     } else if (!/^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(email)) {

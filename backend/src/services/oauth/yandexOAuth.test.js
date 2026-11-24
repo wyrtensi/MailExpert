@@ -209,11 +209,17 @@ describe('Yandex refresh', () => {
 describe('Yandex user identity', () => {
   it.each([
     [{ display_name: ' Team Inbox ', real_name: 'Person Name' }, 'Team Inbox'],
+    [{ login: 'inbox', display_name: ' Inbox ', real_name: 'Person Name' }, 'Person Name'],
     [{ display_name: ' ', real_name: 'Person Name' }, 'Person Name'],
     [{ display_name: 'Invalid\0name', real_name: 'Person Name' }, 'Person Name'],
   ])('returns a granted profile name from %o', async (profile, name) => {
     reply({ id: 'user-id', client_id: config.clientId, ...profile });
     await expect(fetchYandexIdentity('token', config)).resolves.toEqual({ sub: 'user-id', name });
+  });
+
+  it('does not use the login as the mailbox name when there is no profile name', async () => {
+    reply({ id: 'user-id', client_id: config.clientId, login: 'inbox', display_name: 'inbox' });
+    await expect(fetchYandexIdentity('token', config)).resolves.toEqual({ sub: 'user-id' });
   });
 
   it('uses the stable id and verifies the token client with no email scope', async () => {

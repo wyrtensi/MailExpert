@@ -142,7 +142,12 @@ export async function fetchYandexIdentity(accessToken, { clientId }) {
   if (!ok || 'error' in payload || payload.client_id !== clientId || !isOpaqueToken(payload.id) || payload.id.length > 255) {
     throw error(failureCode);
   }
-  const name = [payload.display_name, payload.real_name]
+  const login = typeof payload.login === 'string' ? payload.login.trim().toLowerCase() : null;
+  // Yandex uses the login as a fallback display name even when the full name is available.
+  const displayName = typeof payload.display_name === 'string' && payload.display_name.trim().toLowerCase() !== login
+    ? payload.display_name
+    : null;
+  const name = [displayName, payload.real_name]
     .find(value => typeof value === 'string' && value.trim() && !hasHeaderInjectionChars(value))?.trim();
   return { sub: payload.id, ...(name ? { name } : {}) };
 }

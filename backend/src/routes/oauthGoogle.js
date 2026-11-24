@@ -267,6 +267,7 @@ async function saveGoogleAccount(pending, identity, tokens, appId) {
           oauth_access_token = $1,
           oauth_refresh_token = COALESCE($2, oauth_refresh_token),
           oauth_token_expiry = $3,
+          oauth_token_refreshed_at = NOW(),
           oauth_provider = 'google', oauth_public_client = false, auth_user = email_address,
           imap_host = 'imap.gmail.com', imap_port = 993, imap_tls = true,
           smtp_host = 'smtp.gmail.com', smtp_port = 465, smtp_tls = 'SSL',
@@ -290,14 +291,14 @@ async function saveGoogleAccount(pending, identity, tokens, appId) {
           auth_user,
           oauth_provider, oauth_access_token, oauth_refresh_token, oauth_token_expiry,
           oauth_public_client, oauth_reconnect_required, include_in_unified_inbox,
-          oauth_app_id, oauth_subject, thread_mode, sender_name
+          oauth_app_id, oauth_subject, thread_mode, sender_name, oauth_token_refreshed_at
         ) VALUES ('gmail', 'managed', 'implicit', $1, $2, $3, $4, 'imap',
           'imap.gmail.com', 993, true,
           'smtp.gmail.com', 465, 'SSL',
           $3,
           'google', $5, $6, $7,
           false, false, true,
-          $8, $9, $10, $11)
+          $8, $9, $10, $11, NOW())
         RETURNING id
       `, [pending.userId, identity.name || email, email, color, encryptedAccess, encryptedRefresh, tokens.expiresAt, appId, identity.sub, THREAD_MODE_GMAIL, pending.senderName]);
       accountId = inserted.rows[0].id;

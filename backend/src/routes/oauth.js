@@ -269,6 +269,7 @@ async function processMicrosoftTokens(userId, tokens, { tenantId, clientId, publ
         UPDATE email_accounts SET
           mail_provider = 'microsoft', connection_mode = 'managed', imap_tls_mode = 'implicit',
           oauth_access_token = $1, oauth_refresh_token = COALESCE($2, oauth_refresh_token), oauth_token_expiry = $3,
+          oauth_token_refreshed_at = NOW(),
           oauth_public_client = $4, oauth_subject = $5,
           auth_user = email_address,
           imap_host = 'outlook.office365.com', imap_port = 993, imap_tls = true,
@@ -291,13 +292,13 @@ async function processMicrosoftTokens(userId, tokens, { tenantId, clientId, publ
           smtp_host, smtp_port, smtp_tls,
           auth_user,
           oauth_provider, oauth_access_token, oauth_refresh_token, oauth_token_expiry,
-          oauth_public_client, oauth_subject
+          oauth_public_client, oauth_subject, oauth_token_refreshed_at
         ) VALUES ('microsoft', 'managed', 'implicit', $1,$2,$3,$4,'imap',
           'outlook.office365.com', 993, true,
           'smtp.office365.com', 587, 'STARTTLS',
           $3,
           'microsoft', $5, $6, $7,
-          $8, $9)
+          $8, $9, NOW())
         RETURNING *
       `, [userId, displayName || email, email, color, encrypt(access_token), encrypt(refresh_token), expiry, publicClient, subject]);
       id = result.rows[0].id;

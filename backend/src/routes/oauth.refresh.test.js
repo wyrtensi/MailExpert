@@ -27,6 +27,15 @@ describe('Microsoft token refresh — public (device-code) vs confidential (auth
     delete process.env.MS_CLIENT_SECRET;
   });
 
+  it.each([{}, { access_token: '' }, { access_token: '   ' }])('preserves saved tokens after a malformed success response %j', async (response) => {
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue(res(true, response)));
+
+    await expect(refreshMicrosoftToken({
+      id: 'a-malformed', oauth_refresh_token: 'stored-rt', oauth_access_token: 'still-valid-token',
+    })).rejects.toMatchObject({ code: 'microsoft_bad_token_response' });
+    expect(query).not.toHaveBeenCalled();
+  });
+
   it('omits client_secret for a public account even when a secret is configured (#216 / AADSTS90023)', async () => {
     process.env.MS_CLIENT_SECRET = 'secret-xyz';
     const fetchMock = vi.fn().mockResolvedValue(res(true, OK_TOKENS));

@@ -21,9 +21,23 @@ vi.mock('./oauth/tokenManager.js', () => ({
   },
 }));
 vi.mock('../plugins/registry.js', () => ({ pluginRegistry: { runHook: vi.fn(() => Promise.resolve()) } }));
+const leases = vi.hoisted(() => new Map());
+vi.mock('./redis.js', () => ({
+  redisClient: {
+    set: vi.fn(async (key, token) => {
+      if (leases.has(key)) return null;
+      leases.set(key, token);
+      return 'OK';
+    }),
+    eval: async (_script, { keys: [key], arguments: [token] }) => {
+      if (leases.get(key) === token) leases.delete(key);
+    },
+  },
+}));
 
 const { createRealSchemaDb } = await import('./testing/realSchema.js');
 const { ensureFreshOAuthAccount, OAuthTokenError } = await import('./oauth/tokenManager.js');
+const { redisClient } = await import('./redis.js');
 const { pluginRegistry } = await import('../plugins/registry.js');
 const { setMailEngine } = await import('../plugins/mailEngine.js');
 const { sanitizeSignature } = await import('./emailSanitizer.js');
@@ -55,6 +69,8 @@ let engine;
 
 beforeEach(async () => {
   vi.restoreAllMocks();
+  leases.clear();
+  redisClient.set.mockClear();
   vi.spyOn(console, 'warn').mockImplementation(() => {});
   vi.spyOn(console, 'error').mockImplementation(() => {});
   ensureFreshOAuthAccount.mockReset();
@@ -87,6 +103,54 @@ const insertAlias = async (email, { name = 'Old', source = 'manual', signature =
 )).rows[0];
 
 describe('syncGmailSendAs', () => {
+  it.each([
+    ['without the primary identity', []],
+    ['containing an invalid identity', [PRIMARY, null]],
+    ['containing an alias without a verification status', [PRIMARY, { sendAsEmail: 'info@example.com' }]],
+  ])('keeps saved aliases when Gmail returns a list %s', async (_reason, entries) => {
+    const alias = await insertAlias('info@example.com', { source: 'gmail' });
+    fetchMock.mockResolvedValue(okResponse(entries));
+
+    await expect(syncGmailSendAs(SALES)).rejects.toMatchObject({ code: 'bad_response' });
+    expect(await aliases()).toEqual([expect.objectContaining({ id: alias.id })]);
+    expect(await syncedAt()).toBeNull();
+    expect(await auditRows()).toEqual([]);
+  });
+
+  it.each(['oauth_refresh_token', 'oauth_access_token'])('keeps aliases when the %s changed during the fetch', async (field) => {
+    const alias = await insertAlias('info@example.com', { source: 'gmail' });
+    fetchMock.mockImplementation(async () => {
+      await db.query(`UPDATE email_accounts SET ${field} = $1 WHERE id = $2`, ['reconnected-grant', SALES]);
+      return okResponse([PRIMARY]);
+    });
+
+    await expect(syncGmailSendAs(SALES)).resolves.toEqual({ status: 'skipped', reason: 'grant_changed' });
+    expect(await aliases()).toEqual([expect.objectContaining({ id: alias.id })]);
+    expect(await syncedAt()).toBeNull();
+    expect(await auditRows()).toEqual([]);
+  });
+
+  it('keeps a concurrent sync from fetching and applying another list before the running sync finishes', async () => {
+    const started = Promise.withResolvers();
+    const response = Promise.withResolvers();
+    fetchMock.mockImplementationOnce(() => {
+      started.resolve();
+      return response.promise;
+    }).mockResolvedValue(okResponse([PRIMARY, sendAsEntry('new@example.com')]));
+
+    const first = syncGmailSendAs(SALES);
+    await started.promise;
+    const overlapping = syncGmailSendAs(SALES);
+    await vi.waitFor(() => expect(redisClient.set.mock.calls.length).toBeGreaterThanOrEqual(2));
+    const fetchCountWhileFirstPending = fetchMock.mock.calls.length;
+    response.resolve(okResponse([PRIMARY]));
+    await first;
+
+    await expect(overlapping).resolves.toMatchObject({ status: 'synced', added: ['new@example.com'] });
+    expect(fetchCountWhileFirstPending).toBe(1);
+    expect(await aliases()).toEqual([expect.objectContaining({ email: 'new@example.com' })]);
+  });
+
   it('creates gmail aliases from send-as and sets gmail_send_as_synced_at', async () => {
     fetchMock.mockResolvedValue(okResponse([
       PRIMARY,
@@ -220,9 +284,11 @@ describe('syncGmailSendAs', () => {
   });
 
   it('retries once with force refresh on 401', async () => {
-    ensureFreshOAuthAccount.mockImplementation(async (account, options) => (
-      options?.force ? { ...account, oauth_access_token: FRESH_TOKEN } : account
-    ));
+    ensureFreshOAuthAccount.mockImplementation(async (account, options) => {
+      if (!options?.force) return account;
+      await db.query('UPDATE email_accounts SET oauth_access_token = $1 WHERE id = $2', [FRESH_TOKEN, SALES]);
+      return { ...account, oauth_access_token: FRESH_TOKEN };
+    });
     fetchMock
       .mockResolvedValueOnce(errorResponse(401))
       .mockResolvedValueOnce(okResponse([PRIMARY, sendAsEntry('info@example.com')]));

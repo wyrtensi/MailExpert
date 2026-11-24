@@ -3,6 +3,7 @@ import { decrypt } from './encryption.js';
 import { sanitizeSignature } from './emailSanitizer.js';
 import { insertAuditEntries } from './auditLog.js';
 import { ensureFreshOAuthAccount, OAuthTokenError } from './oauth/tokenManager.js';
+import { acquireOAuthLease, releaseOAuthLease } from './oauth/oauthLease.js';
 import { PROVIDER_FETCH_TIMEOUT_MS } from './oauth/constants.js';
 import { SYSTEM_ACTOR } from './mailNode/domains.js';
 import { pluginRegistry } from '../plugins/registry.js';
@@ -140,15 +141,15 @@ async function fetchWithToken(account) {
 async function readSendAs(account) {
   const fresh = await ensureFreshOAuthAccount(account);
   try {
-    return await fetchWithToken(fresh);
+    return { grant: fresh, sendAs: await fetchWithToken(fresh) };
   } catch (err) {
     if (!(err instanceof GmailSendAsError) || err.code !== 'unauthorized') throw err;
     const refreshed = await ensureFreshOAuthAccount(fresh, { force: true });
-    return fetchWithToken(refreshed);
+    return { grant: refreshed, sendAs: await fetchWithToken(refreshed) };
   }
 }
 
-const ACCOUNT_SQL = `SELECT id, email_address, oauth_provider, oauth_reconnect_required, oauth_app_id,
+const ACCOUNT_SQL = `SELECT id, email_address, oauth_provider, oauth_reconnect_required, oauth_app_id, oauth_subject,
   oauth_access_token, oauth_refresh_token, oauth_token_expiry FROM email_accounts WHERE id = $1`;
 
 function skipReason(account) {
@@ -162,13 +163,26 @@ function skipReason(account) {
 // listAliases, which sanitizes signatures again on read), so a second run with the same Gmail
 // answer plans nothing. Order: remove, then update/adopt, then create, so a case change or a
 // re-adopted address never meets the unique gmail index on its way.
-async function applySendAs(client, accountId, sendAs, actor) {
+async function applySendAs(client, { grant, sendAs }, actor) {
+  const accountId = grant.id;
   const { rows: [account] } = await client.query(
-    'SELECT id, email_address, oauth_provider, oauth_reconnect_required FROM email_accounts WHERE id = $1 FOR UPDATE',
+    `${ACCOUNT_SQL} FOR UPDATE`,
     [accountId],
   );
   const reason = skipReason(account);
   if (reason) return skipped(reason);
+  // A response from before reconsent must not delete aliases on the new connection.
+  if (account.oauth_app_id !== grant.oauth_app_id || account.oauth_subject !== grant.oauth_subject
+    || account.oauth_refresh_token !== grant.oauth_refresh_token
+    || decrypt(account.oauth_access_token) !== decrypt(grant.oauth_access_token)) return skipped('grant_changed');
+  // A complete Gmail list always includes the primary identity. Without it, an empty or
+  // partial response must not be interpreted as the user deleting every saved alias.
+  const primary = sendAs.filter(entry => entry?.isPrimary === true);
+  const complete = sendAs.every(entry => typeof entry?.sendAsEmail === 'string' && entry.sendAsEmail.includes('@')
+    && (entry.isPrimary === true || ['accepted', 'pending'].includes(entry.verificationStatus)));
+  if (!complete || primary.length !== 1 || lc(primary[0].sendAsEmail) !== lc(account.email_address)) {
+    throw new GmailSendAsError('bad_response', 200, 'Gmail send-as response does not contain a complete mailbox identity list');
+  }
 
   const { rows: existing } = await client.query(
     'SELECT id, name, email, reply_to, signature, source FROM account_aliases WHERE account_id = $1 ORDER BY created_at, id',
@@ -233,20 +247,17 @@ function notifyAliasesChanged(accountId) {
 // system (the hourly job), { userId, email } for a user. The request to Google runs before the
 // transaction, so no row lock is held across the network; a failed read changes nothing and
 // propagates (GmailSendAsError, or the refresh's OAuthTokenError other than a revoked grant).
-export async function syncGmailSendAs(accountId, { actor = null } = {}) {
-  const { rows: [account] } = await query(ACCOUNT_SQL, [accountId]);
-  const reason = skipReason(account);
-  if (reason) return skipped(reason);
-
-  let sendAs;
+async function syncSendAs(account, actor) {
+  const accountId = account.id;
+  let snapshot;
   try {
-    sendAs = await readSendAs(account);
+    snapshot = await readSendAs(account);
   } catch (err) {
     if (err instanceof OAuthTokenError && err.code === 'oauth_reconnect_required') return skipped('reconnect_required');
     throw err;
   }
 
-  const result = await withTransaction((client) => applySendAs(client, accountId, sendAs, actor));
+  const result = await withTransaction((client) => applySendAs(client, snapshot, actor));
   if (result.status !== 'synced') return result;
   const { changed, ...synced } = result;
   if (changed) {
@@ -255,4 +266,21 @@ export async function syncGmailSendAs(accountId, { actor = null } = {}) {
     notifyAliasesChanged(accountId);
   }
   return synced;
+}
+
+export async function syncGmailSendAs(accountId, { actor = null } = {}) {
+  const { rows: [account] } = await query(ACCOUNT_SQL, [accountId]);
+  const reason = skipReason(account);
+  if (reason) return skipped(reason);
+
+  // Serialize the read as well as the write across processes. The account row lock only orders
+  // writes, so without this lease a slow fetch could overwrite a newer Gmail list.
+  const key = `gmail:send-as:${account.id}`;
+  const lease = await acquireOAuthLease(key, { lockWaitMs: 2000, ttlSeconds: 90 });
+  if (!lease) return skipped('sync_in_progress');
+  try {
+    return await syncSendAs(account, actor);
+  } finally {
+    await releaseOAuthLease(key, lease);
+  }
 }

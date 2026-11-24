@@ -12,14 +12,18 @@ export const GMAIL_SEND_AS_SYNC_KIND = 'gmail_send_as_sync';
 export const GMAIL_SEND_AS_POLL_MS = 60 * 60 * 1000;
 const FIRST_POLL_DELAY_MS = 2 * 60 * 1000;
 const MAX_ATTEMPTS = 3;
+const RETRYABLE_SKIP_REASONS = new Set(['sync_in_progress', 'grant_changed']);
 
-// The handler: a skipped mailbox (not Google, reconnect needed, deleted) is a finished job, not a
-// retry loop. Messages of GmailSendAsError carry no token or provider body, so they may be kept.
+// The handler: a permanently skipped mailbox (not Google, reconnect needed, deleted) is a finished
+// job, not a retry loop; a transient conflict (another sync holding the lease, or a reconnect
+// replacing the grant mid-fetch) is retried through the queue. Messages of GmailSendAsError carry
+// no token or provider body, so they may be kept.
 export async function runGmailSendAsSync(job) {
   const accountId = job.account_id ?? job.accountId ?? job.payload?.accountId;
   if (!accountId) return;
+  let result;
   try {
-    await syncGmailSendAs(accountId);
+    result = await syncGmailSendAs(accountId);
   } catch (err) {
     if (err instanceof GmailSendAsError) {
       const outcome = err.code === 'bad_response' ? 'fail' : 'retry';
@@ -29,6 +33,9 @@ export async function runGmailSendAsSync(job) {
       throw new JobError(`Google token error: ${err.code || 'oauth_token_error'}`, { outcome: 'retry', code: err.code || 'oauth_token_error' });
     }
     throw err;
+  }
+  if (result?.status === 'skipped' && RETRYABLE_SKIP_REASONS.has(result.reason)) {
+    throw new JobError(`Gmail send-as sync deferred: ${result.reason}`, { outcome: 'retry', code: result.reason });
   }
 }
 
@@ -60,19 +67,28 @@ export async function pollGmailSendAs(now = Date.now()) {
 
 let firstPoll = null;
 let pollTimer = null;
+let pollRunning = false;
 
 export function startGmailSendAsPoll() {
-  if (pollTimer) return;
+  if (pollRunning) return;
+  pollRunning = true;
   const run = () => {
     pollGmailSendAs().catch((err) => console.error('Gmail send-as poll failed:', err?.code || err?.message));
   };
-  firstPoll = setTimeout(run, FIRST_POLL_DELAY_MS);
+  // Start the hourly interval after the initial poll so a restart at :58–:59 never lands both
+  // the +2 min startup poll and the +60 min tick in the same hour dedupe slot.
+  firstPoll = setTimeout(() => {
+    firstPoll = null;
+    if (!pollRunning) return;
+    run();
+    pollTimer = setInterval(run, GMAIL_SEND_AS_POLL_MS);
+    pollTimer.unref?.();
+  }, FIRST_POLL_DELAY_MS);
   firstPoll.unref?.();
-  pollTimer = setInterval(run, GMAIL_SEND_AS_POLL_MS);
-  pollTimer.unref?.();
 }
 
 export function stopGmailSendAsPoll() {
+  pollRunning = false;
   clearTimeout(firstPoll);
   clearInterval(pollTimer);
   firstPoll = null;

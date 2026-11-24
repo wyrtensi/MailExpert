@@ -51,6 +51,7 @@ services:
         BUILD_SHA: ${GIT_SHA:-dev}
     container_name: ${COMPOSE_PROJECT_NAME:-mailexpert}-backend
     restart: unless-stopped
+    stop_grace_period: 35s
     logging: *logging
     environment:
       NODE_ENV: production

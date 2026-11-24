@@ -147,7 +147,13 @@ async function doRefreshMicrosoftToken(account) {
     throw err;
   }
 
-  const { access_token, refresh_token, expires_in } = tokens;
+  const { access_token, refresh_token, expires_in } = tokens ?? {};
+  if (typeof access_token !== 'string' || !access_token.trim()
+    || (refresh_token != null && (typeof refresh_token !== 'string' || !refresh_token.trim()))) {
+    const err = new Error('Microsoft token refresh returned invalid credentials');
+    err.code = 'microsoft_bad_token_response';
+    throw err;
+  }
   const refreshExpiresInSecs = Number.isFinite(expires_in) && expires_in > 0 ? expires_in : 3600;
   const expiry = new Date(Date.now() + refreshExpiresInSecs * 1000);
   const isPublic = !!account.oauth_public_client || becamePublic;
@@ -164,6 +170,7 @@ async function doRefreshMicrosoftToken(account) {
       oauth_access_token = $1,
       oauth_refresh_token = COALESCE($2, oauth_refresh_token),
       oauth_token_expiry = $3,
+      oauth_token_refreshed_at = NOW(),
       oauth_public_client = $4
     WHERE id = $5
       AND oauth_refresh_token IS NOT DISTINCT FROM $6

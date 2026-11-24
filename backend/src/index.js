@@ -19,6 +19,7 @@ import { startJobWorker, stopJobWorker } from './services/jobQueue.js';
 import { registerSendJobKind } from './services/sendQueue.js';
 import { registerTenantJobKinds, startTenantPoll } from './services/tenant/tenantJobs.js';
 import { registerGmailSendAsJobKind, startGmailSendAsPoll, stopGmailSendAsPoll } from './services/gmailSendAsJobs.js';
+import { startOAuthMaintenance, stopOAuthMaintenance } from './services/oauth/maintenance.js';
 import { registerTenantDomainJobKind } from './services/tenant/tenantDomains.js';
 import { tenantProfileWithoutDriver } from './services/tenant/driver.js';
 import oauthRoutes from './routes/oauth.js';
@@ -347,6 +348,7 @@ await encryptExistingCredentials();
 
 // Load OAuth integration configs from DB into process.env
 await loadIntegrationConfigs();
+startOAuthMaintenance();
 
 // Start background snooze watcher — polls every 60 seconds to restore snoozed messages
 imapManager.startSnoozeWatcher();
@@ -415,14 +417,16 @@ process.on('SIGTERM', () => {
   const workerStopped = stopJobWorker({ waitMs: 8000 }).catch(() => false);
   stopProtonLinkReconciler();
   stopGmailSendAsPoll();
+  const oauthStopped = stopOAuthMaintenance();
   httpServer.close(async () => {
-    await workerStopped;
+    await Promise.all([workerStopped, oauthStopped]);
     // close() lets pending commands finish before the connection is shut down.
     try { await redisClient.close(); } catch { /* ignore */ }
     process.exit(0);
   });
-  // Force exit if graceful shutdown takes more than 10 s
-  setTimeout(() => process.exit(1), 10_000).unref();
+  // OAuth renewal can take two sequential 10 s requests before persisting rotated credentials.
+  // Keep this deadline below the compose stop grace period.
+  setTimeout(() => process.exit(1), 30_000).unref();
 });
 
 process.on('unhandledRejection', (reason) => {

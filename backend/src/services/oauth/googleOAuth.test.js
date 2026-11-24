@@ -139,8 +139,12 @@ describe('exchangeGoogleCode', () => {
     expect(err.message).not.toMatch(/auth-code|secret|Bad Request/);
   });
 
-  it('throws authentication_failed when no access token is returned', async () => {
-    vi.stubGlobal('fetch', vi.fn().mockResolvedValue(jsonRes(true, { id_token: 'x' })));
+  it.each([
+    { id_token: 'x' },
+    { access_token: '   ', refresh_token: '   ' },
+    { access_token: 'at-1', refresh_token: '   ' },
+  ])('throws authentication_failed when token response %j is unusable', async (response) => {
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue(jsonRes(true, response)));
     const err = await exchangeGoogleCode({
       clientId: CLIENT_ID, clientSecret: CLIENT_SECRET, code: 'c', codeVerifier: 'v', redirectUri: REDIRECT_URI,
     }).catch(e => e);
@@ -278,6 +282,24 @@ describe('refreshGoogleToken', () => {
     vi.stubGlobal('fetch', vi.fn().mockResolvedValue(jsonRes(true, { access_token: 'new-at', expires_in: 3600 })));
     const result = await refreshGoogleToken(account);
     expect(result.oauth_refresh_token).toBe(account.oauth_refresh_token);
+  });
+
+  it.each([
+    {},
+    { access_token: '' },
+    { access_token: '   ', refresh_token: '   ' },
+    { access_token: 'new-at', refresh_token: '   ' },
+    { access_token: 'new-at', refresh_token: '' },
+    { access_token: 'new-at', refresh_token: 123 },
+    { access_token: 'bad token', refresh_token: 'new-rt' },
+  ])('preserves saved tokens without writing to the database after a malformed success response %j', async (response) => {
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue(jsonRes(true, response)));
+
+    const err = await refreshGoogleToken(account).catch(e => e);
+
+    expect(err.code).toBe('authentication_failed');
+    expect(err.oauthError).toBeUndefined();
+    expect(query).not.toHaveBeenCalled();
   });
 
   it('surfaces invalid_grant as a machine code without the provider body', async () => {

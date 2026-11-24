@@ -18,7 +18,7 @@ vi.mock('./hostValidation.js', () => ({ resolveForConnection: vi.fn(), createPin
 vi.mock('./connectionPolicy.js', () => ({ getConnectionPolicy: vi.fn() }));
 vi.mock('./deliveryReport.js', async (importOriginal) => ({ ...(await importOriginal()), readDeliveryReports: vi.fn(async () => 0) }));
 
-import { ImapManager, MIN_SYNC_INTERVAL_MS, AUTO_IDLE_DELAY_MS, countMissingInboxCopies, fetchBackfillBatch, providerProfile, skipsDuplicateView, folderSpecialUse, makeClientCfg, relocateExemptGuard, insertCopiedSibling, deleteMessageCopyRow, emitSectionsChanged, ensureMailbox, createKeyedSemaphore, isConnectionRefusal, extractImapError, isImapAuthFailure, AUTH_FAILURE_COOLDOWN_MS, AUTH_FAILURE_COOLDOWN_MAX_MS, authCooldownMs, connectCooldownMs, effectiveSyncIntervalMs, folderSyncDue, planModseqSync, connectStaggerFor, startupStaggerFor, NODE_CONNECT_STAGGER_MS, walkStructure, planBodyParts, extractBodyFromMsg, bodyFallbackApplies, poolSizeFor, backgroundPoolCap, rerootThreadChildren, parsePersistentCap, resolvePersistentCap, persistentEligible, shouldRetryIPv4, classifyMoveBySearch, PERSISTENT_FLAG_STORE_TIMEOUT_MS, PERSISTENT_FLAG_LATE_STORE_WAIT_MS, PERSISTENT_FLAG_LOCK_WAIT_MS, FLAG_STORE_UID_CHUNK, FLAG_PUSH_MAX_ATTEMPTS, wrapImapError, acquirePooledClient, releasePooledClient, evictPool, ACQUIRE_TIMEOUT_MS, BACKGROUND_ACQUIRE_TIMEOUT_MS, PREFETCH_MAX_CONSECUTIVE_ERRORS, INLINE_IMAGE_REPEAT_BUDGET, PREFETCH_STOP_PAUSE_MS, PREFETCH_MAX_BUSY_WAITS, newBodyPrefetchCount, newBodyQueueMax, NODE_NEW_BODY_PREFETCH_MAX, NODE_PREFETCH_PER_HOST } from './imapManager.js';
+import { ImapManager, MIN_SYNC_INTERVAL_MS, AUTO_IDLE_DELAY_MS, countMissingInboxCopies, fetchBackfillBatch, fetchSnippetBatch, structureParts, providerProfile, skipsDuplicateView, folderSpecialUse, makeClientCfg, relocateExemptGuard, insertCopiedSibling, deleteMessageCopyRow, emitSectionsChanged, ensureMailbox, createKeyedSemaphore, isConnectionRefusal, extractImapError, isImapAuthFailure, AUTH_FAILURE_COOLDOWN_MS, AUTH_FAILURE_COOLDOWN_MAX_MS, authCooldownMs, connectCooldownMs, effectiveSyncIntervalMs, folderSyncDue, planModseqSync, connectStaggerFor, startupStaggerFor, NODE_CONNECT_STAGGER_MS, walkStructure, planBodyParts, extractBodyFromMsg, bodyFallbackApplies, poolSizeFor, backgroundPoolCap, rerootThreadChildren, parsePersistentCap, resolvePersistentCap, persistentEligible, shouldRetryIPv4, classifyMoveBySearch, PERSISTENT_FLAG_STORE_TIMEOUT_MS, PERSISTENT_FLAG_LATE_STORE_WAIT_MS, PERSISTENT_FLAG_LOCK_WAIT_MS, FLAG_STORE_UID_CHUNK, FLAG_PUSH_MAX_ATTEMPTS, wrapImapError, acquirePooledClient, releasePooledClient, evictPool, withFreshClient, ACQUIRE_TIMEOUT_MS, BACKGROUND_ACQUIRE_TIMEOUT_MS, PREFETCH_MAX_CONSECUTIVE_ERRORS, INLINE_IMAGE_REPEAT_BUDGET, PREFETCH_STOP_PAUSE_MS, PREFETCH_MAX_BUSY_WAITS, newBodyPrefetchCount, newBodyQueueMax, NODE_NEW_BODY_PREFETCH_MAX, NODE_PREFETCH_PER_HOST } from './imapManager.js';
 import { pluginRegistry } from '../plugins/registry.js';
 import { EventEmitter } from 'node:events';
 import { ImapFlow } from 'imapflow';
@@ -143,6 +143,21 @@ describe('providerProfile — host detection', () => {
   });
 
   it.each([
+    ['imap.yandex.com'],
+    ['imap.yandex.ru'],
+    ['imap.yandex.net'],
+  ])('detects yandex on %s with pooled secondary work, 4-minute IDLE keepalive and no speculative multi-part prefetch', host => {
+    const p = providerProfile(account(host));
+    expect(p.poolSize).toBe(1);
+    expect(p.maxBackgroundConnections).toBe(1);
+    expect(p.secondaryOverPool).toBe(true);
+    expect(p.idleKeepaliveMs).toBe(4 * 60 * 1000);
+    expect(p.autoBackfillExistingOnConnect).toBe(false);
+    expect(p.snippetIndex).toBe(true);
+    expect(p.speculativeFetch).toBe(false);
+  });
+
+  it.each([
     ['imap.fastmail.com'],
     ['imap.protonmail.com'],
   ])('falls back to generic for unknown host %s', host => {
@@ -157,6 +172,7 @@ describe('providerProfile — host detection', () => {
     ['olive.com'],
     ['snapple.com'],
     ['webgmail.ru'],
+    ['myyandex.ru'],
   ])('does not false-positive on %s', host => {
     expect(providerProfile(account(host))).toBe(providerProfile(account('generic.example.com')));
   });
@@ -167,6 +183,10 @@ describe('providerProfile — host detection', () => {
 describe('providerProfile — oauth_provider fallback', () => {
   it('detects microsoft via oauth_provider (only supported OAuth flow)', () => {
     expect(providerProfile(account('', 'microsoft')).pushesFlags).toBe(true);
+  });
+
+  it('detects yandex via oauth_provider', () => {
+    expect(providerProfile(account('', 'yandex')).secondaryOverPool).toBe(true);
   });
 
   it('does not detect google via oauth_provider alone — host-based only', () => {
@@ -2633,7 +2653,9 @@ describe('hung IMAP transport recovery', () => {
   beforeEach(() => {
     vi.useFakeTimers();
     query.mockReset();
-    query.mockResolvedValue({ rows: [] });
+    // The tick re-reads the account it holds: a live, enabled one here.
+    query.mockImplementation(async (sql) => (sql.startsWith('SELECT * FROM email_accounts')
+      ? { rows: [{ ...acct, enabled: true }] } : { rows: [] }));
     vi.spyOn(console, 'error').mockImplementation(() => {});
   });
   afterEach(() => {
@@ -3593,6 +3615,7 @@ describe('connect paths back off on IMAP authentication failure', () => {
     // A persistent client is already connected, so the reconnect branch is not taken: the
     // rejection comes from the sync (on a fresh-login provider, its own login).
     const mgr = newManager();
+    query.mockImplementation(async (sql) => ({ rows: sql.startsWith('SELECT * FROM email_accounts') ? [{ ...acct, enabled: true }] : [] }));
     mgr.connections.set(acct.id, Object.assign(new EventEmitter(), { close: vi.fn(), logout: vi.fn(() => Promise.resolve()) }));
     mgr.syncFolders = vi.fn().mockResolvedValue({});
     mgr.syncMessages = vi.fn().mockRejectedValue(gmailXoauthFailure());
@@ -8827,5 +8850,178 @@ describe('fetchMessageBody inline images', () => {
     expect(count('<img src="cid:b">')).toBe(1);
     expect(warn).toHaveBeenCalledTimes(1);
     expect(warn.mock.calls[0][0]).toMatch(new RegExp(`left ${10 - aEmbedded + 1} repeated inline image`));
+  });
+});
+
+describe('fetchSnippetBatch and structureParts', () => {
+  const asyncIter = (items) => (async function* () { for (const item of items) yield item; })();
+  const throwingIter = (err) => ({ [Symbol.asyncIterator]: () => ({ next: async () => { throw err; } }) });
+
+  it('extracts part numbers from multipart structures and defaults single-part mail to 1', () => {
+    expect([...structureParts({ type: 'text/plain' })]).toEqual(['1']);
+    expect([...structureParts({
+      childNodes: [{ part: '1', childNodes: [{ part: '1.1' }, { part: '1.2' }] }, { part: '2' }],
+    })].sort()).toEqual(['1', '1.1', '1.2', '2']);
+  });
+
+  it('falls back to structure-first grouped fetches after a server NO/BAD rejection', async () => {
+    const calls = [];
+    const client = {
+      fetch: vi.fn((uids, queryObj) => {
+        calls.push({ uids, queryObj });
+        if (calls.length === 1) {
+          return throwingIter(Object.assign(new Error('Command failed'), { responseStatus: 'NO', responseText: 'UID FETCH Completed. sc=abc' }));
+        }
+        if (calls.length === 2) {
+          return asyncIter([
+            { uid: 10, bodyStructure: { type: 'text/plain' } },
+            { uid: 11, bodyStructure: { childNodes: [{ part: '1' }, { part: '2' }] } },
+            { uid: 12, bodyStructure: { type: 'text/html' } },
+          ]);
+        }
+        return asyncIter(uids.split(',').map(u => ({ uid: Number(u), bodyParts: new Map() })));
+      }),
+    };
+    const seen = [];
+    const refused = await fetchSnippetBatch(client, [10, 11, 12], async (msg) => { seen.push(msg.uid); });
+    expect(refused).toBe(true);
+    expect(calls[1].queryObj).toEqual({ uid: true, bodyStructure: true });
+    expect(calls[2]).toMatchObject({ uids: '10,12', queryObj: { bodyParts: ['1'] } });
+    expect(calls[3]).toMatchObject({ uids: '11', queryObj: { bodyParts: ['1', '2'] } });
+    expect(seen.sort((a, b) => a - b)).toEqual([10, 11, 12]);
+  });
+
+  it('skips the guessed multi-part fetch immediately when structureFirst is true (Yandex)', async () => {
+    const calls = [];
+    const client = {
+      fetch: vi.fn((uids, queryObj) => {
+        calls.push({ uids, queryObj });
+        if (calls.length === 1) {
+          return asyncIter([{ uid: 20, bodyStructure: { type: 'text/plain' } }]);
+        }
+        return asyncIter([{ uid: 20, bodyParts: new Map() }]);
+      }),
+    };
+    const seen = [];
+    const refused = await fetchSnippetBatch(client, [20], async (msg) => { seen.push(msg.uid); }, { structureFirst: true });
+    expect(refused).toBe(false);
+    expect(calls).toHaveLength(2);
+    expect(calls[0].queryObj).toEqual({ uid: true, bodyStructure: true });
+    expect(calls[1].queryObj.bodyParts).toEqual(['1']);
+    expect(seen).toEqual([20]);
+  });
+
+  it('propagates transport errors instead of treating them as server rejections', async () => {
+    const client = {
+      fetch: vi.fn(() => throwingIter(Object.assign(new Error('Connection not available'), { code: 'NoConnection' }))),
+    };
+    await expect(fetchSnippetBatch(client, [30], async () => {})).rejects.toThrow('Connection not available');
+  });
+});
+
+describe('withFreshClient nested call on a full pool of one (Yandex/Yahoo)', () => {
+  const created = [];
+  const usedIds = [];
+  beforeEach(() => {
+    created.length = 0;
+    ImapFlow.mockImplementation(function () {
+      const c = Object.assign(new EventEmitter(), {
+        usable: true,
+        connect: vi.fn().mockResolvedValue(undefined),
+        noop: vi.fn().mockResolvedValue(undefined),
+        logout: vi.fn().mockResolvedValue(undefined),
+        close: vi.fn(),
+      });
+      created.push(c);
+      return c;
+    });
+  });
+  afterEach(() => {
+    for (const id of usedIds.splice(0)) evictPool(id);
+    vi.restoreAllMocks();
+  });
+
+  it('uses a one-off login instead of waiting for itself when work holding the only pooled session calls withFreshClient again', async () => {
+    const acct = {
+      id: 'yandex-nested-pool-1', user_id: 'u1', enabled: true, protocol: 'imap',
+      imap_host: 'imap.yandex.com', imap_port: 993, imap_tls: true,
+      auth_user: 'u@yandex.ru', auth_pass: 'enc',
+    };
+    usedIds.push(acct.id);
+
+    const clientsSeen = [];
+    await withFreshClient(acct, async (outerClient) => {
+      clientsSeen.push(outerClient);
+      await withFreshClient(acct, async (innerClient) => {
+        clientsSeen.push(innerClient);
+      });
+    });
+
+    expect(created).toHaveLength(2);
+    expect(clientsSeen[0]).toBe(created[0]);
+    expect(clientsSeen[1]).toBe(created[1]);
+    expect(created[1].close).toHaveBeenCalledTimes(1); // one-off login closed on exit
+    expect(created[0].close).not.toHaveBeenCalled();   // pooled session kept open
+  });
+});
+
+describe('_syncTick live account refresh and existing-socket drops', () => {
+  const newMgr = () => {
+    const mgr = new ImapManager(null);
+    for (const key of ['_healthCheckTimer', '_snippetSchedulerTimer', '_stalenessCheckTimer', '_flagPushReconcilerTimer', '_providerIdSchedulerTimer']) {
+      clearInterval(mgr[key]);
+    }
+    mgr.syncFolders = vi.fn().mockResolvedValue();
+    mgr._syncSpamFolder = vi.fn().mockResolvedValue();
+    mgr.broadcast = vi.fn();
+    return mgr;
+  };
+
+  beforeEach(() => {
+    query.mockReset();
+    vi.spyOn(console, 'error').mockImplementation(() => {});
+    vi.spyOn(console, 'warn').mockImplementation(() => {});
+    vi.spyOn(console, 'log').mockImplementation(() => {});
+  });
+  afterEach(() => { vi.restoreAllMocks(); });
+
+  it('refreshes the closure-held account row on a live tick and disconnects removed or disabled accounts', async () => {
+    const mgr = newMgr();
+    const held = { id: 'live-refresh-1', enabled: true, imap_host: 'imap.yandex.com', oauth_provider: 'yandex', oauth_token_expiry: '2026-01-01T00:00:00Z' };
+    const updatedExpiry = '2027-01-01T00:00:00Z';
+    const client = { close: vi.fn(), logout: vi.fn().mockResolvedValue() };
+    mgr.connections.set(held.id, client);
+    query.mockImplementation(async (sql) => (sql.startsWith('SELECT * FROM email_accounts')
+      ? { rows: [{ ...held, oauth_token_expiry: updatedExpiry }] } : { rows: [] }));
+    mgr.syncMessages = vi.fn().mockResolvedValue({});
+
+    await mgr._syncTick(held);
+    expect(held.oauth_token_expiry).toBe(updatedExpiry);
+    expect(mgr.syncMessages).toHaveBeenCalledOnce();
+
+    // Disabled in DB: disconnects on the next tick without syncing.
+    mgr.syncMessages.mockClear();
+    query.mockImplementation(async (sql) => (sql.startsWith('SELECT * FROM email_accounts')
+      ? { rows: [{ ...held, enabled: false }] } : { rows: [] }));
+    await mgr._syncTick(held);
+    expect(mgr.syncMessages).not.toHaveBeenCalled();
+    expect(client.close).toHaveBeenCalledOnce();
+    expect(mgr.connections.has(held.id)).toBe(false);
+  });
+
+  it('drops a broken pre-existing persistent socket without arming a refusal cooldown', async () => {
+    const mgr = newMgr();
+    const acct = { id: 'existing-drop-1', enabled: true, imap_host: 'imap.yandex.com', oauth_provider: 'yandex' };
+    const client = { close: vi.fn(), logout: vi.fn().mockResolvedValue() };
+    mgr.connections.set(acct.id, client);
+    query.mockImplementation(async (sql) => (sql.startsWith('SELECT * FROM email_accounts')
+      ? { rows: [acct] } : { rows: [] }));
+    mgr.syncMessages = vi.fn().mockRejectedValue(Object.assign(new Error('Connection not available'), { code: 'NoConnection' }));
+
+    await mgr._syncTick(acct);
+
+    expect(client.close).toHaveBeenCalledOnce();
+    expect(mgr.connections.has(acct.id)).toBe(false);
+    expect(mgr._connectCooldown.has(acct.id)).toBe(false);
   });
 });

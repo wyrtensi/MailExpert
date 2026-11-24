@@ -10,6 +10,8 @@ import { decrypt, encrypt } from '../encryption.js';
 import { getMailboxOAuthConfig } from '../integrations/mailboxOAuth.js';
 
 const config = { clientId: 'client', clientSecret: 'secret+%' };
+const registeredMailScopes = { id: config.clientId, scope: ['mail:imap_full', 'mail:smtp'] };
+const registeredProfileScope = { ...registeredMailScopes, scope: [...registeredMailScopes.scope, 'login:info'] };
 const tokenResponse = { access_token: 'access', refresh_token: 'refresh', expires_in: 3600, token_type: 'bearer' };
 const deviceResponse = {
   device_code: 'opaque-device-secret',
@@ -34,9 +36,34 @@ afterEach(() => {
 });
 
 describe('Yandex browser authorization', () => {
-  it('prefills the mailbox and asks only for the required mail scopes with PKCE', () => {
+  it('requests the registered profile as an optional scope without weakening the required mail scopes', async () => {
+    reply(registeredProfileScope);
+    const url = new URL(await buildYandexAuthorizationUrl({
+      ...config, redirectUri: 'https://panel.example.com/oauth/yandex/callback',
+      loginHint: 'team@example.com', state: 'flow-state', codeChallenge: 'challenge',
+    }));
+    expect(url.searchParams.get('scope')).toBe('mail:imap_full mail:smtp');
+    expect(url.searchParams.get('optional_scope')).toBe('login:info');
+    expect(url.searchParams.get('force_confirm')).toBe('yes');
+    expect(fetchMock).toHaveBeenCalledExactlyOnceWith('https://oauth.yandex.ru/client/client/info', expect.objectContaining({
+      redirect: 'error', signal: expect.any(AbortSignal),
+    }));
+  });
+
+  it('keeps browser authorization available when the optional scope lookup is unavailable', async () => {
+    fetchMock.mockRejectedValueOnce(new Error('network unavailable'));
+    const url = new URL(await buildYandexAuthorizationUrl({
+      ...config, redirectUri: 'https://panel.example.com/oauth/yandex/callback',
+      loginHint: 'team@example.com', state: 'flow-state', codeChallenge: 'challenge',
+    }));
+    expect(url.searchParams.get('scope')).toBe('mail:imap_full mail:smtp');
+    expect(url.searchParams.has('optional_scope')).toBe(false);
+  });
+
+  it('prefills the mailbox and asks only for registered mail scopes with PKCE', async () => {
+    reply(registeredMailScopes);
     const redirectUri = 'https://panel.example.com/oauth/yandex/callback';
-    const url = new URL(buildYandexAuthorizationUrl({
+    const url = new URL(await buildYandexAuthorizationUrl({
       ...config, redirectUri, loginHint: 'team+inbox@example.com', state: 'flow-state', codeChallenge: 'challenge',
     }));
     expect(url.origin + url.pathname).toBe('https://oauth.yandex.ru/authorize');
@@ -44,7 +71,7 @@ describe('Yandex browser authorization', () => {
       client_id: config.clientId, response_type: 'code', redirect_uri: redirectUri, login_hint: 'team+inbox@example.com',
       state: 'flow-state', code_challenge: 'challenge', code_challenge_method: 'S256', scope: 'mail:imap_full mail:smtp',
     });
-    expect(fetchMock).not.toHaveBeenCalled();
+    expect(fetchMock).toHaveBeenCalledTimes(1);
   });
 
   it('exchanges the browser code with the verifier and server-side client credentials', async () => {
@@ -68,7 +95,19 @@ describe('Yandex browser authorization', () => {
 });
 
 describe('Yandex device authorization', () => {
+  it('offers the registered profile scope during device authorization', async () => {
+    fetchMock.mockResolvedValueOnce({ ok: true, json: async () => registeredProfileScope });
+    reply(deviceResponse);
+    await expect(requestYandexDeviceCode(config)).resolves.toMatchObject({ deviceCode: deviceResponse.device_code });
+    const [, [url, init]] = fetchMock.mock.calls;
+    expect(url).toBe('https://oauth.yandex.ru/device/code');
+    expect(Object.fromEntries(init.body)).toEqual({
+      client_id: config.clientId, scope: 'mail:imap_full mail:smtp', optional_scope: 'login:info',
+    });
+  });
+
   it('requests device codes with only mail scopes and public client ID', async () => {
+    fetchMock.mockResolvedValueOnce({ ok: true, json: async () => registeredMailScopes });
     reply(deviceResponse);
     await expect(requestYandexDeviceCode(config)).resolves.toEqual({
       deviceCode: 'opaque-device-secret',
@@ -77,7 +116,8 @@ describe('Yandex device authorization', () => {
       expiresIn: 300,
       interval: 5,
     });
-    const [[url, init]] = fetchMock.mock.calls;
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+    const [, [url, init]] = fetchMock.mock.calls;
     expect(url).toBe('https://oauth.yandex.ru/device/code');
     expect(init).toMatchObject({ method: 'POST', redirect: 'error' });
     expect(Object.fromEntries(init.body)).toEqual({ client_id: 'client', scope: 'mail:imap_full mail:smtp' });
@@ -85,12 +125,14 @@ describe('Yandex device authorization', () => {
   });
 
   it('defaults the polling interval if omitted', async () => {
+    fetchMock.mockResolvedValueOnce({ ok: true, json: async () => registeredMailScopes });
     reply({ ...deviceResponse, verification_url: 'https://oauth.yandex.ru/device', interval: undefined });
     await expect(requestYandexDeviceCode(config)).resolves.toMatchObject({ interval: 5 });
   });
 
   it.each(['https://ya.ru/device?next=/', 'https://oauth.yandex.ru.example.com/device', 'http://ya.ru/device'])(
     'rejects an unexpected verification URL %s', async (verification_url) => {
+      fetchMock.mockResolvedValueOnce({ ok: true, json: async () => registeredMailScopes });
       reply({ ...deviceResponse, verification_url });
       await expect(requestYandexDeviceCode(config)).rejects.toMatchObject({ code: 'yandex_device_code_failed' });
     },
@@ -165,6 +207,15 @@ describe('Yandex refresh', () => {
 });
 
 describe('Yandex user identity', () => {
+  it.each([
+    [{ display_name: ' Team Inbox ', real_name: 'Person Name' }, 'Team Inbox'],
+    [{ display_name: ' ', real_name: 'Person Name' }, 'Person Name'],
+    [{ display_name: 'Invalid\0name', real_name: 'Person Name' }, 'Person Name'],
+  ])('returns a granted profile name from %o', async (profile, name) => {
+    reply({ id: 'user-id', client_id: config.clientId, ...profile });
+    await expect(fetchYandexIdentity('token', config)).resolves.toEqual({ sub: 'user-id', name });
+  });
+
   it('uses the stable id and verifies the token client with no email scope', async () => {
     reply({ id: 'user-id', psuid: 'client-pairwise-id', client_id: 'client' });
     await expect(fetchYandexIdentity('token', config)).resolves.toEqual({ sub: 'user-id' });

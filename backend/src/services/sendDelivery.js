@@ -216,13 +216,14 @@ export function deliveryFailure(err, account) {
 const GMAIL_IMAP_HOSTS = new Set(['imap.gmail.com', 'imap.googlemail.com']);
 const GMAIL_SMTP_HOSTS = new Set(['smtp.gmail.com', 'smtp.googlemail.com']);
 
-// Whether the mail server files the Sent copy itself, so the panel must not APPEND one. OAuth
-// providers (Gmail, Microsoft) do. So does Gmail added with manual IMAP/SMTP settings: a letter
+// Whether the mail server files the Sent copy itself, so the panel must not APPEND one. Google and
+// Microsoft do, but Mail.ru and Yandex SMTP do not file a copy just because they use OAuth.
+// Gmail added with manual IMAP/SMTP settings also saves the copy: a letter
 // sent through Gmail's own SMTP server lands in that Gmail mailbox's Sent (support.google.com/mail
 // /answer/78892), and an APPEND would at best duplicate it. Matched by exact host: the Workspace
 // relay (smtp-relay.gmail.com) files nothing, nor does Gmail SMTP for a mailbox kept elsewhere.
 export function serverSavesSentCopy(account) {
-  if (account?.oauth_provider) return true;
+  if (account?.oauth_provider === 'google' || account?.oauth_provider === 'microsoft') return true;
   const host = (value) => String(value ?? '').trim().toLowerCase();
   return GMAIL_IMAP_HOSTS.has(host(account?.imap_host)) && GMAIL_SMTP_HOSTS.has(host(account?.smtp_host));
 }

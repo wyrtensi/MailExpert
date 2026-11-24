@@ -57,6 +57,7 @@ export async function resolveMailboxOAuthTarget(provider, body) {
 
 export async function saveMailboxOAuthAccount({ provider, pending, identity, tokens, config, isPending }) {
   const { email } = pending;
+  const profileName = (typeof identity.name === 'string' ? identity.name.trim().slice(0, 255) : '') || null;
   return withTransaction(client => withAccountAddressLock(email, async () => {
     // Reject a consent completed against a client or callback that was replaced mid-flow.
     const stored = await readMailboxOAuthConfig(provider, client, { lock: true });
@@ -72,15 +73,19 @@ export async function saveMailboxOAuthAccount({ provider, pending, identity, tok
       if (existing.oauth_subject !== identity.sub) return { error: 'account_mismatch' };
       const { rows } = await client.query(
         `UPDATE email_accounts SET oauth_access_token = $1, oauth_refresh_token = $2, oauth_token_expiry = $3,
-           oauth_client_id = $4, oauth_reconnect_required = false, sync_error = NULL
+           oauth_client_id = $4, oauth_reconnect_required = false, sync_error = NULL,
+           name = CASE WHEN $8::text IS NOT NULL
+                         AND (name IS NULL OR btrim(name) = '' OR lower(btrim(name)) = lower(btrim(email_address)))
+                       THEN $8 ELSE name END
           WHERE id = $5 AND oauth_provider = $6 AND oauth_subject = $7 AND mail_node IS NOT TRUE
           RETURNING id`,
-        [encryptedAccess, encryptedRefresh, tokens.expiresAt, config.clientId, existing.id, provider, identity.sub],
+        [encryptedAccess, encryptedRefresh, tokens.expiresAt, config.clientId, existing.id, provider, identity.sub,
+          provider === 'yandex' ? profileName : null],
       );
       return rows.length ? { id: rows[0].id, result: 'updated' } : { error: 'invalid_state' };
     }
     if (await findMailboxByEmail(email, client)) return { error: 'already_connected' };
-    const name = (typeof identity.name === 'string' ? identity.name.trim().slice(0, 255) : '') || email;
+    const name = profileName || email;
     const connection = oauthMailboxConnection(provider, email);
     const { rows } = await client.query(
       `INSERT INTO email_accounts (

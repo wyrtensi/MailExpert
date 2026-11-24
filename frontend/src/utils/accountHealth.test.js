@@ -145,6 +145,21 @@ describe('reconnectMenuAction', () => {
     assert.deepEqual(reconnectMenuAction(mailbox), { kind: 'yandex' });
   });
 
+  it('renews consent from the menu for a healthy Yandex mailbox without a display name', () => {
+    const mailbox = { id: 'acc-yandex', oauth_provider: 'yandex', email_address: 'team@yandex.ru', health: 'healthy' };
+    for (const name of [undefined, null, '  ', 'team@yandex.ru', ' TEAM@YANDEX.RU ']) {
+      assert.deepEqual(reconnectMenuAction({ ...mailbox, name }), { kind: 'yandex' });
+    }
+  });
+
+  it('keeps the IMAP menu action for named Yandex mailboxes and other fallback names', () => {
+    const mailbox = { id: 'acc-yandex', oauth_provider: 'yandex', email_address: 'team@yandex.ru', health: 'healthy' };
+    assert.deepEqual(reconnectMenuAction({ ...mailbox, name: 'Support team' }), { kind: 'imap' });
+    assert.deepEqual(reconnectMenuAction({ ...mailbox, name: mailbox.email_address, health: 'failed' }), { kind: 'imap' });
+    assert.deepEqual(reconnectMenuAction({ ...mailbox, name: mailbox.email_address, oauth_provider: 'mailru' }), { kind: 'imap' });
+    assert.deepEqual(reconnectMenuAction({ ...mailbox, name: mailbox.email_address, oauth_provider: null }), { kind: 'imap' });
+  });
+
   it('offers the OAuth consent flow for a reconnect-required OAuth account', () => {
     const google = { id: 'acc-1', oauth_provider: 'google', email_address: 'a@gmail.com', health: 'oauth_reconnect_required' };
     assert.deepEqual(reconnectMenuAction(google), { kind: 'oauth', url: reconnectUrlFor(google) });

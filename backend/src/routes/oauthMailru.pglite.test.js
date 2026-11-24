@@ -5,6 +5,7 @@ import { decrypt, encrypt } from '../services/encryption.js';
 import yandexOAuthRoutes, { yandexCallbackRoutes } from './oauthYandex.js';
 import { buildYandexAuthorizationUrl, exchangeYandexCode, exchangeYandexDeviceCode, fetchYandexIdentity, requestYandexDeviceCode } from '../services/oauth/yandexOAuth.js';
 import { probeConnection } from '../services/accounts/connectionProbe.js';
+import { reset as resetRateLimit } from '../services/rateLimiter.js';
 
 const fixtures = vi.hoisted(() => ({ db: null, redis: new Map() }));
 vi.mock('../services/db.js', () => ({
@@ -82,6 +83,7 @@ beforeAll(async () => {
 
 beforeEach(async () => {
   fixtures.redis.clear();
+  await resetRateLimit(`yandex-device:${USER}`);
   vi.clearAllMocks();
   await fixtures.db.exec('DELETE FROM email_accounts; DELETE FROM integration_config;');
   await fixtures.db.query('INSERT INTO integration_config (provider, config) VALUES ($1, $2)', [
@@ -284,6 +286,7 @@ it('stores, preserves and clears the optional Yandex callback with the saved sec
 
 it('prefills the Yandex browser login and verifies mailbox access before saving a single-use grant', async () => {
   await configureYandexCallback();
+  fetchYandexIdentity.mockResolvedValueOnce({ sub: 'yandex-user-id', name: 'Team Inbox' });
   const state = await yandexStartState({ email: EMAIL.toUpperCase() });
   expect(buildYandexAuthorizationUrl).toHaveBeenCalledWith({
     clientId: CONFIG.clientId, redirectUri: YANDEX_CALLBACK, loginHint: EMAIL, state, codeChallenge: expect.any(String),
@@ -301,7 +304,7 @@ it('prefills the Yandex browser login and verifies mailbox access before saving 
   expect(probeConnection).toHaveBeenCalledWith(expect.objectContaining({
     email_address: EMAIL, imap_host: 'imap.yandex.com', smtp_host: 'smtp.yandex.com',
   }), { oauthAccessToken: 'yandex-access' });
-  expect(await accounts()).toEqual([expect.objectContaining({ email_address: EMAIL, oauth_subject: 'yandex-user-id' })]);
+  expect(await accounts()).toEqual([expect.objectContaining({ email_address: EMAIL, oauth_subject: 'yandex-user-id', name: 'Team Inbox' })]);
   expect((await yandexCallback(state)).headers.get('location')).toBe('/?oauth_error=invalid_state&oauth_provider=yandex');
   expect(exchangeYandexCode).toHaveBeenCalledOnce();
 });
@@ -327,6 +330,20 @@ async function deviceStart(body = { email: EMAIL }) {
   });
   return { flowId: flow.flowId };
 }
+
+it.each([
+  [EMAIL, 'Team Inbox'],
+  ['Custom label', 'Custom label'],
+])('updates the Yandex profile label on reconnect only when %s is a fallback', async (currentName, expectedName) => {
+  await device('/poll', await deviceStart());
+  const [original] = await accounts();
+  await fixtures.db.query('UPDATE email_accounts SET name = $1 WHERE id = $2', [currentName, original.id]);
+
+  fetchYandexIdentity.mockResolvedValueOnce({ sub: 'yandex-user-id', name: 'Team Inbox' });
+  const response = await device('/poll', await deviceStart({ accountId: original.id }));
+  expect(await response.json()).toEqual({ status: 'success', result: 'updated' });
+  expect((await accounts()).map(({ id, name }) => ({ id, name }))).toEqual([{ id: original.id, name: expectedName }]);
+});
 
 it('verifies the requested Yandex mailbox over both mail protocols before storing the grant', async () => {
   probeConnection.mockImplementationOnce(async () => {

@@ -1,5 +1,6 @@
 import { PROVIDER_FETCH_TIMEOUT_MS } from './constants.js';
 import { refreshMailboxToken } from './mailboxRefresh.js';
+import { hasHeaderInjectionChars } from '../accountAliases.js';
 
 const AUTHORIZATION_ENDPOINT = 'https://oauth.yandex.ru/authorize';
 const DEVICE_ENDPOINT = 'https://oauth.yandex.ru/device/code';
@@ -7,6 +8,8 @@ const TOKEN_ENDPOINT = 'https://oauth.yandex.ru/token';
 const USERINFO_ENDPOINT = 'https://login.yandex.ru/info';
 const VERIFICATION_URLS = new Set(['https://ya.ru/device', 'https://oauth.yandex.ru/device']);
 const SCOPES = ['mail:imap_full', 'mail:smtp'];
+const PROFILE_SCOPE = 'login:info';
+const SCOPE_LOOKUP_TIMEOUT_MS = 2500;
 const POLLING_ERRORS = new Map([
   ['authorization_pending', 'authorization_pending'],
   ['slow_down', 'slow_down'],
@@ -20,12 +23,12 @@ const isOpaqueToken = (value) => typeof value === 'string' && /^[\x21-\x7e]+$/.t
 const isPositiveInteger = (value) => Number.isSafeInteger(value) && value > 0;
 const isClientError = (value) => value === 'invalid_client' || value === 'unauthorized_client';
 
-async function requestJson(url, init, failureCode) {
+async function requestJson(url, init, failureCode, timeoutMs = PROVIDER_FETCH_TIMEOUT_MS) {
   try {
     const response = await fetch(url, {
       ...init,
       redirect: 'error',
-      signal: AbortSignal.timeout(PROVIDER_FETCH_TIMEOUT_MS),
+      signal: AbortSignal.timeout(timeoutMs),
     });
     const payload = await response.json();
     if (payload && typeof payload === 'object' && !Array.isArray(payload)) return { ok: response.ok, payload };
@@ -35,18 +38,34 @@ async function requestJson(url, init, failureCode) {
   throw error(failureCode);
 }
 
-export function buildYandexAuthorizationUrl({ clientId, redirectUri, loginHint, state, codeChallenge }) {
+async function authorizationParams(clientId) {
+  const params = new URLSearchParams({ client_id: clientId, scope: SCOPES.join(' ') });
+  const failureCode = 'yandex_scope_lookup_failed';
+  try {
+    const endpoint = `https://oauth.yandex.ru/client/${encodeURIComponent(clientId)}/info`;
+    const { ok, payload } = await requestJson(endpoint, {}, failureCode, SCOPE_LOOKUP_TIMEOUT_MS);
+    if (!ok || payload.id !== clientId || !Array.isArray(payload.scope)) throw error(failureCode);
+    if (payload.scope.includes(PROFILE_SCOPE)) params.set('optional_scope', PROFILE_SCOPE);
+  } catch {
+    // Profile access is optional. A metadata outage must not interrupt an otherwise valid grant.
+    console.warn('Yandex OAuth app scope lookup failed; requesting mailbox access only');
+  }
+  return params;
+}
+
+export async function buildYandexAuthorizationUrl({ clientId, redirectUri, loginHint, state, codeChallenge }) {
   const url = new URL(AUTHORIZATION_ENDPOINT);
-  url.search = new URLSearchParams({
-    client_id: clientId,
+  const params = await authorizationParams(clientId);
+  if (params.has('optional_scope')) params.set('force_confirm', 'yes');
+  for (const [key, value] of Object.entries({
     response_type: 'code',
     redirect_uri: redirectUri,
     login_hint: loginHint,
     state,
     code_challenge: codeChallenge,
     code_challenge_method: 'S256',
-    scope: SCOPES.join(' '),
-  }).toString();
+  })) params.set(key, value);
+  url.search = params.toString();
   return url.href;
 }
 
@@ -54,7 +73,7 @@ export async function requestYandexDeviceCode({ clientId }) {
   const failureCode = 'yandex_device_code_failed';
   const { ok, payload } = await requestJson(DEVICE_ENDPOINT, {
     method: 'POST',
-    body: new URLSearchParams({ client_id: clientId, scope: SCOPES.join(' ') }),
+    body: await authorizationParams(clientId),
   }, failureCode);
   if (!ok || 'error' in payload) throw error(isClientError(payload.error) ? 'app_unavailable' : failureCode);
 
@@ -123,7 +142,9 @@ export async function fetchYandexIdentity(accessToken, { clientId }) {
   if (!ok || 'error' in payload || payload.client_id !== clientId || !isOpaqueToken(payload.id) || payload.id.length > 255) {
     throw error(failureCode);
   }
-  return { sub: payload.id };
+  const name = [payload.display_name, payload.real_name]
+    .find(value => typeof value === 'string' && value.trim() && !hasHeaderInjectionChars(value))?.trim();
+  return { sub: payload.id, ...(name ? { name } : {}) };
 }
 
 export function refreshYandexToken(account) {

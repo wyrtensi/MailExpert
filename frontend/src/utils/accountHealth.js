@@ -115,11 +115,18 @@ export function isYandexReconnectRequired(account) {
   return account?.oauth_provider === 'yandex' && account.health === 'oauth_reconnect_required';
 }
 
+function isHealthyYandexWithoutDisplayName(account) {
+  if (account?.oauth_provider !== 'yandex' || account.health !== 'healthy') return false;
+  const name = account.name?.trim().toLowerCase();
+  return !name || name === account.email_address?.trim().toLowerCase();
+}
+
 // What the account context menu's "Reconnect" item does ('proton': a new Proton sign-in, see
 // below). An IMAP reconnect cannot
 // fix a revoked grant, so reconnect-required OAuth accounts re-run consent instead —
 // or, for a Microsoft mailbox and a user who is not an administrator, nothing
 // ('admin_required': the menu leaves the item out and the row says to ask an administrator).
+// A healthy Yandex mailbox with a fallback name also renews consent to fetch its display name.
 export function reconnectMenuAction(account, { isAdmin = false } = {}) {
   // A managed Proton mailbox whose Bridge session is gone needs a new Proton sign-in, which any
   // approved employee may start for the shared mailbox (the server grants can_reconnect_proton).
@@ -130,7 +137,7 @@ export function reconnectMenuAction(account, { isAdmin = false } = {}) {
   if (isMailruReconnectRequired(account)) {
     return { kind: 'mailru', accountId: account.id };
   }
-  if (isYandexReconnectRequired(account)) {
+  if (isYandexReconnectRequired(account) || isHealthyYandexWithoutDisplayName(account)) {
     return { kind: 'yandex' };
   }
   const url = account?.health === 'oauth_reconnect_required' ? reconnectUrlFor(account) : null;

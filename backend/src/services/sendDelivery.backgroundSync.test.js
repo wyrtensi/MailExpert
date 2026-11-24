@@ -65,6 +65,27 @@ describe('the Sent folder sync after a send', () => {
     expect(imapManager.syncFolderOnDemand).toHaveBeenCalledWith(oauth, 'Sent', { background: true });
   }, 10000);
 
+  it.each(['mailru', 'yandex'])('appends a single Sent copy after %s OAuth SMTP accepts the message', async (provider) => {
+    const oauth = { ...account, oauth_provider: provider };
+    createAccountSmtpTransport.mockResolvedValue({ account: oauth, transport: { sendMail } });
+    sendMail.mockImplementationOnce(async () => {
+      expect(imapManager.appendToSent).not.toHaveBeenCalled();
+      return {};
+    });
+    imapManager.appendToSent.mockResolvedValue({ uid: 7 });
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
+    try {
+      await expect(deliver(oauth)).resolves.toMatchObject({ sentFolder: 'Sent', sentCopySaved: true });
+      expect(sendMail).toHaveBeenCalledOnce();
+      expect(imapManager.appendToSent).toHaveBeenCalledExactlyOnceWith(oauth, 'Sent', expect.any(Buffer));
+      expect(imapManager.upsertSentMessageRecord).toHaveBeenCalledWith(oauth, 'Sent', 7,
+        expect.objectContaining({ messageId: '<m1@example.com>' }));
+    } finally {
+      vi.clearAllTimers();
+      vi.useRealTimers();
+    }
+  });
+
   it('does not APPEND for Gmail added with manual IMAP/SMTP settings: Gmail saves the Sent copy', async () => {
     const gmail = { ...account, imap_host: 'imap.gmail.com', smtp_host: 'SMTP.gmail.com' };
     createAccountSmtpTransport.mockResolvedValue({ account: gmail, transport: { sendMail } });
@@ -75,7 +96,7 @@ describe('the Sent folder sync after a send', () => {
 });
 
 describe('serverSavesSentCopy', () => {
-  it('trusts an OAuth provider, and Gmail sending through its own SMTP server', () => {
+  it('trusts Google and Microsoft OAuth, and Gmail sending through its own SMTP server', () => {
     expect(serverSavesSentCopy({ oauth_provider: 'google' })).toBe(true);
     expect(serverSavesSentCopy({ oauth_provider: 'microsoft' })).toBe(true);
     expect(serverSavesSentCopy({ imap_host: 'imap.gmail.com', smtp_host: 'smtp.gmail.com' })).toBe(true);

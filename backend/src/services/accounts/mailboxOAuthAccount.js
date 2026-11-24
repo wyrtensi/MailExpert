@@ -73,6 +73,7 @@ export async function saveMailboxOAuthAccount({ provider, pending, identity, tok
       if (existing.oauth_subject !== identity.sub) return { error: 'account_mismatch' };
       const { rows } = await client.query(
         `UPDATE email_accounts SET oauth_access_token = $1, oauth_refresh_token = $2, oauth_token_expiry = $3,
+           oauth_token_refreshed_at = NOW(),
            oauth_client_id = $4, oauth_reconnect_required = false, sync_error = NULL,
            name = CASE WHEN $8::text IS NOT NULL
                          AND (name IS NULL OR btrim(name) = '' OR lower(btrim(name)) = lower(btrim(email_address)))
@@ -92,9 +93,10 @@ export async function saveMailboxOAuthAccount({ provider, pending, identity, tok
           added_by, name, email_address, auth_user, smtp_auth_user,
           mail_provider, connection_mode, imap_tls_mode, imap_host, imap_port,
           smtp_host, smtp_port, smtp_tls, oauth_provider, oauth_access_token,
-          oauth_refresh_token, oauth_token_expiry, oauth_client_id, oauth_subject, include_in_unified_inbox
+          oauth_refresh_token, oauth_token_expiry, oauth_client_id, oauth_subject, include_in_unified_inbox,
+          oauth_token_refreshed_at
        ) VALUES ($1, $2, $3, $3, $3, $4::text, 'managed', $5, $6, $7, $8, $9, 'SSL',
-                 $4::text, $10, $11, $12, $13, $14, true)
+                 $4::text, $10, $11, $12, $13, $14, true, NOW())
        RETURNING id`,
       [pending.userId, name, email, provider, connection.imap_tls_mode, connection.imap_host, connection.imap_port, connection.smtp_host, connection.smtp_port,
         encryptedAccess, encryptedRefresh, tokens.expiresAt, config.clientId, identity.sub],

@@ -18,7 +18,8 @@ export async function refreshMailboxToken(account, provider, requestToken) {
     UPDATE email_accounts SET
       oauth_access_token = $1,
       oauth_refresh_token = COALESCE($2, oauth_refresh_token),
-      oauth_token_expiry = $3
+      oauth_token_expiry = $3,
+      oauth_token_refreshed_at = NOW()
     WHERE id = $4
       AND oauth_client_id = $5
       AND oauth_refresh_token IS NOT DISTINCT FROM $6

@@ -23,7 +23,7 @@ vi.mock('./oauth/tokenManager.js', () => ({ OAuthTokenError: class OAuthTokenErr
 const { query } = await import('./db.js');
 const { enqueueJob } = await import('./jobQueue.js');
 const { GmailSendAsError, syncGmailSendAs } = await import('./gmailSendAs.js');
-const { enqueueGmailSendAsSync, pollGmailSendAs, runGmailSendAsSync, GMAIL_SEND_AS_SYNC_KIND } = await import('./gmailSendAsJobs.js');
+const { enqueueGmailSendAsSync, pollGmailSendAs, runGmailSendAsSync, startGmailSendAsPoll, stopGmailSendAsPoll, GMAIL_SEND_AS_SYNC_KIND } = await import('./gmailSendAsJobs.js');
 
 const HOUR = 60 * 60 * 1000;
 const T0 = 5000 * HOUR + 1000;
@@ -70,8 +70,14 @@ describe('gmail send-as jobs', () => {
     }
     syncGmailSendAs.mockRejectedValueOnce(new GmailSendAsError('bad_response', 'boom'));
     await expect(runGmailSendAsSync(job)).rejects.toMatchObject({ jobOutcome: 'fail', code: 'bad_response' });
-    syncGmailSendAs.mockResolvedValueOnce({ status: 'skipped', reason: 'reconnect_required' });
-    await expect(runGmailSendAsSync(job)).resolves.toBeUndefined();
+    for (const reason of ['sync_in_progress', 'grant_changed']) {
+      syncGmailSendAs.mockResolvedValueOnce({ status: 'skipped', reason });
+      await expect(runGmailSendAsSync(job)).rejects.toMatchObject({ jobOutcome: 'retry', code: reason });
+    }
+    for (const reason of ['not_found', 'not_google', 'reconnect_required']) {
+      syncGmailSendAs.mockResolvedValueOnce({ status: 'skipped', reason });
+      await expect(runGmailSendAsSync(job)).resolves.toBeUndefined();
+    }
     expect(syncGmailSendAs).toHaveBeenCalledWith('a1');
   });
 
@@ -80,5 +86,25 @@ describe('gmail send-as jobs', () => {
     const second = await enqueueGmailSendAsSync('a1', { reason: 'connect', now: T0 + 5 });
     expect(first.created).toBe(true);
     expect(second.created).toBe(true);
+  });
+
+  it('aligns the hourly poll timer to the initial poll so restarting at :58 does not skip the next hour slot', async () => {
+    vi.useFakeTimers();
+    try {
+      const startAt = 5000 * HOUR - 2 * 60 * 1000; // :58 of the previous hour
+      vi.setSystemTime(startAt);
+      query.mockResolvedValue({ rows: [{ id: 'a1' }] });
+
+      startGmailSendAsPoll();
+      await vi.advanceTimersByTimeAsync(2 * 60 * 1000); // :00 -> slot 5000
+      await vi.advanceTimersByTimeAsync(HOUR);          // :00 next hour -> slot 5001
+
+      expect(enqueueJob.mock.calls.map(([a]) => a.dedupeKey)).toEqual(['a1:slot-5000', 'a1:slot-5001']);
+      const results = await Promise.all(enqueueJob.mock.results.map((r) => r.value));
+      expect(results.map((r) => r.created)).toEqual([true, true]);
+    } finally {
+      stopGmailSendAsPoll();
+      vi.useRealTimers();
+    }
   });
 });

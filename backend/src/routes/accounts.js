@@ -501,6 +501,8 @@ router.post('/:id/aliases', async (req, res) => {
 const SYNC_SKIPPED = {
   not_google: [409, 'This mailbox is not connected through Google'],
   reconnect_required: [409, 'Reconnect this mailbox to Google first'],
+  grant_changed: [409, 'The Google connection changed. Try syncing again.'],
+  sync_in_progress: [409, 'Gmail aliases are already being synced. Try again shortly.'],
   not_found: [404, 'Account not found'],
 };
 

@@ -69,6 +69,8 @@ export function buildGoogleSignInUrl({ clientId, state, codeChallenge, redirectU
   return `${GOOGLE_AUTH_URL}?${params}`;
 }
 
+const isUsableToken = (value) => typeof value === 'string' && /^[\x21-\x7e]+$/.test(value);
+
 function expiryFrom(expiresIn) {
   const secs = Number.isFinite(expiresIn) && expiresIn > 0 ? expiresIn : 3600;
   return new Date(Date.now() + secs * 1000);
@@ -93,7 +95,7 @@ async function postToken(params) {
     const oauthError = typeof body?.error === 'string' ? body.error : undefined;
     throw new GoogleOAuthError('authentication_failed', { oauthError });
   }
-  return body || {};
+  return body && typeof body === 'object' && !Array.isArray(body) ? body : {};
 }
 
 export async function exchangeGoogleCode({ clientId, clientSecret, code, codeVerifier, redirectUri }) {
@@ -107,13 +109,14 @@ export async function exchangeGoogleCode({ clientId, clientSecret, code, codeVer
     client_secret: clientSecret,
     redirect_uri: redirectUri,
   }));
-  if (typeof tokens.access_token !== 'string' || !tokens.access_token) {
+  const { access_token: accessToken, refresh_token: refreshToken } = tokens;
+  if (!isUsableToken(accessToken) || (refreshToken != null && !isUsableToken(refreshToken))) {
     throw new GoogleOAuthError('authentication_failed');
   }
 
   return {
-    accessToken: tokens.access_token,
-    refreshToken: typeof tokens.refresh_token === 'string' && tokens.refresh_token ? tokens.refresh_token : null,
+    accessToken,
+    refreshToken: refreshToken ?? null,
     expiresAt: expiryFrom(tokens.expires_in),
     scope: typeof tokens.scope === 'string' ? tokens.scope : '',
     idToken: typeof tokens.id_token === 'string' ? tokens.id_token : null,
@@ -171,14 +174,13 @@ export async function refreshGoogleToken(account) {
     client_id: app.client_id,
     client_secret: clientSecret,
   }));
-  if (typeof tokens.access_token !== 'string' || !tokens.access_token) {
+  const { access_token: accessToken, refresh_token: refreshToken, expires_in: expiresIn } = tokens;
+  if (!isUsableToken(accessToken) || (refreshToken != null && !isUsableToken(refreshToken))) {
     throw new GoogleOAuthError('authentication_failed');
   }
 
-  const expiry = expiryFrom(tokens.expires_in);
-  const newRefreshToken = typeof tokens.refresh_token === 'string' && tokens.refresh_token
-    ? tokens.refresh_token
-    : null;
+  const expiry = expiryFrom(expiresIn);
+  const newRefreshToken = refreshToken ?? null;
   // Encrypted once: the ciphertext stored is the one handed back below (each encrypt() draws its
   // own IV), so a later compare-and-set on it (tokenManager.markReconnectRequired) finds the row.
   const storedNewRefreshToken = newRefreshToken ? encrypt(newRefreshToken) : null;
@@ -191,12 +193,13 @@ export async function refreshGoogleToken(account) {
     UPDATE email_accounts SET
       oauth_access_token = $1,
       oauth_refresh_token = COALESCE($2, oauth_refresh_token),
-      oauth_token_expiry = $3
+      oauth_token_expiry = $3,
+      oauth_token_refreshed_at = NOW()
     WHERE id = $4
       AND oauth_refresh_token IS NOT DISTINCT FROM $5
       AND oauth_app_id IS NOT DISTINCT FROM $6
   `, [
-    encrypt(tokens.access_token), storedNewRefreshToken, expiry, account.id,
+    encrypt(accessToken), storedNewRefreshToken, expiry, account.id,
     account.oauth_refresh_token, account.oauth_app_id ?? null,
   ]);
   if (saved?.rowCount === 0) {
@@ -207,7 +210,7 @@ export async function refreshGoogleToken(account) {
 
   return {
     ...account,
-    oauth_access_token: tokens.access_token,
+    oauth_access_token: accessToken,
     oauth_refresh_token: storedNewRefreshToken ?? account.oauth_refresh_token,
     oauth_token_expiry: expiry,
   };

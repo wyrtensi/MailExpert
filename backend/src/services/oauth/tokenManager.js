@@ -5,6 +5,7 @@ import { refreshMailruToken } from './mailruOAuth.js';
 import { refreshYandexToken } from './yandexOAuth.js';
 import { acquireOAuthLease, releaseOAuthLease } from './oauthLease.js';
 import { OAUTH_RECONNECT_REQUIRED_MESSAGE, isOAuthAccount } from './constants.js';
+import { needsBackgroundRefresh } from './refreshSchedule.js';
 
 // Refresh tokens that expire within this window so a connection never starts with a
 // token about to lapse mid-session.
@@ -101,7 +102,12 @@ async function refreshUnderLock(account, options) {
   const accountId = account.id;
   const key = `oauth:refresh-lock:${accountId}`;
   const token = await acquireOAuthLease(key, options);
-  if (!token) throw new OAuthTokenError('oauth_refresh_failed');
+  if (!token) {
+    // A scheduled pass can defer to the current owner. Foreground callers still get their
+    // normal lock budget, including callers that joined this pass in this process.
+    if (options.background) return null;
+    throw new OAuthTokenError('oauth_refresh_failed');
+  }
   try {
     // Re-read after acquiring the lock: another process may have refreshed already,
     // and refreshing with a superseded refresh token could strand the account.
@@ -111,7 +117,11 @@ async function refreshUnderLock(account, options) {
     if (row.oauth_reconnect_required) throw new OAuthTokenError('oauth_reconnect_required');
     // A forced refresh means the provider rejected the caller's token: reuse the row only when
     // it already holds a newer token than the rejected one (a peer refreshed in the meantime).
-    if (!needsTokenRefresh(row) && (!options.force || expiryTime(row) > expiryTime(account))) return row;
+    if (options.background) {
+      if (!needsBackgroundRefresh(row)) return row;
+    } else if (!needsTokenRefresh(row) && (!options.force || expiryTime(row) > expiryTime(account))) {
+      return row;
+    }
     const refreshed = await refreshOAuthToken(row);
     if (refreshed.oauth_reconnect_required) throw new OAuthTokenError('oauth_reconnect_required');
     return refreshed;
@@ -120,21 +130,24 @@ async function refreshUnderLock(account, options) {
   }
 }
 
-const inFlightRefresh = new Map(); // accountId -> { promise, force }
+const inFlightRefresh = new Map();
 
 // Return an account whose OAuth access token is valid for at least the skew window.
 // Non-OAuth and still-fresh accounts are returned unchanged. The returned access token
 // may be plaintext (just refreshed) or encrypted (re-read row); decrypt() handles both.
-// `force: true` bypasses the skew window; pass it when the provider rejected the token the
-// caller holds (IMAP AUTHENTICATE or SMTP AUTH failure).
+// `force: true` bypasses the skew window after the provider rejected the caller's token.
+// `background: true` applies the proactive schedule to an enabled mailbox.
 export function ensureFreshOAuthAccount(account, options = {}) {
   if (!isOAuthAccount(account)) return Promise.resolve(account);
   const force = !!options.force;
-  if (!force && !needsTokenRefresh(account)) return Promise.resolve(account);
+  const background = !force && !!options.background;
+  const needsRefresh = background ? needsBackgroundRefresh : needsTokenRefresh;
+  if (!force && !needsRefresh(account)) return Promise.resolve(account);
 
   const existing = inFlightRefresh.get(account.id);
   if (existing) {
-    if (!force || existing.force) return existing.promise;
+    if (existing.force || (!force && background === existing.background)) return existing.promise;
+    if (!force) return existing.promise.then((row) => ensureFreshOAuthAccount(row ?? account, options));
     // A non-forced refresh may resolve to the stored row without calling the provider, and that
     // row can hold the very token this caller just had rejected. Take its result only when it is
     // newer than the rejected token; otherwise run a forced refresh once it has settled.
@@ -145,9 +158,10 @@ export function ensureFreshOAuthAccount(account, options = {}) {
 
   const promise = refreshUnderLock(account, {
     force,
+    background,
     lockWaitMs: options.lockWaitMs ?? DEFAULT_LOCK_WAIT_MS,
     lockPollMs: options.lockPollMs ?? DEFAULT_LOCK_POLL_MS,
   }).finally(() => inFlightRefresh.delete(account.id));
-  inFlightRefresh.set(account.id, { promise, force });
+  inFlightRefresh.set(account.id, { promise, force, background });
   return promise;
 }

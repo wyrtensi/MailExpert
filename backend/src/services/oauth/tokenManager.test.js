@@ -82,6 +82,76 @@ describe('needsTokenRefresh', () => {
   });
 });
 
+describe('background token renewal', () => {
+  const DAY = 24 * 60 * MINUTE;
+
+  it.each([
+    ['google', refreshGoogleToken],
+    ['mailru', refreshMailruToken],
+    ['microsoft', refreshMicrosoftToken],
+  ])('renews the %s grant before the on-demand window', async (provider, refresh) => {
+    const account = googleAccount({ enabled: true, oauth_provider: provider, oauth_token_expiry: expiresIn(9 * MINUTE) });
+    const renewed = { ...account, oauth_token_expiry: expiresIn(60 * MINUTE) };
+    mockDb({ row: account });
+    refresh.mockResolvedValue(renewed);
+
+    await expect(ensureFreshOAuthAccount(account)).resolves.toBe(account);
+    await expect(ensureFreshOAuthAccount(account, { background: true })).resolves.toBe(renewed);
+    expect(refresh).toHaveBeenCalledExactlyOnceWith(account);
+  });
+
+  it('checks a long-lived Yandex grant after 90 days even while its access token is valid', async () => {
+    const account = googleAccount({
+      enabled: true, oauth_provider: 'yandex', oauth_token_expiry: expiresIn(200 * DAY),
+      oauth_token_refreshed_at: expiresIn(-91 * DAY),
+    });
+    const renewed = { ...account, oauth_token_refreshed_at: new Date() };
+    mockDb({ row: account });
+    refreshYandexToken.mockResolvedValue(renewed);
+
+    await expect(ensureFreshOAuthAccount(account, { background: true })).resolves.toBe(renewed);
+    await ensureFreshOAuthAccount(renewed, { background: true });
+    expect(refreshYandexToken).toHaveBeenCalledExactlyOnceWith(account);
+  });
+
+  it('does not renew a grant again if a peer already checked it or disabled the mailbox', async () => {
+    const account = googleAccount({
+      enabled: true, oauth_provider: 'yandex', oauth_token_expiry: expiresIn(6 * DAY),
+      oauth_token_refreshed_at: expiresIn(-2 * DAY),
+    });
+    const alreadyChecked = { ...account, oauth_token_refreshed_at: new Date() };
+    mockDb({ row: alreadyChecked });
+    await expect(ensureFreshOAuthAccount(account, { background: true })).resolves.toBe(alreadyChecked);
+    expect(query).toHaveBeenCalledTimes(1);
+
+    const disabled = { ...account, enabled: false };
+    mockDb({ row: disabled });
+    await expect(ensureFreshOAuthAccount(account, { background: true })).resolves.toBe(disabled);
+    expect(query).toHaveBeenCalledTimes(2);
+    expect(refreshYandexToken).not.toHaveBeenCalled();
+  });
+
+  it('lets a foreground operation wait for a peer even if a background pass skips the busy lock', async () => {
+    const account = googleAccount({ enabled: true, smtp_host: 'smtp.example.com' });
+    const renewed = { ...account, oauth_access_token: 'peer-token', oauth_token_expiry: expiresIn(60 * MINUTE) };
+    const selectedForBackground = {
+      id: account.id, enabled: true, oauth_provider: account.oauth_provider,
+      oauth_access_token: 'partial-query-token', oauth_token_expiry: expiresIn(9 * MINUTE),
+    };
+    locks.set('oauth:refresh-lock:acc-g', 'other-process');
+    mockDb({ row: renewed });
+
+    const background = ensureFreshOAuthAccount(selectedForBackground, { background: true, lockWaitMs: 0 }).catch(err => err);
+    const sending = ensureFreshOAuthAccount(account, { lockWaitMs: 1000, lockPollMs: 5 }).catch(err => err);
+    const backgroundResult = await background;
+    locks.delete('oauth:refresh-lock:acc-g');
+
+    await expect(sending).resolves.toBe(renewed);
+    expect(backgroundResult).toBeNull();
+    expect(refreshGoogleToken).not.toHaveBeenCalled();
+  });
+});
+
 describe('refreshOAuthToken', () => {
   it('dispatches by provider', async () => {
     refreshGoogleToken.mockResolvedValue({ id: 'acc-g', oauth_access_token: 'g' });

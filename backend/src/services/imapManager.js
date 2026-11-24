@@ -1,3 +1,4 @@
+import { AsyncLocalStorage } from 'node:async_hooks';
 import { FolderStatusMonitor, checkpointFolderStatus } from './folderStatus.js';
 import { recordUnfetchable, suppressedUids, clearUnfetchable, hasRealGap } from './unfetchableUids.js';
 import { ImapFlow } from 'imapflow';
@@ -490,6 +491,73 @@ export function planIntegrityFlagScan({ condstore, storedModseq, serverModseq, e
 
 // Body parts that cover ~99% of real-world email structures (used for full body caching)
 const BODY_PREFETCH_PARTS = ['1', '1.1', '1.2', '2', '2.1', '2.2', '1.1.1', '1.2.1'];
+
+// The part numbers a message's BODYSTRUCTURE lists. imapflow numbers a multipart's children
+// "1", "2", "1.1" and so on; a single-part message carries no number in the tree, and its
+// body is part 1.
+export function structureParts(structure) {
+  const parts = new Set();
+  const walk = (node) => {
+    if (!node) return;
+    if (node.part) parts.add(node.part);
+    for (const child of node.childNodes || []) walk(child);
+  };
+  walk(structure);
+  if (!parts.size) parts.add('1');
+  return parts;
+}
+
+// The server answered the command with NO or BAD: it refused it, and the connection is fine.
+const isServerRejection = (err) => err?.responseStatus === 'NO' || err?.responseStatus === 'BAD';
+
+// Fetches one snippet-indexer batch, handing each message to onMessage.
+//
+// The one-round-trip form asks every message for the same guessed parts. Most servers return
+// nothing for a part a message lacks, except strict servers (Proton Mail Bridge, Yandex), which
+// fail the whole FETCH, so the same batch was retried forever. On that refusal, and from the
+// start when structureFirst is set, this reads each message's structure and asks only for the
+// parts it has, one FETCH per distinct set of parts. Anything the server still refuses is
+// skipped: those messages get no snippet and are marked attempted like any other, so a batch
+// can never repeat. A broken connection still throws.
+//
+// Returns true when the guessed form was refused, so the caller can skip it from then on.
+export async function fetchSnippetBatch(client, uids, onMessage, { structureFirst = false } = {}) {
+  const items = { uid: true, envelope: true, bodyStructure: true };
+  if (!structureFirst) {
+    try {
+      for await (const msg of client.fetch(uids.join(','), { ...items, bodyParts: BODY_PREFETCH_PARTS }, { uid: true })) {
+        await onMessage(msg);
+      }
+      return false;
+    } catch (err) {
+      if (!isServerRejection(err)) throw err;
+    }
+  }
+  const groups = new Map();
+  try {
+    for await (const msg of client.fetch(uids.join(','), { uid: true, bodyStructure: true }, { uid: true })) {
+      const have = structureParts(msg.bodyStructure);
+      const parts = BODY_PREFETCH_PARTS.filter((part) => have.has(part));
+      if (!parts.length) continue;
+      const key = parts.join(' ');
+      if (!groups.has(key)) groups.set(key, { parts, uids: [] });
+      groups.get(key).uids.push(msg.uid);
+    }
+  } catch (err) {
+    if (!isServerRejection(err)) throw err;
+    return !structureFirst;
+  }
+  for (const { parts, uids: group } of groups.values()) {
+    try {
+      for await (const msg of client.fetch(group.join(','), { ...items, bodyParts: parts }, { uid: true })) {
+        await onMessage(msg);
+      }
+    } catch (err) {
+      if (!isServerRejection(err)) throw err;
+    }
+  }
+  return !structureFirst;
+}
 
 // Every cid: reference receives a full copy of its image, so a small message pointing at one
 // inline part thousands of times would build a body of hundreds of MB. The first reference to
@@ -1276,6 +1344,25 @@ const PROVIDERS = {
     skipSpecialUse: [],
     skipFolderNames: [],
   },
+  yandex: {
+    // Yandex closes idle sessions after ~5 minutes and drops excess simultaneous logins
+    // ("Unexpected close", mid-sync drops). Keep IDLE fresh at 4 minutes, reuse one pooled
+    // session for periodic secondary work (folder status, integrity, staleness probe), avoid
+    // full-mailbox backfill on every reconnect, and read BODYSTRUCTURE before parts (Yandex
+    // rejects speculative multi-part BODY_PREFETCH_PARTS with "UID FETCH Completed. sc=...").
+    batchSize: 100, batchDelay: 1500, errorDelay: 30000, batchesPerConn: 25,
+    poolSize: 1,
+    maxBackgroundConnections: 1,
+    secondaryOverPool: true,
+    idleKeepaliveMs: 4 * 60 * 1000,
+    autoBackfillExistingOnConnect: false,
+    fetchBody: false,
+    pushesFlags: true,
+    snippetIndex: true,
+    speculativeFetch: false,
+    skipSpecialUse: [],
+    skipFolderNames: [],
+  },
   strato: {
     // The generic profile plus one opt-out. Strato's server ENABLEs IMAP4rev2 without
     // advertising it in CAPABILITY, then answers `UID SEARCH ALL` with an EMPTY ESEARCH while
@@ -1430,6 +1517,7 @@ export function providerProfile(account) {
   if (host.includes('.icloud.com') || host.includes('.apple.com') || host.includes('.me.com')) return PROVIDERS.apple;
   if (host.includes('.outlook.com') || host.includes('office365.com') || host.includes('.hotmail.com') || host.includes('.live.com') || (account.oauth_provider === 'microsoft')) return PROVIDERS.microsoft;
   if (host.includes('purelymail.com')) return PROVIDERS.purelymail;
+  if (host.includes('.yandex.com') || host.includes('.yandex.ru') || host.includes('.yandex.net') || account.oauth_provider === 'yandex') return PROVIDERS.yandex;
   if (host.includes('.strato.')) return PROVIDERS.strato;
   return PROVIDERS.generic;
 }
@@ -1684,11 +1772,16 @@ export function tokenRefreshTimeoutMs(account) {
 async function ensureFreshToken(account, { force = false } = {}) {
   if (!isOAuthAccount(account)) return account;
   try {
-    return await raceTimeout(
+    const refreshed = await raceTimeout(
       ensureFreshOAuthAccount(account, { force, lockWaitMs: OAUTH_REFRESH_LOCK_WAIT_MS }),
       tokenRefreshTimeoutMs(account),
       'OAuth token refresh',
     );
+    // Write refreshed credentials/expiry back into the caller's object: the sync interval and
+    // IDLE listeners hold it for as long as the connection lives, so stale expiry would otherwise
+    // re-enter the token manager lock on every tick after a background renewal.
+    if (refreshed && refreshed !== account && !Object.isFrozen(account)) Object.assign(account, refreshed);
+    return refreshed;
   } catch (err) {
     if (err instanceof OAuthTokenError) throw err;
     // A timeout or an unexpected lock/DB error: nothing says the grant is gone, so retry later.
@@ -1937,7 +2030,9 @@ function loginHeldBack(account, { background = false } = {}) {
 // every mailbox that ever synced a folder or served a click keeps a second IMAP session open for
 // good, which on a self-hosted node doubles its sessions (Dovecot: one process, a few MB each).
 // IMAP_POOL_IDLE_SECONDS: 0 keeps pooled logins open; empty or invalid = the default.
-export const DEFAULT_POOL_IDLE_SECONDS = 300;
+// Kept below imapflow's 5-minute (300 s) socketTimeout so idle pooled logins close cleanly via
+// logout() instead of racing into a Socket timeout error.
+export const DEFAULT_POOL_IDLE_SECONDS = 240;
 export function parsePoolIdleMs(raw) {
   if (raw === undefined || raw === null || String(raw).trim() === '') return DEFAULT_POOL_IDLE_SECONDS * 1000;
   const n = Number(String(raw).trim());
@@ -2277,12 +2372,29 @@ function guardPoolLease(client, idleLimitMs) {
   return lease;
 }
 
+// The accounts whose pooled session the current async work holds (see withFreshClient).
+const pooledHolds = new AsyncLocalStorage();
+
+// No pooled session of the account is free and none can be added.
+function poolIsFull(account) {
+  const pool = connectionPools.get(account.id);
+  if (!pool || pool.clients.some(c => !pool.inUse.has(c))) return false;
+  return pool.clients.length + (pool.connecting || 0) >= poolSizeFor(account);
+}
+
 // poolOpts: { background, timeoutMs, stallTimeout }. background queues behind interactive work
 // (see acquirePooledClient); timeoutMs bounds how long the operation may run
 // (POOLED_OPERATION_TIMEOUT_MS by default); stallTimeout is the idle limit: POOL_STALL_TIMEOUT_MS
 // by default, a number of ms for work that can be quiet longer on a healthy server
 // (SLOW_COMMAND_STALL_TIMEOUT_MS), or false for none (an upload, see appendToFolder).
 export async function withFreshClient(account, fn, poolOpts = {}) {
+  // Work that already holds this account's pooled session and asks for another while the pool is
+  // full would wait for itself: the session is released only when that work finishes. With a pool
+  // of one (Yahoo, Yandex) this is certain whenever integrity sync runs an inbox move/archive rule.
+  // Such a nested request gets a one-off login instead, closed when it is done.
+  if (pooledHolds.getStore()?.has(account.id) && poolIsFull(account)) {
+    return withFreshLogin(account, fn);
+  }
   const { timeoutMs = POOLED_OPERATION_TIMEOUT_MS, stallTimeout = POOL_STALL_TIMEOUT_MS, ...acquireOpts } = poolOpts;
   const idleLimitMs = stallTimeout === true ? POOL_STALL_TIMEOUT_MS : stallTimeout;
   if (idleLimitMs !== false && !(Number.isFinite(idleLimitMs) && idleLimitMs > 0)) {
@@ -2295,7 +2407,9 @@ export async function withFreshClient(account, fn, poolOpts = {}) {
     // On expiry the catch below evicts the session and the release closes it, which aborts the
     // command still running on it. The idle timer is the inner bound: on silence imapflow closes
     // the session, the command rejects, and the same catch evicts it.
-    return await raceTimeout(fn(client), timeoutMs, 'Pooled IMAP operation');
+    const held = new Set(pooledHolds.getStore() || []);
+    held.add(account.id);
+    return await raceTimeout(pooledHolds.run(held, () => fn(client)), timeoutMs, 'Pooled IMAP operation');
   } catch (err) {
     // On error, evict this client from pool so next call gets a fresh one.
     // Do not close here — releasePooledClient in finally detects the client is
@@ -2693,6 +2807,7 @@ export class ImapManager {
     this._pollOnlyAccounts = new Set(); // accountId — demoted to poll-only (no persistent IDLE) by the per-host connection budget (#379)
     this._idleMissStreak = new Map(); // accountId -> consecutive health checks seen NOT idling despite IDLE being enabled
     this.snippetIndexerRunning = new Set(); // accountId — prevent duplicate snippet-index runs
+    this.snippetStructureFirst = new Set(); // accountId: server refuses guessed body parts (Proton Bridge, Yandex)
     this.snippetBackoff = new Map();        // imap_host -> { failures, until } circuit breaker (host-level: a per-host connection limit hits every account on that host, so back them all off together)
     this.lastUserActivity = new Map();      // accountId -> ms timestamp of last live body fetch
     this.syncTickCount = new Map(); // accountId -> successful sync ticks (for reconcile scheduling)
@@ -4084,6 +4199,8 @@ export class ImapManager {
     this.syncStartedAt.set(account.id, Date.now());
     let activeClient = null;
     let usedFreshSyncClient = false;
+    let reconnectedThisTick = false;
+    let disconnectAfter = false;
     let syncResult;
     try {
       activeClient = this.connections.get(account.id);
@@ -4134,9 +4251,11 @@ export class ImapManager {
           // Credentials accepted: see connectAccount.
           this._secondaryAuthCooldown.delete(account.id);
           this._nodePasswordRestored.delete(account.id);
-          const reconnected = { client: pendingClient, account: setup.freshAccount };
-          activeClient = reconnected.client;
-          syncAccount = reconnected.account;
+          activeClient = pendingClient;
+          reconnectedThisTick = true;
+          // Into the object this interval holds, so later ticks and the IDLE listeners below
+          // share the reconnect's account data (see _refreshLiveAccount).
+          syncAccount = Object.assign(account, setup.freshAccount);
           activeClient.on('close', () => {
             if (this.connections.get(account.id) === activeClient) {
               this.connections.delete(account.id);
@@ -4174,6 +4293,11 @@ export class ImapManager {
         } finally {
           this.connectingAccounts.delete(account.id);
         }
+      } else if (!(await this._refreshLiveAccount(account))) {
+        // Deleted or disabled while connected, or connected by a connect that finished after
+        // the disconnect did: nothing else tears this connection and its timer down.
+        disconnectAfter = true;
+        return;
       }
       // Honor the connection-refusal cooldown on the sync path itself, not just on reconnect.
       // freshInboxSync providers (PurelyMail) keep the persistent connection open and sync via
@@ -4264,14 +4388,16 @@ export class ImapManager {
       if (detail.includes('THROTTLED') || detail.includes('throttl')) {
         this.syncThrottleSkips.set(account.id, 4);
       }
-      // A refusal or a rejected login on the sync path (notably the fresh-login poll, which never
-      // reaches the reconnect gate) must arm the same backoff the connect paths use — otherwise
-      // the poll keeps hammering a provider that's refusing logins. Honored by the check above
-      // next tick. The fresh-login poll refreshes the OAuth token too; a failed refresh is
-      // handled first.
+      // A dropped pre-existing persistent socket ("Connection not available" / NoConnection when
+      // we did not log in during this tick) is a normal server-side idle drop, not a refused login:
+      // close and remove `dead` below without arming a 30 s refusal cooldown that would block
+      // folder status checks and delay recovery. Refusals after a fresh login (reconnectedThisTick
+      // or usedFreshSyncClient) and real server limit errors still arm the refusal ladder.
+      const droppedExistingSocket = !reconnectedThisTick && !usedFreshSyncClient
+        && (err?.code === 'NoConnection' || /^connection not available$/i.test(detail));
       if (await this._handleOAuthRefreshFailure(account, err)) {
         // Handled: backoff armed, or the account was disconnected for reconnect-required.
-      } else if (this._noteLoginFailure(account, err, detail)) {
+      } else if (!droppedExistingSocket && this._noteLoginFailure(account, err, detail)) {
         // Surface what we backed off on, for the same reason as the poll-only tick: gated so a
         // one-off 'Sync wall-clock timeout' doesn't flag an otherwise healthy account. An auth
         // failure is surfaced too: its cooldown runs to hours, so the account must not stay green.
@@ -4291,8 +4417,29 @@ export class ImapManager {
     } finally {
       this.syncingAccounts.delete(account.id);
       this.syncStartedAt.delete(account.id);
-      this._syncAgainIfMailArrived(account);
+      if (disconnectAfter) {
+        console.log(`Disconnecting ${logAccount(account)}: the account was removed or disabled`);
+        await this.disconnectAccount(account.id);
+      } else {
+        this._syncAgainIfMailArrived(account);
+      }
     }
+  }
+
+  // The account object a connection was given holds its settings and tokens, and the sync
+  // interval and IDLE listeners keep it for as long as the connection lives. Each tick re-reads
+  // the row into it so a background OAuth refresh or a settings change applies without a
+  // reconnect. Resolves false when the account is gone or disabled. A failed read keeps what it has.
+  async _refreshLiveAccount(account) {
+    let row;
+    try {
+      ({ rows: [row] } = await query('SELECT * FROM email_accounts WHERE id = $1', [account.id]));
+    } catch {
+      return true;
+    }
+    if (!row || !row.enabled) return false;
+    Object.assign(account, row);
+    return true;
   }
 
   // New mail that arrived while a sync was running (the `exists` listener queued it): sync once more.
@@ -6444,10 +6591,8 @@ export class ImapManager {
           try {
             const lock = await siClient.getMailboxLock(folder);
             try {
-              for await (const msg of siClient.fetch(uids.join(','), {
-                uid: true, envelope: true, bodyStructure: true,
-                bodyParts: BODY_PREFETCH_PARTS,
-              }, { uid: true })) {
+              const structureFirst = !cfg.speculativeFetch || this.snippetStructureFirst.has(account.id);
+              const refused = await fetchSnippetBatch(siClient, uids, async (msg) => {
                 try {
                   const parsed = await parseMessage(msg);
                   if (parsed.snippet) {
@@ -6459,6 +6604,10 @@ export class ImapManager {
                     );
                   }
                 } catch { /* skip snippet on parse/update failure */ }
+              }, { structureFirst });
+              if (refused) {
+                this.snippetStructureFirst.add(account.id);
+                console.log(`Snippet indexer: ${logAccount(account)} refuses guessed body parts; reading each message's structure first from now on`);
               }
             } finally {
               lock.release();

@@ -8,7 +8,8 @@ const makePool = () => ({ clients: [], inUse: new Set(), waiters: [], connecting
 const makeClient = () => ({ logout: vi.fn(() => Promise.resolve()) });
 
 describe('parsePoolIdleMs', () => {
-  it('defaults to 300 seconds when unset, empty or invalid', () => {
+  it('defaults to 240 seconds when unset, empty or invalid', () => {
+    expect(DEFAULT_POOL_IDLE_SECONDS).toBe(240);
     for (const raw of [undefined, null, '', '  ', 'abc', '-5', '1.5']) {
       expect(parsePoolIdleMs(raw)).toBe(DEFAULT_POOL_IDLE_SECONDS * 1000);
     }

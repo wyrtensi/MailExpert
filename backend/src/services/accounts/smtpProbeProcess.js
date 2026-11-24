@@ -10,27 +10,28 @@ function minimalEnvironment() {
   return Object.fromEntries(['SystemRoot', 'WINDIR', 'TEMP', 'TMP'].filter(key => process.env[key] !== undefined).map(key => [key, process.env[key]]));
 }
 
-function payload(candidate, endpoint, timeoutMs) {
+function payload(candidate, endpoint, timeoutMs, oauthAccessToken) {
   const addresses = endpoint?.addresses?.length ? [...endpoint.addresses] : [endpoint?.host];
   if (addresses.some(address => !isIP(address)) || !Number.isInteger(endpoint.port) || endpoint.port < 1 || endpoint.port > 65535) throw new ConnectionError('server_refused', 'smtp');
   const user = candidate.smtp_auth_user || candidate.auth_user;
   const pass = candidate.smtp_auth_pass || candidate.auth_pass;
-  if (typeof user !== 'string' || !user || /[\r\n\0]/.test(user) || typeof pass !== 'string' || !pass) throw new ConnectionError('login_invalid', 'smtp');
+  if (typeof user !== 'string' || !user || /[\r\n\0]/.test(user)
+    || (!oauthAccessToken && (typeof pass !== 'string' || !pass))) throw new ConnectionError('login_invalid', 'smtp');
   const secure = endpoint.secure ?? candidate.smtp_tls === 'SSL';
   if (typeof secure !== 'boolean') throw new ConnectionError('tls_error', 'smtp');
   return { type: 'probe', endpoint: {
     host: addresses[0], addresses, port: endpoint.port, servername: endpoint.servername || null,
     tls: { ...(endpoint.tls?.ca ? { ca: endpoint.tls.ca } : {}), rejectUnauthorized: true },
     secure, requireTLS: !secure,
-  }, auth: { user, pass }, timeoutMs };
+  }, auth: oauthAccessToken ? { type: 'OAuth2', user, accessToken: oauthAccessToken } : { user, pass }, timeoutMs };
 }
 
 // Nodemailer's public verify API keeps its socket outside transport.close(). A dedicated
 // process gives every terminal path an enforceable cancellation boundary without internals.
-export async function probeSmtpInChild(candidate, endpoint, { signal, timeoutMs = 15000 } = {}) {
+export async function probeSmtpInChild(candidate, endpoint, { signal, timeoutMs = 15000, oauthAccessToken } = {}) {
   if (signal?.aborted) throw new ConnectionError(signal.reason instanceof ConnectionError ? signal.reason.code : 'connection_cancelled', 'smtp');
   if (!Number.isFinite(timeoutMs) || timeoutMs <= 0) throw new ConnectionError('connection_timeout', 'smtp');
-  const message = payload(candidate, endpoint, timeoutMs);
+  const message = payload(candidate, endpoint, timeoutMs, oauthAccessToken);
   if (activeChildren >= 8) throw new ConnectionError('server_refused', 'smtp');
   activeChildren++;
   try {

@@ -1,29 +1,25 @@
-import { randomBytes } from 'crypto';
 import { query } from '../db.js';
-import { redisClient } from '../redis.js';
 import { refreshMicrosoftToken } from './microsoftOAuth.js';
 import { refreshGoogleToken } from './googleOAuth.js';
+import { refreshMailruToken } from './mailruOAuth.js';
+import { refreshYandexToken } from './yandexOAuth.js';
+import { acquireOAuthLease, releaseOAuthLease } from './oauthLease.js';
 import { OAUTH_RECONNECT_REQUIRED_MESSAGE, isOAuthAccount } from './constants.js';
 
 // Refresh tokens that expire within this window so a connection never starts with a
 // token about to lapse mid-session.
 export const TOKEN_REFRESH_SKEW_MS = 5 * 60 * 1000;
 
-// Cross-process refresh lock. The TTL outlives the slowest refresh (Microsoft may make two
-// token calls of up to PROVIDER_FETCH_TIMEOUT_MS each, plus DB writes) with a wide margin, so
-// a stalled holder does not let a peer refresh with a superseded refresh token; a crashed
-// holder still frees the account within a minute.
-const LOCK_TTL_SECONDS = 60;
 // Default wait for callers without a tighter deadline (SMTP send, routes). Callers that race
 // the refresh against a timeout (imapManager) pass a shorter `lockWaitMs` so the wait plus the
 // provider's token calls still fit inside their budget.
 const DEFAULT_LOCK_WAIT_MS = 10000;
 const DEFAULT_LOCK_POLL_MS = 200;
-const RELEASE_LOCK_SCRIPT = `if redis.call('get', KEYS[1]) == ARGV[1] then return redis.call('del', KEYS[1]) else return 0 end`;
 
 // Provider error codes that no retry can fix: only a new user consent helps. app_unavailable
-// means the Google app that issued the tokens was disabled or removed.
-const RECONNECT_OAUTH_ERRORS = new Set(['invalid_grant', 'missing_refresh_token', 'app_unavailable']);
+// means the app that issued the tokens was disabled, removed or replaced.
+const RECONNECT_OAUTH_ERRORS = new Set(['invalid_grant', 'missing_refresh_token', 'app_unavailable', 'scope_missing']);
+const CLIENT_BOUND_PROVIDERS = new Set(['mailru', 'yandex']);
 
 // Stable, secret-free error. `code` is one of: oauth_reconnect_required,
 // oauth_refresh_failed, oauth_unsupported_provider, oauth_account_not_found.
@@ -52,11 +48,14 @@ export function needsTokenRefresh(account, now = Date.now()) {
 // token that was JUST refreshed successfully (the grant is bad even though the refresh call
 // itself worked) — can flag the same way a refresh failure does, instead of only telling the
 // user to reconnect without ever recording it.
-export async function markReconnectRequired(accountId, rejectedRefreshToken) {
+export async function markReconnectRequired(accountId, rejectedRefreshToken, grant) {
+  const params = [accountId, rejectedRefreshToken ?? null];
+  if (grant) params.push(grant.oauth_client_id ?? null, grant.oauth_provider);
   const result = await query(
     `UPDATE email_accounts SET oauth_reconnect_required = true, sync_error = 'oauth_reconnect_required'
-     WHERE id = $1 AND oauth_refresh_token IS NOT DISTINCT FROM $2`,
-    [accountId, rejectedRefreshToken ?? null],
+     WHERE id = $1 AND oauth_refresh_token IS NOT DISTINCT FROM $2
+     ${grant ? 'AND oauth_provider = $4 AND oauth_client_id IS NOT DISTINCT FROM $3' : ''}`,
+    params,
   );
   return result?.rowCount !== 0;
 }
@@ -70,13 +69,16 @@ export async function refreshOAuthToken(account) {
   let refresh;
   if (account.oauth_provider === 'microsoft') refresh = refreshMicrosoftToken;
   else if (account.oauth_provider === 'google') refresh = refreshGoogleToken;
+  else if (account.oauth_provider === 'mailru') refresh = refreshMailruToken;
+  else if (account.oauth_provider === 'yandex') refresh = refreshYandexToken;
   else throw new OAuthTokenError('oauth_unsupported_provider');
 
   try {
     return await refresh(account);
   } catch (err) {
     if (RECONNECT_OAUTH_ERRORS.has(err?.oauthError)) {
-      if (!(await markReconnectRequired(account.id, account.oauth_refresh_token))) {
+      const grant = CLIENT_BOUND_PROVIDERS.has(account.oauth_provider) ? account : undefined;
+      if (!(await markReconnectRequired(account.id, account.oauth_refresh_token, grant))) {
         // The grant was replaced during the provider call; the caller retries with the new row.
         console.error(`OAuth refresh for account ${account.id} (${account.oauth_provider}) raced a token update`);
         throw new OAuthTokenError('oauth_refresh_failed');
@@ -90,26 +92,6 @@ export async function refreshOAuthToken(account) {
   }
 }
 
-async function acquireLock(key, { lockWaitMs, lockPollMs }) {
-  const token = randomBytes(16).toString('hex');
-  const deadline = Date.now() + lockWaitMs;
-  for (;;) {
-    const ok = await redisClient.set(key, token, { NX: true, EX: LOCK_TTL_SECONDS });
-    if (ok) return token;
-    if (Date.now() >= deadline) return null;
-    await new Promise((resolve) => setTimeout(resolve, lockPollMs));
-  }
-}
-
-async function releaseLock(key, token) {
-  try {
-    await redisClient.eval(RELEASE_LOCK_SCRIPT, { keys: [key], arguments: [token] });
-  } catch (err) {
-    // The lock expires on its own; a failed release only delays the next refresh.
-    console.error(`OAuth refresh lock release failed: ${err?.message || 'unknown error'}`);
-  }
-}
-
 const expiryTime = (account) => {
   const ms = account?.oauth_token_expiry ? new Date(account.oauth_token_expiry).getTime() : NaN;
   return Number.isFinite(ms) ? ms : -Infinity;
@@ -118,7 +100,7 @@ const expiryTime = (account) => {
 async function refreshUnderLock(account, options) {
   const accountId = account.id;
   const key = `oauth:refresh-lock:${accountId}`;
-  const token = await acquireLock(key, options);
+  const token = await acquireOAuthLease(key, options);
   if (!token) throw new OAuthTokenError('oauth_refresh_failed');
   try {
     // Re-read after acquiring the lock: another process may have refreshed already,
@@ -130,9 +112,11 @@ async function refreshUnderLock(account, options) {
     // A forced refresh means the provider rejected the caller's token: reuse the row only when
     // it already holds a newer token than the rejected one (a peer refreshed in the meantime).
     if (!needsTokenRefresh(row) && (!options.force || expiryTime(row) > expiryTime(account))) return row;
-    return await refreshOAuthToken(row);
+    const refreshed = await refreshOAuthToken(row);
+    if (refreshed.oauth_reconnect_required) throw new OAuthTokenError('oauth_reconnect_required');
+    return refreshed;
   } finally {
-    await releaseLock(key, token);
+    await releaseOAuthLease(key, token);
   }
 }
 

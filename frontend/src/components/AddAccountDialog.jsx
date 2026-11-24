@@ -23,6 +23,10 @@ const FOCUSABLE = 'button:not([disabled]), [href], input:not([disabled]), select
 
 // What the manual form may assume before the status API answers (and when it cannot): nothing.
 const NO_MANUAL_POLICY = Object.freeze({ allowPrivateHosts: false, allowNonstandardPorts: false });
+const OAUTH_INTRO_KEYS = {
+  mailru: 'admin.integrations.mailru.addHint',
+  yandex: 'admin.integrations.yandex.addHint',
+};
 
 function DomainForm({ email, onEmailChange, signal, onAttemptStart, onConnected, accounts }) {
   const attemptRef = useRef(null);
@@ -81,7 +85,7 @@ export default function AddAccountDialog({ onClose, forms = FORMS }) {
   const [domainStatus, setDomainStatus] = useState(null);
   // The safe, shared part of the status the provider forms need: the catalog of the four fixed
   // providers, the manual policy booleans and the state of the managed Proton worker.
-  const [formStatus, setFormStatus] = useState({ catalog: null, manualPolicy: NO_MANUAL_POLICY, proton: null });
+  const [formStatus, setFormStatus] = useState({ catalog: null, manualPolicy: NO_MANUAL_POLICY, proton: null, oauth: {} });
   // One controller per open form: Back and Close abort it, and every form drops what arrives late.
   const [session, setSession] = useState(null);
   const overlayRef = useRef(null);
@@ -99,6 +103,11 @@ export default function AddAccountDialog({ onClose, forms = FORMS }) {
     [googleStatus, domainStatus, formStatus.proton],
   );
   const selected = flow.provider ? options.find((option) => option.kind === flow.provider) ?? null : null;
+  const yandexReconnectId = flow.provider === 'yandex' && !session && seed?.provider === 'yandex' ? seed.id : null;
+  // A redirect to an external browser cannot return to the native client's session.
+  const hasNativeBridge = Boolean(window.mailexpertNative || window.Capacitor?.isNativePlatform?.());
+  const yandexBrowserOAuth = flow.provider === 'yandex' && formStatus.yandexBrowserOAuth === true && !hasNativeBridge;
+  const oauthIntro = Object.hasOwn(OAUTH_INTRO_KEYS, flow.provider);
 
   // Which integrations are configured: decides the state shown on the Gmail and mail-node forms.
   useEffect(() => {
@@ -112,6 +121,11 @@ export default function AddAccountDialog({ onClose, forms = FORMS }) {
           catalog: Array.isArray(data?.mailProviders) ? data.mailProviders : null,
           manualPolicy: { ...NO_MANUAL_POLICY, ...(data?.manual || {}) },
           proton: data?.proton || null,
+          yandexBrowserOAuth: data?.yandex?.redirectConfigured === true,
+          oauth: {
+            mailru: data?.mailru?.configured === true,
+            yandex: data?.yandex?.configured === true,
+          },
         });
       })
       .catch(() => {
@@ -344,8 +358,13 @@ export default function AddAccountDialog({ onClose, forms = FORMS }) {
           )}
           {Form && inForm && (
             <>
-              {selected.enabled && selected.introKey && (
-                <p className="add-account-hint" data-provider-intro>{t(selected.introKey, { service: t(selected.titleKey) })}</p>
+              {selected.enabled && selected.introKey && (!oauthIntro || formStatus.oauth[flow.provider] || yandexReconnectId) && (
+                <p className="add-account-hint" data-provider-intro>
+                  {t(yandexBrowserOAuth ? 'admin.integrations.yandex.browserHint'
+                    : yandexReconnectId ? 'admin.integrations.yandex.reconnectHint'
+                    : formStatus.oauth[flow.provider] ? OAUTH_INTRO_KEYS[flow.provider]
+                    : selected.introKey, { service: t(selected.titleKey) })}
+                </p>
               )}
               {selected.enabled && selected.hintKey && <p className="add-account-hint">{t(selected.hintKey)}</p>}
               {selected.enabled || !selected.hintKey
@@ -360,6 +379,9 @@ export default function AddAccountDialog({ onClose, forms = FORMS }) {
                     catalog={formStatus.catalog}
                     manualPolicy={formStatus.manualPolicy}
                     proton={formStatus.proton}
+                    oauthConfigured={formStatus.oauth[flow.provider]}
+                    yandexBrowserOAuth={yandexBrowserOAuth}
+                    yandexReconnectId={yandexReconnectId}
                     onAttemptStart={() => { attemptedRef.current = true; }}
                     onConnected={handleConnected}
                     onCancel={back}

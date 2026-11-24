@@ -626,6 +626,22 @@ test('already-handled writes from part 1 of the demo-settings fix still answer',
   const quarantineSettings = await answer('/mail-node/quarantine/settings', 'PUT', '/mail-node/quarantine/settings', { userView: false });
   assert.equal(quarantineSettings.userView, false);
   await answer('/oauth/google/start', 'POST', '/oauth/google/start', { email: `coverage-${Date.now()}@gmail.com` });
+  await demoRequest('POST', '/integrations/mailru', {
+    clientId: 'demo-client', clientSecret: 'demo-secret', redirectUri: 'https://example.com/oauth/mailru/callback',
+  });
+  assert.deepEqual(await answer('/oauth/mailru/start', 'POST', '/oauth/mailru/start', { email: 'coverage@mail.ru' }), { demo: true, result: 'created' });
+  await demoRequest('POST', '/integrations/yandex', { clientId: 'demo-client', clientSecret: 'demo-secret' });
+  const yandex = await answer('/oauth/yandex/device', 'POST', '/oauth/yandex/device', { email: 'coverage@yandex.ru' });
+  assert.ok(yandex.flowId);
+  assert.deepEqual(await answer('/oauth/yandex/device/poll', 'POST', '/oauth/yandex/device/poll', { flowId: yandex.flowId }), { status: 'success', result: 'created' });
+  const reconnect = await demoRequest('POST', '/oauth/yandex/device', { email: 'cancel@yandex.ru' });
+  assert.deepEqual(await answer('/oauth/yandex/device/cancel', 'POST', '/oauth/yandex/device/cancel', { flowId: reconnect.flowId }), { ok: true });
+  assert.deepEqual(await demoRequest('POST', '/oauth/yandex/device/poll', { flowId: reconnect.flowId }), { status: 'expired' });
+  await demoRequest('POST', '/integrations/yandex', {
+    clientId: 'demo-client', clientSecret: '', redirectUri: 'https://example.com/oauth/yandex/callback',
+  });
+  assert.equal((await demoRequest('GET', '/integrations/status')).yandex.redirectConfigured, true);
+  assert.deepEqual(await answer('/oauth/yandex/start', 'POST', '/oauth/yandex/start', { email: 'browser@yandex.ru' }), { demo: true, result: 'created' });
 });
 
 test('the node operations answer: queue actions, alerts, budget', async () => {

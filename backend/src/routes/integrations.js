@@ -12,6 +12,11 @@ import { GOOGLE_CALLBACK_PATH } from '../services/oauth/constants.js';
 import { publicProviderCatalog } from '../services/accounts/providerCatalog.js';
 import { getConnectionPolicy } from '../services/connectionPolicy.js';
 import { getProtonStatus } from '../services/proton/workerStatus.js';
+import {
+  getMailboxOAuthConfig, hasMailboxOAuthConfig, MAILBOX_OAUTH_CONFIG_ERRORS,
+  mailboxOAuthRedirectConfigured, saveMailboxOAuthConfig,
+} from '../services/integrations/mailboxOAuth.js';
+import { allowedRequestOrigin, getPublicOrigins } from '../utils/publicOrigins.js';
 
 const router = Router();
 
@@ -78,7 +83,8 @@ router.get('/', requireAdmin, async (req, res) => {
       ...(stored.updated_at ? { updated_at: stored.updated_at } : {}),
     };
   }
-  res.json(configs);
+  const panelOrigin = getPublicOrigins().find(origin => origin.startsWith('https://')) ?? null;
+  res.json({ ...configs, panelOrigin });
 });
 
 // Capability check for any authenticated user (non-admins included). Reports only
@@ -122,6 +128,8 @@ async function protonCapabilities() {
 
 router.get('/status', async (req, res) => {
   const configured = !!(await resolveGoogleConfig());
+  const origin = allowedRequestOrigin(req);
+  const yandexConfig = await getMailboxOAuthConfig('yandex');
   res.json({
     microsoft: {
       configured: !!process.env.MS_CLIENT_ID,
@@ -142,14 +150,24 @@ router.get('/status', async (req, res) => {
     mailProviders: publicProviderCatalog(),
     proton: await protonCapabilities(),
     manual: await manualCapabilities(),
+    mailru: { configured: await hasMailboxOAuthConfig('mailru', origin) },
+    yandex: {
+      configured: !!yandexConfig, redirectConfigured: mailboxOAuthRedirectConfigured('yandex', yandexConfig, origin),
+    },
   });
 });
 
 // Save/update integration config — admin only (writes affect global OAuth env vars)
 router.post('/:provider', requireAdmin, async (req, res) => {
   const { provider } = req.params;
-  const allowed = ['microsoft', 'google'];
+  const allowed = ['microsoft', 'google', 'mailru', 'yandex'];
   if (!allowed.includes(provider)) return res.status(400).json({ error: 'Unknown provider' });
+
+  if (provider === 'mailru' || provider === 'yandex') {
+    const result = await saveMailboxOAuthConfig(provider, req.body);
+    if (result.error) return res.status(400).json({ error: MAILBOX_OAUTH_CONFIG_ERRORS[result.error], code: result.error });
+    return res.json({ ok: true });
+  }
 
   if (provider === 'google') {
     // Only the shared callback URL is stored here: apps are managed at /api/admin/google-apps,

@@ -3,6 +3,8 @@ import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 vi.mock('../db.js', () => ({ query: vi.fn() }));
 vi.mock('./microsoftOAuth.js', () => ({ refreshMicrosoftToken: vi.fn() }));
 vi.mock('./googleOAuth.js', () => ({ refreshGoogleToken: vi.fn() }));
+vi.mock('./mailruOAuth.js', () => ({ refreshMailruToken: vi.fn() }));
+vi.mock('./yandexOAuth.js', () => ({ refreshYandexToken: vi.fn() }));
 
 // Minimal Redis lock semantics: SET NX with expiry and compare-and-delete via EVAL.
 const locks = vi.hoisted(() => new Map());
@@ -27,6 +29,8 @@ const { query } = await import('../db.js');
 const { redisClient } = await import('../redis.js');
 const { refreshMicrosoftToken } = await import('./microsoftOAuth.js');
 const { refreshGoogleToken } = await import('./googleOAuth.js');
+const { refreshMailruToken } = await import('./mailruOAuth.js');
+const { refreshYandexToken } = await import('./yandexOAuth.js');
 const { refreshOAuthToken, ensureFreshOAuthAccount, needsTokenRefresh } = await import('./tokenManager.js');
 
 const MINUTE = 60 * 1000;
@@ -60,6 +64,8 @@ beforeEach(() => {
   redisClient.eval.mockClear();
   refreshMicrosoftToken.mockReset();
   refreshGoogleToken.mockReset();
+  refreshMailruToken.mockReset();
+  refreshYandexToken.mockReset();
   errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
 });
 afterEach(() => {
@@ -85,6 +91,32 @@ describe('refreshOAuthToken', () => {
     expect(await refreshOAuthToken({ id: 'acc-m', oauth_provider: 'microsoft' })).toEqual({ id: 'acc-m', oauth_access_token: 'm' });
     expect(refreshGoogleToken).toHaveBeenCalledTimes(1);
     expect(refreshMicrosoftToken).toHaveBeenCalledTimes(1);
+  });
+
+  it.each(['mailru', 'yandex'])('refreshes a stale %s token through the shared lock', async (provider) => {
+    const impl = provider === 'mailru' ? refreshMailruToken : refreshYandexToken;
+    const account = googleAccount({ oauth_provider: provider, oauth_client_id: 'mailbox-client' });
+    const refreshed = { ...account, oauth_access_token: 'renewed' };
+    mockDb({ row: account });
+    impl.mockResolvedValue(refreshed);
+
+    await expect(ensureFreshOAuthAccount(account)).resolves.toEqual(refreshed);
+    expect(redisClient.set).toHaveBeenCalledTimes(1);
+    expect(impl).toHaveBeenCalledExactlyOnceWith(account);
+  });
+
+  it.each(['mailru', 'yandex'])('flags rejected %s credentials only when the original provider and client still match', async (provider) => {
+    const impl = provider === 'mailru' ? refreshMailruToken : refreshYandexToken;
+    const account = googleAccount({ oauth_provider: provider, oauth_client_id: 'mailbox-client' });
+    impl.mockRejectedValue(providerError('invalid_grant'));
+    query.mockResolvedValue({ rows: [], rowCount: 1 });
+
+    await expect(refreshOAuthToken(account)).rejects.toMatchObject({ code: 'oauth_reconnect_required' });
+    const [sql, params] = query.mock.calls[0];
+    expect(sql).toContain('oauth_provider = $4');
+    expect(sql).toContain('oauth_client_id IS NOT DISTINCT FROM $3');
+    expect(sql).toContain('oauth_refresh_token IS NOT DISTINCT FROM $2');
+    expect(params).toEqual([account.id, account.oauth_refresh_token, account.oauth_client_id, provider]);
   });
 
   it('rejects unknown providers', async () => {

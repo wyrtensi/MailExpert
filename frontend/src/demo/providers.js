@@ -24,10 +24,10 @@ export function createProviderDemo({ accounts, clone, demoError, normalizeEmail,
   let sequence = 1;
 
   // POST /accounts/provider: a mailbox of a fixed provider, without any connection.
-  function createProviderMailbox(body) {
+  function createProviderMailbox(body, { oauthProvider } = {}) {
     const provider = DEMO_MAIL_PROVIDERS.find(p => p.id === body?.provider);
     const email = normalizeEmail(body?.email);
-    if (!provider || !ADDRESS.test(email) || typeof body?.appPassword !== 'string' || !body.appPassword) {
+    if (!provider || !ADDRESS.test(email) || (!oauthProvider && (typeof body?.appPassword !== 'string' || !body.appPassword))) {
       throw demoError('invalid_request', 'invalid_request');
     }
     if (mailboxWithEmail(email)) throw demoError('already_connected', 'already_connected');
@@ -38,6 +38,7 @@ export function createProviderDemo({ accounts, clone, demoError, normalizeEmail,
       smtp_tls: provider.smtp.tls === 'implicit' ? 'SSL' : 'STARTTLS', imap_tls_mode: provider.imap.tls,
       mail_provider: provider.id, connection_mode: 'preset', can_reconnect_proton: false, proton_status: null, health: 'healthy',
       aliases: [], signature: body.signature || null, sort_order: accounts.length, mail_node: false, thread_mode: 'rfc',
+      ...(oauthProvider ? { oauth_provider: oauthProvider } : {}),
     };
     accounts.push(account);
     welcomeLetter(account);

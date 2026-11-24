@@ -41,6 +41,8 @@ import AuditLogTab from './AuditLogTab.jsx';
 import { isGoogleAuthMode } from '../utils/authMode.js';
 import { adminUserErrorText } from '../utils/adminUsers.js';
 import GoogleAppsSection from './GoogleAppsSection.jsx';
+import IntegrationCard from './IntegrationCard.jsx';
+import ProviderIcon from './addAccount/ProviderIcon.jsx';
 import MailNodeSection from './MailNodeSection.jsx';
 import EopSection from './EopSection.jsx';
 import MailNodeOpsSection from './MailNodeOpsSection.jsx';
@@ -58,8 +60,9 @@ import {
 } from '../utils/mailNode.js';
 import MailboxDeletionNotice, { MailboxDeactivatedNotice, TenantPendingLine } from './MailboxDeletionNotice.jsx';
 import { openOAuthWindow } from '../utils/oauthWindow.js';
-import { HEALTH_COLORS, HEALTH_LABEL_KEYS, MICROSOFT_OAUTH_PATH, reconnectUrlFor } from '../utils/accountHealth.js';
+import { HEALTH_COLORS, HEALTH_LABEL_KEYS, MICROSOFT_OAUTH_PATH, isMailruReconnectRequired, isYandexReconnectRequired, reconnectUrlFor } from '../utils/accountHealth.js';
 import { isGoogleReconnectRequired } from '../utils/googleOAuth.js';
+import { reconnectMailruOAuth } from '../utils/mailboxBrowserOAuth.js';
 import { microsoftOAuthErrorKey } from '../utils/microsoftOAuth.js';
 import { withoutDeleteChoices } from '../utils/deletePolicy.js';
 import { getEffectiveShortcuts, getGroupedActions, ACTION_DEFS, SPECIAL_KEY_LABELS, parseModKey, modLabel } from '../utils/defaultShortcuts.js';
@@ -509,7 +512,7 @@ function threadingBlockedMessage(err, t) {
 // Exported (like ThemesTab below) only so AccountsTab.render.test.js can mount it.
 export function AccountsTab() {
   const { t } = useTranslation();
-  const { accounts, setAccounts, updateAccount, setUnreadCounts, addNotification, backfillProgress, user, openAddAccount, openProtonReconnect, accountSettingsRequested, clearAccountSettingsRequest, accountsReady } = useStore();
+  const { accounts, setAccounts, updateAccount, setUnreadCounts, addNotification, backfillProgress, user, openAddAccount, openProtonReconnect, openYandexReconnect, accountSettingsRequested, clearAccountSettingsRequest, accountsReady } = useStore();
   const isAdmin = !!user?.isAdmin;
   const [subview, setSubview] = useState('list'); // 'list' | 'edit' | 'folders' | 'aliases'
   const [editTarget, setEditTarget] = useState(null);
@@ -1323,7 +1326,7 @@ export function AccountsTab() {
               <div style={{ fontSize: 11, marginTop: 3, display: 'flex', alignItems: 'center', gap: 6, flexWrap: 'wrap' }}>
                 {account.health === 'proton_reconnect_required' || account.health === 'proton_unavailable' ? (
                   <span style={{ color: HEALTH_COLORS[account.health], display: 'inline-flex', alignItems: 'center', gap: 4 }}><WarningIcon size={12} /> {t(HEALTH_LABEL_KEYS[account.health])}</span>
-                ) : isGoogleReconnectRequired(account) ? (
+                ) : (isGoogleReconnectRequired(account) || isMailruReconnectRequired(account) || isYandexReconnectRequired(account)) ? (
                   <span style={{ color: 'var(--red)', display: 'inline-flex', alignItems: 'center', gap: 4 }}><WarningIcon size={12} /> {t('admin.accounts.oauthReconnectRequired')}</span>
                 ) : account.sync_error ? (
                   <span style={{
@@ -1341,12 +1344,16 @@ export function AccountsTab() {
               </div>
             </div>
             <div style={{ display: 'flex', gap: 6, flexShrink: 0, marginLeft: 'auto' }}>
-              {isGoogleReconnectRequired(account) && (
-                <button onClick={() => openOAuthWindow(reconnectUrlFor(account))} style={{
+              {(isGoogleReconnectRequired(account) || isMailruReconnectRequired(account) || isYandexReconnectRequired(account)) && (
+                <button type="button" onClick={() => {
+                  if (isMailruReconnectRequired(account)) reconnectMailruOAuth(account.id, t);
+                  else if (isYandexReconnectRequired(account)) openYandexReconnect(account);
+                  else openOAuthWindow(reconnectUrlFor(account));
+                }} style={{
                   padding: '5px 10px', background: 'var(--accent)', border: 'none', borderRadius: 6,
                   color: 'var(--accent-text)', cursor: 'pointer', fontSize: 12, fontWeight: 500,
                 }}>
-                  {t('admin.accounts.reconnectGmail')}
+                  {t(isGoogleReconnectRequired(account) ? 'admin.accounts.reconnectGmail' : 'sidebar.accountMenu.reconnect')}
                 </button>
               )}
               {account.can_reconnect_proton === true && (
@@ -1363,7 +1370,10 @@ export function AccountsTab() {
                   {t('admin.accounts.protonReconnect')}
                 </button>
               )}
-              {account.sync_error && !isGoogleReconnectRequired(account) && account.can_reconnect_proton !== true && (
+              {account.sync_error && !isGoogleReconnectRequired(account)
+                && !isMailruReconnectRequired(account)
+                && !isYandexReconnectRequired(account)
+                && account.can_reconnect_proton !== true && (
                 <IconBtn onClick={() => handleReconnect(account.id)} title={t('sidebar.accountMenu.reconnect')}>
                   <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
                     <polyline points="23 4 23 10 17 10"/>
@@ -2645,6 +2655,196 @@ function MailNodeTab() {
   );
 }
 
+const OAUTH_SETTINGS_KEYS = {
+  mailru: {
+    title: 'admin.integrations.mailru.title',
+    description: 'admin.integrations.mailru.description',
+    redirectNote: 'admin.integrations.mailru.redirectNote',
+    errorRedirectUri: 'admin.integrations.mailru.errorRedirectUri',
+    keepSecret: 'admin.integrations.mailru.keepSecret',
+    saved: 'admin.integrations.mailru.saved',
+    errorSave: 'admin.integrations.mailru.errorSave',
+    errorClientId: 'admin.integrations.mailru.errorClientId',
+    errorClientSecret: 'admin.integrations.mailru.errorClientSecret',
+    consoleUrl: 'https://oauth.mail.ru/app/',
+    createApp: 'admin.integrations.mailru.createApp',
+  },
+  yandex: {
+    title: 'admin.integrations.yandex.title',
+    description: 'admin.integrations.yandex.description',
+    redirectNote: 'admin.integrations.yandex.redirectNote',
+    errorRedirectUri: 'admin.integrations.yandex.errorRedirectUri',
+    keepSecret: 'admin.integrations.yandex.keepSecret',
+    saved: 'admin.integrations.yandex.saved',
+    errorSave: 'admin.integrations.yandex.errorSave',
+    errorClientId: 'admin.integrations.yandex.errorClientId',
+    errorClientSecret: 'admin.integrations.yandex.errorClientSecret',
+    consoleUrl: 'https://oauth.yandex.ru/',
+    createApp: 'admin.integrations.yandex.createApp',
+  },
+};
+
+const YANDEX_SETUP_SCOPES = [
+  ['mail:smtp', 'admin.integrations.yandex.scopeSmtp'],
+  ['mail:imap_full', 'admin.integrations.yandex.scopeImap'],
+  ['login:info', 'admin.integrations.yandex.scopeProfile'],
+];
+
+export function MailboxOAuthSettings({ provider, config, panelOrigin = window.location.origin, onSaved }) {
+  const { t } = useTranslation();
+  const keys = OAUTH_SETTINGS_KEYS[provider];
+  const yandex = provider === 'yandex';
+  const configured = Boolean(config?.clientId);
+  const suggestedRedirectUri = panelOrigin ? `${panelOrigin}/oauth/${provider}/callback` : '';
+  const [expanded, setExpanded] = useState(false);
+  const [guideOpen, setGuideOpen] = useState(!configured);
+  const [clientId, setClientId] = useState(config?.clientId ?? '');
+  const [clientSecret, setClientSecret] = useState('');
+  const [redirectDraft, setRedirectDraft] = useState(config?.redirectUri || null);
+  const [useCode, setUseCode] = useState(yandex && configured && !config.redirectUri);
+  const [saving, setSaving] = useState(false);
+  const [message, setMessage] = useState(null);
+  const [scopeCopy, setScopeCopy] = useState(null);
+  const redirectUri = redirectDraft ?? suggestedRedirectUri;
+  const callback = URL.canParse(redirectUri) ? new URL(redirectUri) : null;
+  const callbackUrl = callback?.protocol === 'https:' ? callback : null;
+  const keepSecret = configured && clientId.trim() === config.clientId;
+  const canSave = !saving && clientId.trim() && (useCode || redirectUri.trim()) && (clientSecret.trim() || keepSecret);
+
+  const copyRedirect = async () => {
+    const { ok } = await copyToClipboard(redirectUri.trim());
+    setMessage(ok
+      ? { type: 'success', text: t('admin.integrations.mailboxOAuth.redirectCopied') }
+      : { type: 'error', text: t('common.copyFailed') });
+  };
+
+  const copyScope = async (scope) => {
+    const { ok } = await copyToClipboard(scope);
+    setScopeCopy({ scope, ok });
+  };
+
+  const save = async (event) => {
+    event.preventDefault();
+    if (!canSave) return;
+    setSaving(true);
+    setMessage(null);
+    const savedConfig = { clientId: clientId.trim(), redirectUri: useCode ? '' : redirectUri.trim() };
+    try {
+      await api.saveIntegration(provider, { ...savedConfig, clientSecret: clientSecret.trim() });
+      setClientSecret('');
+      onSaved(savedConfig);
+      setMessage({ type: 'success', text: t(keys.saved) });
+    } catch (err) {
+      const key = apiErrorKey(err?.code, {
+        redirect_uri_invalid: keys.errorRedirectUri,
+        client_id_invalid: keys.errorClientId,
+        client_secret_required: keys.errorClientSecret,
+        client_secret_redacted: keys.errorClientSecret,
+      });
+      setMessage({ type: 'error', text: t(key ?? keys.errorSave) });
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  return (
+    <IntegrationCard
+      icon={<ProviderIcon kind={provider} size={20} />}
+      title={t(keys.title)}
+      description={t(keys.description)}
+      status={t(configured ? 'admin.integrations.microsoft.configured' : 'admin.integrations.microsoft.notConfigured')}
+      active={configured}
+      expanded={expanded}
+      onToggle={() => setExpanded((open) => !open)}
+    >
+      <form className="admin-oauth-form" onSubmit={save} aria-busy={saving}>
+        <details className="admin-oauth-guide" open={guideOpen} onToggle={(event) => setGuideOpen(event.currentTarget.open)}>
+          <summary>{t('admin.integrations.mailboxOAuth.setupTitle')}</summary>
+          <ol>
+            <li>
+              <a href={keys.consoleUrl} target="_blank" rel="noreferrer">{t(keys.createApp)}</a>
+              {yandex && <div>{t('admin.integrations.yandex.setupAppType')}</div>}
+            </li>
+            {yandex ? (
+              <>
+                <li>
+                  {t('admin.integrations.yandex.setupWeb')}{' '}
+                  {useCode
+                    ? t('admin.integrations.yandex.setupWithoutRedirect')
+                    : t('admin.integrations.yandex.setupRedirect')}
+                  {!useCode && callbackUrl && <div>{t('admin.integrations.yandex.setupHostname', { hostname: callbackUrl.hostname })}</div>}
+                </li>
+                <li>
+                  {t('admin.integrations.yandex.setupPermissions')}
+                  <ul className="admin-oauth-scope-list">
+                    {YANDEX_SETUP_SCOPES.map(([scope, description]) => (
+                      <li key={scope}>
+                        <div>
+                          <code>{scope}</code>
+                          <div>{t(description)}</div>
+                        </div>
+                        <button type="button" className="admin-integration-save" onClick={() => copyScope(scope)}
+                          aria-label={t('admin.integrations.yandex.copyScope', { scope })}>{t('common.copy')}</button>
+                      </li>
+                    ))}
+                  </ul>
+                  {scopeCopy && (
+                    <div className="admin-oauth-hint" role={scopeCopy.ok ? 'status' : 'alert'}>
+                      {scopeCopy.ok ? t('admin.integrations.yandex.scopeCopied', { scope: scopeCopy.scope }) : t('common.copyFailed')}
+                    </div>
+                  )}
+                </li>
+              </>
+            ) : (
+              <li>{t('admin.integrations.mailru.setupWeb')}</li>
+            )}
+            <li>{t('admin.integrations.mailboxOAuth.setupCredentials')}</li>
+          </ol>
+        </details>
+        <Field label={t('admin.integrations.microsoft.clientId')} htmlFor={`${provider}-client-id`} required>
+          <input id={`${provider}-client-id`} style={inputStyle} value={clientId} disabled={saving} required onChange={e => setClientId(e.target.value)} />
+        </Field>
+        <Field label={t('admin.integrations.microsoft.clientSecret')} htmlFor={`${provider}-client-secret`} required={!keepSecret}>
+          <input id={`${provider}-client-secret`} style={inputStyle} type="password" autoComplete="new-password"
+            placeholder={keepSecret ? t(keys.keepSecret) : undefined}
+            value={clientSecret} disabled={saving} required={!keepSecret} onChange={e => setClientSecret(e.target.value)} />
+        </Field>
+        {yandex && (
+          <label className="admin-oauth-device-mode">
+            <input id="yandex-code-login" type="checkbox" checked={useCode} disabled={saving}
+              onChange={(event) => { setUseCode(event.target.checked); setMessage(null); }} />
+            <span>{t('admin.integrations.yandex.useCode')}</span>
+          </label>
+        )}
+        <Field label={t('admin.integrations.microsoft.redirectUri')} htmlFor={`${provider}-redirect-uri`} required={!useCode}>
+          <div className="admin-oauth-redirect-row">
+            <input id={`${provider}-redirect-uri`} style={inputStyle} type="url" value={redirectUri}
+              disabled={saving || useCode} required={!useCode} placeholder={suggestedRedirectUri} spellCheck={false}
+              aria-describedby={`${provider}-redirect-note`} onChange={e => { setRedirectDraft(e.target.value); setMessage(null); }} />
+            <button type="button" className="admin-integration-save" onClick={copyRedirect}
+              disabled={saving || useCode || !callbackUrl}>{t('common.copy')}</button>
+          </div>
+          <div id={`${provider}-redirect-note`} className="admin-oauth-hint">
+            {useCode ? t('admin.integrations.yandex.useCodeNote') : t(keys.redirectNote)}
+            {!useCode && !panelOrigin && <div>{t('admin.integrations.mailboxOAuth.httpsRequired')}</div>}
+            {!useCode && callbackUrl && callbackUrl.origin !== window.location.origin && (
+              <div>{t('admin.integrations.mailboxOAuth.startOnOrigin', { origin: callbackUrl.origin })}</div>
+            )}
+          </div>
+        </Field>
+        <button type="submit" className="admin-integration-save" disabled={!canSave}>
+          {saving ? t('common.saving') : t('common.save')}
+        </button>
+        {message && (
+          <p role={message.type === 'error' ? 'alert' : 'status'} style={{ color: message.type === 'error' ? 'var(--red)' : 'var(--green)' }}>
+            {message.text}
+          </p>
+        )}
+      </form>
+    </IntegrationCard>
+  );
+}
+
 // ─── Integrations Tab ────────────────────────────────────────────────────────
 function IntegrationsTab() {
   const { t } = useTranslation();
@@ -2901,67 +3101,22 @@ function IntegrationsTab() {
           {!loading && (
             <div>
               {/* Microsoft 365 */}
-          <div style={{
-            border: '1px solid var(--border-subtle)', borderRadius: 12,
-            overflow: 'hidden', marginBottom: 12,
-          }}>
-            {/* Header */}
-            <div
-              onClick={() => setMsExpanded(!msExpanded)}
-              style={{
-                padding: '14px 16px', display: 'flex', alignItems: 'center',
-                gap: 12, cursor: 'pointer', background: 'var(--bg-tertiary)',
-                transition: 'background 0.1s',
-              }}
-              onMouseEnter={e => e.currentTarget.style.background = 'var(--bg-hover)'}
-              onMouseLeave={e => e.currentTarget.style.background = 'var(--bg-tertiary)'}
-            >
-              {/* Microsoft icon */}
-              <svg width="20" height="20" viewBox="0 0 21 21" fill="none">
+          <IntegrationCard
+            icon={
+              <svg width="20" height="20" viewBox="0 0 21 21" fill="none" aria-hidden="true">
                 <rect x="1" y="1" width="9" height="9" fill="#f25022"/>
                 <rect x="11" y="1" width="9" height="9" fill="#7fba00"/>
                 <rect x="1" y="11" width="9" height="9" fill="#00a4ef"/>
                 <rect x="11" y="11" width="9" height="9" fill="#ffb900"/>
               </svg>
-
-              <div style={{ flex: 1 }}>
-                <div style={{ fontSize: 14, fontWeight: 500, color: 'var(--text-primary)' }}>
-                  {t('admin.integrations.microsoft.title')}
-                </div>
-                <div style={{ fontSize: 12, color: 'var(--text-tertiary)', marginTop: 1 }}>
-                  {t('admin.integrations.microsoft.description')}
-                </div>
-              </div>
-
-              <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
-                {msConfigured ? (
-                  <span style={{
-                    fontSize: 11, padding: '3px 8px', borderRadius: 20,
-                    background: 'rgba(74,222,128,0.1)', color: 'var(--green)',
-                    border: '1px solid rgba(74,222,128,0.2)', fontWeight: 500,
-                  }}>
-                    {t('admin.integrations.microsoft.configured')}
-                  </span>
-                ) : (
-                  <span style={{
-                    fontSize: 11, padding: '3px 8px', borderRadius: 20,
-                    background: 'var(--bg-elevated)', color: 'var(--text-tertiary)',
-                    border: '1px solid var(--border)',
-                  }}>
-                    {t('admin.integrations.microsoft.notConfigured')}
-                  </span>
-                )}
-                <svg width="14" height="14" viewBox="0 0 24 24" fill="none"
-                  stroke="var(--text-tertiary)" strokeWidth="2"
-                  style={{ transform: msExpanded ? 'rotate(180deg)' : 'none', transition: 'transform 0.15s' }}>
-                  <polyline points="6 9 12 15 18 9"/>
-                </svg>
-              </div>
-            </div>
-
-            {/* Expanded form */}
-            {msExpanded && (
-              <div style={{ padding: '16px', borderTop: '1px solid var(--border-subtle)' }}>
+            }
+            title={t('admin.integrations.microsoft.title')}
+            description={t('admin.integrations.microsoft.description')}
+            status={t(msConfigured ? 'admin.integrations.microsoft.configured' : 'admin.integrations.microsoft.notConfigured')}
+            active={msConfigured}
+            expanded={msExpanded}
+            onToggle={() => setMsExpanded((open) => !open)}
+          >
                 {/* Admin-only: setup instructions + credential form. Non-admins can't
                     read or write the global config, so they see only the note + connect
                     buttons below. (#315) */}
@@ -3056,12 +3211,7 @@ function IntegrationsTab() {
 
                 <div style={{ display: 'flex', gap: 8 }}>
                   {isAdmin && (
-                  <button onClick={handleSaveMs} disabled={saving} style={{
-                    padding: '9px 16px', background: 'var(--bg-elevated)',
-                    border: '1px solid var(--border)', borderRadius: 8,
-                    color: 'var(--text-primary)', cursor: saving ? 'not-allowed' : 'pointer',
-                    fontSize: 13, fontWeight: 500, opacity: saving ? 0.7 : 1,
-                  }}>
+                  <button onClick={handleSaveMs} disabled={saving} className="admin-integration-save">
                     {saving ? t('common.saving') : t('admin.integrations.microsoft.save')}
                   </button>
                   )}
@@ -3212,11 +3362,17 @@ function IntegrationsTab() {
                     </div>
                   )}
                 </div>
-              </div>
-            )}
-          </div>
+          </IntegrationCard>
 
-          {isAdmin && <GoogleAppsSection />}
+          {isAdmin && (
+            <>
+              <GoogleAppsSection />
+              {Object.keys(OAUTH_SETTINGS_KEYS).map((provider) => (
+                <MailboxOAuthSettings key={provider} provider={provider} config={configs[provider]} panelOrigin={configs.panelOrigin}
+                  onSaved={(config) => setConfigs(prev => ({ ...prev, [provider]: config }))} />
+              ))}
+            </>
+          )}
         </div>
       )}
         </div>
@@ -3225,51 +3381,21 @@ function IntegrationsTab() {
       {subTab === 'apps' && (
         <div>
           {/* Todoist */}
-          <div style={{
-            border: '1px solid var(--border-subtle)', borderRadius: 12,
-            overflow: 'hidden', marginBottom: 12,
-          }}>
-            {/* Header */}
-            <div
-              onClick={() => setTdExpanded(!tdExpanded)}
-              style={{
-                padding: '14px 16px', display: 'flex', alignItems: 'center',
-                gap: 12, cursor: 'pointer', background: 'var(--bg-tertiary)',
-                transition: 'background 0.1s',
-              }}
-              onMouseEnter={e => e.currentTarget.style.background = 'var(--bg-hover)'}
-              onMouseLeave={e => e.currentTarget.style.background = 'var(--bg-tertiary)'}
-            >
-              <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="var(--accent)" strokeWidth="2">
+          <IntegrationCard
+            icon={
+              <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="var(--accent)" strokeWidth="2" aria-hidden="true">
                 <circle cx="12" cy="12" r="9"/>
                 <polyline points="9 12 11 14 15 10"/>
               </svg>
-              <div style={{ flex: 1 }}>
-                <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
-                  <span style={{ fontSize: 14, fontWeight: 600, color: 'var(--text-primary)' }}>
-                    {t('admin.integrations.todoist.title')}
-                  </span>
-                  <span style={{
-                    fontSize: 11, padding: '2px 8px', borderRadius: 10,
-                    background: (!tdLoading && tdConnected) ? 'rgba(34,197,94,0.1)' : 'var(--bg-primary)',
-                    color: (!tdLoading && tdConnected) ? '#22c55e' : 'var(--text-tertiary)',
-                    border: `1px solid ${(!tdLoading && tdConnected) ? '#22c55e' : 'var(--border)'}`,
-                  }}>
-                    {tdLoading ? '...' : (tdConnected ? t('admin.integrations.todoist.connected') : t('admin.integrations.todoist.notConnected'))}
-                  </span>
-                </div>
-                <div style={{ fontSize: 12, color: 'var(--text-tertiary)', marginTop: 2 }}>
-                  {t('admin.integrations.todoist.description')}
-                </div>
-              </div>
-              <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="var(--text-tertiary)" strokeWidth="2.5"
-                style={{ transform: tdExpanded ? 'rotate(180deg)' : 'none', transition: 'transform 0.2s', flexShrink: 0 }}>
-                <polyline points="6 9 12 15 18 9"/>
-              </svg>
-            </div>
-
-            {tdExpanded && (
-              <div style={{ padding: '16px 18px', borderTop: '1px solid var(--border-subtle)', display: 'flex', flexDirection: 'column', gap: 12 }}>
+            }
+            title={t('admin.integrations.todoist.title')}
+            description={t('admin.integrations.todoist.description')}
+            status={tdLoading ? null : t(tdConnected ? 'admin.integrations.todoist.connected' : 'admin.integrations.todoist.notConnected')}
+            active={!tdLoading && tdConnected}
+            expanded={tdExpanded}
+            onToggle={() => setTdExpanded((open) => !open)}
+          >
+              <div style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
                 {tdLoading ? (
                   <div style={{ color: 'var(--text-tertiary)', fontSize: 13 }}>{t('admin.integrations.loading')}</div>
                 ) : tdConnected ? (
@@ -3342,8 +3468,7 @@ function IntegrationsTab() {
                   </>
                 )}
               </div>
-            )}
-          </div>
+          </IntegrationCard>
         </div>
       )}
     </div>

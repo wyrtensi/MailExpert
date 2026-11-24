@@ -50,6 +50,17 @@ describe('SMTP probe with a real isolated child and socket', () => {
     await expectReaped(server);
   });
 
+  it('verifies a mailbox with XOAUTH2 without sending a message', async () => {
+    const server = await fixture({ authMechanism: 'XOAUTH2' });
+    const oauthAccessToken = 'oauth-fixture-token';
+    await probeSmtpInChild({ ...candidate, auth_pass: null, smtp_auth_pass: null }, server.endpoint, { oauthAccessToken });
+    const auth = server.commands.find(command => command.startsWith('AUTH XOAUTH2 '));
+    expect(auth).toBeDefined();
+    expect(Buffer.from(auth.split(' ')[2], 'base64').toString()).toBe(`user=${candidate.smtp_auth_user}\x01auth=Bearer ${oauthAccessToken}\x01\x01`);
+    expect(server.commands.some(command => /^(MAIL FROM|RCPT TO|DATA)\b/.test(command))).toBe(false);
+    await expectReaped(server);
+  });
+
   it('bounds a real stalled greeting and closes the socket before returning timeout', async () => {
     const server = await fixture({ stall: true });
     const result = probeSmtpInChild(candidate, server.endpoint, { timeoutMs: 10000 });

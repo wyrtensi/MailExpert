@@ -1,4 +1,4 @@
-// Render tests for the provider forms of the add-account dialog: the two-field forms of Yahoo,
+// Render tests for the provider forms of the add-account dialog: the app-password forms of Yahoo,
 // Yandex, Mail.ru and iCloud, "Other", Proton (with its polling and challenges), the collapsed
 // advanced block of all eight services, the app-password help and its clipboard failure, and the
 // secrets boundary. Requests are checked at the HTTP level (a fetch stub), so the headers, the
@@ -159,13 +159,84 @@ afterEach(async () => {
 after(() => { win.close(); });
 
 const outsideAdvanced = (host, selector) => [...host.querySelectorAll(selector)].filter((el) => !el.closest('[data-advanced-connection]'));
+const advancedToggle = (host) => host.querySelector('[data-advanced-connection] > button[aria-expanded]');
+const usesPasswordOption = (provider) => provider === 'yandex' || provider === 'mailru';
+
+async function selectAppPassword(host) {
+  const toggle = advancedToggle(host);
+  if (toggle.getAttribute('aria-expanded') === 'false') await click(toggle);
+  await click(byText(host, 'button', 'admin.accounts.add.appPasswordOption'));
+}
+
+describe('Yandex and Mail.ru app password option', () => {
+  test('a late Mail.ru OAuth status does not move focus while entering an app password', async () => {
+    let setConfigured;
+    function FormWithPendingStatus() {
+      const [configured, setStatus] = React.useState(false);
+      setConfigured = setStatus;
+      return React.createElement(Harness, {
+        Form: ImapProviderAddForm, provider: 'mailru', catalog: CATALOG, oauthConfigured: configured,
+      });
+    }
+    const { host } = await mount(React.createElement(FormWithPendingStatus));
+    await selectAppPassword(host);
+    const password = host.querySelector('#imap-add-password');
+    password.focus();
+    await React.act(async () => setConfigured(true));
+    assert.ok(win.document.activeElement === password, 'the password input keeps focus');
+  });
+
+  for (const provider of ['yandex', 'mailru']) {
+    for (const oauthConfigured of [true, false]) {
+      test(`${provider} requires choosing an app password even when OAuth is ${oauthConfigured ? 'configured' : 'unavailable'}`, async () => {
+        const email = `person@${CATALOG.find((preset) => preset.id === provider).publicDomains[0]}`;
+        const { host } = await mount(React.createElement(Harness, {
+          Form: ImapProviderAddForm, provider, catalog: CATALOG, initialEmail: email, oauthConfigured,
+        }));
+        const oauthButton = () => byText(host, 'button', `admin.integrations.${provider}.connect`);
+        const passwordField = () => host.querySelector('#imap-add-password');
+        const addressField = () => host.querySelector('#imap-add-email');
+        const form = host.querySelector('form');
+        assert.equal(Boolean(oauthButton()), oauthConfigured);
+        assert.equal(Boolean(addressField()), provider !== 'mailru' || !oauthConfigured);
+        assert.equal(host.textContent.includes('admin.accounts.add.appPasswordWhenOAuthUnavailable'), !oauthConfigured);
+        assert.equal(advancedToggle(host).getAttribute('aria-expanded'), 'false');
+        gone(passwordField());
+        gone(byText(host, 'button', 'admin.accounts.add.appPasswordOption'));
+
+        await click(advancedToggle(host));
+        gone(passwordField(), 'opening Advanced settings alone does not select the app password');
+        await submit(form);
+        assert.equal(calls.length, 0);
+
+        await selectAppPassword(host);
+        gone(oauthButton(), 'the form shows the selected sign-in method');
+        assert.equal(addressField().value, email);
+        assert.ok(passwordField()?.closest('[data-advanced-connection]'));
+        await type(passwordField(), SENTINEL);
+        await click(advancedToggle(host));
+        gone(passwordField());
+        await submit(form);
+        assert.equal(calls.length, 0, 'collapsing the fallback prevents sending its password');
+
+        await selectAppPassword(host);
+        assert.equal(passwordField().value, '');
+        await type(passwordField(), SENTINEL);
+        await submit(form);
+        assert.equal(calls[0].path, '/api/accounts/provider');
+        assert.deepEqual(calls[0].body, { provider, email, appPassword: SENTINEL });
+      });
+    }
+  }
+});
 
 describe('fixed providers: Yahoo, Yandex, Mail.ru, iCloud', () => {
   for (const provider of PRESETS) {
     test(`missing advanced servers block ${provider} even after the block is collapsed`, async () => {
       const { host } = await mount(React.createElement(Harness, { Form: ImapProviderAddForm, provider, catalog: CATALOG, initialEmail: 'team@example.com' }));
+      if (usesPasswordOption(provider)) await selectAppPassword(host);
       await type(host.querySelector('#imap-add-password'), SENTINEL);
-      await click(host.querySelector('[data-advanced-connection] button[aria-expanded]'));
+      if (!usesPasswordOption(provider)) await click(advancedToggle(host));
       for (const key of ['imap_host', 'smtp_host', 'imap_port', 'smtp_port']) {
         const input = host.querySelector(`[id$="${key}"]`);
         const original = input.value;
@@ -178,7 +249,14 @@ describe('fixed providers: Yahoo, Yandex, Mail.ru, iCloud', () => {
         assert.equal(host.querySelector('button[type="submit"]').disabled, false);
       }
       await type(host.querySelector('[id$="imap_host"]'), '');
-      await click(host.querySelector('[data-advanced-connection] button[aria-expanded]'));
+      await click(advancedToggle(host));
+      if (usesPasswordOption(provider)) {
+        gone(host.querySelector('button[type="submit"]'));
+        await submit(host.querySelector('form'));
+        assert.equal(calls.filter((c) => c.method === 'POST').length, 0);
+        await selectAppPassword(host);
+        await type(host.querySelector('#imap-add-password'), SENTINEL);
+      }
       assert.equal(host.querySelector('button[type="submit"]').disabled, true);
       assert.ok(host.querySelector('[data-servers-missing]'));
     });
@@ -200,10 +278,11 @@ describe('fixed providers: Yahoo, Yandex, Mail.ru, iCloud', () => {
   });
 
   for (const id of PRESETS) {
-    test(`two_required_fields_for_each_preset: ${id}`, async () => {
+    test(`two_required_fields_for_each_preset_password_flow: ${id}`, async () => {
       const { host } = await mount(React.createElement(Harness, { Form: ImapProviderAddForm, provider: id, catalog: CATALOG }));
       const inputs = outsideAdvanced(host, 'input, select, textarea');
-      assert.deepEqual(inputs.map((el) => el.id), ['imap-add-email', 'imap-add-password']);
+      assert.deepEqual(inputs.map((el) => el.id), usesPasswordOption(id) ? ['imap-add-email'] : ['imap-add-email', 'imap-add-password']);
+      if (usesPasswordOption(id)) await selectAppPassword(host);
       assert.equal(host.querySelector('#imap-add-password').type, 'password');
       const connect = host.querySelector('button[type="submit"]');
       assert.equal(connect.disabled, true);
@@ -250,8 +329,8 @@ describe('fixed providers: Yahoo, Yandex, Mail.ru, iCloud', () => {
     answers['POST /api/accounts/provider'] = accountRow('a3', 'team@bk.ru', { mail_provider: 'mailru' });
     const { host } = await mount(React.createElement(Harness, { Form: ImapProviderAddForm, provider: 'mailru', catalog: CATALOG }));
     await type(host.querySelector('#imap-add-email'), 'team@bk.ru');
+    await selectAppPassword(host);
     await type(host.querySelector('#imap-add-password'), SENTINEL);
-    await click(host.querySelector('[data-advanced-connection] button[aria-expanded]'));
     await type(host.querySelector('[id$="imap_host"]'), 'imap.example.com');
     assert.ok(host.querySelector('[role="status"].add-account-note'), 'the form says that the route changed');
     await submit(host.querySelector('form'));
@@ -283,6 +362,7 @@ describe('fixed providers: Yahoo, Yandex, Mail.ru, iCloud', () => {
     let { host, unmount } = await mount(React.createElement(Harness, { Form: ImapProviderAddForm, provider: 'mailru', catalog: CATALOG }));
     await type(host.querySelector('#imap-add-email'), 'team@bk.ru');
     gone(host.querySelector('[data-other-tile]'), 'the address belongs to this tile');
+    await selectAppPassword(host);
     await type(host.querySelector('#imap-add-password'), 'p');
     await submit(host.querySelector('form'));
     assert.equal(calls.at(-1).body.email, 'team@bk.ru');
@@ -302,6 +382,7 @@ describe('fixed providers: Yahoo, Yandex, Mail.ru, iCloud', () => {
     ({ host } = await mount(React.createElement(Harness, { Form: ImapProviderAddForm, provider: 'yandex', catalog: CATALOG })));
     await type(host.querySelector('#imap-add-email'), 'team@corp.example');
     gone(host.querySelector('[data-other-tile]'));
+    await selectAppPassword(host);
     await type(host.querySelector('#imap-add-password'), 'p');
     await submit(host.querySelector('form'));
     assert.deepEqual(calls.at(-1).body, { provider: 'yandex', email: 'team@corp.example', appPassword: 'p' });
@@ -311,6 +392,7 @@ describe('fixed providers: Yahoo, Yandex, Mail.ru, iCloud', () => {
     answers['POST /api/accounts/provider'] = { status: 400, body: { error: 'imap_auth_failed', code: 'imap_auth_failed' } };
     const { host } = await mount(React.createElement(Harness, { Form: ImapProviderAddForm, provider: 'yandex', catalog: CATALOG }));
     await type(host.querySelector('#imap-add-email'), 'ann@ya.ru');
+    await selectAppPassword(host);
     await type(host.querySelector('#imap-add-password'), SENTINEL);
     gone(host.querySelector('[data-login-offered]'));
     await submit(host.querySelector('form'));
@@ -904,6 +986,7 @@ describe('usability of the provider forms', () => {
       answers['POST /api/accounts/provider'] = { status: 400, body: { error: 'smtp_auth_failed', code: 'smtp_auth_failed' } };
       const { host } = await mount(React.createElement(Harness, { Form: ImapProviderAddForm, provider, catalog: CATALOG }));
       await type(host.querySelector('#imap-add-email'), email);
+      if (usesPasswordOption(provider)) await selectAppPassword(host);
       await type(host.querySelector('#imap-add-password'), 'p');
       await submit(host.querySelector('form'));
       assert.equal(host.querySelector('[role="alert"]').textContent, 'admin.accounts.add.error.smtpAuth');
@@ -1008,8 +1091,9 @@ describe('required field indicators', () => {
     test(`${provider} marks address/password without marking optional metadata`, async () => {
       const { host } = await mount(React.createElement(Harness, { Form: ImapProviderAddForm, provider, catalog: CATALOG }));
       requiredField(host, '#imap-add-email');
+      if (usesPasswordOption(provider)) await selectAppPassword(host);
       requiredField(host, '#imap-add-password');
-      await click(byText(host, 'button', 'admin.accounts.add.advanced'));
+      if (!usesPasswordOption(provider)) await click(advancedToggle(host));
       const name = host.querySelector('input[placeholder="admin.accounts.displayNamePh"]');
       assert.equal(name.required, false);
       assert.equal(host.querySelector(`label[for="${name.id}"] [data-required-mark]`), null);

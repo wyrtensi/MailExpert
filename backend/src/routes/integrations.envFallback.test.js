@@ -117,7 +117,7 @@ describe('GOOGLE_REDIRECT_URI as the fallback callback URL', () => {
     ];
     await withApp(router, async (base) => {
       const body = await (await fetch(`${base}/api/integrations`)).json();
-      expect(Object.keys(body).sort()).toEqual(['google', 'microsoft']);
+      expect(Object.keys(body).sort()).toEqual(['google', 'microsoft', 'panelOrigin']);
       expect(body.microsoft.clientSecret).toBe('••••••••');
       expect(JSON.stringify(body)).not.toContain('node-key');
       expect(JSON.stringify(body)).not.toContain('x@example.org');

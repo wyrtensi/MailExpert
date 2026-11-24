@@ -6564,6 +6564,58 @@ describe('the live-sync ladder is cleared by a successful sync, not by a login',
     const acct = { id: 'ladder-error', user_id: 'u1', enabled: true, protocol: 'imap', imap_host: 'mail.example.com', imap_port: 993, imap_tls: true, auth_user: 'u', auth_pass: 'enc' };
     const clears = () => query.mock.calls.filter(([sql]) => sql.startsWith('UPDATE email_accounts SET sync_error = NULL'));
     const errorBroadcasts = (mgr) => mgr.broadcast.mock.calls.filter(([m]) => m.type === 'account_error');
+    const failNextConnect = (error) => ImapFlow.mockImplementationOnce(function () {
+      return Object.assign(new EventEmitter(), { connect: vi.fn().mockRejectedValue(error), close: vi.fn() });
+    });
+
+    it('reports a pre-login close only when it repeats across connect and reconnect', async () => {
+      const mgr = ladderManager();
+      mgr.syncMessages = vi.fn().mockResolvedValue({});
+      query.mockImplementation(async (sql) => ({ rows: sql.startsWith('SELECT * FROM email_accounts') ? [acct] : [], rowCount: 1 }));
+      const closed = imapErr({ code: 'ClosedAfterConnectTLS', message: 'Unexpected close' });
+
+      failNextConnect(closed);
+      expect(await mgr.connectAccount(acct)).toBe(false);
+      expect(errorBroadcasts(mgr)).toHaveLength(0);
+
+      failNextConnect(closed);
+      await mgr._syncTick(acct);
+      expect(errorBroadcasts(mgr)).toEqual([[{ type: 'account_error', accountId: acct.id, error: 'Unexpected close' }]]);
+
+      await mgr._syncTick(acct);
+      expect(clears()).toHaveLength(1);
+      expect(mgr.broadcast).toHaveBeenCalledWith({ type: 'account_connected', accountId: acct.id });
+    });
+
+    it('resets a deferred pre-login close after a successful sync', async () => {
+      const mgr = ladderManager();
+      mgr.syncMessages = vi.fn().mockResolvedValue({});
+      query.mockImplementation(async (sql) => ({ rows: sql.startsWith('SELECT * FROM email_accounts') ? [acct] : [], rowCount: 1 }));
+      const closed = imapErr({ code: 'ClosedAfterConnectText', message: 'Unexpected close' });
+
+      failNextConnect(closed);
+      await mgr._syncTick(acct);
+      expect(errorBroadcasts(mgr)).toHaveLength(0);
+      await mgr._syncTick(acct);
+      expect(mgr.syncMessages).toHaveBeenCalledTimes(1);
+
+      await mgr.disconnectAccount(acct.id);
+      failNextConnect(closed);
+      await mgr._syncTick(acct);
+      expect(errorBroadcasts(mgr)).toHaveLength(0);
+    });
+
+    it.each([
+      { code: 'ClosedAfterConnectText', message: 'Unexpected close', tlsFailed: true },
+      { code: 'CERT_HAS_EXPIRED', message: 'certificate has expired' },
+    ])('still reports a TLS failure on the first attempt (%s)', async (error) => {
+      const mgr = ladderManager();
+      query.mockResolvedValue({ rows: [], rowCount: 1 });
+      failNextConnect(imapErr(error));
+
+      expect(await mgr.connectAccount(acct)).toBe(false);
+      expect(errorBroadcasts(mgr)).toHaveLength(1);
+    });
 
     it('surfaces a login-ok, sync-refused loop on its second round', async () => {
       const mgr = ladderManager();

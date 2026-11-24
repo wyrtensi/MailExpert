@@ -45,6 +45,8 @@ import { importLegacyGoogleConfig } from '../services/oauth/googleApps.js';
 const CLIENT_ID = '123456789012-abc123def456.apps.googleusercontent.com';
 const REDIRECT_URI = 'https://mail.example.com/oauth/google/callback';
 const NEW_PARTS = {
+  mailru: { configured: false },
+  yandex: { configured: false, redirectConfigured: false },
   mailProviders: expect.any(Array),
   proton: { configured: true, available: true, code: null },
   manual: { allowPrivateHosts: false, allowNonstandardPorts: false },
@@ -53,7 +55,12 @@ const imapManagerStub = { disconnectAccount: vi.fn(async () => {}) };
 
 function buildApp() {
   const app = express();
+  app.set('trust proxy', 1);
   app.use(express.json());
+  app.use((req, _res, next) => {
+    if (req.get('x-test-host')) req.headers.host = req.get('x-test-host');
+    next();
+  });
   app.set('imapManager', imapManagerStub);
   app.use('/api/integrations', integrationsRoutes);
   app.use((err, _req, res, next) => { void err; void next; res.status(500).json({ error: 'Internal server error' }); });
@@ -94,6 +101,31 @@ afterEach(() => {
 });
 
 describe('GET /api/integrations/status (non-admin capability check)', () => {
+  it('reports Yandex browser OAuth only on its configured callback origin', async () => {
+    vi.stubEnv('APP_URL', 'https://panel.example.com');
+    vi.stubEnv('APP_ALT_URLS', 'https://other.example.com');
+    query.mockImplementation(async (_sql, params) => ({
+      rows: params?.[0] === 'yandex' ? [{
+        config: {
+          clientId: 'yandex-client-id', clientSecret: 'enc:yandex-client-secret',
+          redirectUri: 'https://panel.example.com/oauth/yandex/callback',
+        },
+      }] : [],
+    }));
+    try {
+      for (const [host, redirectConfigured] of [['panel.example.com', true], ['other.example.com', false]]) {
+        const response = await fetch(`${base}/api/integrations/status`, {
+          headers: { 'x-test-host': host, 'x-forwarded-proto': 'https' },
+        });
+        const body = await response.json();
+        expect(body.yandex).toEqual({ configured: true, redirectConfigured });
+        expect(JSON.stringify(body)).not.toContain('yandex-client');
+      }
+    } finally {
+      vi.unstubAllEnvs();
+    }
+  });
+
   it('is reachable by a non-admin (not behind requireAdmin) and reports configured=true when MS_CLIENT_ID is set', async () => {
     process.env.MS_CLIENT_ID = 'some-client-id';
     const res = await fetch(`${base}/api/integrations/status`);
@@ -141,7 +173,9 @@ describe('GET /api/integrations/status (non-admin capability check)', () => {
   });
 
   it('reports the mail node as configured without its host or key', async () => {
-    query.mockResolvedValueOnce({ rows: [{ config: { mailHost: 'node.example.net', apiKey: 'enc:node-api-key' } }] });
+    query.mockImplementation(async (_sql, params) => ({
+      rows: params?.[0] === 'mail_node' ? [{ config: { mailHost: 'node.example.net', apiKey: 'enc:node-api-key' } }] : [],
+    }));
     const body = await (await fetch(`${base}/api/integrations/status`)).json();
     expect(body.domainMail).toEqual({ configured: true });
     expect(JSON.stringify(body)).not.toContain('node.example.net');
@@ -222,6 +256,31 @@ describe('GET /api/integrations (config read) stays admin-only', () => {
   it('is rejected with 403 for a non-admin', async () => {
     const res = await fetch(`${base}/api/integrations`);
     expect(res.status).toBe(403);
+  });
+
+  it('suggests the approved HTTPS panel origin, independent of the request host', async () => {
+    authState.admin = true;
+    vi.stubEnv('APP_URL', 'https://panel.example.com:8443/setup');
+    vi.stubEnv('APP_ALT_URLS', 'https://alternate.example.com');
+    try {
+      const res = await fetch(`${base}/api/integrations`, { headers: { 'x-test-host': 'alternate.example.com' } });
+      expect(res.status).toBe(200);
+      expect((await res.json()).panelOrigin).toBe('https://panel.example.com:8443');
+    } finally {
+      vi.unstubAllEnvs();
+    }
+  });
+
+  it('has no HTTPS suggestion when the panel is only configured over HTTP', async () => {
+    authState.admin = true;
+    vi.stubEnv('APP_URL', 'http://panel.example.com');
+    vi.stubEnv('APP_ALT_URLS', '');
+    try {
+      const res = await fetch(`${base}/api/integrations`, { headers: { 'x-test-host': 'unapproved.example.com' } });
+      expect((await res.json()).panelOrigin).toBeNull();
+    } finally {
+      vi.unstubAllEnvs();
+    }
   });
 });
 

@@ -56,7 +56,7 @@ function credentials(candidate, protocol) {
     : { user: candidate.smtp_auth_user || candidate.auth_user, pass: candidate.smtp_auth_pass || candidate.auth_pass };
 }
 
-function validateCandidate(candidate) {
+function validateCandidate(candidate, oauthAccessToken) {
   if (typeof candidate?.email_address !== 'string' || candidate.email_address.length > 320
     || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(candidate.email_address)) throw new ConnectionError('email_invalid');
   for (const protocol of ['imap', 'smtp']) {
@@ -64,7 +64,7 @@ function validateCandidate(candidate) {
     tlsMode(candidate, protocol);
     const { user, pass } = credentials(candidate, protocol);
     if (typeof user !== 'string' || !user || user.length > 320 || /[\r\n\0]/.test(user)
-      || typeof pass !== 'string' || !pass) throw new ConnectionError('login_invalid', protocol);
+      || (!oauthAccessToken && (typeof pass !== 'string' || !pass))) throw new ConnectionError('login_invalid', protocol);
   }
 }
 
@@ -120,7 +120,7 @@ function alternativeLogin(candidate, protocol, initialLogin) {
   return tokens.some(token => token === 'local_part_public_domain' || token === 'local_part') ? local : null;
 }
 
-async function probeProtocol(candidate, protocol, parent, timeoutMs, resolveEndpoint) {
+async function probeProtocol(candidate, protocol, parent, timeoutMs, resolveEndpoint, oauthAccessToken) {
   const budget = scope(parent, timeoutMs, protocol);
   const expiresAt = Date.now() + timeoutMs;
   try {
@@ -134,12 +134,14 @@ async function probeProtocol(candidate, protocol, parent, timeoutMs, resolveEndp
       checkAbort(budget.signal, protocol);
       try {
         if (protocol === 'smtp') {
-          await probeSmtpInChild({ ...candidate, smtp_auth_user: user }, endpoint, { signal: budget.signal, timeoutMs: Math.max(1, expiresAt - Date.now()) });
+          await probeSmtpInChild({ ...candidate, smtp_auth_user: user }, endpoint, {
+            signal: budget.signal, timeoutMs: Math.max(1, expiresAt - Date.now()), ...(oauthAccessToken ? { oauthAccessToken } : {}),
+          });
         } else {
           const client = new ImapFlow({
             host: endpoint.host, port: endpoint.port, secure: endpoint.secure,
             ...(endpoint.secure ? {} : { doSTARTTLS: true }),
-            tls: endpoint.tls, auth: { user, pass: candidate.auth_pass },
+            tls: endpoint.tls, auth: oauthAccessToken ? { user, accessToken: oauthAccessToken } : { user, pass: candidate.auth_pass },
             logger: false, logRaw: false, emitLogs: false, disableAutoIdle: true,
             connectionTimeout: timeoutMs, greetingTimeout: timeoutMs, socketTimeout: timeoutMs,
           });
@@ -164,13 +166,18 @@ async function probeProtocol(candidate, protocol, parent, timeoutMs, resolveEndp
   } finally { budget.dispose(); }
 }
 
-export async function probeConnection(candidate, { signal, protocolTimeoutMs = 15000, totalTimeoutMs = 35000, resolveEndpoint = resolveProbeEndpoint } = {}) {
-  validateCandidate(candidate);
+export async function probeConnection(candidate, {
+  signal, protocolTimeoutMs = 15000, totalTimeoutMs = 35000, resolveEndpoint = resolveProbeEndpoint, oauthAccessToken,
+} = {}) {
+  if (oauthAccessToken !== undefined && (typeof oauthAccessToken !== 'string' || !/^[!-~]+$/.test(oauthAccessToken))) {
+    throw new ConnectionError('login_invalid');
+  }
+  validateCandidate(candidate, oauthAccessToken);
   for (const timeout of [protocolTimeoutMs, totalTimeoutMs]) {
     if (!Number.isFinite(timeout) || timeout <= 0) throw new ConnectionError('server_refused');
   }
   const budget = scope(signal, totalTimeoutMs, null);
-  const probes = ['imap', 'smtp'].map(protocol => probeProtocol(candidate, protocol, budget.signal, protocolTimeoutMs, resolveEndpoint));
+  const probes = ['imap', 'smtp'].map(protocol => probeProtocol(candidate, protocol, budget.signal, protocolTimeoutMs, resolveEndpoint, oauthAccessToken));
   try {
     const [imapLogin, smtpLogin] = await Promise.all(probes);
     return { imapLogin, smtpLogin };

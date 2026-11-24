@@ -7,8 +7,9 @@ import { filterAccounts } from '../utils/accountFilter.js';
 import { useStableAccountOrder } from '../hooks/useStableAccountOrder.js';
 import { useRovingRows } from '../hooks/useRovingRows.js';
 import { manualMoveNeighbour, movePinnedId, prunePinnedIds } from '../utils/accountOrder.js';
-import { HEALTH_COLORS, HEALTH_LABEL_KEYS, canReconnectOAuth, computeAccountHealth, reconnectMenuAction, reconnectUrlFor } from '../utils/accountHealth.js';
+import { HEALTH_COLORS, HEALTH_LABEL_KEYS, canReconnectOAuth, computeAccountHealth, isMailruReconnectRequired, isYandexReconnectRequired, reconnectMenuAction, reconnectUrlFor } from '../utils/accountHealth.js';
 import { openOAuthWindow } from '../utils/oauthWindow.js';
+import { reconnectMailruOAuth } from '../utils/mailboxBrowserOAuth.js';
 import { api } from '../utils/api.js';
 import { noticeVersion } from '../utils/panelUpdate.js';
 import { mailboxBusyOr } from '../utils/mailboxBusy.js';
@@ -345,7 +346,7 @@ export default function Sidebar() {
   const uiScale = useUiScale();
   const {
     accounts, unreadCounts, selectedAccountId, selectedFolder,
-    setSelectedAccount, setShowAdmin, setAdminTab, openCompose, openAddAccount, openProtonReconnect, openAccountSettings,
+    setSelectedAccount, setShowAdmin, setAdminTab, openCompose, openAddAccount, openProtonReconnect, openYandexReconnect, openAccountSettings,
     folders, setFolders, setAccounts, user, setUser, lockScreen, sidebarCollapsed: sidebarCollapsedPref, toggleSidebar,
     blockRemoteImages, setBlockRemoteImages, setMobileSidebarOpen, addNotification,
     searchAllFolders, setSearchAllFolders,
@@ -1017,6 +1018,8 @@ export default function Sidebar() {
         action: () => {
           if (reconnect.kind === 'oauth') openOAuthWindow(reconnect.url);
           else if (reconnect.kind === 'proton') openProtonReconnect(account);
+          else if (reconnect.kind === 'mailru') reconnectMailruOAuth(reconnect.accountId, t);
+          else if (reconnect.kind === 'yandex') openYandexReconnect(account);
           else api.reconnectAccount(account.id).catch((err) => notifyActionFailed('common.actionFailed.reconnect', err));
         },
       }]),
@@ -1461,6 +1464,8 @@ export default function Sidebar() {
           const hasProblem = health === 'failed' || needsReconnect || protonProblem;
           const reconnectAllowed = canReconnectOAuth(account, { isAdmin: !!user?.isAdmin });
           const reconnectUrl = needsReconnect && reconnectAllowed ? reconnectUrlFor(account) : null;
+          const reconnectMailru = isMailruReconnectRequired(account);
+          const reconnectYandex = isYandexReconnectRequired(account);
           // A Microsoft mailbox an ordinary user may not reconnect: the state plus who to ask.
           const healthLabel = needsReconnect && !reconnectAllowed && reconnectUrlFor(account)
             ? t('sidebar.health.reconnectAskAdmin')
@@ -1582,10 +1587,15 @@ export default function Sidebar() {
                       )}
                     </div>
                     <div style={{ display: 'flex', alignItems: 'center', gap: 4, flexShrink: 0 }}>
-                      {reconnectUrl && (
+                      {(reconnectUrl || reconnectMailru || reconnectYandex) && (
                         <button
                           type="button"
-                          onClick={e => { e.stopPropagation(); openOAuthWindow(reconnectUrl); }}
+                          onClick={e => {
+                            e.stopPropagation();
+                            if (reconnectMailru) reconnectMailruOAuth(account.id, t);
+                            else if (reconnectYandex) openYandexReconnect(account);
+                            else openOAuthWindow(reconnectUrl);
+                          }}
                           onKeyDown={e => e.stopPropagation()}
                           aria-label={t('sidebar.health.reconnectAccount', { email: account.email_address })}
                           title={t('sidebar.health.reconnectAccount', { email: account.email_address })}

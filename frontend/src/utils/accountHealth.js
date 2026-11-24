@@ -107,17 +107,38 @@ export function canReconnectOAuth(account, { isAdmin = false } = {}) {
   return true;
 }
 
+export function isMailruReconnectRequired(account) {
+  return account?.oauth_provider === 'mailru' && account.health === 'oauth_reconnect_required';
+}
+
+export function isYandexReconnectRequired(account) {
+  return account?.oauth_provider === 'yandex' && account.health === 'oauth_reconnect_required';
+}
+
+function isHealthyYandexWithoutDisplayName(account) {
+  if (account?.oauth_provider !== 'yandex' || account.health !== 'healthy') return false;
+  const name = account.name?.trim().toLowerCase();
+  return !name || name === account.email_address?.trim().toLowerCase();
+}
+
 // What the account context menu's "Reconnect" item does ('proton': a new Proton sign-in, see
 // below). An IMAP reconnect cannot
 // fix a revoked grant, so reconnect-required OAuth accounts re-run consent instead —
 // or, for a Microsoft mailbox and a user who is not an administrator, nothing
 // ('admin_required': the menu leaves the item out and the row says to ask an administrator).
+// A healthy Yandex mailbox with a fallback name also renews consent to fetch its display name.
 export function reconnectMenuAction(account, { isAdmin = false } = {}) {
   // A managed Proton mailbox whose Bridge session is gone needs a new Proton sign-in, which any
   // approved employee may start for the shared mailbox (the server grants can_reconnect_proton).
   // The sign-in dialog is seeded with this mailbox and its address.
   if (account?.health === 'proton_reconnect_required' && account.can_reconnect_proton === true) {
     return { kind: 'proton', accountId: account.id, email: account.email_address };
+  }
+  if (isMailruReconnectRequired(account)) {
+    return { kind: 'mailru', accountId: account.id };
+  }
+  if (isYandexReconnectRequired(account) || isHealthyYandexWithoutDisplayName(account)) {
+    return { kind: 'yandex' };
   }
   const url = account?.health === 'oauth_reconnect_required' ? reconnectUrlFor(account) : null;
   if (!url) return { kind: 'imap' };

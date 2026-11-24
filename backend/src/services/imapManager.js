@@ -352,6 +352,12 @@ export function isConnectionRefusal(detail) {
   return /connection not available|too many|maximum number|number of connections|rate.?limit|temporarily|try again|connection limit|over quota|throttl|connect timeout|temporary authentication failure|^\[(?:LIMIT|UNAVAILABLE|INUSE)\]/i.test(String(detail || ''));
 }
 
+function isClosedDuringImapConnect(err) {
+  // ImapFlow uses the TLS suffix when the connection was already secure. An
+  // explicit TLS failure still needs to be reported on the first attempt.
+  return err?.tlsFailed !== true && (err?.code === 'ClosedAfterConnectText' || err?.code === 'ClosedAfterConnectTLS');
+}
+
 // Stamp an account's last successful sync. Shared by both exits of syncMessages so they cannot
 // drift: a folder that turned out to be empty is still a SUCCESSFUL sync and must be stamped.
 // Without this a brand-new account that has never received mail keeps last_sync = NULL forever,
@@ -3444,8 +3450,10 @@ export class ImapManager {
       // Other errors don't set a cooldown — the health check retries them normally.
       // For OAuth accounts this is reached only after connectImapClient's forced token refresh
       // and single retry were rejected too, so the bounded auth cooldown applies as for passwords.
-      this._noteLoginFailure(account, err, detail);
-      await this._recordAccountError(account, detail);
+      const failure = this._noteLoginFailure(account, err, detail);
+      await this._recordAccountError(account, detail, {
+        recoverable: failure === 'refused' || isClosedDuringImapConnect(err),
+      });
       return false;
     } finally {
       // Always release the in-progress lock so future attempts (e.g. manual reconnect) can proceed
@@ -4150,13 +4158,15 @@ export class ImapManager {
             return;
           }
           // Back off (auth first, then refusal) so the interval stops hammering — mirrors connectAccount.
-          this._noteLoginFailure(account, reconnErr, detail);
+          const failure = this._noteLoginFailure(account, reconnErr, detail);
           console.error(`Reconnect failed for ${logAccount(account)}:`, detail);
           // A failed reconnect is the same class of failure as a failed first connect, so record
           // it exactly as connectAccount does. This was the gap: an account whose host died
           // mid-session only ever failed here, so it kept looking healthy in the sidebar while
           // silently serving stale mail.
-          await this._recordAccountError(account, detail);
+          await this._recordAccountError(account, detail, {
+            recoverable: failure === 'refused' || isClosedDuringImapConnect(reconnErr),
+          });
           // Force-close a client left mid-connect when the timeout fired so it doesn't
           // linger as an orphaned socket.
           if (pendingClient) { try { pendingClient.close(); } catch { /* already closed */ } }

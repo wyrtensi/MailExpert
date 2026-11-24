@@ -15,7 +15,7 @@ export function probeCertificate() {
   }
 }
 
-export async function smtpFixture({ certificate, mode = 'implicit', advertiseAuth = true, rejectAuth = false, stall = false, stallQuit = false } = {}) {
+export async function smtpFixture({ certificate, mode = 'implicit', advertiseAuth = true, authMechanism = 'PLAIN', rejectAuth = false, stall = false, stallQuit = false } = {}) {
   const sockets = new Set();
   const commands = [];
   const servernames = [];
@@ -33,7 +33,7 @@ export async function smtpFixture({ certificate, mode = 'implicit', advertiseAut
         buffer = buffer.slice(end + 2);
         commands.push(line);
         if (/^EHLO|^HELO/i.test(line)) {
-          socket.write(`250-mail.example.com\r\n${mode === 'starttls' && !socket.encrypted ? '250-STARTTLS\r\n' : ''}${advertiseAuth ? '250-AUTH PLAIN\r\n' : ''}250 SIZE 100000\r\n`);
+          socket.write(`250-mail.example.com\r\n${mode === 'starttls' && !socket.encrypted ? '250-STARTTLS\r\n' : ''}${advertiseAuth ? `250-AUTH ${authMechanism}\r\n` : ''}250 SIZE 100000\r\n`);
         } else if (/^STARTTLS/i.test(line) && mode === 'starttls') {
           socket.removeListener('data', data);
           socket.write('220 Ready\r\n', () => handle(new tls.TLSSocket(socket, { isServer: true, secureContext: tls.createSecureContext(certificate) })));

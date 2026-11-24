@@ -427,15 +427,17 @@ describe('oauth_reconnect_required', () => {
 });
 
 describe('transient refresh failures take the recoverable path', () => {
-  it.each(['google', 'microsoft'])('fits the lock wait plus the worst-case %s token calls inside its refresh budget', (provider) => {
+  it.each(['google', 'microsoft', 'mailru', 'yandex'])('fits the lock wait plus the worst-case %s provider calls inside its refresh budget', (provider) => {
     const worstCase = OAUTH_REFRESH_LOCK_WAIT_MS + OAUTH_REFRESH_MAX_TOKEN_CALLS[provider] * PROVIDER_FETCH_TIMEOUT_MS;
     expect(worstCase).toBeLessThan(tokenRefreshTimeoutMs({ oauth_provider: provider }));
   });
 
-  it('keeps the Google refresh budget at 15 s and gives Microsoft room for its second token call', () => {
-    expect(OAUTH_REFRESH_MAX_TOKEN_CALLS).toEqual({ google: 1, microsoft: 2 });
+  it('budgets 15 s for Google or Yandex and 25 s for Microsoft retries or Mail.ru discovery', () => {
+    expect(OAUTH_REFRESH_MAX_TOKEN_CALLS).toEqual({ google: 1, microsoft: 2, mailru: 2, yandex: 1 });
     expect(tokenRefreshTimeoutMs({ oauth_provider: 'google' })).toBe(15000);
     expect(tokenRefreshTimeoutMs({ oauth_provider: 'microsoft' })).toBe(25000);
+    expect(tokenRefreshTimeoutMs({ oauth_provider: 'mailru' })).toBe(25000);
+    expect(tokenRefreshTimeoutMs({ oauth_provider: 'yandex' })).toBe(15000);
   });
 
   it('lets the token manager give up on a busy lock before the refresh budget runs out', async () => {

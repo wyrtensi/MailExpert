@@ -17,8 +17,10 @@ const CONSUMERS = [
 
 describe('shared OAuth constants', () => {
   it('lists the OAuth providers', () => {
-    expect([...OAUTH_PROVIDERS].sort()).toEqual(['google', 'microsoft']);
+    expect([...OAUTH_PROVIDERS].sort()).toEqual(['google', 'mailru', 'microsoft', 'yandex']);
     expect(isOAuthAccount({ oauth_provider: 'google' })).toBe(true);
+    expect(isOAuthAccount({ oauth_provider: 'mailru' })).toBe(true);
+    expect(isOAuthAccount({ oauth_provider: 'yandex' })).toBe(true);
     expect(isOAuthAccount({ oauth_provider: 'microsoft' })).toBe(true);
     expect(isOAuthAccount({ oauth_provider: null })).toBe(false);
     expect(isOAuthAccount(undefined)).toBe(false);

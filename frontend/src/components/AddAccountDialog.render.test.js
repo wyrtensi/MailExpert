@@ -137,7 +137,7 @@ describe('AddAccountDialog', () => {
     assert.equal(dialog().querySelector('[data-provider-intro]')?.textContent, 'admin.accounts.add.intro.other');
   });
 
-  test('Mail.ru displays OAuth only when configured and binds without asking for an address', async (context) => {
+  test('Mail.ru shows sign-in, mail access, and linking in order without asking for an address', async (context) => {
     const configured = context.mock.method(api, 'getIntegrationsStatus', async () => ({ mailru: { configured: false } }));
     const start = context.mock.method(api, 'startMailruOAuth', async () => {
       throw Object.assign(new Error('private details'), { code: 'not_configured' });
@@ -162,9 +162,20 @@ describe('AddAccountDialog', () => {
     configured.mock.mockImplementation(async () => ({ mailru: { configured: true } }));
     await openReal();
     assert.equal(Boolean(dialog().querySelector('input[type="email"]')), false);
-    assert.equal(settingsLink()?.target, '_blank');
-    assert.ok(settingsLink().relList.contains('noreferrer'));
-    assert.ok(settingsLink().compareDocumentPosition(button('admin.integrations.mailru.connect')) & Node.DOCUMENT_POSITION_FOLLOWING);
+    const steps = [...dialog().querySelectorAll('ol > li')];
+    const actions = steps.map((step) => step.querySelector('a, button'));
+    assert.deepEqual(actions.map((action) => action.textContent), [
+      'admin.integrations.mailru.signIn',
+      'admin.integrations.mailru.prepare',
+      'admin.integrations.mailru.connect',
+    ]);
+    assert.ok(actions.every((action) => action.classList.contains('add-account-button')));
+    assert.equal(actions[0].href, 'https://account.mail.ru/login');
+    assert.equal(actions[1], settingsLink());
+    for (const link of actions.slice(0, 2)) {
+      assert.equal(link.target, '_blank');
+      assert.ok(link.relList.contains('noreferrer'));
+    }
     assert.equal(button('admin.integrations.mailru.connect').disabled, false);
     assert.equal(button('admin.accounts.add.connectAppPassword'), undefined);
     await click(button('admin.integrations.mailru.connect'));

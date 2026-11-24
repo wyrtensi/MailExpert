@@ -272,10 +272,22 @@ export default function ImapProviderAddForm({
       )}
 
       {showMailruOAuth && (
-        <>
-          <div className="add-account-field">
+        <ol className="add-account-steps">
+          <li>
             <a
-              className="add-account-link-button add-account-link-anchor"
+              className="add-account-button"
+              href="https://account.mail.ru/login"
+              target="_blank"
+              rel="noreferrer"
+              aria-describedby="mailru-sign-in-note"
+            >
+              {t('admin.integrations.mailru.signIn')}
+            </a>
+            <p className="add-account-note" id="mailru-sign-in-note">{t('admin.integrations.mailru.signInNote')}</p>
+          </li>
+          <li>
+            <a
+              className="add-account-button"
               href="https://account.mail.ru/oauth/applications"
               target="_blank"
               rel="noreferrer"
@@ -284,14 +296,14 @@ export default function ImapProviderAddForm({
               {t('admin.integrations.mailru.prepare')}
             </a>
             <p className="add-account-note" id="mailru-prepare-note">{t('admin.integrations.mailru.prepareNote')}</p>
-          </div>
-          <div className="add-account-field">
+          </li>
+          <li>
             <button type="button" className="add-account-button" disabled={blocked} onClick={startOAuth} aria-describedby="mailru-consent-note">
               {t(oauthPending ? 'admin.integrations.mailru.redirecting' : 'admin.integrations.mailru.connect')}
             </button>
             <p className="add-account-note" id="mailru-consent-note">{t('admin.integrations.mailru.consentNote')}</p>
-          </div>
-        </>
+          </li>
+        </ol>
       )}
 
       {showYandexOAuth && (

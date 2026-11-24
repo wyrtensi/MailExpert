@@ -73,6 +73,32 @@ test('new browser integrations suggest the configured panel origin with its port
   assert.match(host.textContent, /panel\.example\.com/);
 });
 
+test('the Yandex setup guide copies each of its three required scopes separately', async () => {
+  await render('yandex');
+  const scopes = ['mail:smtp', 'mail:imap_full', 'login:info'];
+  const copyLabel = 'admin.integrations.yandex.copyScope';
+  const buttons = [...host.querySelectorAll(`button[aria-label^="${copyLabel} "]`)];
+  assert.deepEqual(buttons.map(button => button.getAttribute('aria-label')), scopes.map(scope => `${copyLabel} ${scope}`));
+  assert.match(host.textContent, /admin\.integrations\.yandex\.setupPermissions/);
+
+  const copied = [];
+  const clipboard = Object.getOwnPropertyDescriptor(navigator, 'clipboard');
+  Object.defineProperty(navigator, 'clipboard', {
+    configurable: true, value: { writeText: async (value) => copied.push(value) },
+  });
+  try {
+    for (const [index, button] of buttons.entries()) {
+      await click(button);
+      assert.equal(host.querySelector('[role="status"]').textContent, `admin.integrations.yandex.scopeCopied ${scopes[index]}`);
+    }
+  } finally {
+    if (clipboard) Object.defineProperty(navigator, 'clipboard', clipboard);
+    else delete navigator.clipboard;
+  }
+  assert.deepEqual(copied, scopes);
+  assert.deepEqual(requests, []);
+});
+
 test('Yandex code mode disables the redirect, preserves the draft on toggle, and saves without a redirect', async () => {
   await render('yandex', { clientId: 'saved-client', redirectUri: browserRedirect });
   const redirect = field('yandex-redirect-uri');

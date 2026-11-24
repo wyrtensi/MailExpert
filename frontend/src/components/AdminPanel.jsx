@@ -2684,6 +2684,12 @@ const OAUTH_SETTINGS_KEYS = {
   },
 };
 
+const YANDEX_SETUP_SCOPES = [
+  ['mail:smtp', 'admin.integrations.yandex.scopeSmtp'],
+  ['mail:imap_full', 'admin.integrations.yandex.scopeImap'],
+  ['login:info', 'admin.integrations.yandex.scopeProfile'],
+];
+
 export function MailboxOAuthSettings({ provider, config, panelOrigin = window.location.origin, onSaved }) {
   const { t } = useTranslation();
   const keys = OAUTH_SETTINGS_KEYS[provider];
@@ -2698,6 +2704,7 @@ export function MailboxOAuthSettings({ provider, config, panelOrigin = window.lo
   const [useCode, setUseCode] = useState(yandex && configured && !config.redirectUri);
   const [saving, setSaving] = useState(false);
   const [message, setMessage] = useState(null);
+  const [scopeCopy, setScopeCopy] = useState(null);
   const redirectUri = redirectDraft ?? suggestedRedirectUri;
   const callback = URL.canParse(redirectUri) ? new URL(redirectUri) : null;
   const callbackUrl = callback?.protocol === 'https:' ? callback : null;
@@ -2709,6 +2716,11 @@ export function MailboxOAuthSettings({ provider, config, panelOrigin = window.lo
     setMessage(ok
       ? { type: 'success', text: t('admin.integrations.mailboxOAuth.redirectCopied') }
       : { type: 'error', text: t('common.copyFailed') });
+  };
+
+  const copyScope = async (scope) => {
+    const { ok } = await copyToClipboard(scope);
+    setScopeCopy({ scope, ok });
   };
 
   const save = async (event) => {
@@ -2763,8 +2775,24 @@ export function MailboxOAuthSettings({ provider, config, panelOrigin = window.lo
                   {!useCode && callbackUrl && <div>{t('admin.integrations.yandex.setupHostname', { hostname: callbackUrl.hostname })}</div>}
                 </li>
                 <li>
-                  {t('admin.integrations.yandex.setupPermissions', { smtp: 'mail:smtp', imap: 'mail:imap_full' })}
-                  <div>{t('admin.integrations.yandex.setupProfile', { scope: 'login:info' })}</div>
+                  {t('admin.integrations.yandex.setupPermissions')}
+                  <ul className="admin-oauth-scope-list">
+                    {YANDEX_SETUP_SCOPES.map(([scope, description]) => (
+                      <li key={scope}>
+                        <div>
+                          <code>{scope}</code>
+                          <div>{t(description)}</div>
+                        </div>
+                        <button type="button" className="admin-integration-save" onClick={() => copyScope(scope)}
+                          aria-label={t('admin.integrations.yandex.copyScope', { scope })}>{t('common.copy')}</button>
+                      </li>
+                    ))}
+                  </ul>
+                  {scopeCopy && (
+                    <div className="admin-oauth-hint" role={scopeCopy.ok ? 'status' : 'alert'}>
+                      {scopeCopy.ok ? t('admin.integrations.yandex.scopeCopied', { scope: scopeCopy.scope }) : t('common.copyFailed')}
+                    </div>
+                  )}
                 </li>
               </>
             ) : (

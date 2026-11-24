@@ -973,7 +973,25 @@ body, #root {
 .admin-oauth-guide summary { color: var(--text-primary); font-weight: 600; cursor: pointer; }
 .admin-oauth-guide a { color: var(--accent); text-decoration: underline; text-underline-offset: 2px; }
 .admin-oauth-guide ol { margin: 8px 0 0; padding-inline-start: 18px; }
-.admin-oauth-guide li + li { margin-top: 6px; }
+.admin-oauth-guide > ol > li + li { margin-top: 6px; }
+.admin-oauth-scope-list {
+  margin: 8px 0 0;
+  padding: 0;
+  list-style: none;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+}
+.admin-oauth-scope-list > li {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 4px 12px;
+  padding: 8px 10px;
+}
+.admin-oauth-scope-list > li + li { border-top: 1px solid var(--border-subtle); }
+.admin-oauth-scope-list code { color: var(--text-primary); font-weight: 600; }
+.admin-oauth-scope-list button { padding: 4px 10px; font-size: 12px; }
 .admin-oauth-device-mode {
   display: flex;
   align-items: center;

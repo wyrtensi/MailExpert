@@ -257,6 +257,31 @@ describe('GET /api/integrations (config read) stays admin-only', () => {
     const res = await fetch(`${base}/api/integrations`);
     expect(res.status).toBe(403);
   });
+
+  it('suggests the approved HTTPS panel origin, independent of the request host', async () => {
+    authState.admin = true;
+    vi.stubEnv('APP_URL', 'https://panel.example.com:8443/setup');
+    vi.stubEnv('APP_ALT_URLS', 'https://alternate.example.com');
+    try {
+      const res = await fetch(`${base}/api/integrations`, { headers: { 'x-test-host': 'alternate.example.com' } });
+      expect(res.status).toBe(200);
+      expect((await res.json()).panelOrigin).toBe('https://panel.example.com:8443');
+    } finally {
+      vi.unstubAllEnvs();
+    }
+  });
+
+  it('has no HTTPS suggestion when the panel is only configured over HTTP', async () => {
+    authState.admin = true;
+    vi.stubEnv('APP_URL', 'http://panel.example.com');
+    vi.stubEnv('APP_ALT_URLS', '');
+    try {
+      const res = await fetch(`${base}/api/integrations`, { headers: { 'x-test-host': 'unapproved.example.com' } });
+      expect((await res.json()).panelOrigin).toBeNull();
+    } finally {
+      vi.unstubAllEnvs();
+    }
+  });
 });
 
 

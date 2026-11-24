@@ -2764,7 +2764,9 @@ export async function demoRequest(method, path, body = {}) {
     return clone({ contacts: listContacts(url).contacts });
   }
 
-  if (verb === 'GET' && pathname === '/integrations') return clone(integrationsConfig);
+  if (verb === 'GET' && pathname === '/integrations') {
+    return { ...clone(integrationsConfig), panelOrigin: globalThis.location?.origin ?? null };
+  }
   if (verb === 'GET' && pathname === '/integrations/status') {
     return {
       google: { configured: true, available: true }, microsoft: { configured: false }, domainMail: { configured: true },

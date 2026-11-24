@@ -2666,6 +2666,8 @@ const OAUTH_SETTINGS_KEYS = {
     errorSave: 'admin.integrations.mailru.errorSave',
     errorClientId: 'admin.integrations.mailru.errorClientId',
     errorClientSecret: 'admin.integrations.mailru.errorClientSecret',
+    consoleUrl: 'https://oauth.mail.ru/app/',
+    createApp: 'admin.integrations.mailru.createApp',
   },
   yandex: {
     title: 'admin.integrations.yandex.title',
@@ -2677,30 +2679,44 @@ const OAUTH_SETTINGS_KEYS = {
     errorSave: 'admin.integrations.yandex.errorSave',
     errorClientId: 'admin.integrations.yandex.errorClientId',
     errorClientSecret: 'admin.integrations.yandex.errorClientSecret',
+    consoleUrl: 'https://oauth.yandex.ru/',
+    createApp: 'admin.integrations.yandex.createApp',
   },
 };
 
-function MailboxOAuthSettings({ provider, config, onSaved }) {
+export function MailboxOAuthSettings({ provider, config, panelOrigin = window.location.origin, onSaved }) {
   const { t } = useTranslation();
   const keys = OAUTH_SETTINGS_KEYS[provider];
-  const redirectRequired = provider === 'mailru';
-  const suggestedRedirectUri = `${window.location.origin}/oauth/${provider}/callback`;
+  const yandex = provider === 'yandex';
+  const configured = Boolean(config?.clientId);
+  const suggestedRedirectUri = panelOrigin ? `${panelOrigin}/oauth/${provider}/callback` : '';
   const [expanded, setExpanded] = useState(false);
+  const [guideOpen, setGuideOpen] = useState(!configured);
   const [clientId, setClientId] = useState(config?.clientId ?? '');
   const [clientSecret, setClientSecret] = useState('');
-  const [redirectUri, setRedirectUri] = useState(config?.redirectUri ?? (redirectRequired ? suggestedRedirectUri : ''));
+  const [redirectDraft, setRedirectDraft] = useState(config?.redirectUri || null);
+  const [useCode, setUseCode] = useState(yandex && configured && !config.redirectUri);
   const [saving, setSaving] = useState(false);
   const [message, setMessage] = useState(null);
-  const configured = Boolean(config?.clientId);
+  const redirectUri = redirectDraft ?? suggestedRedirectUri;
+  const callback = URL.canParse(redirectUri) ? new URL(redirectUri) : null;
+  const callbackUrl = callback?.protocol === 'https:' ? callback : null;
   const keepSecret = configured && clientId.trim() === config.clientId;
-  const canSave = !saving && clientId.trim() && (!redirectRequired || redirectUri.trim()) && (clientSecret.trim() || keepSecret);
+  const canSave = !saving && clientId.trim() && (useCode || redirectUri.trim()) && (clientSecret.trim() || keepSecret);
+
+  const copyRedirect = async () => {
+    const { ok } = await copyToClipboard(redirectUri.trim());
+    setMessage(ok
+      ? { type: 'success', text: t('admin.integrations.mailboxOAuth.redirectCopied') }
+      : { type: 'error', text: t('common.copyFailed') });
+  };
 
   const save = async (event) => {
     event.preventDefault();
     if (!canSave) return;
     setSaving(true);
     setMessage(null);
-    const savedConfig = { clientId: clientId.trim(), redirectUri: redirectUri.trim() };
+    const savedConfig = { clientId: clientId.trim(), redirectUri: useCode ? '' : redirectUri.trim() };
     try {
       await api.saveIntegration(provider, { ...savedConfig, clientSecret: clientSecret.trim() });
       setClientSecret('');
@@ -2729,8 +2745,34 @@ function MailboxOAuthSettings({ provider, config, onSaved }) {
       expanded={expanded}
       onToggle={() => setExpanded((open) => !open)}
     >
-      <form onSubmit={save} aria-busy={saving}>
-        {!redirectRequired && <p className="add-account-note">{t('admin.integrations.yandex.setupNote')}</p>}
+      <form className="admin-oauth-form" onSubmit={save} aria-busy={saving}>
+        <details className="admin-oauth-guide" open={guideOpen} onToggle={(event) => setGuideOpen(event.currentTarget.open)}>
+          <summary>{t('admin.integrations.mailboxOAuth.setupTitle')}</summary>
+          <ol>
+            <li>
+              <a href={keys.consoleUrl} target="_blank" rel="noreferrer">{t(keys.createApp)}</a>
+              {yandex && <div>{t('admin.integrations.yandex.setupAppType')}</div>}
+            </li>
+            {yandex ? (
+              <>
+                <li>
+                  {t('admin.integrations.yandex.setupWeb')}{' '}
+                  {useCode
+                    ? t('admin.integrations.yandex.setupWithoutRedirect')
+                    : t('admin.integrations.yandex.setupRedirect')}
+                  {!useCode && callbackUrl && <div>{t('admin.integrations.yandex.setupHostname', { hostname: callbackUrl.hostname })}</div>}
+                </li>
+                <li>
+                  {t('admin.integrations.yandex.setupPermissions', { smtp: 'mail:smtp', imap: 'mail:imap_full' })}
+                  <div>{t('admin.integrations.yandex.setupProfile', { scope: 'login:info' })}</div>
+                </li>
+              </>
+            ) : (
+              <li>{t('admin.integrations.mailru.setupWeb')}</li>
+            )}
+            <li>{t('admin.integrations.mailboxOAuth.setupCredentials')}</li>
+          </ol>
+        </details>
         <Field label={t('admin.integrations.microsoft.clientId')} htmlFor={`${provider}-client-id`} required>
           <input id={`${provider}-client-id`} style={inputStyle} value={clientId} disabled={saving} required onChange={e => setClientId(e.target.value)} />
         </Field>
@@ -2739,12 +2781,27 @@ function MailboxOAuthSettings({ provider, config, onSaved }) {
             placeholder={keepSecret ? t(keys.keepSecret) : undefined}
             value={clientSecret} disabled={saving} required={!keepSecret} onChange={e => setClientSecret(e.target.value)} />
         </Field>
-        <Field label={t('admin.integrations.microsoft.redirectUri')} htmlFor={`${provider}-redirect-uri`} required={redirectRequired}>
-          <input id={`${provider}-redirect-uri`} style={inputStyle} type="url" value={redirectUri}
-            disabled={saving} required={redirectRequired} placeholder={suggestedRedirectUri}
-            aria-describedby={`${provider}-redirect-note`} onChange={e => setRedirectUri(e.target.value)} />
-          <div id={`${provider}-redirect-note`} style={{ color: 'var(--text-tertiary)', fontSize: 12, marginTop: 5 }}>
-            {t(keys.redirectNote, { uri: suggestedRedirectUri })}
+        {yandex && (
+          <label className="admin-oauth-device-mode">
+            <input id="yandex-code-login" type="checkbox" checked={useCode} disabled={saving}
+              onChange={(event) => { setUseCode(event.target.checked); setMessage(null); }} />
+            <span>{t('admin.integrations.yandex.useCode')}</span>
+          </label>
+        )}
+        <Field label={t('admin.integrations.microsoft.redirectUri')} htmlFor={`${provider}-redirect-uri`} required={!useCode}>
+          <div className="admin-oauth-redirect-row">
+            <input id={`${provider}-redirect-uri`} style={inputStyle} type="url" value={redirectUri}
+              disabled={saving || useCode} required={!useCode} placeholder={suggestedRedirectUri} spellCheck={false}
+              aria-describedby={`${provider}-redirect-note`} onChange={e => { setRedirectDraft(e.target.value); setMessage(null); }} />
+            <button type="button" className="admin-integration-save" onClick={copyRedirect}
+              disabled={saving || useCode || !callbackUrl}>{t('common.copy')}</button>
+          </div>
+          <div id={`${provider}-redirect-note`} className="admin-oauth-hint">
+            {useCode ? t('admin.integrations.yandex.useCodeNote') : t(keys.redirectNote)}
+            {!useCode && !panelOrigin && <div>{t('admin.integrations.mailboxOAuth.httpsRequired')}</div>}
+            {!useCode && callbackUrl && callbackUrl.origin !== window.location.origin && (
+              <div>{t('admin.integrations.mailboxOAuth.startOnOrigin', { origin: callbackUrl.origin })}</div>
+            )}
           </div>
         </Field>
         <button type="submit" className="admin-integration-save" disabled={!canSave}>
@@ -3283,7 +3340,7 @@ function IntegrationsTab() {
             <>
               <GoogleAppsSection />
               {Object.keys(OAUTH_SETTINGS_KEYS).map((provider) => (
-                <MailboxOAuthSettings key={provider} provider={provider} config={configs[provider]}
+                <MailboxOAuthSettings key={provider} provider={provider} config={configs[provider]} panelOrigin={configs.panelOrigin}
                   onSaved={(config) => setConfigs(prev => ({ ...prev, [provider]: config }))} />
               ))}
             </>

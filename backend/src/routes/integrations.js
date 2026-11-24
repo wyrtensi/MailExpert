@@ -16,7 +16,7 @@ import {
   getMailboxOAuthConfig, hasMailboxOAuthConfig, MAILBOX_OAUTH_CONFIG_ERRORS,
   mailboxOAuthRedirectConfigured, saveMailboxOAuthConfig,
 } from '../services/integrations/mailboxOAuth.js';
-import { allowedRequestOrigin } from '../utils/publicOrigins.js';
+import { allowedRequestOrigin, getPublicOrigins } from '../utils/publicOrigins.js';
 
 const router = Router();
 
@@ -83,7 +83,8 @@ router.get('/', requireAdmin, async (req, res) => {
       ...(stored.updated_at ? { updated_at: stored.updated_at } : {}),
     };
   }
-  res.json(configs);
+  const panelOrigin = getPublicOrigins().find(origin => origin.startsWith('https://')) ?? null;
+  res.json({ ...configs, panelOrigin });
 });
 
 // Capability check for any authenticated user (non-admins included). Reports only

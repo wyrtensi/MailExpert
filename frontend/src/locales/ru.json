@@ -2411,7 +2411,7 @@
         "errorNotConfigured": "Вход через Google не настроен администратором.",
         "errorEmailNotVerified": "Google не подтвердил, что этот адрес проверен. Ящик не подключён.",
         "errorMissingRefreshToken": "Google не выдал офлайн-доступ. Удалите MailExpert из разрешений аккаунта Google и подключитесь заново.",
-        "errorScopeMissing": "Полный доступ к Gmail не предоставлен. Подключитесь заново и разрешите доступ к Gmail.",
+        "errorScopeMissing": "Полный доступ к Gmail не предоставлен. Подключитесь заново и в запросе прав на почту поставьте галочку.",
         "retry": "Попробовать снова",
         "errorAuthenticationFailed": "Авторизация Google не удалась. Повторите попытку.",
         "errorAlreadyConnected": "Этот адрес Gmail уже подключён.",

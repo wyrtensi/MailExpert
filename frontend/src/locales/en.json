@@ -2369,7 +2369,7 @@
         "errorNotConfigured": "Google sign-in is not configured by an administrator.",
         "errorEmailNotVerified": "Google did not confirm that this email address is verified. The mailbox was not connected.",
         "errorMissingRefreshToken": "Google did not grant offline access. Remove MailExpert from your Google account permissions and connect again.",
-        "errorScopeMissing": "Full Gmail access was not granted. Connect again and allow access to Gmail.",
+        "errorScopeMissing": "Full Gmail access was not granted. Connect again and tick the mail access checkbox on the permissions screen.",
         "retry": "Try again",
         "errorAuthenticationFailed": "Google authorization failed. Please try again.",
         "errorAlreadyConnected": "This Gmail address is already connected.",
